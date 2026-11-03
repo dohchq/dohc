@@ -53,6 +53,35 @@ function momentPayload(overrides: Record<string, unknown> = {}): string {
 
 const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
 
+it("serves a kept text effect and its later edit without exposing the conflict parent", () => {
+  const keptSha = "b".repeat(64);
+  const laterSha = "c".repeat(64);
+  const kept = momentPayload({
+    conflictId: "private-conflict", conflictEffectIndex: 0,
+    momentId: "kept-moment", payloadBeforeBlobSha256: keptSha,
+    payloadBeforePath: "docs/a.md", payloadAfterBlobSha256: keptSha,
+  });
+  expect(filterOpForShare(pathShare, "conflict.resolve", JSON.stringify({
+    conflictId: "private-conflict", effects: [JSON.parse(kept)],
+  }))).toEqual({ allowed: false });
+  const first = filterOpForShare(pathShare, "moment.append", kept);
+  const later = filterOpForShare(pathShare, "moment.append", momentPayload({
+    momentId: "later-moment", payloadBeforeBlobSha256: keptSha,
+    payloadBeforePath: "docs/a.md", payloadAfterBlobSha256: laterSha,
+    beforePresent: "present", beforeLatestMomentId: "kept-moment",
+  }));
+  expect(first.allowed && later.allowed).toBe(true);
+  if (!first.allowed || !later.allowed) return;
+  expect(first.payload).toMatchObject({ payloadAfterBlobSha256: keptSha });
+  expect(later.payload).toMatchObject({ payloadBeforeBlobSha256: keptSha, payloadAfterBlobSha256: laterSha });
+  expect(first.blobSha256s).toContain(keptSha);
+  expect(later.blobSha256s).toContain(laterSha);
+  for (const op of [first, later]) {
+    expect(op.payload).not.toHaveProperty("conflictId");
+    expect(op.payload).not.toHaveProperty("momentId");
+  }
+});
+
 it.each(["live.audit.base","live.audit.application","live.audit.settlement"])("keeps %s out of every file-share level", (kind) => {
   const payload = JSON.stringify({formatVersion: 1,record: {checkpoint: {binding: {currentPath: "docs/a.md"},stateDigest: "a".repeat(64)}}});
   for (const access of ["view","comment","edit"] as const) {

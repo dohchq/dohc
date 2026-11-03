@@ -30,9 +30,14 @@ export const COPY_TILE_STATE_CLASS: Record<CopyFeedback | "rest", string> = {
 const TONE: Record<CopyFeedback, string> = { copied: "text-success", failed: "text-danger" };
 const ICON = { copied: Check, failed: TriangleAlert } as const;
 const wordsClass =
-  "inline-flex shrink-0 items-center rounded-md border border-line px-2 text-muted transition-colors duration-75 hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
-// A row's copy, or one among a page header's 28px buttons.
-const WORDS_SIZE = { row: "h-6 gap-1.5 text-[12px]", header: "h-7 gap-1 text-[11px]" } as const;
+  "inline-flex shrink-0 items-center border border-line text-muted transition-colors duration-75 hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
+// A row's copy, one among a page header's 28px buttons, or one beside a
+// default SecondaryButton.
+const WORDS_SIZE = {
+  row: "h-6 gap-1.5 rounded-md px-2 text-[12px]",
+  header: "h-7 gap-1 rounded-md px-2 text-[11px]",
+  button: "h-8 gap-1.5 rounded-lg px-3 text-[13px]",
+} as const;
 
 // A missing clipboard is a failure like any other. The write starts in the
 // task that called it, so a click with its text at hand writes at once.

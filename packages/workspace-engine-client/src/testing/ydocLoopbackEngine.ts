@@ -688,6 +688,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         lineageClaimId: null,
         lineageOriginatedHere: false,
         head: file ? file.head : "absent",
+        headSha256: file?.head === "present" ? sha256(file.content) : null,
         ...(seed !== undefined && file !== undefined
           ? {
               ...(seedContent !== undefined ? { seedContent } : { seedBlobSha256 }),
@@ -946,12 +947,14 @@ export class YdocLoopbackEngine implements EngineTransport {
     const session = this.requireSession(
       requiredString(params, "sessionId", "ydoc.resync params"),
     );
+    const head = this.capturedFileFor(session.workspace, session.versionId, session.objectId);
     // The live adapter preserves its event position across a resync, so the
     // loopback sequence stays monotonic — resetting it would make the next
     // remote update emit seq 1 and re-mark the freshly-resynced session
     // stale.
     return {
       result: {
+        headSha256: head?.head === "present" ? sha256(head.content) : null,
         lineageClaimId: null,
         lineageOriginatedHere: false,
         recoveredPaths: [],

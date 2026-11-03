@@ -398,7 +398,7 @@ pub(super) fn bounded(doc: &Ydoc) -> Result<Vec<u8>, OwnerOutboxError> {
 }
 
 /// Refuse ordinary publication and settlement before either writes durable state.
-pub(crate) fn require_ordinary_write(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
+pub fn require_ordinary_write(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
     let observed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
         params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
@@ -447,9 +447,11 @@ pub fn install_observed_binding_in_tx(
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
+    // An adopted lineage stays the owner's after its activation's release,
+    // while its native log may hold the deliveries the release carried.
     let adopted: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
-        params![b.workspace_id,b.main_version_id,b.object_id], |row| row.get(0),
+        &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)", crate::live_update_application::owner_activations::CURRENT_ACTIVATIONS),
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |row| row.get(0),
     ).map_err(read_sql)?;
     if adopted {
         return Err(OwnerOutboxError::ParentMismatch);

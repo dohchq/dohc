@@ -24,11 +24,14 @@ import {
 // `agentName` is the name an agent gave for itself, such as an MCP client's
 // handshake name. It is provenance, like a document edit's author; without
 // it the message carries the agent name from the person's settings.
+// `agentId` names the agent of a run dohc dispatched, which main knows; the
+// message carries that agent's id and settings name.
+// A person's own message in the app wakes each of their agents it names.
 export type ChatWriter =
   | { via: "renderer" }
-  | { via: "cli"; actor: "human" | "agent"; agentName?: string }
+  | { via: "cli"; actor: "human" | "agent"; agentName?: string; agentId?: string }
   // `local` marks a message that stays on this computer, such as a wake in
-  // "My agent", so it never waits for a session.
+  // an agent's chat, so it never waits for a session.
   | { via: "automation"; automationId: string; name: string; depth: number; local?: true };
 // A person or their agent: only they react.
 export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
@@ -81,7 +84,10 @@ export function createChatWrites(dependencies: {
   // Changes whenever the credential cache sets, clears, or reloads a session.
   currentCredentialGeneration(): number;
   localUserDisplayName(): string;
-  agentDisplayName(): Promise<string>;
+  // The name of the agent with this id, or of the first agent.
+  agentDisplayName(agentId?: string): Promise<string>;
+  // The person's agents a message names.
+  agentIdsNamedIn(body: string): Promise<string[]>;
   // The stable per-install id a signed-out reaction is authored under.
   localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
@@ -98,7 +104,7 @@ export function createChatWrites(dependencies: {
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, localInstallationId, projectChatBookmarks,
+    localUserDisplayName, agentDisplayName, agentIdsNamedIn, localInstallationId, projectChatBookmarks,
     queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, betweenDispatchScans,
     notifyRenderer,
   } = dependencies;
@@ -210,8 +216,9 @@ export function createChatWrites(dependencies: {
   async function personActorFor(writer: PersonWriter) {
     return writer.via === "cli" && writer.actor === "agent"
       ? {
-          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName() },
+          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName(writer.agentId) },
           authorOwnerDisplayName: localUserDisplayName(),
+          ...(writer.agentId ? { authorAgentId: writer.agentId } : {}),
         }
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };
   }
@@ -236,6 +243,7 @@ export function createChatWrites(dependencies: {
       throw new AutomationChatSessionWait();
     }
     const actor = await actorFor(input.writer);
+    const namedAgentIds = input.writer.via === "renderer" ? await agentIdsNamedIn(body) : [];
     const attachments = await input.resolveAttachments();
     const authorActorKey = deriveChatActorKey({
       credentials: admission.actorCredentials,
@@ -251,6 +259,7 @@ export function createChatWrites(dependencies: {
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(authorUserId ? { authorUserId } : {}),
       ...(input.writer.via === "cli" ? { origin: "cli" as const } : {}),
+      ...(namedAgentIds.length > 0 ? { namedAgentIds } : {}),
       body,
       ...(input.needsDecision ? { needsDecision: true } : {}),
       ...(input.options && input.options.length > 0 ? { options: input.options } : {}),
@@ -343,6 +352,8 @@ export function createChatWrites(dependencies: {
     title?: string;
     // The thread a new post starts; a Group's chat lane keeps its running one.
     threadId?: string;
+    // Desktop's own thread in an agent DM; see LinkedChatStore.startChannelThread.
+    ownThread?: true;
   }) {
     const target = { channelId: input.channelId };
     let started;
@@ -354,6 +365,7 @@ export function createChatWrites(dependencies: {
         ...(input.lane ? { lane: input.lane } : {}),
         ...(input.title ? { title: input.title } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...(input.ownThread ? { ownThread: true } : {}),
         ...fields,
       }), admission, input.signal);
     } catch (error) {
@@ -473,7 +485,7 @@ export function deriveChatActorKey(input: {
       author: input.writer.via === "automation"
         ? { kind: "automation", automationId: input.writer.automationId }
         : input.writer.via === "cli" && input.writer.actor === "agent"
-          ? { kind: "agent", claimedName: input.writer.agentName }
+          ? { kind: "agent", claimedName: input.writer.agentId ?? input.writer.agentName }
           : { kind: "human" },
       displayName: input.displayName,
       origin: input.writer.via,

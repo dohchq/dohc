@@ -25,6 +25,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
+use dohc_engine_storage::capture_first_imports;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
@@ -1090,12 +1091,16 @@ fn select_released_switch_jobs(
         .filter(|path| path.released_hold)
         .map(|path| path_collision_key(&path.path))
         .collect();
+    // A write above a released path waits for the folder the hold kept.
     for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
         let target = path_collision_key(&target);
         if released.iter().any(|path| {
             target == *path
                 || target
                     .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+                || path
+                    .strip_prefix(target.as_str())
                     .is_some_and(|rest| rest.starts_with('/'))
         }) {
             selected.insert(id);
@@ -1242,6 +1247,50 @@ impl ActorHandle {
         })
         .await
     }
+
+    /// Continue the workspace's unfinished first import, or start one under
+    /// `correlation_id`. Returns the import's correlation id.
+    pub async fn begin_first_import(
+        &self,
+        workspace_id: String,
+        correlation_id: String,
+    ) -> Result<String, RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                capture_first_imports::begin_in(tx, &workspace_id, &correlation_id)
+            })? {
+                TxnOutcome::Committed(correlation_id) => Ok(correlation_id),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
+    /// The correlation id of the workspace's unfinished first import.
+    pub async fn unfinished_first_import(
+        &self,
+        workspace_id: String,
+    ) -> Result<Option<String>, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| capture_first_imports::unfinished_in(conn, &workspace_id))
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    pub async fn finish_first_import(&self, workspace_id: String) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                capture_first_imports::finish_in(tx, &workspace_id)
+            })? {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
     pub async fn capture_recoveries(
         &self,
         workspace_id: String,
@@ -1863,6 +1912,8 @@ struct PreparedCaptureRecovery {
     /// path to a different, disambiguated object.
     object_id: String,
     lineage: dohc_engine_sync::PreparedLocalYdocLineage,
+    /// Decided before the file is ingested, while its old snapshot stands.
+    outcome: dohc_engine_sync::CaptureLineage,
     preserve: bool,
     authors: Option<String>,
 }
@@ -1874,12 +1925,18 @@ fn prepare_capture_recovery_in(
     indexing: &CaptureIndexing,
 ) -> Result<PreparedCaptureRecovery, RuntimeError> {
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
+    let lineage = dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?;
+    let outcome = dohc_engine_sync::admit_capture_in_tx(tx, &lineage, &input.path, &input.text)?;
     let mut prepared = PreparedCaptureRecovery {
         object_id: object_id.to_owned(),
-        lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
+        lineage,
+        outcome,
         preserve: false,
         authors: None,
     };
+    if outcome == dohc_engine_sync::CaptureLineage::KeepTail {
+        return Ok(prepared);
+    }
     if let CaptureIndexing::Reader { folds, root, .. } = indexing
         && let Some(fold) = folds
             .iter()
@@ -2053,7 +2110,12 @@ fn capture_ingest_in_tx(
             },
             None => true,
         };
-        let changed = if has_ydoc_state {
+        let keeps_tail = recovery
+            .as_ref()
+            .is_some_and(|prepared| prepared.outcome == dohc_engine_sync::CaptureLineage::KeepTail);
+        let changed = if keeps_tail {
+            None
+        } else if has_ydoc_state {
             let resulting = dohc_engine_sync::ResultingHead::Text {
                 path: &result.snapshot.path,
                 text: &result.snapshot.text,
@@ -3620,6 +3682,7 @@ mod capture_secret_root_guard_tests {
                     path: SECRET_PATH.to_owned(),
                     text: "TOKEN=original".to_owned(),
                     metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms: 2,
                     claim_foreign_head: true,

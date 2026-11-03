@@ -4,20 +4,19 @@ import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isContextMenuKey, isDeleteKey } from "../ui/keys";
 import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 import { useRequestSequence } from "../useRequestSequence";
-import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { SecondaryButton, SectionLabel } from "../ui/controls";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
+import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
   ChevronRight,
-  Database,
   FilePlus2,
   Folder,
   FolderPlus,
   FolderOpen,
   Laptop,
-  Pin,
   RefreshCw,
   TriangleAlert,
   X,
@@ -43,12 +42,12 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
-import { Overlay } from "../Overlay";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
+  folderMoveIdentity,
   pendingTreeChangeSettled,
   type AnsweredTreeChange,
   type PendingTreeChange,
@@ -65,12 +64,16 @@ import {
   parseTab,
   TAB_KINDS,
   type EditorGroup,
+  type ExplorerMode,
   clampOpenEditorsHeight,
 } from "./workbenchState";
 import { TabGlyph, tabMark } from "./tabGlyph";
+import type { ExplorerApps } from "./AppsSection";
+import { ExplorerHome } from "./ExplorerHome";
+import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isFolderMoveRefusal, isLiveFolderMoveRefusal, KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
@@ -94,6 +97,13 @@ export type TreeChangeOperation = {
 
 export interface ExplorerProps {
   workspaceId: string;
+  // Which view the Explorer shows: Home, by kind, or Files, the folder tree.
+  mode: ExplorerMode;
+  onModeChange: (mode: ExplorerMode) => void;
+  // Whether the workspace's first listing has landed. Home waits for it.
+  listed: boolean;
+  // Opened paths and tabs, most recent first, for Home's Recent.
+  recentFiles: readonly string[];
   files: WorkspaceFileEntry[];
   folders: string[];
   // The request of the listing `files` and `folders` came from.
@@ -106,6 +116,7 @@ export interface ExplorerProps {
   recoveryPaths: ReadonlySet<string>;
   /** Display names for virtual paths that cannot carry a useful file name. */
   tabLabels?: ReadonlyMap<string, string>;
+  tabGlyphs?: ReadonlyMap<string, ObjectKind>;
   expandedFolders: string[];
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
@@ -140,6 +151,9 @@ export interface ExplorerProps {
   // still opens and expands as any folder's does.
   appFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
+  // The workspace's apps, for Home's Apps section. Without it Home has no
+  // Apps section.
+  apps?: ExplorerApps;
   dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
@@ -180,8 +194,9 @@ export interface ExplorerProps {
   // Asks for a listing and answers its request.
   onRefresh: () => number;
   // Failed tree operations go to the shell's error toast and Notices row,
-  // with Try again when asking again can succeed.
-  onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  // with Try again when asking again can succeed. A refused folder move
+  // names itself, so a later success of the same move clears it.
+  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string) => void;
   // A finished rename, move or delete: a toast and a Notices row, with Undo
   // while main can still reverse it.
   onNotice: (message: string, undo?: () => void) => void;
@@ -233,7 +248,7 @@ type DropPreview = {
   targetIsFolder: boolean;
 };
 
-type RowDropPreview = {
+export type RowDropPreview = {
   kind: DropPreview["kind"];
   role: "target" | "contained";
 };
@@ -284,7 +299,9 @@ function SectionActionButton(props: {
   );
 }
 
-// Depth indent with guide lines (one per ancestor level).
+// Depth indent with guide lines (one per ancestor level). A level is as wide
+// as a glyph, so a child's icon starts under its parent's name, and its line
+// runs under the parent's chevron.
 function IndentGuides({ depth }: { depth: number }) {
   return (
     <>
@@ -292,7 +309,7 @@ function IndentGuides({ depth }: { depth: number }) {
         <span
           key={i}
           aria-hidden
-          className="ml-[7px] h-7 w-[9px] shrink-0 border-l border-line/60"
+          className="ml-1.5 h-7 w-[9px] shrink-0 border-l border-line/60"
         />
       ))}
     </>
@@ -392,14 +409,12 @@ export const TreeRow = memo(function TreeRow(props: {
         // alone is medium weight so it still reads inside a multi-selection
         // once the tree loses focus. An attenuated fill for the
         // selected-not-active rows sat between hover and selected, too close
-        // to either to read. The keyboard-focused row draws the accent focus
-        // outline inset, inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. It holds 3:1 against
-        // every fill. The
-        // drag drop-target is a filled tint with a solid bar (list.drop-
+        // to either to read. The keyboard-focused row draws the row's 1px
+        // accent line inside its own rounded box, so the tree's scroller
+        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
         // Background style).
         style={{ height: TREE_ROW_HEIGHT }}
-        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
+        className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -421,7 +436,6 @@ export const TreeRow = memo(function TreeRow(props: {
             }`}
           />
         ) : null}
-        <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={row.depth} />
         {row.isFolder ? (
           <>
@@ -465,6 +479,8 @@ export const TreeRow = memo(function TreeRow(props: {
 });
 
 let editIdCounter = 0;
+const EMPTY_TREE: TreeNode = { segment: "", fullPath: "", file: null, children: [] };
+
 function nextChangeId(): string {
   editIdCounter += 1;
   return `pending-${editIdCounter}`;
@@ -620,10 +636,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
   const renameFocus = useRef<{ from: string; to: string } | null>(null);
+  // A rename in Home returns focus to Home's row for the path.
+  const rowFor = useCallback((path: string) => rowRefs.current.get(path) ??
+    [...fileTreeRef.current?.querySelectorAll<HTMLElement>("[data-home-key]") ?? []].find((row) => row.dataset.path === path), []);
   useFocusSurface(fileTreeRef, () => {
     const paths = renameFocus.current;
     renameFocus.current = null;
-    return paths ? rowRefs.current.get(paths.to) ?? rowRefs.current.get(paths.from) : null;
+    return paths ? rowFor(paths.to) ?? rowFor(paths.from) : null;
   });
   const workspaceTreeRef = useRef<HTMLUListElement>(null);
   const openEditorsListRef = useRef<HTMLUListElement>(null);
@@ -735,21 +754,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return map;
   }, [projected.files]);
 
-  // Same glyph rule as TreeRow, driven by the memoized lookup so pinned rows
-  // don't rescan projected.files. A pinned row has no selected fill.
-  function fileGlyph(path: string) {
-    const file = fileByPath.get(path);
-    return <FileGlyph kind={listedFileKind(path, file?.kind)} icon={file?.icon} size={GLYPH_SIZE} className={glyphTone(false)} />;
-  }
-
   const expandedSet = useMemo(
     () => new Set(props.expandedFolders),
     [props.expandedFolders],
   );
 
+  // Home draws no folder tree, so it builds none.
+  const home = props.mode === "home";
   const tree = useMemo(
-    () => buildTree(projected.files, projected.folders),
-    [projected],
+    () => (home ? EMPTY_TREE : buildTree(projected.files, projected.folders)),
+    [home, projected],
   );
 
   const rows = useMemo(() => {
@@ -859,7 +873,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     openEditorsExpanded,
     openEditorsHeight,
     openEditorCount,
-    props.pinned.length,
   ]);
 
   useEffect(() => {
@@ -972,14 +985,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Optimistic op runner: stage pending changes, run the IPCs, roll back the
   // failures (with a visible error), re-project shell paths for successes,
-  // and ask for a listing, which settles the successes. Answers each
-  // success with what its IPC returned. `failed` reports a failure in the
-  // caller's own words instead.
+  // and ask for a listing, which settles the successes. Hands `answered`
+  // each success with what its IPC returned, including a Try again's.
+  // `failed` reports a failure in the caller's own words instead.
   const runChanges = useCallback(
     async <Result,>(
       changes: PendingTreeChange[],
       run: (change: PendingTreeChange) => Promise<Result>,
-      options: { afterBegin?: () => void; failed?: (change: PendingTreeChange, cause: unknown) => void } = {},
+      options: {
+        afterBegin?: () => void;
+        failed?: (change: PendingTreeChange, cause: unknown) => void;
+        answered?: (succeeded: { change: PendingTreeChange; result: Result }[]) => void;
+      } = {},
     ): Promise<{ change: PendingTreeChange; result: Result }[]> => {
       if (changes.length === 0) return [];
       // Land the stable active draft and drain queued collection writes
@@ -994,16 +1011,26 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       } finally {
         options.afterBegin?.();
       }
+      const succeeded: { change: PendingTreeChange; result: Result }[] = [];
       try {
         setPending((current) => [...current, ...changes]);
-        const succeeded: { change: PendingTreeChange; result: Result }[] = [];
         for (const change of changes) {
           try {
             succeeded.push({ change, result: await run(change) });
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
-            if (options.failed) options.failed(change, cause);
-            else onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
+            if (options.failed) {
+              options.failed(change, cause);
+              continue;
+            }
+            // Try again reruns a refused folder move as it was asked.
+            const again = isLiveFolderMoveRefusal(cause)
+              ? () => void runChanges([{ ...change, id: nextChangeId() }], run, { answered: options.answered })
+              : undefined;
+            const identity = change.kind === "folder" && isFolderMoveRefusal(cause)
+              ? folderMoveIdentity(workspaceId, change)
+              : undefined;
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, identity);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -1022,14 +1049,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         const listing = onRefresh();
         const answered = new Set(succeeded.map(({ change }) => change.id));
         setPending((current) => current.map((change) => (answered.has(change.id) ? { ...change, listing } : change)));
-        return succeeded;
       } finally {
         // Cell edits resume only after the successful paths are projected,
         // so nothing can enqueue against a path this operation just changed.
         operation?.release();
       }
+      options.answered?.(succeeded);
+      return succeeded;
     },
-    [onBeginChanges, onError, onPathsChanged, onRefresh],
+    [onBeginChanges, onError, onPathsChanged, onRefresh, workspaceId],
   );
 
   // Undo runs as a tree change of its own: drafts settle first, the row
@@ -1126,7 +1154,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               toPath: change.toPath,
             })
           : Promise.resolve(undefined),
-      ).then(announce);
+        { answered: announce },
+      );
     },
     [announce, runChanges, workspaceId],
   );
@@ -1153,17 +1182,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           try {
             return await bridge().moveWorkspacePath({ workspaceId, fromPath: path, toPath });
           } catch (cause) {
-            if (document.activeElement === rowRefs.current.get(toPath)) {
+            if (document.activeElement === rowFor(toPath)) {
               renameFocus.current = { from: toPath, to: path };
             }
             throw cause;
           }
         },
         // Remove this input in the same commit that stages the renamed row.
-        { afterBegin: () => setEditing(current => current === edit ? null : current) },
-      ).then(announce);
+        { afterBegin: () => setEditing(current => current === edit ? null : current), answered: announce },
+      );
     },
-    [announce, runChanges, workspaceId],
+    [announce, rowFor, runChanges, workspaceId],
   );
 
   const commitCreateFolder = useCallback(
@@ -1197,7 +1226,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         "path" in change
           ? bridge().deleteWorkspacePath({ workspaceId, relativePath: change.path })
           : Promise.resolve(undefined),
-      ).then(announce);
+        { answered: announce },
+      );
     },
     [announce, runChanges, workspaceId, isFolderPath],
   );
@@ -1233,23 +1263,55 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setFocusedPath(path);
   }, []);
 
+  // A selection belongs to the view it was made in.
+  const [selectionMode, setSelectionMode] = useState(props.mode);
+  if (selectionMode !== props.mode) {
+    setSelectionMode(props.mode);
+    setSelection(new Set());
+    setAnchorPath(null);
+    setFocusedPath(null);
+  }
+
+  // Home's Show in Files asks for a reveal of its own; the shell's comes in
+  // revealPaths. Either one switches to Files first.
+  const [homeReveal, setHomeReveal] = useState<readonly string[] | null>(null);
+  const reveal = revealPaths ?? homeReveal;
+  const { onModeChange } = props;
   useEffect(() => {
-    if (!revealPaths) return;
-    // A path the tree does not list never gets a row; drop the request so it
-    // cannot take focus later when that path appears.
-    if (!revealPaths.some((path) => fileByPath.has(path) || isFolderPath(path))) {
-      onRevealed?.();
+    if (!reveal) return;
+    if (home) {
+      onModeChange("files");
       return;
     }
-    const shown = revealPaths.filter((path) => renderIndexByPath.has(path));
+    const done = () => {
+      setHomeReveal(null);
+      onRevealed?.();
+    };
+    // A path the tree does not list never gets a row; drop the request so it
+    // cannot take focus later when that path appears.
+    if (!reveal.some((path) => fileByPath.has(path) || isFolderPath(path))) {
+      done();
+      return;
+    }
+    const shown = reveal.filter((path) => renderIndexByPath.has(path));
     if (shown.length === 0) return;
     const first = shown.reduce((a, b) => (renderIndexByPath.get(a)! <= renderIndexByPath.get(b)! ? a : b));
     setFilesExpanded(true);
     setSelection(new Set(shown));
     setAnchorPath(first);
     focusRow(first);
-    onRevealed?.();
-  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPaths]);
+    done();
+  }, [fileByPath, focusRow, home, isFolderPath, onModeChange, onRevealed, renderIndexByPath, reveal]);
+
+  const showInFiles = useCallback(
+    (path: string | null) => {
+      onModeChange("files");
+      if (path === null) return;
+      for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
+      setHomeReveal([path]);
+    },
+    [onModeChange, onSetFolderExpanded],
+  );
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
@@ -1302,6 +1364,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 
   // ---- context menu (main decides the entries, the Menu part draws them) ----
+
+  const modeRef = useRef(props.mode);
+  modeRef.current = props.mode;
+  // An app folder's pin is its sidebar pin; anything else is pinned in Home.
+  const pinnedApps = props.apps?.pinnedApps;
+  const isPinned = useCallback(
+    (path: string) => props.pinned.includes(path) || (pinnedApps?.includes(path) ?? false),
+    [pinnedApps, props.pinned],
+  );
 
   // Asks main what it offers here, then opens at `at`. Nothing is drawn
   // until main answers, and a menu main leaves empty does not open.
@@ -1365,6 +1436,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           props.onNewPage(targetDir);
           break;
         case "new-folder":
+          // The name field is a row in the folder tree.
+          if (modeRef.current === "home") onModeChange("files");
           beginCreateFolder(targetDir);
           break;
         case "new-collection":
@@ -1415,6 +1488,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       beginCreateFolder,
       beginRename,
       requestDelete,
+      onModeChange,
       onTogglePin,
       onError,
       exportZip,
@@ -1435,23 +1509,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (fromMenuKey(keyboardMenu)) return;
       if (!selectionRef.current.has(path)) selectSingle(path);
       rowRefs.current.get(path)?.focus({ preventScroll: true });
-      openMenu(isFolderPath(path) ? "folder" : "file", path, props.pinned.includes(path), {
+      openMenu(isFolderPath(path) ? "folder" : "file", path, isPinned(path), {
         x: event.clientX,
         y: event.clientY,
       }, false);
     },
-    [selectSingle, isFolderPath, openMenu, props.pinned],
-  );
-
-  const onPinnedContextMenu = useCallback(
-    (path: string, event: MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (fromMenuKey(keyboardMenu)) return;
-      event.currentTarget.focus({ preventScroll: true });
-      openMenu(isFolderPath(path) ? "folder" : "file", path, true, { x: event.clientX, y: event.clientY }, false);
-    },
-    [isFolderPath, openMenu],
+    [selectSingle, isFolderPath, openMenu, isPinned],
   );
 
   const onContainerContextMenu = useCallback(
@@ -1463,8 +1526,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [openMenu],
   );
 
-  // The Menu key and Shift+F10 open the focused row's menu under the row, or
-  // the workspace's menu when no row has focus.
+  // The Menu key and Shift+F10 open the focused row's menu under the row,
+  // in Files or Home, or the workspace's menu when no row has one.
   const openMenuFromKeyboard = useCallback(
     (target: EventTarget) => {
       // A right-click presses a pointer before its contextmenu event; the
@@ -1475,23 +1538,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
       const row =
         target instanceof HTMLElement
-          ? target.closest<HTMLElement>('[data-testid="tree-row"], [data-testid="pinned-row"]')
+          ? target.closest<HTMLElement>('[data-testid="tree-row"], [data-home-key]')
           : null;
       const path = row?.dataset.path;
       if (row && path !== undefined) {
         const box = row.getBoundingClientRect();
-        const pinnedRow = row.dataset.testid === "pinned-row";
-        if (!pinnedRow && !selectionRef.current.has(path)) selectSingle(path);
-        openMenu(isFolderPath(path) ? "folder" : "file", path, pinnedRow || props.pinned.includes(path), {
-          x: box.left,
-          y: box.bottom,
-        }, true);
+        // A Home row names its own kind and leaves the tree's selection alone.
+        const homeKind = row.dataset.menuKind;
+        if (homeKind === undefined && !selectionRef.current.has(path)) selectSingle(path);
+        const kind = homeKind === "file" || homeKind === "folder" ? homeKind : isFolderPath(path) ? "folder" : "file";
+        openMenu(kind, path, isPinned(path), { x: box.left, y: box.bottom }, true);
         return;
       }
       const box = fileTreeRef.current?.getBoundingClientRect();
       openMenu("root", undefined, false, { x: box?.left ?? 0, y: box?.top ?? 0 }, true);
     },
-    [selectSingle, isFolderPath, openMenu, props.pinned],
+    [selectSingle, isFolderPath, openMenu, isPinned],
   );
 
   // ---- drag and drop ----
@@ -1641,6 +1703,20 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     clearDragPreview();
   }, [clearDragPreview]);
 
+  // Home's Pages drag as Files' rows do.
+  const homeDrag = useMemo(
+    () => ({ start: onRowDragStart, over: onRowDragOver, drop: onRowDrop, leave: onRowDragLeave, end: onRowDragEnd }),
+    [onRowDragEnd, onRowDragLeave, onRowDragOver, onRowDragStart, onRowDrop],
+  );
+  // Home focuses the row first, so the menu gives focus back to it.
+  const onHomeMenu = useCallback(
+    (kind: "file" | "folder", path: string, at: OpenMenu["at"]) => {
+      if (fromMenuKey(keyboardMenu)) return;
+      openMenu(kind, path, isPinned(path), at, false);
+    },
+    [isPinned, openMenu],
+  );
+
   const onContainerDragOver = useCallback(
     (event: DragEvent) => {
       const preview = previewForDrop(event, null, "", false);
@@ -1679,6 +1755,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (isContextMenuKey(event)) {
         event.preventDefault();
         openMenuFromKeyboard(event.target);
+        return;
+      }
+      // The tree's keys belong to the tree and the frame around it. A row in
+      // another section, such as Open editors or Apps, keeps its own Enter,
+      // Space and arrows.
+      if (
+        event.target !== event.currentTarget &&
+        !workspaceTreeRef.current?.contains(event.target as Node)
+      ) {
         return;
       }
       if (event.key === "F2") {
@@ -1747,9 +1832,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     editing?.mode === "rename" && editing.isFolder && expandedSet.has(editing.path);
 
   const editRow = (depth: number): ReactNode => (
-    <li role="none" key="edit-row" className="relative">
-      <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-1.5 pr-2">
-        <span aria-hidden className="w-1 shrink-0" />
+    <li role="none" key="edit-row" className="relative px-1">
+      <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-2 px-2">
         <IndentGuides depth={depth} />
         {editing?.mode === "rename" && editing.isFolder ? (
           <ChevronRight
@@ -1804,7 +1888,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
           // VS Code's rename input signals the same way with focusBorder).
-          className={`min-w-0 flex-1 rounded-sm border ${editError ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-ink/50"} bg-bg px-1 py-0.5 text-[13px] text-ink outline-none`}
+          className={`-ml-1 min-w-0 flex-1 rounded-sm border ${editError ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-ink/50"} bg-bg px-1 py-0.5 text-[13px] text-ink outline-none`}
         />
       </div>
       {editError && (
@@ -1849,14 +1933,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }
 
   const rootDropPreview = dropPreview?.targetPath === null ? dropPreview : null;
-  const dropPreviewForRow = (row: VisibleRow): RowDropPreview | null => {
+  const dropPreviewFor = (path: string): RowDropPreview | null => {
     if (!dropPreview || dropPreview.targetPath === null) return null;
-    if (dropPreview.targetPath === row.fullPath) {
+    if (dropPreview.targetPath === path) {
       return { kind: dropPreview.kind, role: "target" };
     }
     if (
       dropPreview.targetIsFolder &&
-      row.fullPath.startsWith(`${dropPreview.targetPath}/`)
+      path.startsWith(`${dropPreview.targetPath}/`)
     ) {
       return { kind: dropPreview.kind, role: "contained" };
     }
@@ -1919,7 +2003,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
-          dropPreview={dropPreviewForRow(row)}
+          dropPreview={dropPreviewFor(row.fullPath)}
           registerRef={registerRef}
           onRowFocus={setFocusedPath}
           onRowClick={onRowClick}
@@ -1954,15 +2038,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         ref={fileTreeRef}
         tabIndex={-1}
         data-focus-surface="tree"
+        id={EXPLORER_PANEL_ID}
         data-testid="file-tree"
-        aria-label="Files"
+        data-mode={props.mode}
+        aria-label={home ? "Home" : "Files"}
         onKeyDown={onTreeKeyDown}
-        onScroll={updateVirtualRange}
-        onDragOver={onContainerDragOver}
-        onDrop={onContainerDrop}
-        onDragLeave={onContainerDragLeave}
+        onScroll={home ? undefined : updateVirtualRange}
+        onDragOver={home ? undefined : onContainerDragOver}
+        onDrop={home ? undefined : onContainerDrop}
+        onDragLeave={home ? undefined : onContainerDragLeave}
         onContextMenu={onContainerContextMenu}
-        className={`min-h-0 flex-1 overflow-y-auto py-1 ${
+        className={`min-h-0 flex-1 overflow-y-auto py-2 ${
           rootDropPreview
             ? `outline outline-1 -outline-offset-2 ${
                 rootDropPreview.kind === "blocked" ? "outline-danger/30" : "outline-ink/30"
@@ -1970,42 +2056,42 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal || props.collectionsElsewhere) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
-          <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
-          {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
-          {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
-            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
-            onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
-            <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
-          </button>)}
-          {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
-          {props.collectionsElsewhere && <CollectionsElsewhereRow elsewhere={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
-          {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
-          {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
-          </>}
-        </section>}
+        {home ? (
+          <ExplorerHome
+            explorer={props}
+            files={projected.files}
+            fileByPath={fileByPath}
+            folders={folderPathSet}
+            activePath={activeTab}
+            scrollerRef={fileTreeRef}
+            editingPath={editing?.mode === "rename" ? editing.path : null}
+            renderEditRow={editRow}
+            onMenu={onHomeMenu}
+            onRename={beginRename}
+            onDelete={requestDelete}
+            onShowInFiles={showInFiles}
+            drag={homeDrag}
+            dropPreviewFor={dropPreviewFor}
+          />
+        ) : (
+        <>
         <section
           data-testid="open-editors-section"
           aria-label="Open editors"
-          className="relative mb-1 border-b border-line pb-1"
+          className="relative"
         >
           <header
             data-testid="open-editors-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
+            className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
           >
             <button
               type="button"
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
-              <ChevronRight
-                size={11}
-                aria-hidden
-                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
-              />
-              <span className="min-w-0 flex-1 truncate">Open editors</span>
+              <span className="min-w-0 truncate">Open editors</span>
               {openEditorCount > 0 ? (
                 <span
                   aria-label={`${openEditorCount} open editor${openEditorCount === 1 ? "" : "s"}`}
@@ -2014,6 +2100,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   {openEditorCount}
                 </span>
               ) : null}
+              <ChevronRight
+                size={11}
+                aria-hidden
+                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+              />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
               <SectionActionButton
@@ -2085,9 +2176,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             data-group-id={group.id}
                             data-path={tab.path}
                             data-active={active}
-                            // The open button spans the row, so its inset
-                            // focus outline follows the row's rounded fill;
-                            // the close button sits on top at the right.
+                            // The open button spans the row, so its keyboard
+                            // focus follows the row's rounded fill; the close
+                            // button sits on top at the right.
                             className={`group relative mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                               active
                                 ? "bg-selected text-ink"
@@ -2098,10 +2189,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               type="button"
                               title={tab.path}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
-                              className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md py-0 pl-8 pr-9 text-left text-[13px] focus-visible:-outline-offset-2"
+                              className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
                             >
                               <TabGlyph
-                                {...tabMark(tab.path, fileByPath)}
+                                {...tabMark(tab.path, fileByPath, props.tabGlyphs?.get(tab.path))}
                                 size={GLYPH_SIZE}
                                 className={glyphTone(active)}
                               />
@@ -2187,24 +2278,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           ) : null}
         </section>
 
-        <section data-testid="explorer-files-section" aria-label="Files">
+        <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
           <header
             data-testid="explorer-files-header"
-            className="group flex h-6 items-center gap-1 pr-1 hover:bg-hover"
+            className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
           >
             <button
               type="button"
               data-testid="explorer-files-toggle"
               aria-expanded={filesExpanded}
               onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-3 text-left dohc-section-label group-hover:text-muted"
+              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
+              <span className="min-w-0 truncate">Files</span>
               <ChevronRight
                 size={11}
                 aria-hidden
                 className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
               />
-              <span className="min-w-0 flex-1 truncate">Files</span>
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
               <SectionActionButton label="New file" onClick={() => props.onNewPage(creationParentPath())}>
@@ -2230,46 +2321,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
           {filesExpanded ? (
             <>
-              {props.pinned.length > 0 ? (
-                <section
-                  data-testid="explorer-pinned"
-                  aria-label="Pinned"
-                  className="mb-1 border-b border-line pb-1"
-                >
-                  <SectionLabel as="header" className="flex h-6 items-center gap-1.5 px-3">
-                    <Pin size={10} aria-hidden />
-                    Pinned
-                  </SectionLabel>
-                  <ul className="m-0 list-none p-0">
-                    {props.pinned.map((path) => (
-                      <li key={path}>
-                        <button
-                          type="button"
-                          data-testid="pinned-row"
-                          data-path={path}
-                          onClick={() =>
-                            isFolderPath(path)
-                              ? onSetFolderExpanded(path, true)
-                              : onOpenFile(path)
-                          }
-                          onContextMenu={(event) => onPinnedContextMenu(path, event)}
-                          className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
-                        >
-                          {props.appFolders?.has(path) ? (
-                            <ObjectGlyph kind="app" size={GLYPH_SIZE} className={glyphTone(false)} />
-                          ) : isFolderPath(path) ? (
-                            <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
-                          ) : (
-                            fileGlyph(path)
-                          )}
-                          <span className="truncate">{basenameOf(path)}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              ) : null}
-
               {empty ? (
                 <button
                   type="button"
@@ -2292,6 +2343,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             </>
           ) : null}
         </section>
+        </>
+        )}
       </nav>
 
       {/* Outside the tree, so a right-click on the menu never reaches the
@@ -2314,59 +2367,40 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       ) : null}
 
       {confirmDelete ? (
-        <Overlay onClose={() => setConfirmDelete(null)}>
-          <div
-            data-testid="delete-confirm"
-            className="flex max-h-[calc(100vh-32px)] w-[min(420px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
-          >
-            <div className="min-h-0 overflow-auto p-4">
-              <p className="m-0 text-sm text-ink">
-                Delete{" "}
-                <span className="break-all font-medium">
-                  {confirmDelete.length === 1
-                    ? basenameOf(confirmDelete[0]!)
-                    : `${confirmDelete.length} items`}
-                </span>
-                ?
-              </p>
-              {/* Only a share view asks: its delete has no trash behind it. */}
-              <p className="mb-0 mt-2 text-xs text-muted">
-                {`${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-                  confirmDelete.length === 1 ? "it" : "them"
-                } from. ${
-                  props.shareView?.granterEmail ?? "The person who shared it"
-                } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
-              </p>
-              {confirmDelete.length > 1 ? (
-                <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
-                  {confirmDelete.map((path) => (
-                    <li
-                      key={path}
-                      className="border-b border-line px-2 py-1 font-mono text-[11px] text-muted last:border-b-0"
-                    >
-                      <span className="break-all">{path}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
-              <SecondaryButton onClick={() => setConfirmDelete(null)} className="h-8 py-0">
-                Cancel
-              </SecondaryButton>
-              <DangerButton
-                data-testid="confirm-delete"
-                onClick={() => {
-                  performDeletes(confirmDelete);
-                  setConfirmDelete(null);
-                }}
-                className="h-8 py-0 text-xs"
-              >
-                Delete
-              </DangerButton>
-            </div>
-          </div>
-        </Overlay>
+        <ConfirmDialog
+          title={`Delete ${confirmDelete.length === 1 ? basenameOf(confirmDelete[0]!) : `${confirmDelete.length} items`}?`}
+          confirmLabel="Delete"
+          intent="danger"
+          testId="delete-confirm"
+          cancelTestId="cancel-delete"
+          confirmTestId="confirm-delete"
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            performDeletes(confirmDelete);
+            setConfirmDelete(null);
+          }}
+        >
+          {/* Only a share view asks: its delete has no trash behind it. */}
+          <p className="m-0 mt-2 text-[13px] text-muted">
+            {`${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
+              confirmDelete.length === 1 ? "it" : "them"
+            } from. ${
+              props.shareView?.granterEmail ?? "The person who shared it"
+            } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
+          </p>
+          {confirmDelete.length > 1 ? (
+            <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+              {confirmDelete.map((path) => (
+                <li
+                  key={path}
+                  className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
+                >
+                  <span className="break-all">{path}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </ConfirmDialog>
       ) : null}
     </>
   );

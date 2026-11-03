@@ -473,7 +473,7 @@ describe("AgentIntegration", () => {
 
   // endAgentRun is the single funnel every terminal run path goes
   // through (driver turn-completed, panel Stop, the endAgentRun IPC), so the
-  // try-in-version review card listens here, not on each caller.
+  // post-run dispatch scan listens here, not on each caller.
   it("notifies onRunEnded when a known run ends, and never for an unknown run id", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
       const ended: Array<{ workspaceId: string; runId: string; status: string }> = [];
@@ -809,7 +809,7 @@ describe("AgentIntegration", () => {
       return found.sort((left, right) => left.id.localeCompare(right.id));
     }
 
-    it("keeps every run record and review card when both start and end runs before a sync", async () => {
+    it("keeps every run record and run-end hook when both start and end runs before a sync", async () => {
       await withWorkspace(async ({ root: rootA }) => {
         await withWorkspace(async ({ root: rootB }) => {
           const ended: string[] = [];

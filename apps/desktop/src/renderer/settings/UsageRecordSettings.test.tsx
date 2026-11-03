@@ -14,7 +14,7 @@ const ROWS = [
   row("version.create", "Create a workspace version", { renderer: cell(3), cli: cell(1, false) }, "2026-10-07"),
   row("file.kept.save", "Save a kept copy beside its file", { renderer: cell(0), cli: cell(2), mcp: cell(0) }, "2026-10-06"),
   row("chat.export", "Export a chat", {}),
-  row("version.try", "Try changes in a workspace version", { renderer: cell(0) }),
+  row("version.merge", "Merge a workspace version", { renderer: cell(0) }),
 ];
 const RECORD: Readable = { status: "readable", enabled: true, file: "C:\\Users\\a\\AppData\\Roaming\\dohc\\dohc-usage.json",
   since: "2026-09-12", incompleteDays: 1, rows: ROWS, setAside: null };
@@ -69,7 +69,7 @@ describe("usage record in Privacy", () => {
     expect(toggle().getAttribute("aria-checked")).toBe("true");
     const rows = screen.getAllByRole("row").slice(1);
     expect(rows.map(r => r.dataset.testid)).toEqual([
-      "usage-record-row-version.create", "usage-record-row-file.kept.save", "usage-record-row-version.try", "usage-record-row-chat.export",
+      "usage-record-row-version.create", "usage-record-row-file.kept.save", "usage-record-row-version.merge", "usage-record-row-chat.export",
     ]);
     const created = within(rows[0]!).getAllByRole("cell");
     // An earlier version's count from a door this one does not count keeps its number and the mark.
@@ -180,7 +180,7 @@ describe("usage record in Privacy", () => {
       "version.create\t3\t1 (not counted by this version)\tnot counted\tnot counted\t2026-10-07",
       "file.kept.save\t0\t2\t0\tnot counted\t2026-10-06",
       "chat.export\tnot counted\tnot counted\tnot counted\tnot counted\t",
-      "version.try\t0\tnot counted\tnot counted\tnot counted\t",
+      "version.merge\t0\tnot counted\tnot counted\tnot counted\t",
     ].join("\n"));
     expect(text).not.toContain("AppData");
     expect(text).not.toContain("Create a workspace version");

@@ -83,7 +83,7 @@ function ScopedTransfer(props: DatasetCsvTransferDialogProps) {
   }
 
   return <Overlay onClose={busy ? undefined : props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-label": "Import or export Collection", className: "dohc-elevated dohc-pop-in flex max-h-[90vh] w-[min(560px,92vw)] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink" }}>
-    <div className="flex items-center justify-between gap-3"><h2 className="m-0 text-sm font-semibold">Import or export Collection</h2><SecondaryButton disabled={busy} onClick={props.onClose}>Close</SecondaryButton></div>
+    <div className="flex items-center justify-between gap-3"><h2 className="m-0 text-base font-semibold">Import or export Collection</h2><SecondaryButton disabled={busy} onClick={props.onClose}>Close</SecondaryButton></div>
     <SecondaryButton disabled={busy} onClick={() => { contextVersion.current++; setCsv(true); }}>CSV or saved import report</SecondaryButton>
     <label className="grid gap-1 text-[12px] text-muted">Copy from this workspace<select className={selectClass} disabled={busy || !sources?.length} value={selected} onChange={event => { contextVersion.current++; setSelected(event.target.value); setSnapshot(null); setTableName(""); }}>
       <option value="">Choose a source</option>

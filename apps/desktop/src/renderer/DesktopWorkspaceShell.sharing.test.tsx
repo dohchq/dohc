@@ -429,21 +429,17 @@ describe("active file sharing", () => {
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
 describe("shared view banner", () => {
-  it("does not offer app creation in a received share workspace", async () => {
+  it("shows no Apps section and no app creation in a received share workspace without apps", async () => {
     const user = userEvent.setup();
-    const bridge = Object.assign(makeShareBridge(), {
-      listSites: vi.fn(async () => ({ sites: [] })),
-    });
+    const bridge = makeShareBridge();
     renderShell(bridge, SHARE_VIEW);
 
-    await user.click(await screen.findByTestId("activity-sites"));
-
-    expect(
-      await screen.findByText(
-        "This shared view cannot create an app. Ask the workspace owner to add one.",
-      ),
-    ).toBeTruthy();
+    await waitFor(() => expect(bridge.listSites).toHaveBeenCalled());
+    await screen.findByTestId("explorer-files-section");
+    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Add an app here…" })).toBeNull();
     expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
   });
@@ -1838,14 +1834,14 @@ describe("chats surface after a failed capture build", () => {
 });
 
 // #687/#589: the note's precedence and exact copy are pinned at the
-// AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
+// AgentList layer, but every test there hands
 // sessionRecorderOn and sharedView straight to SettingsDialog — bypassing
 // the shell's own derivation. A regression that severs
 // DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
 // sessionRecorderOn derivation with `undefined`, or dropping sharedView)
 // would leave every other suite green. This test drives the real command
 // palette -> Settings -> Agents path through the shell itself.
-describe("runner note reaches the card through the shell's own wiring", () => {
+describe("the Check note reaches Settings › Agents through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const offStatus = { ...SYNC_STATUS, historyRecordingUnavailable: true };
@@ -1860,10 +1856,10 @@ describe("runner note reaches the card through the shell's own wiring", () => {
     await user.keyboard("mcp");
     await user.click(within(palette).getByText("Settings: Open Agents (MCP)"));
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
-        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
+        "The workspace engine starts when dohc starts. Restart dohc to check an agent.",
       ),
     );
   });
@@ -1879,7 +1875,7 @@ describe("runner note reaches the card through the shell's own wiring", () => {
       ),
     );
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
+    const note = await screen.findByTestId("agents-check-note");
     await waitFor(() =>
       expect(note.textContent).toBe(
         "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",

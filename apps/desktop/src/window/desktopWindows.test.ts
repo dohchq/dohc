@@ -25,7 +25,8 @@ class Contents extends EventEmitter {
   setZoomLevel = vi.fn();
   send = vi.fn();
   isDestroyed() { return this.destroyed; }
-  isCrashed() { return false; }
+  // As in Electron, a destroyed webContents throws on use.
+  isCrashed() { if (this.destroyed) throw new TypeError("Object has been destroyed"); return false; }
   getURL() { return this.url; }
   isLoadingMainFrame() { return this.loading; }
   get native(): WebContents { return this as unknown as WebContents; }
@@ -223,6 +224,17 @@ describe("desktop workspace windows", () => {
     expect(f.windows.targetWindow(utility.native)).toBeUndefined();
     const manager = f.windows.showOrCreateManagerWindow();
     expect(f.windows.targetWindow(utility.native)).toBe(manager);
+  });
+
+  // A closing window loses its webContents before the window itself goes.
+  // A quit in that gap must find no renderer to ask, not throw.
+  it("leaves a closing window's destroyed renderer out of the windows that answer", () => {
+    const f = fixture(); const closing = new Window(); const open = new Window();
+    f.windows.trackWorkspaceWindow(closing.native); f.windows.trackWorkspaceWindow(open.native);
+    closing.webContents.destroyed = true;
+    expect(f.windows.workspaceWindows.answering()).toEqual([open.native]);
+    open.destroy();
+    expect(f.windows.workspaceWindows.answering()).toEqual([]);
   });
 
   it("activates the target window and prioritizes that workspace without changing the input list", async () => {
@@ -617,9 +629,9 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
     f.setReady(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
     f.setCanInstall(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
@@ -661,7 +673,7 @@ describe("desktop native menus", () => {
   it("reuses native recents for cloned roots while rebuilding current menus", () => {
     const f = fixture();
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(false);
 
     const rows = [workspace("replacement", workspace("a").rootPath), workspace("b")];
     f.setRows(rows);
@@ -674,7 +686,7 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.addRecentDocument).toHaveBeenCalledTimes(2);
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledOnce();
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
-    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
+    expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     const target = new Window();
     f.windows.trackWorkspaceWindow(target.native);
     click(submenu(item(f, "File", "Open recent"))[0]!, target.native);

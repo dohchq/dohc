@@ -7,6 +7,7 @@ import { prepare, assertPrepared } from "./build.mjs";
 import { git, repoRoot } from "./process.mjs";
 import { closeDebugApplication } from "./close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "./desktop-close-policy.mjs";
+import { makeDebugHome, removeDebugHome } from "./debug-home.mjs";
 
 async function evaluateDebugger(url, expression) {
   const socket = new WebSocket(url);
@@ -40,20 +41,39 @@ const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 const { _electron: electron } = require("playwright");
 const directory = join(repoRoot, ".agent-artifacts/debug", randomUUID());
 const profile = join(directory, "profile");
-const home = join(directory, "home");
 const workspace = join(directory, "workspace");
+let session;
+let forgetLink;
+let leaveStartup;
+let launching;
+let interrupted = false;
 let app;
 let processHandle;
 let stop;
 const logs = [];
 try {
   await prepare();
-  for (const path of [profile, home, workspace]) await mkdir(path, { recursive: true });
+  session = makeDebugHome(directory);
+  // Playwright's SIGINT handler, installed while Electron runs, ends the
+  // process with process.exit(130), and so does a signal before launch. The
+  // link goes with the process either way.
+  forgetLink = () => removeDebugHome(session);
+  process.once("exit", forgetLink);
+  // Until Electron starts launching, a signal ends the launcher at once, as it always has.
+  leaveStartup = (signal) => process.exit(signal === "SIGTERM" ? 143 : 130);
+  process.once("SIGINT", leaveStartup); process.once("SIGTERM", leaveStartup);
+  const { home } = session;
+  for (const path of [profile, workspace]) await mkdir(path, { recursive: true });
   await writeFile(join(workspace, "debug.md"), "# Debug workspace\n\nThis workspace belongs to this debug session.\n");
   const env = { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: workspace };
   if (process.argv.includes("--native-dialogs")) delete env.DOHC_TEST_PICK_PATH;
   delete env.ELECTRON_RUN_AS_NODE;
   const commit = git(["rev-parse", "HEAD"]);
+  // Once Electron may be starting, a signal waits for the launch and then
+  // stops the session the usual way, which closes the app before the link goes.
+  launching = () => { interrupted = true; };
+  process.off("SIGINT", leaveStartup); process.off("SIGTERM", leaveStartup);
+  process.on("SIGINT", launching); process.on("SIGTERM", launching);
   app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
     args: [`--user-data-dir=${profile}`, "--dohc-isolated-test", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
   processHandle = app.process();
@@ -63,8 +83,9 @@ try {
       done();
     };
     app.once("close", stop); processHandle.once("exit", stop);
+    process.off("SIGINT", launching); process.off("SIGTERM", launching);
     process.on("SIGINT", stop); process.on("SIGTERM", stop);
-    if (processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
+    if (interrupted || processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
   });
   const record = (source, text) => logs.push({ at: new Date().toISOString(), source, text: String(text) });
   app.process().stdout?.setEncoding("utf8").on("data", (text) => record("main.stdout", text));
@@ -76,7 +97,7 @@ try {
   const mainPort = await app.evaluate(() => process.debugPort);
   const rendererPort = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split(/\r?\n/)[0];
   const instance = { root: repoRoot, commit, supervisorPid: process.pid, launcherPid: app.process().pid,
-    electronPid: await app.evaluate(() => process.pid), workspace, profile, home,
+    electronPid: await app.evaluate(() => process.pid), workspace, profile, home, homeFiles: session.files,
     mainInspector: `http://127.0.0.1:${mainPort}/json/list`, rendererInspector: `http://127.0.0.1:${rendererPort}/json/list`, build: assertPrepared(), directory };
   const debuggerTargets = {};
   for (const [kind, address] of [["main", instance.mainInspector], ["renderer", instance.rendererInspector]]) {
@@ -111,6 +132,12 @@ finally {
       await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
       console.log(`[debug] Evidence retained at ${directory}`);
     } finally {
+      for (const handler of [leaveStartup, launching]) if (handler) { process.off("SIGINT", handler); process.off("SIGTERM", handler); }
+      // The app may still use the link if its process did not exit.
+      if (forgetLink) process.off("exit", forgetLink);
+      if (processHandle && processHandle.exitCode === null && processHandle.signalCode === null) {
+        if (session?.link) console.error(`[debug] Left ${session.link} in place, because the app may still be running. Remove it once the app has stopped.`);
+      } else removeDebugHome(session);
       if (stop) { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
     }
   }

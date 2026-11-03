@@ -98,6 +98,9 @@ pub enum DomainError {
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
 
+    #[error("synced deletion revival refused")]
+    SyncedDeletionRevivalRefused,
+
     /// The source version is not a named fork of the target, or its durable
     /// fork-base snapshot set is missing.
     #[error("durable fork base not found")]
@@ -251,6 +254,7 @@ impl DomainError {
             DomainError::ForkBaseNotFound => "fork-base-not-found",
             DomainError::ConflictNotFound => "conflict-not-found",
             DomainError::ConflictStaleTarget => "conflict-stale-target",
+            DomainError::SyncedDeletionRevivalRefused => "synced-deletion-revival-refused",
             DomainError::InvalidText { .. } => "invalid-text",
             DomainError::PayloadTooLarge { .. } => "payload-too-large",
             DomainError::IdentifierTooLong { .. } => "identifier-too-long",

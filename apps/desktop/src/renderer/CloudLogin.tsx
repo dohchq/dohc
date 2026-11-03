@@ -308,7 +308,7 @@ export function CloudLogin(props: {
     >
       {props.untitled ? null : (
         <div className="flex items-center gap-2">
-          <h2 className="m-0 flex flex-1 items-center gap-1.5 text-sm font-semibold text-ink">
+          <h2 className="m-0 flex flex-1 items-center gap-1.5 text-base font-semibold text-ink">
             <Cloud size={14} aria-hidden className="text-subtle" />
             Sync and sharing
           </h2>

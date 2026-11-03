@@ -391,6 +391,7 @@ fn sync_delete(store: &mut EngineStore) -> Vec<dohc_engine_sync::MomentMateriali
         &envelope,
         &NoFaults,
         &NoLiveLeases,
+        &dohc_engine_collab::live_update_application::ReleasedTails::default(),
     )
     .unwrap();
     let ApplyDisposition::Applied(result) = result.primary else {

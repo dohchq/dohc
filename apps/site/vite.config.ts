@@ -17,7 +17,7 @@ export default defineConfig({
   css: { postcss: { plugins: [shadowHostTokens] } },
   build: {
     rolldownOptions: {
-      input: ["index.html", "privacy.html"],
+      input: ["index.html", "privacy.html", "404.html"],
     },
   },
   server: {

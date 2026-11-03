@@ -52,7 +52,7 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   "saved-to-host": {
     label: "Saved to host",
     mark: "working",
-    title: "The session host accepted your edits. The local file may still be updating.",
+    title: "The server accepted your edits. The local file may still be updating.",
   },
   "pending-share": {
     label: "Saved locally · Pending share",
@@ -100,7 +100,7 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   "changed-on-disk": {
     label: "Changed outside dohc",
     mark: "attention",
-    title: "This file changed outside dohc while it was open. dohc keeps your text in History.",
+    title: "This file changed outside dohc.",
   },
   deleted: {
     label: "Deleted",

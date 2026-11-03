@@ -8,6 +8,7 @@ import {
   RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
+import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createRelaySyncEngine,
@@ -50,14 +51,23 @@ function pullResult(
   };
 }
 
+// How many relay tasks hold the fake capture's chain right now.
+let chainHeld = 0;
+
 function capture(): WorkspaceEngineCapture {
   return {
-    // Mirrors the real capture: give the engine's push+pull closure a page
+    // Mirrors the real capture: give the engine's pull closure a page
     // materializer. The relay operation commits each page after that callback
     // resolves.
     runRelaySync: vi.fn(
-      async (task: (materializePage: () => Promise<void>) => Promise<unknown>) =>
-        await task(async () => undefined),
+      async (task: (materializePage: () => Promise<void>) => Promise<unknown>) => {
+        chainHeld += 1;
+        try {
+          return await task(async () => undefined);
+        } finally {
+          chainHeld -= 1;
+        }
+      },
     ),
     start: vi.fn(),
     observeFileEvents: vi.fn(),
@@ -77,6 +87,22 @@ function capture(): WorkspaceEngineCapture {
     flush: vi.fn(),
     stop: vi.fn(),
   } as unknown as WorkspaceEngineCapture;
+}
+
+// A capture whose relay tasks and local work share one serial chain, like the
+// real capture's.
+function serialCaptureFake() {
+  let captureChain: Promise<unknown> = Promise.resolve();
+  function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = captureChain.then(task);
+    captureChain = result.catch(() => undefined);
+    return result;
+  }
+  const serialCapture = Object.assign(capture(), {
+    runRelaySync: <T>(task: Parameters<WorkspaceEngineCapture["runRelaySync"]>[0]) =>
+      enqueue(() => task(async () => undefined)) as Promise<T>,
+  });
+  return { serialCapture, enqueue };
 }
 
 // The relay's held reads, answered by the test one at a time. Like a fetch,
@@ -157,17 +183,11 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
-  it("releases document opens and authored writes and pulls between drain passes", async () => {
+  it("opens documents and writes while a push waits on the relay, and pulls between drain passes", async () => {
     const events: string[] = [];
-    let captureChain: Promise<unknown> = Promise.resolve();
-    function enqueue<T>(task: () => Promise<T>): Promise<T> {
-      const result = captureChain.then(task);
-      captureChain = result.catch(() => undefined);
-      return result;
-    }
-    const serialCapture = Object.assign(capture(), {
-      runRelaySync: <T>(task: Parameters<WorkspaceEngineCapture["runRelaySync"]>[0]) =>
-        enqueue(() => task(async () => undefined)) as Promise<T>,
+    const fake = serialCaptureFake();
+    const enqueue = fake.enqueue;
+    const serialCapture = Object.assign(fake.serialCapture, {
       openYDocSession: vi.fn(() => enqueue(async () => {
         events.push("document opened");
         return {} as Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
@@ -195,16 +215,60 @@ describe("relaySyncEngine", () => {
     sync.queueSync();
     const pass = sync.retryNow({ countsAsAttempt: true });
     await entered.promise;
-    const opened = serialCapture.openYDocSession();
-    const written = serialCapture.writeAuthoredFile();
+    void serialCapture.openYDocSession();
+    void serialCapture.writeAuthoredFile();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(["push 1", "document opened", "authored write"]);
     release.resolve();
-    await Promise.all([pass, opened, written]);
-    expect(events).toEqual(["push 1", "pull", "document opened", "authored write"]);
+    await pass;
+    expect(events).toEqual(["push 1", "document opened", "authored write", "pull"]);
     expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 1, syncFailure: null });
     // New edits must not postpone a drain's continuation until the debounce.
     sync.queueSync();
     await vi.advanceTimersToNextTimerAsync();
-    expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2", "pull"]);
+    expect(events).toEqual(["push 1", "document opened", "authored write", "pull", "push 2", "pull"]);
+    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 0, syncFailure: null });
+    await sync.stop();
+  });
+
+  it("sends an edit captured while a push waits on the relay in the next pass", async () => {
+    // The engine's outbox: a push sends what was captured when it started,
+    // and the relay's answer acknowledges only that.
+    const outbox = ["a"];
+    const sent: string[][] = [];
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    pushMock.mockImplementation(async () => {
+      const selected = [...outbox];
+      if (sent.length === 0) {
+        entered.resolve();
+        await release.promise;
+      }
+      sent.push(selected);
+      outbox.splice(0, selected.length);
+      return { pushed: selected.length, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+    });
+    const { serialCapture, enqueue } = serialCaptureFake();
+    const sync = engine({ capture: serialCapture });
+    const first = sync.start();
+    await entered.promise;
+    let captured = false;
+    // As the workspace does, a finished capture queues a pass.
+    void enqueue(async () => {
+      outbox.push("b");
+      captured = true;
+    }).then(() => sync.queueSync());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(captured).toBe(true);
+    expect(sent).toEqual([]);
+    release.resolve();
+    await first;
+    expect(sent).toEqual([["a"]]);
+    expect(outbox).toEqual(["b"]);
+    expect(sync.snapshot().pendingChangeCount).toBe(1);
+    await vi.advanceTimersToNextTimerAsync();
+    expect(sent).toEqual([["a"], ["b"]]);
+    expect(outbox).toEqual([]);
     expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 0, syncFailure: null });
     await sync.stop();
   });
@@ -718,13 +782,25 @@ describe("relaySyncEngine", () => {
   // re-pushes, and completes normally instead of failing the pass.
   it("recovers and re-pushes when the origin diverged (restored/cloned engine.db)", async () => {
     const cap = capture();
+    const held: number[] = [];
     pushMock
-      .mockRejectedValueOnce(new RelayOriginDivergedError())
-      .mockResolvedValue({
-        pushed: 1,
-        hasMore: false, originsPushed: ["origin_new"], ownerAdmissionPending: [],
-        sharingDeclined: [],
+      .mockImplementationOnce(async () => {
+        held.push(chainHeld);
+        throw new RelayOriginDivergedError();
+      })
+      .mockImplementation(async () => {
+        held.push(chainHeld);
+        return {
+          pushed: 1,
+          hasMore: false, originsPushed: ["origin_new"], ownerAdmissionPending: [],
+          sharingDeclined: [],
+        };
       });
+    const recover = recoverMock.getMockImplementation()!;
+    recoverMock.mockImplementation(async () => {
+      held.push(chainHeld);
+      return await recover();
+    });
     const sync = engine({ capture: cap });
     await sync.start();
 
@@ -732,6 +808,8 @@ describe("relaySyncEngine", () => {
     expect(recoverMock).toHaveBeenCalledTimes(1);
     expect(pushMock).toHaveBeenCalledTimes(2);
     expect(pullMock).toHaveBeenCalledTimes(1);
+    // The pushes and the recovery waited on the relay off the capture chain.
+    expect(held).toEqual([0, 0, 0]);
     // The pass completed cleanly — no auth-expiry, no failure notice.
     expect(sync.snapshot().authExpired).toBe(false);
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
@@ -741,12 +819,25 @@ describe("relaySyncEngine", () => {
     pullMock
       .mockRejectedValueOnce(new RelayOriginDivergedError())
       .mockResolvedValue(pullResult());
+    const held: number[] = [];
+    const push = pushMock.getMockImplementation()!;
+    pushMock.mockImplementation(async () => {
+      held.push(chainHeld);
+      return await push();
+    });
+    const recover = recoverMock.getMockImplementation()!;
+    recoverMock.mockImplementation(async () => {
+      held.push(chainHeld);
+      return await recover();
+    });
     const sync = engine({ capture: capture() });
     await sync.start();
 
     expect(recoverMock).toHaveBeenCalledTimes(1);
     expect(pushMock).toHaveBeenCalledTimes(2);
     expect(pullMock).toHaveBeenCalledTimes(2);
+    // The pushes and the recovery waited on the relay off the capture chain.
+    expect(held).toEqual([0, 0, 0]);
     expect(recoverMock.mock.invocationCallOrder[0]!).toBeGreaterThan(
       pullMock.mock.invocationCallOrder[0]!,
     );
@@ -854,6 +945,23 @@ describe("relaySyncEngine", () => {
     errorSpy.mockRestore();
   });
 
+  it("ends a pass that quit stopped waiting for without calling it a failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    pushMock.mockRejectedValue(new EngineWorkspaceShuttingDownError());
+    const afterPass = vi.fn(async () => false);
+    const sync = engine({ capture: capture(), afterPass });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(sync.snapshot().syncFailure).toBeNull();
+    expect(afterPass).toHaveBeenCalledExactlyOnceWith({ failed: false });
+    expect(errorSpy).not.toHaveBeenCalled();
+    // No backoff retries the pass.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  });
+
   it("runs a pass at once for Try again instead of waiting out the backoff", async () => {
     let fail = true;
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -875,6 +983,33 @@ describe("relaySyncEngine", () => {
     // The backoff it replaced does not run a pass of its own later.
     await vi.runAllTimersAsync();
     expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("pushes what it recorded until a push leaves nothing behind", async () => {
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockClear();
+    const more = { pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+    pushMock.mockResolvedValueOnce(more).mockResolvedValueOnce(more);
+    await sync.pushRecorded();
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    // The continuation the first pushes asked for does not push again.
+    await vi.runOnlyPendingTimersAsync();
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    await sync.stop();
+    await sync.pushRecorded();
+    expect(pushMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects a push of what it recorded when the pass fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    pushMock.mockRejectedValueOnce(new RelayUnreachableError());
+    await expect(sync.pushRecorded()).rejects.toThrow(RelayUnreachableError);
+    expect(sync.snapshot().syncFailure?.cause).toBe("server-unreachable");
     errorSpy.mockRestore();
     await sync.stop();
   });

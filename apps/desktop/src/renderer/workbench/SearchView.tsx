@@ -99,7 +99,7 @@ const FileGroup = memo(function FileGroup(props: {
         onClick={() => props.onToggle(group.path)}
         // h-7 at 13px: the workbench list rhythm (Explorer rows, palette
         // rows) — Search must not read denser than the tree one click away.
-        className="flex h-7 w-full items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-hover"
+        className="dohc-focus-row flex h-7 w-full items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-hover"
       >
         {props.collapsed ? (
           <ChevronRight size={12} aria-hidden className="shrink-0 text-subtle" />
@@ -153,7 +153,7 @@ const FileGroup = memo(function FileGroup(props: {
                 type="button"
                 data-testid="search-show-more"
                 onClick={() => props.onShowAll(group.path)}
-                className="flex h-7 w-full items-center rounded-md pl-6 pr-2 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
+                className="dohc-focus-row flex h-7 w-full items-center rounded-md pl-6 pr-2 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 Show {hidden} more match{hidden === 1 ? "" : "es"}
               </button>
@@ -555,7 +555,7 @@ export function SearchView(props: {
                 type="button"
                 data-testid="search-show-more-files"
                 onClick={() => setGroupWindow((current) => current + GROUP_WINDOW_STEP)}
-                className="flex h-7 w-full items-center rounded-md px-1.5 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
+                className="dohc-focus-row flex h-7 w-full items-center rounded-md px-1.5 text-left text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 Show {hiddenGroupCount} more file{hiddenGroupCount === 1 ? "" : "s"}
               </button>

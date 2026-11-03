@@ -4,6 +4,15 @@ import { executeCli } from "./index";
 import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken } from "./protocol";
 
 describe("document commands", () => {
+  it.each([false, true])("prints a kept edit as success, json=%s", async json => {
+    const warning = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+    const result = await executeCli({ argv: ["document", "edit", "n.md", "--text", "After.", ...(json ? ["--json"] : [])],
+      request: async () => ({ ok: true, path: "n.md", changed: true, warning }) });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(warning);
+  });
+
   it.each(["", "# Live text", "# Live text\n\n"])("reads current Markdown byte for byte: %j", async (markdown) => {
     const request = vi.fn(async () => ({ ok: true, path: "notes/plan.md", markdown }));
     expect(await executeCli({ argv: ["document", "read", "plan.md"], cwd: "/workspace/notes", request }))

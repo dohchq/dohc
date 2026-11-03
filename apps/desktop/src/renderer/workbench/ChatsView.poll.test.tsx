@@ -14,8 +14,17 @@ const decision = {
   options: ["Soup", "Salad"],
 };
 
+// A new post has a Poll button; a chat bar starts a poll from its "+".
+function openPoll(prefix: string) {
+  if (prefix === "chats-new-thread") {
+    fireEvent.mouseDown(screen.getByTestId(`${prefix}-poll-toggle`));
+    return;
+  }
+  fireEvent.click(screen.getByTestId(`${prefix}-add`));
+  fireEvent.click(screen.getByTestId(`${prefix}-poll-toggle`));
+}
 function fillPoll(prefix: string, choices: string[]) {
-  fireEvent.mouseDown(screen.getByTestId(`${prefix}-poll-toggle`));
+  openPoll(prefix);
   choices.forEach((choice, index) => {
     fireEvent.change(screen.getAllByTestId(`${prefix}-poll-choice`)[index]!, { target: { value: choice } });
   });
@@ -203,7 +212,7 @@ describe("ChatsView polls", () => {
       expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", body: "Lunch?" }),
     );
     await waitFor(() => expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe(""));
-    fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
+    openPoll("chats");
     expect(choiceValues("chats")).toEqual(["", ""]);
   });
 

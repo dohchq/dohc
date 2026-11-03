@@ -21,6 +21,8 @@ export async function runNativeOwnerDeliveryPass(options: {
   bearer: string;
   accountId: string;
   assertCurrent(): void;
+  /** Enrollment can set aside an older queue even when this pass sends nothing. */
+  onEnrolled?(): Promise<void>;
 }) {
   const {client, document, config, signal} = options;
   const pending = new Set<Promise<unknown>>();
@@ -60,6 +62,7 @@ export async function runNativeOwnerDeliveryPass(options: {
         const draft = await guarded(signal => client.ownerYDocEnroll(request(), {...target, captured,
           journalCursor: input.appliedThroughJournalCursor, hostVector: input.hostVector, checkpoint: input.missingStateUpdate}, signal), attemptSignal);
         preparation = {status: "observed", draft}; position = draft;
+        await options.onEnrolled?.();
         return "applied";
       }
       position = await guarded(signal => client.ownerYDocApplyInitialSync(request(), {...target, ...prior(),

@@ -214,6 +214,20 @@ export function createExitRounds<Participant>(options: {
     options.send(participant, { kind: "request", roundId: round.id, exit: round.kind });
   }
 
+  // A proceeded round whose exit then did not happen (the updater refused or
+  // failed, or a member went back): every member of that round, including
+  // one enrolled after it began, drops the intent it claimed for it, so the
+  // next ordinary close is not labelled a restart and no window still shows
+  // one under way.
+  function retract(roundId: number): void {
+    if (proceeded?.id !== roundId) return;
+    const members = proceeded.members;
+    proceeded = null;
+    for (const participant of members) {
+      options.send(participant, { kind: "cancelled", roundId });
+    }
+  }
+
   return {
     current(): { roundId: number; kind: ExitKind } | null {
       return current ? { roundId: current.id, kind: current.kind } : null;
@@ -265,11 +279,17 @@ export function createExitRounds<Participant>(options: {
       return { roundId: round.id, outcome: promise, created: true };
     },
 
-    // An answer counts only from a participant of the current round. Returns
-    // whether a round consumed it.
+    // An answer counts only from a participant of the current round, or a
+    // member going back on the proceeded round's exit after a late draft
+    // stopped its unload. Returns whether a round consumed it.
     answer(senderId: number, roundId: number, decision: ExitRoundDecision): boolean {
       const round = current;
-      if (!round || round.id !== roundId || !round.members.has(senderId)) return false;
+      if (!round || round.id !== roundId || !round.members.has(senderId)) {
+        const member = proceeded?.members.some((participant) => options.participantId(participant) === senderId);
+        if (decision !== "cancel" || proceeded?.id !== roundId || !member) return false;
+        retract(roundId);
+        return true;
+      }
       if (decision === "cancel") {
         // A window that went back cancels the round outright, dialog or not:
         // the user in that window made a decision too.
@@ -320,18 +340,7 @@ export function createExitRounds<Participant>(options: {
       return taken;
     },
 
-    // A proceeded round whose exit then did not happen (the updater refused
-    // or failed): every member of that round, including one enrolled after
-    // it began, drops the intent it claimed for it, so the next ordinary
-    // close is not labelled a restart.
-    retract(roundId: number): void {
-      if (proceeded?.id !== roundId) return;
-      const members = proceeded.members;
-      proceeded = null;
-      for (const participant of members) {
-        options.send(participant, { kind: "cancelled", roundId });
-      }
-    },
+    retract,
   };
 }
 

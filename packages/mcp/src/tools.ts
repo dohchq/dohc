@@ -34,7 +34,9 @@ import {
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
+  type CliStreamPosition,
   type CliVerb,
+  type VersionResolution,
 } from "@dohc/cli/protocol";
 import type { z } from "zod";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
@@ -93,6 +95,13 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_directory: ["folder.create"],
   dohc_read_operation: ["history.operation.read"],
   dohc_undo_operation: ["history.operation.undo"],
+  dohc_list_versions: ["version.list"],
+  dohc_compare_version: ["version.compare"],
+  dohc_list_version_conflicts: ["version.conflicts.list"],
+  dohc_create_version: ["version.create"],
+  dohc_switch_version: ["version.switch"],
+  dohc_merge_version: ["version.merge"],
+  dohc_resolve_version_conflict: ["version.conflict.resolve"],
   dohc_duplicate_file: ["file.duplicate"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
@@ -1367,7 +1376,7 @@ async function detectSiteAt(
   // workspace-core/src/sites.ts) for the identical malformed input — a
   // dohc.json preview.mode that isn't one of the three valid values must
   // surface the same diagnostic here as it does for the desktop detector,
-  // or dohc_test_app can silently pass a config the desktop Apps view flags.
+  // or dohc_test_app can silently pass a config the desktop Explorer flags.
   if (configPreviewMode !== undefined && configuredPreviewMode === undefined) {
     diagnostics.push({
       severity: "warning",
@@ -1522,7 +1531,7 @@ async function detectSiteAt(
   // core/src/sites.ts) branch-for-branch: a dohc.json config OR a
   // framework config file (vite.config.ts, ...) is "configured", and
   // either one is a high-confidence signal on its own, same as an actual
-  // index.html file — the desktop Apps view and MCP's dohc_detect_apps must
+  // index.html file — the desktop Explorer's Apps section and MCP's dohc_detect_apps must
   // describe the same project the same way.
   const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
@@ -1939,6 +1948,31 @@ export async function undoOperation(ctx: ToolContext, args: { operationId: strin
   return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
 }
 
+// The versions menu's reads. Owner workspace only; files History does not
+// track and secret files are left out.
+export async function listVersions(ctx: ToolContext) {
+  return requestCli(ctx, "versionList", {});
+}
+export async function compareVersion(ctx: ToolContext, args: { version: string; afterPath?: string }) {
+  return requestCli(ctx, "versionCompare", args);
+}
+export async function listVersionConflicts(ctx: ToolContext, args: { afterConflictId?: string }) {
+  return requestCli(ctx, "versionConflicts", args);
+}
+// The versions menu's changes. Each first saves the edits open in dohc.
+export async function createVersion(ctx: ToolContext, args: { name: string }) {
+  return requestCli(ctx, "versionCreate", args);
+}
+export async function switchVersion(ctx: ToolContext, args: { version: string }) {
+  return requestCli(ctx, "versionSwitch", args);
+}
+export async function mergeVersion(ctx: ToolContext, args: { version: string }) {
+  return requestCli(ctx, "versionMerge", args);
+}
+export async function resolveVersionConflict(ctx: ToolContext, args: { conflictId: string; resolution: VersionResolution }) {
+  return requestCli(ctx, "versionResolve", args);
+}
+
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Share copy details require the owning workspace." };
   const parsed = ShareCopyInput.safeParse(input);
@@ -1968,8 +2002,20 @@ export async function listFileChats(ctx: ToolContext, args: { path: string }) {
   return requestCli(ctx, "fileChats", args);
 }
 
-export async function readChat(ctx: ToolContext, args: { threadId: string }) {
-  return requestCli(ctx, "chat", args);
+export async function readChat(ctx: ToolContext, args: {
+  threadId?: string;
+  group?: string;
+  before?: CliStreamPosition;
+  limit?: number;
+}) {
+  const { threadId, group, before, limit } = args;
+  if (threadId !== undefined && group === undefined && before === undefined && limit === undefined) {
+    return requestCli(ctx, "chat", { threadId });
+  }
+  if (group !== undefined && threadId === undefined) {
+    return requestCli(ctx, "chat", { group, ...(before ? { before } : {}), ...(limit ? { limit } : {}) });
+  }
+  return { ok: false as const, reason: "Pass a threadId to read a thread, or a group to read its stream." };
 }
 
 // --- groups (PR 12/15 slice, WS-E) ----------------------------------------
@@ -2349,12 +2395,13 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
 
 export async function editDocument(
   ctx: ToolContext,
-  args: { path: string; find?: string; replacement: string; requestId?: string },
+  args: { path: string; find?: string; replacement: string; requestId?: string; allowLossySourceSha256?: string },
   agent: string | undefined,
 ) {
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "documentEdit", {
+    ...(args.allowLossySourceSha256 ? { allowLossySourceSha256: args.allowLossySourceSha256 } : {}),
     path: resolved.normalized,
     ...(args.find === undefined ? {} : { find: args.find }),
     replacement: args.replacement,

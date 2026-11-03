@@ -35,7 +35,7 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
     await writeWorkspaceFiles(temp, [{ path: "docs/plan.md", contents: "# Plan\n\nShare me.\n" }]);
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await seedWorkspaceRegistry(temp, [
       { workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" } },
@@ -141,7 +141,7 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
       { path: "docs/plan.md", contents: "# Plan\n" },
       { path: "shared-with-me/notes/notes.md", contents: "# Notes\n" },
     ]);
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await seedWorkspaceRegistry(temp, [{
       workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" },

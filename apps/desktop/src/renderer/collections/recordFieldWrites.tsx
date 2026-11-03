@@ -103,7 +103,7 @@ export function CollectionRecordFieldWrite({
   const session = useBoundNoteCheck({
     open: change.recordPath,
     doc: docState.doc,
-    checkedHash: source.state === "clear" ? source.contentHash : null,
+    headSha256: docState.headSha256,
   });
   const checkedClear = source.state === "clear" && session === "clear";
   useEffect(() => {
@@ -291,8 +291,8 @@ export function CollectionRecordFieldWrite({
         }
         return;
       case "saved-to-host":
-        onDurabilityConfirmed?.("The session host accepted this change. The local file may still be updating.");
-        onHeldDurably("The session host accepted this change. The local file may still be updating.");
+        onDurabilityConfirmed?.("The server accepted this change. The local file may still be updating.");
+        onHeldDurably("The server accepted this change. The local file may still be updating.");
         return;
       case "pending-share":
         onDurabilityConfirmed?.("Saved on this device. The shared file update is pending.");

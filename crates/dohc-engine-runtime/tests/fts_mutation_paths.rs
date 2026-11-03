@@ -373,6 +373,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
             Arc::new(NoFaults),
             CancellationToken::new(),
             None,
+            None,
         )
         .await
         .expect("settle ydoc");

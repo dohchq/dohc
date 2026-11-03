@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -24,6 +24,14 @@ async function removeLayout(path) {
   await chmod(base, 0o700).catch(() => {});
   for (const entry of await readdir(base).catch(() => [])) await chmod(join(base, entry), 0o700).catch(() => {});
   await rm(path, { recursive: true, force: true });
+}
+
+// ShipIt clears quarantine from every file of a macOS update, which needs the owner's write bit.
+async function assertOwnerWritable(base) {
+  for (const entry of await readdir(base, { recursive: true, withFileTypes: true })) {
+    const path = join(entry.parentPath, entry.name);
+    if (entry.isFile()) assert.ok((await stat(path)).mode & 0o200, `${path} is owner-writable`);
+  }
 }
 
 test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
@@ -71,14 +79,15 @@ test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
     assert.deepEqual((await readdir(sourceBase)).sort(), sourceEntries);
     for (const name of stale.slice(0, 2)) assert.equal(await readFile(join(sourceBase, name, "node"), "utf8"), "unselected executable");
   });
-  await t.test("keeps packaged folders owner-writable and files read-only", async sub => {
+  await t.test("keeps packaged folders and files owner-writable", async sub => {
     const f = await fixture(sub);
     await f.prepare();
     const base = join(f.resources, "engine-reader");
-    for (const [path, mode] of [[base, 0o755], [dirname(f.original.node), 0o755], [join(base, "selection.json"), 0o444], [f.original.manifest, 0o444]]) {
+    for (const [path, mode] of [[base, 0o755], [dirname(f.original.node), 0o755], [join(base, "selection.json"), 0o644], [f.original.manifest, 0o644], [f.original.bundle, 0o644], [f.original.node, 0o755]]) {
       assert.equal(f.modes.get(path), mode, `requested POSIX mode for ${path}`);
       if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, mode);
     }
+    await assertOwnerWritable(base);
     await rm(f.app, { recursive: true, force: true });
   });
   await t.test("plain rm deletes an unsigned packaged layout without mode repair", async sub => {
@@ -112,11 +121,6 @@ test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
         ignore: file => file.endsWith("already-ignored") };
       const operation = signReader(options, {}, {
         chmod: f.setMode,
-        rename: async (from, to) => {
-          // Model POSIX replacement: Windows cannot replace a read-only destination.
-          if (process.platform === "win32" && (await stat(to).catch(() => null))?.isFile()) await chmod(to, 0o644);
-          await rename(from, to);
-        },
         wait: async ms => { waits.push(ms); },
         run: async (command, args) => {
           assert.equal(command, "/usr/bin/codesign");
@@ -167,10 +171,11 @@ test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
             assert.deepEqual(await readFile(join(sourceBase, "selection.json")), sourceSelection, "signing must not rewrite the staged selection through a hard link");
             assert.equal(createHash("sha256").update(await readFile(staged.node)).digest("hex"), sourceNodeHash, "signing must not rewrite the staged Node through a hard link");
           }
-          for (const [path, mode] of [[join(f.resources, "engine-reader"), 0o755], [dirname(final.node), 0o755], [join(f.resources, "engine-reader/selection.json"), 0o444], [final.manifest, 0o444]]) {
-            assert.equal(f.modes.get(path === final.manifest ? f.original.manifest : path), mode);
+          for (const [path, mode] of [[join(f.resources, "engine-reader"), 0o755], [dirname(final.node), 0o755], [join(f.resources, "engine-reader/selection.json"), 0o644], [final.manifest, 0o644], [final.node, 0o755]]) {
+            assert.equal(f.modes.get(path === final.manifest ? f.original.manifest : path === final.node ? f.original.node : path), mode);
             if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, mode);
           }
+          await assertOwnerWritable(join(f.resources, "engine-reader"));
           if (scenario === "outer reader mutation" || scenario === "outer compiler mutation") {
             const node = scenario === "outer reader mutation" ? final.node : compilerNode;
             await chmod(node, 0o755);

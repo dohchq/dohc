@@ -260,6 +260,11 @@
   "share.live.document.retry",
   "share.live.document.recovery.save",
   "workspace.name.suggest",
+  "agent.run.retry",
+  "settings.agents.order",
+  "device.update.download",
+  "app.view",
+  "app.local.check",
   "file.reveal",
   "explorer.menu.read"
 ]

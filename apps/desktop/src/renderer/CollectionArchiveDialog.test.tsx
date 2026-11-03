@@ -10,7 +10,7 @@ const props = () => ({ datasetId: "dataset", workspaceId: "workspace", datasetPa
 it("shows affected apps before archiving and confirms the reverse path", async () => {
   backend.dataset.mockImplementation(async value => value.action === "lifecycle" ? { kind: "lifecycle", archived: false, generation: 0, reason: "", apps: [{ appId: "public-form", binding: { operationIds: ["submit"] } }], nextCursor: null } : { kind: "lifecycle-updated", archived: true, generation: 1 });
   const p = props(); render(<CollectionArchiveDialog {...p} />);
-  expect(await screen.findByText("public-form")).toBeTruthy(); expect(screen.getByText(/Restore it from Archived collections/)).toBeTruthy();
+  expect(await screen.findByText("public-form")).toBeTruthy(); expect(screen.getByText(/Restore it from archived Collections/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Archive Collection" }));
   await waitFor(() => expect(p.onChanged).toHaveBeenCalledOnce());
   expect(backend.dataset).toHaveBeenLastCalledWith({ workspaceId: "workspace", datasetPath: "data/dataset.json", expectedDatasetId: "dataset", action: "archive" }); expect(p.onClose).toHaveBeenCalledOnce();

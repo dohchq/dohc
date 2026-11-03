@@ -145,6 +145,12 @@ type EngineDocOpenOutcome =
       token: number;
       kind: "bound";
       doc: Y.Doc;
+      // The file head `doc`'s state was installed with. Undefined while the
+      // head is unknown.
+      headSha256?: string | null;
+      lastSave: EngineYDocBinding["lastSave"];
+      // Counts states main installed other than this session's own saves.
+      pairedInstalls: number;
       objectId: string | null;
       versionId: string | null;
       artifactAssets: readonly ArtifactAssetDescriptor[];
@@ -184,12 +190,14 @@ function makeTransport(
   localSeq: { current: number },
   writesRefused: { current: boolean },
   kind: LiveDocumentKind,
+  allowLossySourceSha256?: string,
 ): EngineYDocTransport {
   let lineageGeneration = 1;
   return {
     ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
     async open() {
       const result = await bridge().openEngineYDocSession({
+        ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
         workspaceId,
         path,
         sessionId,
@@ -199,6 +207,7 @@ function makeTransport(
       }
       return {
         available: result.available,
+        headSha256: result.headSha256,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
         ...(result.objectId ? { objectId: result.objectId } : {}),
         ...(result.versionId ? { versionId: result.versionId } : {}),
@@ -258,7 +267,7 @@ function makeTransport(
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
         if (event.sessionId !== sessionId) return;
-        listener(event.update, event.lineageGeneration);
+        listener(event.update, event.lineageGeneration, event.head);
       });
     },
     onLineageReplacement(listener) {
@@ -269,6 +278,7 @@ function makeTransport(
           update: event.update,
           recoveredPaths: event.recoveredPaths,
           artifactAssets: event.artifactAssets,
+          ...(event.head ? { head: event.head } : {}),
           lineageGeneration: event.lineageGeneration,
         });
       });
@@ -291,6 +301,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  allowLossySourceSha256?: string;
   accessEnded?: boolean;
   workspaceId: string;
   path: string;
@@ -433,6 +444,7 @@ function createEngineDocSession(
     localSeq,
     writesRefused,
     documentKind,
+    input.allowLossySourceSha256,
   );
 
   let snapshot = emptyLeaseSnapshot(requestKey);
@@ -536,6 +548,9 @@ function createEngineDocSession(
     kind: "bound",
     doc,
     objectId: bound.objectId,
+    headSha256: bound.headSha256,
+    lastSave: bound.lastSave,
+    pairedInstalls: bound.pairedInstalls,
     versionId: bound.versionId,
     artifactAssets,
     readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
@@ -1448,6 +1463,15 @@ function createEngineDocSession(
             if (checkedState) onSaveState(checkedState);
             observeSaveState(replacement);
             setOutcome(boundOutcome(replacement, bound, bound.artifactAssets));
+          });
+          // The head changes in the task that applied its state, so a check
+          // never reads one without the other.
+          bound.onHeadChanged(() => {
+            if (disposed) return;
+            publish(current => current.outcome?.kind === "bound" && current.outcome.doc === bound.doc
+              ? { ...current, outcome: { ...current.outcome, headSha256: bound.headSha256, lastSave: bound.lastSave,
+                pairedInstalls: bound.pairedInstalls } }
+              : current);
           });
           // An edit is unsaved the instant it happens. Only main's settle
           // report may clear it — nothing here guesses "saved". The seed apply

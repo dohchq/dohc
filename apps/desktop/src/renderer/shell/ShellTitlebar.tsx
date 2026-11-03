@@ -6,8 +6,9 @@ import { RestrictedModeIndicator } from "../RestrictedMode";
 import { toggleAbout, type WorkbenchState } from "../workbench/workbenchState";
 
 // The shell's titlebar: the workspace switcher, the version picker, the saved
-// dot, Restricted Mode, and the two side panel toggles.
+// dot, Restricted Mode, the update button, and the two side panel toggles.
 export function ShellTitlebar(props: {
+  update: ReactNode;
   // The version picker, when this workspace records versions.
   version?: ReactNode;
   workspace: WorkspaceSummary;
@@ -56,6 +57,7 @@ export function ShellTitlebar(props: {
       }
       onWorkspaceContextMenu={() => void showWorkbenchMenu("status")}
       agentActive={agentActive}
+      update={props.update}
       primarySidebar={{
         visible: wb.sidebarVisible,
         onToggle: toggleSidePanel,

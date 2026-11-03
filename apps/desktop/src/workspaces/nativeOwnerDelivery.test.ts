@@ -91,6 +91,7 @@ it("awaits an interrupted native read before releasing the pass", async () => {
 });
 
 it("requests a complete host checkpoint before discovering the enrolled outbox", async () => {
+  const onEnrolled = vi.fn(async () => undefined);
   const captured={nativeHeadSequence:2,localStateDigest:"c".repeat(64)};
   const draft={binding,relayDatabaseNamespace:"namespace",revision:1,acceptedCursor:7,nativeHeadSequence:3, nativeUnsettled: false,outboxId:"enrolled",pendingBytes:2,state:"active"};
   const client={ownerYDocPrepareEnrollment:vi.fn().mockResolvedValueOnce({status:"capture",captured}).mockResolvedValue({status:"observed",draft}),
@@ -104,9 +105,10 @@ it("requests a complete host checkpoint before discovering the enrolled outbox",
     return {kind:"authority",authority:{value:{},hostEpoch:parseHostEpoch(1)}};
   });
   mock.drain.mockResolvedValue("acknowledged");
-  expect(await runNativeOwnerDeliveryPass({client:client as unknown as EngineClient,workspaceHandle:"handle",config,refusals:new OwnerKnownRefusals(),document:config.documents[0]!,signal:new AbortController().signal,bearer:"credential",accountId:"owner",assertCurrent(){}})).toBe("acknowledged");
+  expect(await runNativeOwnerDeliveryPass({client:client as unknown as EngineClient,workspaceHandle:"handle",config,refusals:new OwnerKnownRefusals(),document:config.documents[0]!,signal:new AbortController().signal,bearer:"credential",accountId:"owner",assertCurrent(){},onEnrolled})).toBe("acknowledged");
   expect(client.ownerYDocEnroll).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({captured,journalCursor:7,hostVector:Uint8Array.of(1),checkpoint:Uint8Array.of(2,3)}),expect.any(AbortSignal));
   expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(2);
+  expect(onEnrolled).toHaveBeenCalledExactlyOnceWith();
 });
 
 it("pulls accepted state when an enrolled owner has no pending edits", async () => {

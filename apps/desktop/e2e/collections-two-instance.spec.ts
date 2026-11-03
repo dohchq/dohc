@@ -11,6 +11,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   seedCloudCredentials,
+  showExplorerFiles,
   waitForWorkspaceFile,
   waitForWorkspaceReady,
   writeWorkspaceFiles,
@@ -68,7 +69,7 @@ test("a drag's field write on one device moves the card on the other device's op
 
   try {
     await mkdir(join(sourceRoot, "tasks"), { recursive: true });
-    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
 
     // Device A: a real daemon workspace seeds the collection the way an
@@ -130,6 +131,7 @@ test("a drag's field write on one device moves the card on the other device's op
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
+    await showExplorerFiles(page);
     await waitForWorkspaceFile(page, workspaceId, schemaPath);
     await waitForWorkspaceFile(page, workspaceId, apolloPath);
     expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain(

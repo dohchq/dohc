@@ -132,7 +132,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       return bindEngineYDoc({
       open: () => ipc!.open(sender,{workspaceId: "workspace",sessionId,path: "docs/a.md"}),stageLocalUpdate: () => ++seq,
       async applyLocalUpdate(update,seq,lineageGeneration,requestId) {const result = ipc!.applyUpdate(sender,{sessionId,update,seq,lineageGeneration,requestId}); if (!result.accepted) throw new Error(result.reason);},
-      onRemoteUpdate(listener) {listeners.set(CHANNELS.engineYDocRemoteUpdate,event => listener(event.update,event.lineageGeneration)); return () => listeners.delete(CHANNELS.engineYDocRemoteUpdate);},
+      onRemoteUpdate(listener) {listeners.set(CHANNELS.engineYDocRemoteUpdate,event => listener(event.update,event.lineageGeneration,event.head)); return () => listeners.delete(CHANNELS.engineYDocRemoteUpdate);},
       onLineageReplacement(listener) {listeners.set(CHANNELS.engineYDocLineageReplacement,listener); return () => listeners.delete(CHANNELS.engineYDocLineageReplacement);},
       async acknowledgeLineageReplacement(lineageGeneration) {const result=ipc!.acknowledgeLineageReplacement(sender,{sessionId,lineageGeneration}); if (!result.accepted) throw new Error(result.reason); return result.updates;},
       adoptOwner: lineageGeneration => ipc!.prepareOwnerHandoff(sender,{sessionId,lineageGeneration}),
@@ -380,7 +380,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const waitingAfterEdits = peerSync.nextApplied(peerSignal.signal);
     const cancelWaiting = expect(waitingAfterEdits).rejects.toThrow();
     await expect.poll(() => frameChanges.listenerCount()).toBe(2);
-    expect((await control.settle(document)).materialized).toBe(true);
+    expect(await control.settle(document)).toMatchObject({materialized: true});
     expect(namedPeer.invalidated.aborted).toBe(false);
     peerSignal.abort(); await cancelWaiting; peerSync.close();
     expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count).toBe(0);
@@ -513,7 +513,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     expect(await drain()).toHaveProperty("kind", "done");
     expect(handoffCount).toBe(handoffsAfterRestore);
     expect(native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all()).toEqual(pendingTail);
-    expect((await control.settle(document)).materialized).toBe(true);
+    expect(await control.settle(document)).toMatchObject({materialized: true});
     expect(readFileSync(join(workspaceRoot, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(renderer.doc!));
     await reconnect();
     expect(await drain()).toHaveProperty("kind", "done");

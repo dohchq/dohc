@@ -276,6 +276,15 @@ fn exceeding_the_process_memory_limit_reports_crashed() {
 
 #[cfg(windows)]
 #[test]
+fn a_reader_at_its_measured_peak_stays_under_the_process_memory_limit() {
+    let (_dir, config) = fixture("ok");
+    let mut reader = Reader::new(Some(config));
+    assert!(run(reader.request(request("peak"))).is_ok());
+    finish(&mut reader);
+}
+
+#[cfg(windows)]
+#[test]
 fn native_launch_preserves_empty_quoted_and_unicode_arguments() {
     let arguments = ["", "two words", "trailing\\", "a\\\"b", "Ω"];
     let mut command = Command::new(runtime().0);

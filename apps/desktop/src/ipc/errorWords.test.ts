@@ -1,3 +1,4 @@
+import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { installWorkspaceDataKey, SECRET_KEY_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -12,20 +13,24 @@ import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { LIVE_FOLDER_MOVE_BODY, LiveDocumentMutationError, LiveFolderMoveError, liveFolderMoveTitle, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
+  CollectionMoveUnfinishedError,
   ERROR_WORDS,
   ipcWireError,
   isChatMentionPageChanged,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
+  isLiveFolderMoveRefusal,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
+  namingCollectionMove,
   needsNewerDohc,
   PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
@@ -33,7 +38,9 @@ import {
   readServerCollectionsUnavailable,
   readError,
   shouldRecheckShareAccess,
+  versionNameRefusal,
   VOLUME_SHARES_NEW_FILES_WORDS,
+  waitedForCollectionMove,
   withErrorWords,
 } from "./errorWords";
 
@@ -56,6 +63,21 @@ function acrossIpc(error: unknown, channel = "desktop:list-workspace-versions"):
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);
 }
+
+it("keeps the synced deletion refusal words across Electron for History and conflict choices", () => {
+  const received = acrossIpc(refusal("INVALID_PARAMS", "synced-deletion-revival-refused"));
+  expect(readError(received).title).toBe("dohc can't bring back this file, because that could stop sync");
+  expect(ipcErrorMessage(received, "Could not restore this file.")).toContain("Choose Keep this machine's copy, then copy its text from its History into a file with a new name.");
+  expect(readError(acrossIpc(new SyncedDeletionRevivalError())).words).toBe(readError(received).words);
+});
+
+it("uses History instructions for restore refusals without changing conflict instructions", () => {
+  const restore = readError(new SyncedDeletionRevivalError("tasks/trip.txt", undefined, true));
+  expect(restore.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
+  expect(restore.words).toBe("Copy its text from its History into a file with a new name.");
+  expect(restore.canRetry).toBe(false);
+  expect(readError(new SyncedDeletionRevivalError("tasks/trip.txt")).words).toBe("Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for trip.txt, keep the removal there.");
+});
 
 // The engine's own list: every `ErrorCode` arm of `as_str`.
 const engineCodes = [
@@ -169,6 +191,15 @@ describe("error words", () => {
     [refusal("FORBIDDEN", "The request was rejected."), false],
   ] as const)("reads %s as a share's write refusal across IPC: %s", (error, refused) => {
     expect(isShareReadOnlyRefusal(acrossIpc(error, "desktop:write-workspace-text"))).toBe(refused);
+  });
+
+  it.each([
+    [new VersionedTextStoreError("version-name-conflict", "version-name-conflict"), "taken"],
+    [new VersionedTextStoreError("invalid-version-name", "invalid-version-name"), "invalid"],
+    [new VersionedTextStoreError("version-not-found", "version-not-found"), null],
+    [refusal("INVALID_PARAMS", "version-name-conflict"), null],
+  ] as const)("reads %s as a refusal of a version's name across IPC: %s", (error, refused) => {
+    expect(versionNameRefusal(acrossIpc(error, "desktop:create-workspace-version"))).toBe(refused);
   });
 
   it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
@@ -333,6 +364,14 @@ describe("error words", () => {
     expect(readError(received).words).toBe(refused.message);
     expect(isSharedLiveFileRefusal(acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"))).toBe(false);
     expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
+  });
+
+  it("reads a refused folder move across IPC as its title and body", () => {
+    const title = liveFolderMoveTitle("notes/box");
+    const received = acrossIpc(new LiveFolderMoveError([title, LIVE_FOLDER_MOVE_BODY].join(String.fromCharCode(10))), "desktop:move-workspace-path");
+    expect(isLiveFolderMoveRefusal(received)).toBe(true);
+    expect(readError(received)).toMatchObject({ title: `dohc can't move "notes/box" while a page in it has live editing on`, words: LIVE_FOLDER_MOVE_BODY });
+    expect(isSharedLiveFileRefusal(received)).toBe(false);
   });
 
   it("explains an open editing session across IPC and keeps its refusal for Copy", () => {
@@ -558,4 +597,15 @@ describe("error words", () => {
     expect(withErrorWords("Could not share.", acrossIpc(new Error("Sync this workspace before sharing."))))
       .toBe("Could not share. Sync this workspace before sharing.");
   });
+});
+
+it("names the Collection in a stopped move's words, as written, and leaves any other error as it is", () => {
+  const stopped = acrossIpc(new CollectionMoveUnfinishedError("sync.example.test", { cause: null, waited: true }), "dohc:dataset");
+  expect(readError(namingCollectionMove(stopped, "Q&A $& notes")).words).toBe("\"Q&A $& notes\" didn't finish moving to sync.example.test. Its records are kept on this computer.");
+  const named = readError(namingCollectionMove(stopped, "CRM: Accounts")).words;
+  expect(named).toBe("\"CRM: Accounts\" didn't finish moving to sync.example.test. Its records are kept on this computer.");
+  expect(readError(named).words).toBe(named);
+  expect(waitedForCollectionMove(namingCollectionMove(stopped, "Orders"))).toBe(true);
+  const other = acrossIpc(new Error("Sharing failed (502)."), "dohc:dataset");
+  expect(namingCollectionMove(other, "Orders")).toBe(other);
 });

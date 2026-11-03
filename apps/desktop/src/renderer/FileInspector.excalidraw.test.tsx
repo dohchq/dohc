@@ -69,6 +69,7 @@ vi.mock("./ExcalidrawCanvas", () => ({
 
 import { FileInspector } from "./FileInspector";
 import { REPLACED_HISTORY_DRAFT_NOTICE } from "./fileInspectorUi";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
@@ -1209,6 +1210,32 @@ describe("FileInspector Excalidraw view", () => {
     expect(bridge.openFileExternally).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       relativePath: "broken.excalidraw",
+    });
+  });
+
+  it.each([
+    ["the images notice", drawing("disk"), true],
+    ["the error state", "not json", false],
+  ])("reports a failed Open externally from %s, with Try again", async (_label, text, assetsInvalid) => {
+    const bridge = bridgeFor(text);
+    if (assetsInvalid) {
+      bridge.openEngineYDocSession = vi.fn(async () => ({ available: false, artifactAssetsInvalid: true }));
+    }
+    bridge.openFileExternally.mockRejectedValueOnce(new Error("open refused"));
+    vi.stubGlobal("dohcDesktop", bridge);
+    const onButtonError = vi.fn<ReportButtonError>();
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" onButtonError={onButtonError} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open externally" }));
+    await waitFor(() => expect(onButtonError).toHaveBeenCalledOnce());
+    const [fallback, error, retry] = onButtonError.mock.calls[0]!;
+    expect(fallback).toBe("dohc could not open this file externally.");
+    expect(error).toEqual(new Error("open refused"));
+    retry?.();
+    expect(bridge.openFileExternally).toHaveBeenCalledTimes(2);
+    expect(bridge.openFileExternally).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "drawing.excalidraw",
     });
   });
 

@@ -12,6 +12,7 @@ import {
   Layers,
   MessageCircle,
   PenTool,
+  Sparkles,
   Table2,
   Workflow,
   type LucideIcon,
@@ -82,13 +83,14 @@ export function FileGlyph(props: { kind: FileKindRecord; icon: string | undefine
 // wherever it is listed. A `Record` over the kinds, so a new kind is a
 // compile error here until it has its icon. Like a file's, the glyph is
 // decorative beside the object's name.
-export type ObjectKind = "app" | "collection" | "group" | "chat" | "compare" | "change" | "graph" | "history";
+export type ObjectKind = "app" | "collection" | "group" | "chat" | "agent" | "compare" | "change" | "graph" | "history";
 
 const OBJECT_GLYPHS: Record<ObjectKind, LucideIcon> = {
   app: AppWindow,
   collection: Table2,
   group: Hash,
   chat: MessageCircle,
+  agent: Sparkles,
   compare: Layers,
   change: FileDiff,
   graph: Workflow,

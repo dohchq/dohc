@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { createHash } from "node:crypto";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
@@ -86,20 +86,16 @@ describe("useBoundNoteCheck", () => {
     return doc;
   }
 
-  it("needs no check for a session with no witness, or a witness of the bytes checked", () => {
+  it("clears an absent witness and checks a lossy witness", async () => {
     const plain = markdownToYDoc("# Note\n");
-    expect(renderHook(() => useBoundNoteCheck({ open: "a", doc: plain, checkedHash: "c".repeat(64) })).result.current).toBe("clear");
-    expect(renderHook(() => useBoundNoteCheck({ open: "a", doc: seeded(), checkedHash: sha(LOSSY) })).result.current).toBe("clear");
-  });
-
-  it("checks a session holding other bytes than the ones checked", async () => {
+    expect(renderHook(() => useBoundNoteCheck({ open: "a", doc: plain })).result.current).toBe("clear");
     const doc = seeded();
-    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }));
+    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, headSha256: sha(LOSSY) }));
     expect(result.current).toBe("checking");
     await waitFor(() => expect(result.current).toBe("lossy"));
   });
 
-  it("clears each later session that holds a witness whose source keeps its meaning, with no check", async () => {
+  it("clears later sessions whose source keeps its meaning, including after edits", async () => {
     // Hand-written, not in dohc's form, and not lossy.
     const source = "Title\n=====\n\n* one\n";
     const witnessed = () => {
@@ -110,7 +106,7 @@ describe("useBoundNoteCheck", () => {
       return doc;
     };
     const first = witnessed();
-    const view = renderHook(({ doc }) => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }), {
+    const view = renderHook(({ doc }) => useBoundNoteCheck({ open: "a", doc, headSha256: sha(source) }), {
       initialProps: { doc: first },
     });
     expect(view.result.current).toBe("checking");
@@ -122,17 +118,126 @@ describe("useBoundNoteCheck", () => {
     paragraph.insert(0, [new Y.XmlText("Typed.")]);
     reopened.getXmlFragment("body").push([paragraph]);
     view.rerender({ doc: reopened });
-    expect(view.result.current).toBe("clear");
+    await waitFor(() => expect(view.result.current).toBe("clear"));
   });
 
-  it("remembers the witness of the state it checked, not the one the note rendered with", async () => {
+  // As in a teammate's shared session, which has no file head on their device.
+  it("judges the witnessed source of a session with no file head", async () => {
+    const source = "Title\n=====\n\n* one\n";
+    const keeping = markdownToYDoc(source);
+    keeping.getMap("meta").set("dohcMarkdownSource", source);
+    keeping.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    keeping.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(keeping)));
+    const clear = renderHook(() => useBoundNoteCheck({ open: "a", doc: keeping, headSha256: null }));
+    await waitFor(() => expect(clear.result.current).toBe("clear"));
+    const lossyDoc = seeded();
+    const lossy = renderHook(() => useBoundNoteCheck({ open: "b", doc: lossyDoc, headSha256: null }));
+    await waitFor(() => expect(lossy.result.current).toBe("lossy"));
+  });
+
+  // A teammate's update brings no new head, so the source it records is checked from the document.
+  it("checks again when a session with no file head records another source", async () => {
+    const doc = seeded();
+    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, headSha256: null }));
+    await waitFor(() => expect(result.current).toBe("lossy"));
+    const source = "Title\n=====\n\n* one\n";
+    const imported = markdownToYDoc(source);
+    act(() => doc.transact(() => {
+      const meta = doc.getMap("meta");
+      meta.set("dohcMarkdownSource", source);
+      meta.set("dohcMarkdownSourceSha256", sha(source));
+      meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(imported)));
+    }));
+    imported.destroy();
+    await waitFor(() => expect(result.current).toBe("clear"));
+  });
+
+  describe("after a clear verdict", () => {
+    const source = "Title\n=====\n\n* one\n";
+    async function checkedClear() {
+      const doc = markdownToYDoc(source);
+      doc.getMap("meta").set("dohcMarkdownSource", source);
+      doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+      doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+      const view = renderHook(({ headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }), {
+        initialProps: { headSha256: sha(source) },
+      });
+      await waitFor(() => expect(view.result.current).toBe("clear"));
+      return { doc, view };
+    }
+
+    it("stays clear when a save moves the file head", async () => {
+      const { view } = await checkedClear();
+      // "checking" would replace the editor and drop its focus mid-typing.
+      view.rerender({ headSha256: sha("# Title\n\n- one\n") });
+      expect(view.result.current).toBe("clear");
+    });
+
+  });
+
+  // A change outside dohc resyncs a lossy source into the same document. Its
+  // state comes with its head; a source that arrives without one reads as an
+  // unknown head until the pair does.
+  it.each(["before the new head arrives", "after the new source is answered"])(
+    "waits for the head of a new lossy source, and ignores an older answer that lands %s",
+    async (when) => {
+      const posted: Array<{ id: number; headSha256: string | null }> = [];
+      let reply!: (id: number, lossy: boolean) => void;
+      vi.stubGlobal("Worker", class {
+        onmessage: ((event: { data: { id: number; lossy: boolean } }) => void) | null = null;
+        onerror = null;
+        constructor() {
+          reply = (id, lossy) => this.onmessage?.({ data: { id, lossy } });
+        }
+        postMessage(message: { id: number; headSha256: string | null }) {
+          posted.push(message);
+        }
+        terminate() {}
+      });
+      const source = "Title\n=====\n\n* one\n";
+      const doc = markdownToYDoc(source);
+      doc.getMap("meta").set("dohcMarkdownSource", source);
+      doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+      doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+      const initialProps: { headSha256?: string | null } = { headSha256: sha(source) };
+      const view = renderHook((props: { headSha256?: string | null }) =>
+        useBoundNoteCheck({ open: "a", doc, headSha256: props.headSha256 }), { initialProps });
+      expect(posted).toEqual([expect.objectContaining({ headSha256: sha(source) })]);
+      expect(view.result.current).toBe("checking");
+
+      act(() => {
+        doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
+        doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
+        doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(LOSSY))));
+        view.rerender({ headSha256: undefined });
+      });
+      expect(view.result.current).toBe("checking");
+      expect(posted).toHaveLength(1);
+      if (when === "before the new head arrives") {
+        await act(async () => reply(posted[0]!.id, false));
+        expect(view.result.current).toBe("checking");
+      }
+
+      view.rerender({ headSha256: sha(LOSSY) });
+      expect(view.result.current).toBe("checking");
+      expect(posted.at(-1)).toMatchObject({ headSha256: sha(LOSSY) });
+      await act(async () => reply(posted.at(-1)!.id, true));
+      expect(view.result.current).toBe("lossy");
+      if (when === "after the new source is answered") {
+        await act(async () => reply(posted[0]!.id, false));
+      }
+      expect(view.result.current).toBe("lossy");
+    },
+  );
+
+  it("reads the document as it was when the check ran", async () => {
     // The note renders with a lossy source; sync then records a source that
     // keeps its meaning before the check encodes the document.
     const doc = seeded();
     const kept = "Title\n=====\n\n* one\n";
     let swapped = false;
     const first = renderHook(() => {
-      const check = useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) });
+      const check = useBoundNoteCheck({ open: "a", doc, headSha256: null });
       if (!swapped) {
         swapped = true;
         doc.getMap("meta").set("dohcMarkdownSource", kept);
@@ -145,34 +250,37 @@ describe("useBoundNoteCheck", () => {
 
     // Another session that records the lossy source still gets its check.
     const other = seeded();
-    const second = renderHook(() => useBoundNoteCheck({ open: "b", doc: other, checkedHash: "c".repeat(64) }));
+    const second = renderHook(() => useBoundNoteCheck({ open: "b", doc: other, headSha256: null }));
     expect(second.result.current).toBe("checking");
     await waitFor(() => expect(second.result.current).toBe("lossy"));
   });
 
-  it("checks a replacement document that records the same source", async () => {
+  it("checks a replacement document with the same source against its authoritative head", async () => {
     const edited = seeded();
     const paragraph = new Y.XmlElement("paragraph");
     paragraph.insert(0, [new Y.XmlText("Typed.")]);
     edited.getXmlFragment("body").push([paragraph]);
-    const view = renderHook(({ doc }) => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }), {
-      initialProps: { doc: edited },
+    const view = renderHook(({ doc, headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }), {
+      initialProps: { doc: edited, headSha256: sha("converted file") },
     });
     await waitFor(() => expect(view.result.current).toBe("clear"));
 
     // Sync swaps in another device's unedited import of the same bytes.
-    view.rerender({ doc: seeded() });
+    view.rerender({ doc: seeded(), headSha256: sha(LOSSY) });
     expect(view.result.current).toBe("checking");
     await waitFor(() => expect(view.result.current).toBe("lossy"));
   });
 
-  it("clears a session whose witness later edits left behind", async () => {
+  it("holds an expired lossy witness until the authoritative file head changes", async () => {
     const doc = seeded();
-    // An edit after Edit anyway: saving now writes dohc's form of the session.
     const paragraph = new Y.XmlElement("paragraph");
     paragraph.insert(0, [new Y.XmlText("Typed.")]);
     doc.getXmlFragment("body").push([paragraph]);
-    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, checkedHash: "c".repeat(64) }));
+    const { result, rerender } = renderHook(({ headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }), {
+      initialProps: { headSha256: sha(LOSSY) },
+    });
+    await waitFor(() => expect(result.current).toBe("lossy"));
+    rerender({ headSha256: sha("converted file") });
     await waitFor(() => expect(result.current).toBe("clear"));
   });
 });

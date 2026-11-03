@@ -13,6 +13,153 @@ const TYPING: &str = "Typed while held.\n";
 const OUTSIDE: &str = "Changed outside the editor.\n";
 const FOREIGN: &str = "Another program created this file.\n";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_link_retry_capture_does_not_reenter_a_version_fences_session_gate() {
+    use dohc_engine_collab::{ContentKind, LocalAppend, Regime, WriterDocCache, Ydoc};
+    use dohc_engine_domain::{RenameTextFile, VersionedTextStore};
+    use std::time::Duration;
+    let harness = Harness::new();
+    let before = "[[old]]\n";
+    let outside = "agent prose [[old]]\n";
+    std::fs::write(harness.root.join(NEW_FILE), before).unwrap();
+    std::fs::write(harness.root.join("old.md"), "target\n").unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    let key = harness.key(&derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE));
+    let lease = harness.leases.acquire(&key).unwrap();
+    let seed_key = key.clone();
+    let operation = "dohc-operation:outside-fence";
+    {
+        let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+        let head = VersionedTextStore::new(&mut store)
+            .read_text(WORKSPACE_ID, "main", NEW_FILE)
+            .unwrap()
+            .unwrap();
+        let doc = Ydoc::wire();
+        let seed = doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, before)
+            .unwrap();
+        dohc_engine_collab::ensure_marker(
+            &mut store,
+            &seed_key,
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            &NoFaults,
+            3,
+        )
+        .unwrap();
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &seed_key,
+            &seed,
+            LocalAppend {
+                is_seed: true,
+                seed_source_sha256: Some(&head.blob_sha256),
+                ..Default::default()
+            },
+            &NoFaults,
+            3,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: WORKSPACE_ID.into(),
+                    version_id: "main".into(),
+                    from_path: "old.md".into(),
+                    to_path: "renamed.md".into(),
+                    moment_id: "outside-fence-rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some(operation.into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    std::fs::rename(harness.root.join("old.md"), harness.root.join("renamed.md")).unwrap();
+    std::fs::write(harness.root.join(NEW_FILE), outside).unwrap();
+    let capture = Arc::new(tokio::sync::Mutex::new(()));
+    let sessions = Arc::new(tokio::sync::Mutex::new(()));
+    let leases = harness.leases.clone();
+    let first = harness
+        .actor
+        .history_rewrite_links(
+            WORKSPACE_ID.into(),
+            operation.into(),
+            "outside-fence-pass".into(),
+            None,
+            harness.root.clone(),
+            harness.leases.clone(),
+            [capture.clone(), sessions.clone()],
+            Arc::new(NoFaults),
+            (
+                Arc::new(move |key| leases.is_held_by_session(key)),
+                Arc::new(|_| {}),
+            ),
+            Arc::new(()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["unchecked"], serde_json::json!([NEW_FILE]));
+    drop(lease);
+    let capture_guard = capture.lock().await;
+    let session_guard = sessions.lock().await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        reconcile_full_for_switch(
+            &harness.root,
+            &harness.actor,
+            WORKSPACE_ID,
+            &harness.leases,
+            &harness.status,
+            &harness.self_writes,
+            None,
+            None,
+            CaptureProvenance::default(),
+            EngineEvents::default(),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("capture must only offer a retry while the version fence holds session_ops")
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(NEW_FILE)).unwrap(),
+        outside
+    );
+    drop(session_guard);
+    drop(capture_guard);
+    harness
+        .actor
+        .retry_pending_link_rewrites(WORKSPACE_ID)
+        .await;
+    let recorded = harness
+        .actor
+        .versioned_text_read(
+            WORKSPACE_ID.into(),
+            "main".into(),
+            NEW_FILE.into(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.text, "agent prose [[renamed]]\n");
+    files.close().await;
+    harness.close();
+}
+
 fn apply_context<'a>(
     root: &'a Path,
     actor: &'a ActorHandle,

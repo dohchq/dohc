@@ -10,6 +10,8 @@ import {
   EngineYDocPendingLimitError,
   EngineYDocUpdateTooLargeError,
   type EngineYDocBatchScheduler,
+  type EngineYDocDelivery,
+  type EngineYDocHead,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
 
@@ -82,15 +84,16 @@ function mockTransport(
   shippedSequences: number[];
   staged: () => number;
   shippedGenerations: number[];
-  pushRemote: (update: Uint8Array, lineageGeneration?: number) => void;
+  pushRemote: (update: Uint8Array, lineageGeneration?: number, head?: EngineYDocHead) => void;
   replaceLineage: (input: {
     update: Uint8Array;
     recoveredPaths: string[];
     artifactAssets: readonly import("@dohc/workspace-engine-client").ArtifactAssetDescriptor[];
+    head?: EngineYDocHead;
     lineageGeneration: number;
   }) => Promise<void>;
   releaseReplacement: () => void;
-  bufferDuringReplacement: (update: Uint8Array) => void;
+  bufferDuringReplacement: (update: Uint8Array, head?: EngineYDocHead) => void;
   acknowledgedGenerations: number[];
   closed: () => boolean;
   events: string[];
@@ -113,13 +116,14 @@ function mockTransport(
   let staged = 0;
   const shippedGenerations: number[] = [];
   let remoteListener:
-    | ((update: Uint8Array, lineageGeneration: number) => void)
+    | ((update: Uint8Array, lineageGeneration: number, head?: EngineYDocHead) => void)
     | null = null;
   let replacementListener:
     | ((input: {
         update: Uint8Array;
         recoveredPaths: string[];
         artifactAssets: readonly import("@dohc/workspace-engine-client").ArtifactAssetDescriptor[];
+        head?: EngineYDocHead;
         lineageGeneration: number;
       }) => void | Promise<void>)
     | null = null;
@@ -128,7 +132,7 @@ function mockTransport(
     releaseReplacement = resolve;
   });
   const acknowledgedGenerations: number[] = [];
-  const bufferedReplacementUpdates: Uint8Array[] = [];
+  const bufferedReplacementUpdates: EngineYDocDelivery[] = [];
   let closed = false;
   const transport: EngineYDocTransport = {
     async open() {
@@ -182,13 +186,14 @@ function mockTransport(
     shippedSequences,
     staged: () => staged,
     shippedGenerations,
-    pushRemote: (update, lineageGeneration = 1) =>
-      remoteListener?.(update, lineageGeneration),
+    pushRemote: (update, lineageGeneration = 1, head) =>
+      remoteListener?.(update, lineageGeneration, head),
     replaceLineage: async (input) => {
       await replacementListener?.(input);
     },
     releaseReplacement,
-    bufferDuringReplacement: (update) => bufferedReplacementUpdates.push(update),
+    bufferDuringReplacement: (update, head) =>
+      bufferedReplacementUpdates.push({ update, ...(head ? { head } : {}) }),
     acknowledgedGenerations,
     closed: () => closed,
     events,
@@ -1168,6 +1173,175 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     typeIntoBody(binding.doc!, "Fresh local.");
     await vi.waitFor(() => expect(mock.shippedGenerations.at(-1)).toBe(2));
+    await binding.destroy();
+  });
+
+  it("changes the head in the same task as the state it came with, and forgets it for a source without one", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const seen: Array<{ text: string; head: string | null | undefined; saved: string | null | undefined }> = [];
+    binding.onHeadChanged(() => seen.push({
+      text: bodyText(binding.doc!), head: binding.headSha256, saved: binding.lastSave?.sha256,
+    }));
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(mock.mainDoc));
+    const push = (change: () => void, lineageGeneration?: number, head?: EngineYDocHead) => {
+      const before = Y.encodeStateVector(remote);
+      change();
+      mock.pushRemote(Y.encodeStateAsUpdate(remote, before), lineageGeneration, head);
+    };
+
+    push(() => typeIntoBody(remote, "Remote."), 1, { sha256: "a".repeat(64) });
+    expect(seen).toEqual([{ text: bodyText(remote), head: "a".repeat(64), saved: undefined }]);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
+    expect(seen.at(-1)).toEqual({ text: bodyText(remote), head: "b".repeat(64), saved: "b".repeat(64) });
+
+    // A delta that keeps the source keeps its head.
+    push(() => typeIntoBody(remote, "More."));
+    expect(seen).toHaveLength(2);
+    expect(binding.headSha256).toBe("b".repeat(64));
+
+    push(() => remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64)));
+    expect(seen).toHaveLength(3);
+    expect(binding.headSha256).toBeUndefined();
+    // The save's receipt outlasts the head it wrote.
+    expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 1 });
+
+    // Another lineage's pair is not this doc's.
+    push(() => typeIntoBody(remote, "Stale."), 2, { sha256: "d".repeat(64) });
+    expect(seen).toHaveLength(3);
+    expect(binding.headSha256).toBeUndefined();
+    expect(bodyText(binding.doc!)).not.toContain("Stale.");
+    remote.destroy();
+    await binding.destroy();
+  });
+
+  it("forgets the head for state main installs with its head unknown, even when it changes nothing", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const changes = vi.fn();
+    binding.onHeadChanged(changes);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    mock.pushRemote(new Uint8Array([0, 0]), 1, {});
+    expect(binding.headSha256).toBeUndefined();
+    expect(changes).toHaveBeenCalledTimes(2);
+    // The read that pairs a head with it counts the install.
+    expect(binding.pairedInstalls).toBe(1);
+    await binding.destroy();
+  });
+
+  it("keeps a null head through an update that changes the source, and does not count it", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const remote = new Y.Doc();
+    remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64));
+    mock.pushRemote(Y.encodeStateAsUpdate(remote), 1, { sha256: null });
+    expect(binding.headSha256).toBeNull();
+    expect(binding.pairedInstalls, "count a null head -> a teammate's edit to a shared note drops Edit anyway").toBe(0);
+    remote.destroy();
+    await binding.destroy();
+  });
+
+  it("wakes no one for a head that changes nothing, as each update of a shared note carries", async () => {
+    const mock = mockTransport();
+    const binding = await bindEngineYDoc(mock.transport);
+    const changes = vi.fn();
+    binding.onHeadChanged(changes);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: null });
+    expect(changes).toHaveBeenCalledOnce();
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(mock.mainDoc));
+    for (const change of [
+      () => typeIntoBody(remote, "Typed."),
+      () => remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64)),
+    ]) {
+      const before = Y.encodeStateVector(remote);
+      change();
+      mock.pushRemote(Y.encodeStateAsUpdate(remote, before), 1, { sha256: null });
+    }
+    expect(bodyText(binding.doc!)).toContain("Typed.");
+    expect(changes, "wake on every head -> each keystroke on a shared note re-renders the inspector").toHaveBeenCalledOnce();
+    expect([binding.headSha256, binding.lastSave, binding.pairedInstalls]).toEqual([null, null, 0]);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    expect(changes).toHaveBeenCalledTimes(2);
+    remote.destroy();
+    await binding.destroy();
+  });
+
+  it("installs a replacement with its head, then the head of state buffered behind it", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    const headsAtReplacement: Array<string | null | undefined> = [];
+    binding.onDocumentReplaced(() => headsAtReplacement.push(binding.headSha256));
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    winner.getMap("meta").set("dohcMarkdownSourceSha256", "b".repeat(64));
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [],
+      head: { sha256: "b".repeat(64) }, lineageGeneration: 2,
+    });
+    const beforeRemote = Y.encodeStateVector(winner);
+    typeIntoBody(winner, "Read with the next head.");
+    mock.bufferDuringReplacement(Y.encodeStateAsUpdate(winner, beforeRemote), { sha256: "c".repeat(64) });
+    mock.releaseReplacement();
+    await replacing;
+
+    expect(bodyText(binding.doc!)).toContain("Read with the next head.");
+    expect(headsAtReplacement).toEqual(["c".repeat(64)]);
+    expect(binding.headSha256).toBe("c".repeat(64));
+    winner.destroy();
+    await binding.destroy();
+  });
+
+  it.each([
+    ["records another source", "b".repeat(64)],
+    ["records the same source", undefined],
+  ])("does not keep the old head for a replacement that %s and came without one", async (_, source) => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    if (source) winner.getMap("meta").set("dohcMarkdownSourceSha256", source);
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
+    });
+    mock.releaseReplacement();
+    await replacing;
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(binding.headSha256).toBeUndefined();
+    winner.destroy();
+    await binding.destroy();
+  });
+
+  it("counts each state main installs with a head of its own and each replacement, but not this session's saves, and keeps the newest save's receipt", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    const changes = vi.fn();
+    binding.onHeadChanged(changes);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+    expect(binding.pairedInstalls).toBe(2);
+    expect(changes).toHaveBeenCalledTimes(2);
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
+    mock.pushRemote(new Uint8Array([0, 0]));
+    // A read of the head the save wrote is that save.
+    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64) });
+    expect(binding.pairedInstalls).toBe(2);
+    expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 2 });
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
+    });
+    mock.releaseReplacement();
+    await replacing;
+    expect(binding.pairedInstalls).toBe(3);
+    expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 2 });
+    winner.destroy();
     await binding.destroy();
   });
 

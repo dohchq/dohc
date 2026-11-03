@@ -2,6 +2,7 @@ import { expect, test, type Locator } from "@playwright/test";
 import tailwind from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 import { build, preview, type PreviewServer } from "vite";
+import { rendererAlias } from "../electron.vite.config";
 import { createTestScratch, removeTestScratch } from "../src/workspaces/testTemp";
 import type {} from "./fixtures/chat-list/api";
 
@@ -26,6 +27,7 @@ test.describe("chat list virtualization", () => {
         configFile: false,
         root,
         plugins: [tailwind()],
+        resolve: { alias: rendererAlias },
         esbuild: { jsx: "automatic" },
         build: { outDir: output, emptyOutDir: true },
         logLevel: "error",
@@ -196,6 +198,51 @@ test.describe("chat list virtualization", () => {
     // preserve the reading position too, without dropping data preservation.
     await page.evaluate(() => window.chatListFixture.reorder());
     await expect(anchor).toHaveAttribute("aria-posinset", "222");
+    await expect.poll(() => anchor.evaluate((node, previousTop) =>
+      Math.abs(node.getBoundingClientRect().top - previousTop), top)).toBeLessThan(2);
+    await expect(anchor).toBeInViewport({ ratio: 1 });
+  });
+
+  // A long Markdown reply shows as plain text until the parse worker answers,
+  // then reflows into its formatted, usually taller, layout.
+  test("stays at the newest message while a long reply is formatted", async ({ page }) => {
+    await page.setViewportSize({ width: 650, height: 800 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto(server.resolvedUrls!.local[0]);
+    const list = page.getByRole("list");
+    const reply = page.locator('[data-message-id="m-500"]');
+    await expect(page.locator('[data-message-id="m-499"]')).toBeInViewport();
+    await expect.poll(() => gap(list)).toBeLessThan(2);
+    await page.evaluate(() => window.chatListFixture.appendMarkdown());
+    await expect(reply.locator("pre")).toBeAttached();
+    await expect(reply.getByRole("heading", { name: "Reply 500" })).toBeAttached();
+    // The reply's last line stays in view. The reply has its own bullet list,
+    // and the chat list comes first in the page.
+    await expect.poll(() => Promise.all([reply, list.first()].map((node) =>
+      node.evaluate((element) => element.getBoundingClientRect().bottom)))
+      .then(([replyBottom, listBottom]) => replyBottom - listBottom)).toBeLessThanOrEqual(1);
+  });
+
+  test("keeps the text being read still while a reply above it is formatted", async ({ page }) => {
+    await page.setViewportSize({ width: 650, height: 800 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto(server.resolvedUrls!.local[0]);
+    await expect(page.locator('[data-message-id="m-499"]')).toBeInViewport();
+    await page.evaluate(() => window.chatListFixture.jump("m-200"));
+    const anchor = page.locator('[data-message-id="m-200"]');
+    await expect(anchor).toBeInViewport({ ratio: 1 });
+    const top = await anchor.evaluate((node) => node.getBoundingClientRect().top);
+    // The nearest row still mounted wholly above the viewport.
+    const aboveId = await page.evaluate(() => {
+      const viewportTop = document.querySelector('[role="list"]')!.getBoundingClientRect().top;
+      return [...document.querySelectorAll("[data-message-id]")]
+        .filter((row) => row.getBoundingClientRect().bottom <= viewportTop)
+        .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0]
+        ?.getAttribute("data-message-id");
+    });
+    if (!aboveId) throw new Error("No row is mounted above the viewport");
+    await page.evaluate((id) => window.chatListFixture.markdown(id), aboveId);
+    await expect(page.locator(`[data-message-id="${aboveId}"] pre`)).toBeAttached();
     await expect.poll(() => anchor.evaluate((node, previousTop) =>
       Math.abs(node.getBoundingClientRect().top - previousTop), top)).toBeLessThan(2);
     await expect(anchor).toBeInViewport({ ratio: 1 });

@@ -36,7 +36,7 @@ export function CollectionRecoveryRestoreDialog(props: {
   }
   return <Overlay onClose={busy?undefined:() => { void cancel(); }} panelProps={{role:"dialog","aria-modal":true,"aria-labelledby":"collection-recovery-restore-title"}}>
     <div className="dohc-elevated w-110 max-w-[85vw] rounded-xl border border-line bg-panel p-5">
-      <h2 id="collection-recovery-restore-title" className="m-0 text-sm font-semibold text-ink">Restore a Collection</h2>
+      <h2 id="collection-recovery-restore-title" className="m-0 text-base font-semibold text-ink">Restore a Collection</h2>
       {recovery ? <>
         <p className="text-[13px] text-ink">{recovery.revision.definition.name}</p>
         <p className="text-[13px] text-muted">This restores records, uploaded files, rules, and history on this computer. Existing Collections stay unchanged.</p>

@@ -1,5 +1,5 @@
 import { mapWidgetOwners } from "./widgetOwnership";
-import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
+import { isCodeBlockNode, isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import {
   MENU_ACTIVE_OPTION,
+  MENU_ACTIVE_OPTION_BESIDE_CURRENT,
   MENU_ENTER,
   MENU_FRAME,
   MENU_ICON,
@@ -113,6 +114,27 @@ function removeBlockDragGhost(slot: DragGhostSlot): void {
   slot.current = null;
 }
 
+/** What a top-level block hangs left of its text, into the gutter its
+ * controls sit in. styles.css keeps the controls clear of it. */
+function gutterHang(node: ProseMirrorNode): string | null {
+  switch (node.type.name) {
+    case "bulletList":
+      return "bullet";
+    case "orderedList":
+      return "number";
+    case "taskList":
+      return "checkbox";
+    case "blockquote":
+      return "bar";
+    case "callout":
+      return "frame";
+    case "table":
+      return "table";
+    default:
+      return isCodeBlockNode(node) ? "frame" : null;
+  }
+}
+
 function buildBlockControlDecorations(
   doc: ProseMirrorNode,
   onInsertRef: RefObject<(pos: number) => void>,
@@ -126,8 +148,11 @@ function buildBlockControlDecorations(
   // Only widgets: ProseMirror checks each node decoration against the
   // document with a scan from its first block, so one per block makes every
   // keystroke quadratic in the document's length.
-  doc.forEach((_node, pos) => {
+  doc.forEach((node, pos) => {
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
+    const hang = gutterHang(node);
+    // A numbered list hangs as many digits as its first number has.
+    const digits = hang === "number" ? String(node.attrs.start ?? 1).length : 0;
     decorations.push(
       Decoration.widget(
         pos,
@@ -135,6 +160,8 @@ function buildBlockControlDecorations(
           const wrap = document.createElement("span");
           wrap.className = "dohc-block-affordance";
           wrap.setAttribute("contenteditable", "false");
+          if (hang) wrap.dataset.hang = hang;
+          if (digits) wrap.style.setProperty("--dohc-block-digits", String(digits));
 
           const plus = document.createElement("button");
           plus.type = "button";
@@ -209,7 +236,8 @@ function buildBlockControlDecorations(
           wrap.append(plus, handle);
           return wrap;
         },
-        { side: -1, key: `dohc-block-controls-${ownerKey}`, ownerKey },
+        // A block that changes kind or digits gets new controls, with its hang.
+        { side: -1, key: `dohc-block-controls-${ownerKey}-${hang}-${digits}`, ownerKey },
       ),
     );
   });
@@ -610,8 +638,8 @@ export async function copyBlockAsMarkdown(
 // The block handle's menu, drawn from the Menu part's recipe. ProseMirror
 // owns the handle, so this cannot be the Menu component; it closes by the
 // same rule (useDismiss) and moves by the same keys (moveInMenu). Focus stays
-// on the frame and aria-activedescendant names the active row, which draws
-// the accent outline whichever of the keyboard or the pointer moved it there.
+// on the frame and aria-activedescendant names the active row, which takes
+// the selected fill whichever of the keyboard or the pointer moved it there.
 export function BlockMenu({
   state,
   onSelect,
@@ -797,8 +825,8 @@ export function resolveTurnIntoDropdown(
  *
  * The dropdown is a listbox drawn from the Menu part's recipe. It holds focus
  * for its options and names the active one with aria-activedescendant; that
- * option draws the accent outline, and the block's current type keeps the
- * selected fill.
+ * option takes the selected fill and, while the keyboard moves, the row's
+ * accent line. The block's current type keeps the selected fill.
  */
 export function TurnIntoMenu({
   editor,
@@ -932,7 +960,7 @@ export function TurnIntoMenu({
                 tabIndex={-1}
                 aria-selected={index === selected}
                 data-active={index === selected || undefined}
-                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${
+                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION_BESIDE_CURRENT} ${
                   current ? MENU_ROW_TONE.current : `${MENU_ROW_TONE.rest} data-active:text-ink`
                 }`}
                 // Only a pointer that moves picks the active option, so a

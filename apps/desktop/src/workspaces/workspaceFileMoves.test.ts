@@ -1121,6 +1121,57 @@ describe("agent moves and deletes", () => {
   });
 });
 
+describe("a folder with a live page", () => {
+  const refusal = [`dohc can't move "notes" while a page in it has live editing on`,
+    "In Live documents, stop live editing for every page in this folder, then move the folder again."].join(String.fromCharCode(10));
+  // A page this computer owns at notes/page.md. The engine refuses only a folder check over it.
+  async function ownedFixture() {
+    const methods: string[] = [], checks: Array<{ path: string; folder: boolean }> = [];
+    const f = await fixture({ beforeRequest: request => {
+      methods.push(request.method);
+      if (request.method !== VERSIONED_METHOD.textCheckMove) return;
+      const params = request.params as { path: string; folder?: boolean };
+      checks.push({ path: params.path, folder: params.folder === true });
+      if (params.folder === true && "notes/page.md".startsWith(`${params.path}/`)) {
+        throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "live-folder-page-owned", retry: "no" }, null);
+      }
+    } });
+    await write(f.rootPath, "notes/page.md", "page");
+    await write(f.rootPath, "drafts/plain.md", "plain");
+    const seen = await f.start();
+    return { ...f, methods, checks, seen };
+  }
+
+  it("refuses the move from the app, the CLI and MCP, with no relay, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.move("notes", "moved")).toMatchObject({ ok: false, reason: refusal });
+    await expect(f.moveByHand("notes", "moved")).rejects.toMatchObject({ name: "LiveFolderMoveError", message: refusal });
+    expect(f.checks.filter(check => check.path === "notes")).toEqual([{ path: "notes", folder: true }, { path: "notes", folder: true }]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    expect(existsSync(join(f.rootPath, "moved"))).toBe(false);
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
+  it("moves a folder with no live page, and a file move sends no folder check", async () => {
+    const f = await ownedFixture();
+    expect(await f.move("drafts", "kept")).toMatchObject({ ok: true });
+    expect(await f.move("notes/page.md", "notes/renamed.md")).toMatchObject({ ok: true });
+    expect(f.checks).toContainEqual({ path: "drafts", folder: true });
+    expect(f.checks.filter(check => check.path === "notes/page.md").every(check => !check.folder)).toBe(true);
+    expect(await readFile(join(f.rootPath, "kept/plain.md"), "utf8")).toBe("plain");
+  });
+
+  it("deletes the folder as before", async () => {
+    const f = await ownedFixture();
+    await f.removeByHand("notes");
+    expect(existsSync(join(f.rootPath, "notes"))).toBe(false);
+    expect(f.checks.every(check => !check.folder)).toBe(true);
+  });
+});
+
 describe("agent move and delete admission", () => {
   // Runs the admission inside a stand-in for the capture seam and fails the
   // test if anything is recorded or the disk is touched.

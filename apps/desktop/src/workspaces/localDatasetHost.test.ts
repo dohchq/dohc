@@ -429,7 +429,7 @@ describe("local dataset owner adapter", () => {
       expect(completed.state).toBe("imported");expect(posted).toBe(phase === "installed" ? 2 : 1);
       const remote=createRemoteDatasetData({workspaceId:"w",credentials,credentialGeneration:1,currentCredentialGeneration:()=>1,signal:controller.signal,assertCurrent(){},relayJson:transport});
       expect((await remote.permissions!({workspaceId:"w",datasetId:id(1),action:"permissions"})).permissions).toEqual([]);
-      const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},async remote(origin){expect(origin).toBe("https://relay");return remote;}});
+      const routed=createDatasetAuthorityRouter(restarted,{async status(datasetId){return restarted.transferStatus(datasetId);},marker:datasetId=>restarted.transferStatus(datasetId),async remote(origin){expect(origin).toBe("https://relay");return remote;}});
       expect((await routed.invoke(call(approved,id(5)))).result).toMatchObject([{name:"First"}]);
       expect(await routed.file({...upload,workspaceId:"w",action:"file",fileId:file.file.fileId})).toEqual({file:file.file,bytesBase64});
       expect(await routed.invoke(mutation)).toMatchObject({replayed:true});
@@ -604,6 +604,26 @@ describe("local dataset owner adapter", () => {
     expect(changes).toBe(3);
     // A refused change tells nothing.
     await expect(host.approve({preparationId: "gone", revisionSha256: approved.revision.revisionSha256})).rejects.toThrow(/expired/);
+    expect(changes).toBe(3);
+  });
+
+  // A read that finds a stopped move resumes it. Were a stop a change, the reads it sets off would resume the move again, without end.
+  it("tells the executor when a move fences a Collection and when it finishes, not when it stops", async () => {
+    let changes = 0, stopped = true;
+    const {host} = await open({onDatasetsChanged: () => { changes += 1; }}); await activate(host);
+    const target: import("./localDatasetTransfer").DatasetTransferTarget = { async importRecovery(input) {
+      for await (const _chunk of input.stream) { /* The server reads the whole archive before it answers. */ }
+      if (stopped) throw new Error("Sharing failed (502).");
+      return {transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:input.sourceCursor,
+        targetCursor:{...input.sourceCursor,hostEpoch:"server-epoch",revision:input.sourceCursor.revision+1,digest:"f".repeat(64)}};
+    } };
+    const move = () => host.transferToShared({datasetId:id(1),targetOrigin:"https://relay.example",target});
+    await expect(move()).rejects.toThrow("Sharing failed (502).");
+    expect(changes).toBe(2);
+    await expect(move()).rejects.toThrow("Sharing failed (502).");
+    expect(changes).toBe(2);
+    stopped = false;
+    expect((await move()).state).toBe("imported");
     expect(changes).toBe(3);
   });
 

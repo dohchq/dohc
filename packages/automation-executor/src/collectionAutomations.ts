@@ -1347,6 +1347,14 @@ export class CollectionAutomations {
     return this.opened;
   }
 
+  /**
+   * The engine opened the workspace. An open that read the run store before
+   * that failed, so it tries again once any open under way settles.
+   */
+  workspaceOpened(): Promise<void> {
+    return this.open().then(() => this.open());
+  }
+
   /** The settled watcher batch: re-read the Collections whose automations or schema changed. */
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
     void this.rereadFoldersOf(events.map((event) => event.path))

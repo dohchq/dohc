@@ -218,7 +218,7 @@ export function CloudSyncSettings(props: {
     // The shell already raised the failure, with its reason and Try again.
     return (
       <SettingRow title="Server" testId="settings-row-server">
-        <SecondaryButton size="compact" onClick={props.cloud.onChanged}>
+        <SecondaryButton onClick={props.cloud.onChanged}>
           Try again
         </SecondaryButton>
       </SettingRow>
@@ -227,7 +227,7 @@ export function CloudSyncSettings(props: {
 
   const connectRow = (
     <SettingRow title="Server" testId="settings-row-server">
-      <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
+      <PrimaryButton data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
         Connect server
       </PrimaryButton>
     </SettingRow>
@@ -285,7 +285,6 @@ export function CloudSyncSettings(props: {
                 way to the right one. */}
             {unconfirmed && status.connected ? (
               <SecondaryButton
-                size="compact"
                 data-testid="cloud-relink-workspace"
                 disabled={syncBusy !== null}
                 onClick={() => void enableSync()}
@@ -395,11 +394,10 @@ export function ProtectedFilesRow(props: {
             data-testid="cloud-sync-passphrase"
             value={props.passphrase}
             onChange={(event) => props.onPassphrase(event.currentTarget.value)}
-            className="h-7 w-40 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+            className="h-8 w-40 rounded-md border border-line bg-bg px-2 text-[13px] text-ink focus:border-ink"
           />
           <PrimaryButton
             type="submit"
-            size="compact"
             data-testid="cloud-sync-passphrase-submit"
             disabled={props.busy || tooShort}
           >
@@ -410,7 +408,6 @@ export function ProtectedFilesRow(props: {
         </form>
       ) : props.secretState === "protected-key-present" ? (
         <SecondaryButton
-          size="compact"
           data-testid="cloud-protect-secrets"
           onClick={() => props.onStart("protect")}
         >
@@ -418,7 +415,6 @@ export function ProtectedFilesRow(props: {
         </SecondaryButton>
       ) : (
         <SecondaryButton
-          size="compact"
           data-testid="cloud-unlock-secrets"
           onClick={() => props.onStart("unlock")}
         >

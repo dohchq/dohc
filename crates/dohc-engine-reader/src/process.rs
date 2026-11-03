@@ -1,4 +1,4 @@
-use crate::{Config, Failure, Outcome, Request, Shared, session::Session, wire::CHUNK};
+use crate::{Config, Failure, Outcome, PreparationRequest, Shared, session::Session, wire::CHUNK};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,7 +13,7 @@ use std::{
 pub(super) type Event = std::result::Result<Option<Outcome>, Failure>;
 pub(super) struct Worker {
     child: crate::platform::Process,
-    input: Option<mpsc::Sender<Request>>,
+    input: Option<mpsc::Sender<PreparationRequest>>,
     pub output: mpsc::Receiver<Event>,
     #[cfg(test)]
     shared: Arc<Shared>,
@@ -64,7 +64,8 @@ impl Worker {
         }
         let manifest: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::Unavailable)?;
         {
-            let digest = crate::wire::sha(&bytes);
+            let digest =
+                crate::wire::sha(&serde_json::to_vec(&manifest).map_err(|_| Failure::Unavailable)?);
             let mut state = shared.state.lock().unwrap();
             if state
                 .build_digest
@@ -98,7 +99,7 @@ impl Worker {
             .current_dir(cwd.path())
             .arg("--permission")
             .arg(read_grant)
-            .arg("--max-old-space-size=256")
+            .arg("--max-old-space-size=512")
             .arg(&c.bundle)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -110,7 +111,7 @@ impl Worker {
         );
         let (child, stdout, stdin, mut stderr) =
             crate::platform::spawn(&mut command).map_err(unavailable)?;
-        let (input, requests) = mpsc::channel::<Request>();
+        let (input, requests) = mpsc::channel::<PreparationRequest>();
         let (events, output) = mpsc::channel();
         let mut w = Self {
             child,
@@ -150,7 +151,7 @@ impl Worker {
                         }
                     }
                     while let Ok(request) = requests.recv() {
-                        let result = session.execute(&request);
+                        let result = session.prepare(&request);
                         drop(request);
                         let failed = result.is_err();
                         send(result.map(Some));
@@ -163,7 +164,7 @@ impl Worker {
         );
         Ok(w)
     }
-    pub fn send(&self, r: Request) -> std::result::Result<(), Failure> {
+    pub fn send(&self, r: PreparationRequest) -> std::result::Result<(), Failure> {
         self.input
             .as_ref()
             .unwrap()
@@ -186,8 +187,14 @@ fn file_sha(file: &mut File, cap: u64, deadline: Instant) -> std::result::Result
                 .collect());
         }
         length += n as u64;
-        if length > cap || Instant::now() >= deadline {
+        if length > cap {
             return Err(Failure::Unavailable);
+        }
+        // A slow start is not a changed reader. Unavailable would close the
+        // reader for the life of the engine; a timeout lets the next request
+        // start it again.
+        if Instant::now() >= deadline {
+            return Err(Failure::TimedOut);
         }
         hasher.update(&buffer[..n]);
     }

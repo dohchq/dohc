@@ -1,7 +1,7 @@
-import { desktopPins, activityPin } from "../src/testPins";
+import { desktopPins } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
@@ -10,6 +10,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   keepCollectionsHere,
+  openExplorerHome,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -34,8 +35,8 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId(activityPin("sites")).click();
-    await expect(page.getByTestId("sites-view")).toBeVisible();
+    await openExplorerHome(page);
+    await expect(page.getByTestId("explorer-apps-section")).toBeVisible({ timeout: 20_000 });
     const app = page.locator('[data-testid="sites-row"][data-root="demo"]');
     await expect(app).toBeVisible({ timeout: 20_000 });
     await app.click();
@@ -82,34 +83,31 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
   }
 });
 
-test("@apps pins an app from its shelf row and opens it, from the keyboard", async () => {
+test("@apps pins an app from its Home row and opens it from the keyboard", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
     await writeWorkspaceFiles(temp, [
-      { path: "demo/index.html", contents: "<!doctype html><title>Launch app</title><main>From the shelf</main>" },
+      { path: "demo/index.html", contents: "<!doctype html><title>Launch app</title><main>From the Explorer</main>" },
     ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId(activityPin("sites")).click();
-    await expect(page.getByTestId("sites-count")).toHaveText("1 app", { timeout: 20_000 });
+    await openExplorerHome(page);
+    await expect(page.getByTestId("sites-count")).toHaveAttribute("aria-label", "1 app", { timeout: 20_000 });
     const row = page.locator('[data-testid="sites-row"][data-root="demo"]');
-    await row.focus();
-    await page.keyboard.press("Tab");
-    await expect(page.getByRole("button", { name: "Pin to sidebar" })).toBeFocused();
-    await page.keyboard.press("Enter");
+    await row.hover();
+    await page.getByRole("button", { name: "Pin to sidebar" }).click();
     await expect(page.getByTestId("activity-pinned-app")).toHaveCount(1);
-    await expect(page.getByRole("button", { name: "Unpin" })).toBeFocused();
+    await expect(page.getByRole("button", { name: "Unpin" })).toHaveCount(1);
 
-    await page.keyboard.press("Shift+Tab");
-    await expect(row).toBeFocused();
+    await row.focus();
     await page.keyboard.press("Enter");
     await expect(
       page.frameLocator('[data-testid="site-preview-frame"]').locator("main"),
-    ).toHaveText("From the shelf", { timeout: 20_000 });
+    ).toHaveText("From the Explorer", { timeout: 20_000 });
     await expect(row).toHaveAttribute("aria-current", "page");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -133,7 +131,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId(activityPin("sites")).click();
+    await openExplorerHome(page);
     await page.locator('[data-testid="sites-row"][data-root="demo"]').click();
     const frame = page.frameLocator('[data-testid="site-preview-frame"]');
     await expect(frame.getByRole("button", { name: "Inside the app" })).toBeVisible({ timeout: 20_000 });
@@ -156,42 +154,6 @@ test("@apps closes Preview options when a click lands in the preview", async () 
   }
 });
 
-test("@apps creates and opens the first app beside an existing app folder", async () => {
-  const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-
-  try {
-    await writeWorkspaceFiles(temp, [
-      { path: "app/notes.txt", contents: "Keep this file.\n" },
-    ]);
-    desktop = await launchDesktopApp({ workspace: temp });
-    const page = desktop.page;
-    await openWorkspaceFromFirstRun(page, temp);
-
-    await page.getByTestId(activityPin("sites")).click();
-    await expect(page.getByTestId("sites-count")).toContainText("0 apps");
-    await page.screenshot({ path: test.info().outputPath("apps-empty.png") });
-    await page.getByRole("button", { name: "Create app" }).click();
-
-    await expect(page.getByTestId("site-preview-page")).toBeVisible();
-    await expect(page.getByTestId("site-preview-frame")).toBeVisible({
-      timeout: 20_000,
-    });
-    await expect(
-      page
-        .frameLocator('[data-testid="site-preview-frame"]')
-        .getByRole("heading", { name: "My app" }),
-    ).toBeVisible();
-    // A non-empty app/ stays as it was; the new app takes the next free name.
-    await expect
-      .poll(() => readFile(path.join(temp.rootPath, "app-2", "index.html"), "utf8"))
-      .toContain("<h1>My app</h1>");
-    expect(await readFile(path.join(temp.rootPath, "app", "notes.txt"), "utf8")).toBe("Keep this file.\n");
-  } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
-  }
-});
-
 test("@apps finds an app declared only by app.publish.json and publishes it again after its folder moves", async ({}, info) => {
   test.setTimeout(240_000);
   const workspace = await createTempWorkspace(), workspaceId = randomUUID(), userId = "moved-app-owner";
@@ -205,7 +167,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       { path: "poll/main.ts", contents: 'import "./style.css";\ndocument.body.innerHTML = "<h1>Trip poll</h1>";\n' },
       { path: "poll/style.css", contents: "h1 { color: rgb(4, 5, 6); }\n" },
     ]);
-    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay.sqlite"), appPublications: true,
+    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay", "relay.sqlite"), appPublications: true,
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
     const claim = await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: { authorization: `Bearer test:${userId}`, "content-type": "application/json" }, body: JSON.stringify({ workspaceId }) });
     expect(claim.ok).toBe(true);
@@ -217,12 +179,15 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
     await keepCollectionsHere(page, workspaceId);
-    await page.getByTestId(activityPin("sites")).click();
+    await openExplorerHome(page);
 
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
-      await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Review and open app", exact: true })).toBeVisible();
-      await page.getByTestId("site-preview-publish").click();
+      // The app uses no Collection, so its tab offers a share link instead of opening here.
+      await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Publish on a link", exact: true })).toBeVisible();
+      // The moved app's old tab stays open, mounted and hidden, so only the visible tab's button counts.
+      const review = page.getByTestId("app-view-review").filter({ visible: true });
+      await review.click();
       const publication = page.getByTestId("app-publication-dialog");
       await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
       const share = page.getByTestId("share-dialog");
@@ -231,14 +196,14 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       await share.getByRole("button", { name: "Create link", exact: true }).click();
       const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
       await share.getByRole("button", { name: "Close", exact: true }).click();
-      await page.getByTestId("site-preview-publish").click();
+      await review.click();
       await publication.getByRole("combobox", { name: "Publication share link" }).selectOption({ index: 1 });
       await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
       await expect(publication.getByRole("heading", { name: "Review app publication", exact: true })).toBeVisible();
       await expect(publication.getByTestId("app-publication-source-paths")).toContainText(`${root}/main.ts`);
       await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
       await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
-      await publication.getByRole("button", { name: "Close publication", exact: true }).click();
+      await publication.getByRole("button", { name: "Close", exact: true }).click();
       const guest = await shared!.browser.newPage();
       guest.on("pageerror", error => shared!.failures.push(error.message));
       await guest.goto(linkUrl);
@@ -320,7 +285,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
       { path: "reading-list/count.js", contents: 'document.querySelector("[role=status]").textContent = `${document.querySelectorAll("li").length} books`;\nsteps.push("C");\ndocument.getElementById("order").textContent = steps.join(" ");\n' },
       { path: "reading-list/cover.png", contents: coverPng },
     ]);
-    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay.sqlite"), appPublications: true,
+    relay = await spawnSyncRelay({ dbPath: path.join(workspace.baseDir, "relay", "relay.sqlite"), appPublications: true,
       linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
     const claim = await fetch(`${relay.baseUrl}/sync/workspaces`, { method: "POST", headers: { authorization: `Bearer test:${userId}`, "content-type": "application/json" }, body: JSON.stringify({ workspaceId }) });
     expect(claim.ok).toBe(true);
@@ -333,10 +298,10 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await openWorkspaceFromFirstRun(page, workspace);
     await keepCollectionsHere(page, workspaceId);
 
-    await page.getByTestId(activityPin("sites")).click();
+    await openExplorerHome(page);
     await page.locator('[data-testid="sites-row"][data-root="reading-list"]').click();
     await expect(page.getByTestId("site-preview-page")).toBeVisible();
-    await page.getByTestId("site-preview-publish").click();
+    await page.getByTestId("site-preview-review").click();
     const publication = page.getByTestId("app-publication-dialog");
     await publication.getByRole("button", { name: "Share app folder", exact: true }).click();
     const share = page.getByTestId("share-dialog");
@@ -347,7 +312,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
     await share.getByRole("button", { name: "Close", exact: true }).click();
 
-    await page.getByTestId("site-preview-publish").click();
+    await page.getByTestId("site-preview-review").click();
     await publication.getByRole("combobox", { name: "Publication share link" }).selectOption({ index: 1 });
     await publication.getByRole("button", { name: "Prepare app", exact: true }).click();
     await expect(publication.getByRole("heading", { name: "Review app publication", exact: true })).toBeVisible();
@@ -356,7 +321,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await page.screenshot({ path: info.outputPath("static-app-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
     await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
-    await publication.getByRole("button", { name: "Close publication", exact: true }).click();
+    await publication.getByRole("button", { name: "Close", exact: true }).click();
 
     const guest = await shared.browser.newPage();
     guest.on("pageerror", error => shared!.failures.push(error.message));

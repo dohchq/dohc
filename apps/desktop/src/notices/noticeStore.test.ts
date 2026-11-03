@@ -1,5 +1,6 @@
 import { historyCursor } from "../testing/historyPageFixture";
 import { open, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -27,6 +28,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeContract";
+import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
   RETRY_ELSEWHERE,
@@ -1240,6 +1242,18 @@ describe("notices for another person", () => {
   }, 60_000);
 });
 
+it.each(["unavailable", "plaintext projection exceeds limit"])("does not invent another computer for a sync refusal: %s", async reason => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "sync-refusal-local", originId: "host", originSeq: 1,
+    refusalCoordinates: [{ originId: "host", originSeq: 1 }], reason,
+    document: { versionId: "main", path: "n.md", objectId: "object", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [notice] = (await first.store.list()).notices;
+  expect(notice!.body).not.toContain("other computer");
+  expect(notice!.body).toContain(reason === "unavailable" ? "Review the file, then try sync again." : "Make the file smaller, then try sync again.");
+});
+
 it("rebuilds refusal Notices from the engine and keeps read marks across restart", async () => {
   let pending = [{ noticeId: "sync-refusal-a", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
     reason: "plaintext projection exceeds limit", document: { versionId: "main", path: "doc.md",
@@ -1269,6 +1283,94 @@ it("rebuilds refusal Notices from the engine and keeps read marks across restart
   expect((await again.store.list()).notices).toEqual([]);
 });
 
+it.each([null, ""])("names a file in held Notices without a path (%s)", async path => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "pathless-hold", originId: null, originSeq: null,
+    refusalCoordinates: [{ obligationOrder: 7, checkpointSha256: "held", headSha256: null }],
+    reason: "markdown-write-held",
+    document: path === null ? null : { versionId: "main", path, objectId: "note", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [shown] = (await first.store.list()).notices;
+  expect(shown).toMatchObject({ kind: "markdown-write-held", target: {} });
+  expect(shown).toMatchObject({ title: "Held a change to a note", body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links." });
+});
+
+it("keeps local hold identity through restart and dismisses only the shown checkpoint", async () => {
+  const firstCoordinate = { obligationOrder: 7, checkpointSha256: "first", headSha256: null };
+  const nextCoordinate = { ...firstCoordinate, checkpointSha256: "next" };
+  let coordinates = [firstCoordinate];
+  const dismissRefusal = vi.fn(async () => {});
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "local-hold", originId: null, originSeq: null,
+    refusalCoordinates: coordinates, reason: "markdown-write-held",
+    document: { versionId: "main", path: "note.md", objectId: "note", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices, dismissRefusal });
+  const [shown] = (await first.store.list()).notices;
+  expect(shown).toMatchObject({ kind: "markdown-write-held", target: { path: "note.md" }, refusalCoordinates: [firstCoordinate] });
+  expect(shown).toMatchObject({ title: "Held a change to note.md", body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links." });
+  expect(shown!.detail).not.toContain("Origin:");
+  await first.store.mark([shown!], "dismissed", null);
+  expect(dismissRefusal).toHaveBeenCalledWith(WORKSPACE, "local-hold", [firstCoordinate]);
+  expect((await first.store.list()).notices).toHaveLength(0);
+  const restarted = await computer(null, { directory: first.directory, refusalNotices, dismissRefusal });
+  expect((await restarted.store.list()).notices).toHaveLength(0);
+  coordinates = [nextCoordinate];
+  expect((await restarted.store.list()).notices).toEqual([expect.objectContaining({
+    kind: "markdown-write-held", readAtMs: null, refusalCoordinates: [nextCoordinate],
+  })]);
+  coordinates = [];
+});
+
+it("keeps an owner's held note available through an unavailable engine and removes it after authoritative completion", async () => {
+  let available = true, owed = true;
+  const coordinate = {obligationOrder: 12, checkpointSha256: "owner-only-edits", headSha256: null};
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: !available ? null : owed ? [{
+    noticeId: "owner-hold", originId: null, originSeq: null, refusalCoordinates: [coordinate], reason: "markdown-write-held",
+    document: {versionId: "main", path: "trip/note.md", objectId: "note", lineageClaimId: "owner-lineage", conflictId: null},
+  }] : []}];
+  const first = await computer(null, {refusalNotices});
+  const [shown] = (await first.store.list()).notices;
+  expect(shown).toMatchObject({store: "local", workspaceId: WORKSPACE, kind: "markdown-write-held", target: {path: "trip/note.md"}});
+  await first.store.mark([shown!], "read", null);
+  available = false;
+  const restarted = await computer(null, {directory: first.directory, refusalNotices});
+  expect((await restarted.store.list()).notices).toEqual([expect.objectContaining({noticeId: "owner-hold",
+    readAtMs: clock, target: {path: "trip/note.md"}, refusalCoordinates: [coordinate]})]);
+  // Completion while closed is learned from the next authoritative engine read.
+  owed = false;
+  expect((await restarted.store.list()).notices).toHaveLength(1);
+  available = true;
+  expect((await restarted.store.list()).notices).toEqual([]);
+  expect((await computer(null, {directory: first.directory, refusalNotices}).then(c => c.store.list())).notices).toEqual([]);
+});
+
+it("does not let a dismissed absent-head hold hide a later head for the same note", async () => {
+  const firstCoordinate = {obligationOrder: 12, checkpointSha256: "accepted", headSha256: null as string | null};
+  let coordinate = firstCoordinate;
+  let dismissed: typeof firstCoordinate | undefined;
+  let owed = true;
+  const dismissRefusal = vi.fn(async (_workspace: string, _notice: string, shown: unknown[]) => {
+    expect(shown).toEqual([firstCoordinate]); dismissed = firstCoordinate;
+  });
+  const refusalNotices = async () => [{workspaceId: WORKSPACE, notices: !owed || dismissed === coordinate ? [] : [{
+    noticeId: "head-hold", originId: null, originSeq: null, refusalCoordinates: [coordinate], reason: "markdown-write-held",
+    document: {versionId: "main", path: "note.md", objectId: "note", lineageClaimId: "lineage", conflictId: null},
+  }]}];
+  const first = await computer(null, {refusalNotices, dismissRefusal});
+  await first.store.mark((await first.store.list()).notices, "dismissed", null);
+  expect(owed).toBe(true);
+  const restarted = await computer(null, {directory: first.directory, refusalNotices, dismissRefusal});
+  expect((await restarted.store.list()).notices).toEqual([]);
+  coordinate = {...firstCoordinate, headSha256: "c".repeat(64)};
+  expect((await restarted.store.list()).notices).toEqual([expect.objectContaining({noticeId: "head-hold",
+    kind: "markdown-write-held", readAtMs: null, target: {path: "note.md"}, refusalCoordinates: [coordinate]})]);
+  owed = false;
+  expect((await restarted.store.list()).notices).toEqual([]);
+  expect(dismissRefusal).toHaveBeenCalledOnce();
+});
+
 it("names the current file for a terminal binding refusal without suggesting sync again", async () => {
   const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
     noticeId: "sync-refusal-renamed", originId: "host", originSeq: 1,
@@ -1284,6 +1386,50 @@ it("names the current file for a terminal binding refusal without suggesting syn
     target: { path: "renamed.md" },
   });
   expect(row!.body).not.toContain("try sync again");
+});
+
+it("says some author names did not sync, for one or more saves, without suggesting sync again", async () => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "sync-refusal-unattributed", originId: "host", originSeq: 1,
+    refusalCoordinates: [{ originId: "host", originSeq: 1 }, { originId: "host", originSeq: 2 }],
+    reason: "dohc could not verify who changed this file. The file will share without author names.",
+    document: { versionId: "main", path: "n.md", objectId: "object-a", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [row] = (await first.store.list()).notices;
+  expect(row).toMatchObject({
+    title: "Some author names did not sync for “n.md”",
+    body: "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs.",
+    target: { path: "n.md" },
+  });
+});
+
+it("cuts a long file name to fit the title and keeps listing other refusals", async () => {
+  const long = `${"a".repeat(120)}.md`;
+  const refusal = (noticeId: string, originSeq: number, path: string) => ({
+    noticeId, originId: "host", originSeq, refusalCoordinates: [{ originId: "host", originSeq }],
+    reason: "dohc could not verify who changed this file. The file will share without author names.",
+    document: { versionId: "main", path, objectId: `object-${originSeq}`, lineageClaimId: "lineage", conflictId: null },
+  });
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [
+    refusal("sync-refusal-long", 1, `notes/${long}`), refusal("sync-refusal-tab", 2, "notes/a\tb.md"), refusal("sync-refusal-short", 3, "notes/n.md"),
+    refusal("sync-refusal-folder", 4, "notes/"),
+  ] }];
+  const first = await computer(null, { refusalNotices });
+  const titles = (await first.store.list()).notices.map(row => row.title);
+  expect(titles).toHaveLength(4);
+  expect(titles.filter(title => title === "Some author names did not sync")).toHaveLength(2);
+  expect(titles).toContain("Some author names did not sync for “n.md”");
+  const cut = titles.find(title => title.includes("…"))!;
+  expect([...cut]).toHaveLength(120);
+  expect(cut).toMatch(/^Some author names did not sync for “a+…”$/u);
+});
+
+it("keeps the refusals it words for itself equal to the engine's", () => {
+  const engine = (path: string) => readFileSync(new URL(`../../../../crates/dohc-engine-sync/src/${path}`, import.meta.url), "utf8")
+    .replace(/=\s+"/g, '= "');
+  expect(engine("moment_apply/pending.rs")).toContain(`BINDING_CHANGED: &str = ${JSON.stringify(SETTLEMENT_BINDING_CHANGED)};`);
+  expect(engine("settlement_publication.rs")).toContain(`REFUSAL_MESSAGE: &str = ${JSON.stringify(SETTLEMENT_ATTRIBUTION_REFUSED)};`);
 });
 
 it("offers no Open step for a binding refusal whose file is gone", async () => {

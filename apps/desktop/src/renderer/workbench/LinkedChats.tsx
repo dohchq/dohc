@@ -1,6 +1,6 @@
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
-import { ArrowLeft, Info, MessageSquare } from "lucide-react";
+import { ArrowLeft, Info, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatFileMentionRecord,
@@ -19,6 +19,7 @@ import {
   AboutLinks,
   AboutNote,
   AboutSection,
+  AboutSectionAction,
   type AboutFile,
   type AboutNotices,
   type AboutSectionId,
@@ -31,26 +32,37 @@ import {
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// The About rail for a file: its Links, Chats, History and Access. A focused
-// chat tab gets AboutConversationPanel instead.
+// The About rail for a file: who has it, its comments, what changed and what
+// links to it. A focused chat tab gets AboutConversationPanel instead.
 // Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
 // stable object id, so a chat follows its file through renames, and that id
-// is what History asks about. Product vocabulary: these are Chats.
+// is what History asks about. About calls them comments: each is a chat about
+// the file, listed in Chats like any other.
 // Message rendering + composer are the shared chatMessages pieces
 // so this surface and the workspace Chats view can never drift.
 
 // The composer's replacement for every received file share.
 // Same words main throws (SharedFileReadOnlyError) and the same shape the
 // Chats view's read-only notice uses.
+const READ_ONLY = "Chats are read-only in this shared view.";
 function ReadOnlyNotice() {
   return (
     <p
       data-testid="linked-chat-readonly-note"
       className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
     >
-      Chats are read-only in this shared view.
+      {READ_ONLY}
     </p>
   );
+}
+
+const NEW_COMMENT_COMPOSER = "linked-chat-new-composer-input";
+
+// A comment's chat takes its title from the comment's first line.
+const TITLE_MAX = 200;
+export function commentTitle(body: string): string {
+  const line = body.trim().split("\n", 1)[0]!.trim();
+  return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1)}…` : line;
 }
 
 const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
@@ -64,7 +76,7 @@ type ThreadsState =
   | { status: "unavailable"; key: string }
   | { status: "ready"; key: string; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
-const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { links: true, chats: true, history: true, access: false };
+const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { access: true, chats: true, history: true, links: true };
 
 // The engine answers "still updating" only while its first capture of the
 // workspace runs, and that capture ends ready or degraded. So the read asks
@@ -127,6 +139,8 @@ export function LinkedChatsPanel(props: {
     // History stopped recording, so its section says so.
     paused: boolean;
     onOpenMoment: (momentId: string, filePath: string) => void;
+    // Opens the workspace's History view.
+    onOpenHistory: () => void;
   };
   // The links into the file, read again as `revision` changes. Chats that
   // link here are read only where `onOpenChat` can open them.
@@ -157,7 +171,8 @@ export function LinkedChatsPanel(props: {
     token: number;
     focusMessageId?: string;
   } | null>(null);
-  const [creating, setCreating] = useState<string | null>(null);
+  // The comment being written on the whole file, while its composer is open.
+  const [commenting, setCommenting] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
   // Thread requests and this file's Chats read each own a token, so opening,
@@ -220,7 +235,7 @@ export function LinkedChatsPanel(props: {
     setActiveThread(null);
     setMessages([]);
     setComposer("");
-    setCreating(null);
+    setCommenting(null);
     if (!filePath) {
       setThreadsState({ status: "loading" });
       return;
@@ -322,33 +337,48 @@ export function LinkedChatsPanel(props: {
     props.onInitialThreadConsumed,
   ]);
 
-  const createChat = useCallback(
-    async (title: string) => {
+  // A comment on the whole file starts its chat, then posts as its first
+  // message. A post that fails leaves the chat open with the words in its
+  // composer, so nothing written is lost.
+  const commentOnFile = useCallback(
+    async (body: string) => {
       if (!filePath) return;
-      const trimmed = title.trim();
-      if (trimmed.length === 0) return;
+      const trimmed = body.trim();
+      if (trimmed.length === 0 || sending) return;
       const token = ++liveToken.current;
+      setSending(true);
       try {
-        const result = await bridge().createFileChat({
-          workspaceId,
-          path: filePath,
-          title: trimmed,
-        });
+        const { thread } = await bridge().createFileChat({ workspaceId, path: filePath, title: commentTitle(trimmed) });
         if (token !== liveToken.current) return;
-        setCreating(null);
+        setCommenting(null);
         setThreadsState((current) =>
-          current.status === "ready"
-            ? { ...current, threads: [...current.threads, result.thread] }
-            : current,
+          current.status === "ready" ? { ...current, threads: [...current.threads, thread] } : current,
         );
-        void openThread(result.thread);
+        try {
+          const result = await bridge().sendChatMessage({ workspaceId, threadId: thread.id, body: trimmed });
+          if (token !== liveToken.current) return;
+          if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
+        } catch (error) {
+          if (token !== liveToken.current) return;
+          setComposer(trimmed);
+          props.onError(ipcErrorMessage(error, "Could not post that comment."), error);
+        }
+        void openThread(thread);
       } catch (error) {
         if (token !== liveToken.current) return;
-        props.onError(ipcErrorMessage(error, "Could not start a chat for this file."), error);
+        props.onError(ipcErrorMessage(error, "Could not comment on this file."), error);
+      } finally {
+        setSending(false);
       }
     },
-    [filePath, openThread, props.onError, workspaceId],
+    [filePath, openThread, props.onAgentWaitsForTrust, props.onError, sending, workspaceId],
   );
+
+  // The composer that opens takes focus, as the + that opened it asked.
+  const composing = commenting !== null;
+  useEffect(() => {
+    if (composing) document.getElementById(NEW_COMMENT_COMPOSER)?.focus();
+  }, [composing]);
 
   const sendMessage = useCallback(async () => {
     const thread = activeThread;
@@ -458,6 +488,7 @@ export function LinkedChatsPanel(props: {
           <ReadOnlyNotice />
         ) : (
           <ChatComposer
+            pinned
             testIdPrefix="linked-chat"
             composerId="linked-chat-composer"
             value={composer}
@@ -476,7 +507,7 @@ export function LinkedChatsPanel(props: {
     // About covers a file or a conversation. A shared view has no
     // conversations, so there it names a file's own chats.
     const subject = readOnly ? "a file" : "a file or a conversation";
-    const shows = readOnly ? "its chats and access" : "who has access";
+    const shows = readOnly ? "its comments and access" : "who has access";
     return (
       <EmptyState
         data-testid="linked-chats-empty"
@@ -498,39 +529,65 @@ export function LinkedChatsPanel(props: {
     : threads.status === "updating" ? { status: "updating" }
     : threads.status === "unavailable" ? { status: "failed", retry: () => void refreshThreads() }
     : { status: "ready", objectId: threads.fileObjectId };
+  // A file dohc does not track has no object for a chat to follow, so it
+  // takes no comments: the section says why instead of offering one.
+  const ready = threads?.status === "ready" ? threads : null;
+  const untracked = ready !== null && ready.fileObjectId === null;
+  const canComment = ready !== null && !readOnly && !untracked;
+  const startComment = () => {
+    setSectionsOpen((current) => ({ ...current, chats: true }));
+    setCommenting((current) => current ?? "");
+  };
   return (
     <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
       <AboutHeader subject={{ path: filePath }} />
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
-        <AboutLinks
+        <AboutAccess
           workspaceId={workspaceId}
-          path={filePath}
-          revision={props.links.revision}
-          expanded={sectionsOpen.links}
-          onToggle={toggleSection("links")}
-          onOpenLink={props.links.onOpenLink}
-          {...(props.links.onOpenChat ? { onOpenChat: props.links.onOpenChat } : {})}
+          subject={{ kind: "path", path: filePath }}
+          expanded={sectionsOpen.access}
+          onToggle={toggleSection("access")}
           notices={notices}
+          context={props.accessContext}
         />
         <AboutSection
           id="chats"
-          icon={MessageSquare}
-          label="Chats"
-          count={threads?.status === "ready" ? String(threads.threads.length) : undefined}
+          label="Comments"
+          count={ready ? String(ready.threads.length) : undefined}
+          empty={ready !== null && ready.threads.length === 0 && commenting === null && !readOnly && !untracked}
           expanded={sectionsOpen.chats}
           onToggle={toggleSection("chats")}
+          actions={canComment ? (
+            <AboutSectionAction testId="linked-chat-new" label="Comment on this file" icon={Plus} onClick={startComment} />
+          ) : null}
         >
           {threads === null || threads.status === "updating" ? (
-            <SkeletonRows rows={2} className="px-2 py-1" label="Loading Chats..." />
+            <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments..." />
           ) : threads.status === "unavailable" ? (
             <RetryRow testId="linked-chats-failed" onRetry={() => void refreshThreads()} />
           ) : (
             <div data-testid="linked-chats-panel">
-              {threads.threads.length === 0 ? (
-                // The next step is the New chat control below, where this
-                // file offers one.
-                <AboutNote testId="linked-chats-empty">No chats about this file yet.</AboutNote>
-              ) : (
+              {commenting !== null ? (
+                <div className="-mx-1">
+                  <ChatComposer
+                    testIdPrefix="linked-chat-new"
+                    composerId={NEW_COMMENT_COMPOSER}
+                    value={commenting}
+                    sending={sending}
+                    placeholder="Comment on this file…"
+                    sendLabel="Comment"
+                    onChange={setCommenting}
+                    onSend={() => void commentOnFile(commenting)}
+                    onEscape={() => setCommenting(null)}
+                  />
+                </div>
+              ) : null}
+              {readOnly ? (
+                <AboutNote testId="linked-chat-readonly-note">{READ_ONLY}</AboutNote>
+              ) : untracked ? (
+                <AboutNote testId="linked-chats-untracked">dohc does not track this file, so it cannot have comments.</AboutNote>
+              ) : null}
+              {threads.threads.length > 0 ? (
                 <ul className="m-0 list-none p-0">
                   {threads.threads.map((thread) => (
                     <li key={thread.id}>
@@ -538,7 +595,7 @@ export function LinkedChatsPanel(props: {
                     </li>
                   ))}
                 </ul>
-              )}
+              ) : null}
             </div>
           )}
         </AboutSection>
@@ -552,71 +609,21 @@ export function LinkedChatsPanel(props: {
             expanded={sectionsOpen.history}
             onToggle={toggleSection("history")}
             onOpenMoment={props.history.onOpenMoment}
+            onOpenHistory={props.history.onOpenHistory}
             notices={notices}
           />
         ) : null}
-        <AboutAccess
+        <AboutLinks
           workspaceId={workspaceId}
-          subject={{ kind: "path", path: filePath }}
-          expanded={sectionsOpen.access}
-          onToggle={toggleSection("access")}
+          path={filePath}
+          revision={props.links.revision}
+          expanded={sectionsOpen.links}
+          onToggle={toggleSection("links")}
+          onOpenLink={props.links.onOpenLink}
+          {...(props.links.onOpenChat ? { onOpenChat: props.links.onOpenChat } : {})}
           notices={notices}
-          context={props.accessContext}
         />
       </div>
-      {threads?.status !== "ready" ? null : readOnly ? (
-        <ReadOnlyNotice />
-      ) : (
-        <div className="shrink-0 border-t border-line p-2">
-          {threads.fileObjectId === null ? (
-            <p className="m-0 px-1 text-[11px] leading-4 text-subtle">
-              Chats aren't available for this file yet — only text files dohc
-              tracks can have Chats.
-            </p>
-          ) : creating === null ? (
-            <button
-              type="button"
-              data-testid="linked-chat-new"
-              onClick={() => setCreating(basenameOf(filePath))}
-              className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-hover hover:text-ink"
-            >
-              <MessageSquare size={12} aria-hidden />
-              New chat
-            </button>
-          ) : (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void createChat(creating);
-              }}
-            >
-              <label className="sr-only" htmlFor="linked-chat-new-title">
-                Chat title
-              </label>
-              <input
-                spellCheck={false}
-                id="linked-chat-new-title"
-                data-testid="linked-chat-new-title"
-                autoFocus
-                value={creating}
-                maxLength={200}
-                placeholder="Chat title"
-                onChange={(event) => setCreating(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    event.stopPropagation();
-                    setCreating(null);
-                  }
-                }}
-                className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-              />
-              <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
-                Press Enter to start the chat.
-              </p>
-            </form>
-          )}
-        </div>
-      )}
     </div>
   );
 }

@@ -275,6 +275,7 @@ impl ApplicationOwner {
             namespace: operation.relay_database_namespace.clone(),
             coordinate,
             binding: operation.old_binding.clone(),
+            activation_id: None,
             live: false,
         };
         let outcome = store.write_with(faults, |tx| {
@@ -306,8 +307,9 @@ fn prepare_in(
 
     require_workspace(tx, held)?;
     let b = &held.binding;
+    // A cancelled operation never prepares again.
     let saved: (String,String,Option<i64>,Option<String>,Option<String>,Option<String>) = tx.query_row(
-        "SELECT input_json,receipt_json,length(CAST(proposal_json AS BLOB)),proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",
+        "SELECT input_json,receipt_json,length(CAST(proposal_json AS BLOB)),proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5 AND cancelled_json IS NULL",
         params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation.operation_id],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
     ).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
@@ -572,7 +574,7 @@ fn prepare_in(
     put_binary_blob(tx, &candidate_bytes)?;
     put_binary_blob(tx, &frozen_state_bytes)?;
     put_binary_blob(tx, &point_state_bytes)?;
-    let changed = tx.execute("UPDATE live_restore_fences SET proposal_json=?6,proposal_candidate_sha256=?7,proposal_frozen_sha256=?8,proposal_point_sha256=?9 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5 AND proposal_json IS NULL",
+    let changed = tx.execute("UPDATE live_restore_fences SET proposal_json=?6,proposal_candidate_sha256=?7,proposal_frozen_sha256=?8,proposal_point_sha256=?9 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5 AND proposal_json IS NULL AND cancelled_json IS NULL",
         params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation.operation_id,json,receipt.candidate_digest,receipt.frozen_state_digest,receipt.point_state_digest]).map_err(write_sql)?;
     if changed != 1 {
         return Err(ApplicationError::Conflict);
@@ -647,10 +649,22 @@ fn origin(
             Ok((hex_sha256(&budget.json(&bootstrap)?), sequence))
         }
         RestoreDeliveryOrigin::Owner { id } => {
-            let saved: (String,String,i64,String) = conn.query_row(
-                "SELECT evidence_digest,binding_json,local_ydoc_sequence,host_coordinate_json FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND adoption_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
-                params![held.namespace,id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
-                |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
+            // The activation the restore recorded, even one released since.
+            let recorded = owner_activations::activation_by_id(conn, &held.namespace, id)?
+                .filter(|activation| {
+                    activation.key.workspace_id == b.workspace_id
+                        && activation.key.version_id == b.main_version_id
+                        && activation.key.object_id == b.object_id
+                        && activation.lineage_claim_id == b.lineage_claim_id
+                })
+                .ok_or(ApplicationError::Conflict)?;
+            let adopted = recorded.adoption.ok_or(ApplicationError::Conflict)?;
+            let saved = (
+                adopted.evidence_digest,
+                recorded.binding_json,
+                adopted.local_ydoc_sequence,
+                recorded.host_coordinate_json,
+            );
             let binding: LiveObjectBinding =
                 serde_json::from_str(&saved.1).map_err(|_| ApplicationError::Corrupt)?;
             let host: ApplicationHostCoordinate =

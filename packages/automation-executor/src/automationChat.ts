@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
-import type { ChatChannelKind, ChatChannelType, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatChannelKind, ChatChannelType, ChatMessage, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type { ReachRoster } from "./automationReach";
 
-export async function hasChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<boolean> {
-  try { return (await store.getMessage({ workspaceId, messageId })) !== null; }
+/** The message, or null when the store has no message with this id. */
+export async function findChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<ChatMessage | null> {
+  try { return await store.getMessage({ workspaceId, messageId }); }
   catch (error) {
-    if (error instanceof Error && error.message === "message-not-found") return false;
+    if (error instanceof Error && error.message === "message-not-found") return null;
     throw error;
   }
+}
+
+export async function hasChatMessage(store: Pick<LinkedChatStore, "getMessage">, workspaceId: string, messageId: string): Promise<boolean> {
+  return (await findChatMessage(store, workspaceId, messageId)) !== null;
 }
 
 // Where an automation's messages go (item 6, section 2). A post goes to a
@@ -185,12 +190,15 @@ export interface AutomationChatMessage {
   target:
     | { kind: "group"; channelId: string; lane: ChatThreadLane }
     | { kind: "direct-message"; threadId: string }
-    // The person's own agent, in its "My agent" thread for this automation.
+    // The person's own agent, in its thread for this automation.
     | { kind: "agent" };
   /** Also the idempotency key: a retry replays the recorded message. */
   effectId: string;
   messageId: string;
-  /** The thread a new post starts; a Group's chat lane keeps its running one. */
+  /**
+   * The thread a new post starts; a Group's chat lane keeps its running one.
+   * An agent wake takes the woken agent's thread instead (`automationAgentWakeThreadId`).
+   */
   threadId: string;
   automation: { automationId: string; name: string; depth: number };
   body: string;
@@ -204,9 +212,20 @@ export function automationMessageId(effectId: string): string {
   return hashed("message-auto-", effectId);
 }
 
-/** The "My agent" thread an automation's wakes go to, one per automation. */
+/**
+ * The thread id an automation's wake carries before an agent is chosen.
+ * `wakeAgent` posts it in the woken agent's thread instead.
+ */
 export function automationWakeThreadId(automationId: string): string {
   return hashed("thread-auto-", `wake/${automationId}`);
+}
+
+/**
+ * The thread an automation's wakes go to in one agent's chat, one per
+ * automation and agent, so switching back to an agent continues its thread.
+ */
+export function automationAgentWakeThreadId(automationId: string, agentId: string): string {
+  return hashed("thread-auto-", `wake/${JSON.stringify([automationId, agentId])}`);
 }
 
 /** The thread id a post starts, the same on every attempt. */

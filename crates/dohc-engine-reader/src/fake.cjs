@@ -11,10 +11,24 @@ function frame(type, flags, data) {
 const control = o => process.stdout.write(frame(1, 0, Buffer.from(JSON.stringify(o))));
 const eof = bytes => process.stdout.end(bytes, () => process.exit(0));
 function answer(r) {
+  if (r.method === 'check-markdown-witness') {
+    const keys = Object.keys(r).sort();
+    if (JSON.stringify(keys) !== JSON.stringify(['id', 'method', 'projectionSha256', 'source', 'sourceSha256'].sort())) process.exit(20);
+    if (mode === 'witness-over-cap') {
+      const header = frame(1, 0, Buffer.alloc(0)); header.writeUInt32LE(65537, 8);
+      return process.stdout.write(header);
+    }
+    return control({id: r.id, kind: 'witness-checked',
+      sourceSha256: mode === 'witness-source-mismatch' ? hash('wrong') : r.sourceSha256,
+      projectionSha256: mode === 'witness-projection-mismatch' ? hash('wrong') : r.projectionSha256,
+      keepsMeaning: mode !== 'witness-unsafe'});
+  }
   const fault = r.currentPath;
   if (fault === 'crash') return process.exit(17);
   if (fault === 'hang') return;
-  if (fault === 'memory') {const allocations = []; for (let i = 0; i < 40; i++) allocations.push(Buffer.alloc(16 * 1024 * 1024, 1));}
+  if (fault === 'memory') {const allocations = []; for (let i = 0; i < 80; i++) allocations.push(Buffer.alloc(16 * 1024 * 1024, 1));}
+  // Commits about 711 MiB on Windows, above the real reader's highest accepted peak of 659 MiB.
+  if (fault === 'peak') {const held = []; for (let i = 0; i < 640; i++) held.push(new Array(65536).fill(i + 0.5)); for (let i = 0; i < 12; i++) held.push(Buffer.alloc(16 * 1024 * 1024, 1));}
   if (fault === 'stderr') process.stderr.write(Buffer.alloc(100000, 120));
   if (fault === 'malformed') return process.stdout.write(Buffer.alloc(12));
   if (fault === 'oversize') {const h = frame(1, 0, Buffer.alloc(0)); h.writeUInt32LE(65537, 8); return process.stdout.write(h);}
@@ -56,7 +70,7 @@ process.stdin.on('data', chunk => {
     if (type !== 1) continue;
     const r = JSON.parse(payload);
     if (r.method === 'hello') {
-      const expected = ['--permission', '--allow-fs-read=' + __filename, '--max-old-space-size=256'];
+      const expected = ['--permission', '--allow-fs-read=' + __filename, '--max-old-space-size=512'];
       const env = Object.keys(process.env);
       // Windows receives SystemRoot. On macOS, CoreFoundation sets this variable inside Node itself.
       const allowed = {win32: ['SystemRoot'], darwin: ['__CF_USER_TEXT_ENCODING']}[process.platform] ?? [];

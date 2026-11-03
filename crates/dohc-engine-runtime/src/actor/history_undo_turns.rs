@@ -603,7 +603,7 @@ impl ActorHandle {
                         token.clone(),
                     );
                     let outcome = self
-                        .run(move |store, cache| {
+                        .run_with_reader_retry(move |store, cache| {
                             let usable = super::super::link_documents::baseline(
                                 store,
                                 cache,
@@ -943,7 +943,7 @@ impl ActorHandle {
                                 Err(error) => {
                                     tx.execute_batch("ROLLBACK TO undo_member; RELEASE undo_member").map_err(StorageError::persist_public)?;
                                     if matches!(&error,RuntimeError::Storage(StorageError::FileLocked)) { return Err(error); }
-                                    let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..}) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive));
+                                    let refusal = matches!(&error,RuntimeError::Domain(DomainError::UndoRefused {..} | DomainError::SyncedDeletionRevivalRefused) | RuntimeError::Sync(dohc_engine_sync::SyncError::LiveDocumentBindingActive));
                                     if refusal {
                                         tx.execute("UPDATE history_undo_plans SET errors_json=json_set(errors_json,?2,?3) WHERE request_id=?1",params![p.request,format!("$.\"{cursor}\""),settle_error.cloned().unwrap_or_else(|| error.to_string())]).map_err(StorageError::persist_public)?;
                                     }

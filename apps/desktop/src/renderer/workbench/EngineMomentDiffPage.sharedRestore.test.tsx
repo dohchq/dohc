@@ -23,22 +23,25 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     automation: (automationId) => ({ name: automationId, collection: "Tasks" }),
     presentations: neutralHistoryPresentations,
   });
-  const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], authors: [], pendingOperation: null,
-    nextGrantCursor: null, nextBeforeCursor: null});
-  vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
+  vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment})});
   render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}
     onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} onError={noop} onSettled={noop}
     historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} />);
   await screen.findByTestId("engine-diff-restore-file");
-  return {moment, ownerRestore};
+  // The rarer ways back wait behind More.
+  fireEvent.click(screen.getByTestId("engine-diff-more"));
+  return {moment};
 }
 
-it("opens shared restore for the text detail produced by the real IPC mapper", async () => {
-  const {moment, ownerRestore} = await open(textDetail);
+// A restore that stops a note's last Edit access can leave it and other
+// shared notes stuck (#3090), so More offers no Restore shared file, even
+// for the Markdown change it used to offer it on. Open file still works.
+it("does not offer Restore shared file on a Markdown change", async () => {
+  const {moment} = await open(textDetail);
   expect(moment.contentKind).toBeUndefined();
-  fireEvent.click(screen.getByTestId("engine-diff-shared-restore"));
-  await screen.findByTestId("owner-restore-dialog");
-  expect(ownerRestore).toHaveBeenCalledWith({workspaceId: "workspace", action: "options", path: "docs/a.md"});
+  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
+  expect(screen.queryByText("Restore shared file…")).toBeNull();
+  expect(screen.getByTestId("engine-diff-open-file")).toBeTruthy();
 });
 
 it("offers Copy your version on a recovery change only, and copies the kept file whole", async () => {
@@ -53,24 +56,6 @@ it("offers Copy your version on a recovery change only, and copies the kept file
     await vi.waitFor(() => expect(writeText).toHaveBeenLastCalledWith("# Plan\n\nKept typing.\n"));
     cleanup();
   }
-});
-
-it("does not offer shared restore for a binary Markdown path", async () => {
-  const {moment} = await open({protected: false, moment: {...base, payload: {before: null, after: {...text, contentKind: "binary", text: ""}}}});
-  expect(moment.contentKind).toBe("binary");
-  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
-});
-
-it("does not offer shared restore for protected Markdown history", async () => {
-  const {moment} = await open({protected: true, moment: {...base, momentOrder: 0, protected: true}});
-  expect(moment.protected).toBe(true);
-  expect(moment.contentKind).toBeUndefined();
-  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
-});
-
-it("does not offer shared restore for other text formats", async () => {
-  await open({protected: false, moment: {...base, path: "docs/a.txt", payload: {before: null, after: {...text, path: "docs/a.txt"}}}});
-  expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
 });
 
 it("offers Stop and restore only for a change a person the owner shared with, or an Edit link, wrote directly", async () => {
@@ -97,8 +82,8 @@ it("offers Stop and restore only for a change a person the owner shared with, or
 });
 
 // A live document's settlement names the collaborator whose edit it holds.
-// The direct-write ledger has nothing of it, so the page names them and
-// offers the shared restore instead.
+// The direct-write ledger has nothing of it, so the page names them, and
+// offers neither Stop and restore nor Restore shared file.
 it("names a live document's collaborator without offering Stop and restore", async () => {
   for (const author of [
     {kind: "named" as const, userId: "user_ana", grantId: "grant-1", grantGeneration: 1},
@@ -106,7 +91,7 @@ it("names a live document's collaborator without offering Stop and restore", asy
   ]) {
     await open({protected: false, moment: {...base, authors: [author], payload: {before: null, after: text}}});
     expect(screen.queryByTestId("engine-diff-stop-and-restore")).toBeNull();
-    expect(screen.getByTestId("engine-diff-shared-restore")).toBeTruthy();
+    expect(screen.queryByTestId("engine-diff-shared-restore")).toBeNull();
     cleanup();
   }
 });

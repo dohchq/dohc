@@ -32,9 +32,11 @@ export interface LiveAgentDispatchStoreHandle {
   requeueFailedTrigger(input: {
     workspaceId: string;
     triggerMessageId: string;
+    agentId: string;
     runId: string;
   }): Promise<boolean>;
-  listAppQuitRecoveries(workspaceId: string): Promise<ChatDispatchRecovery[]>;
+  /** Stopped runs in the workspace, or only in one thread. */
+  listAppQuitRecoveries(workspaceId: string, threadId?: string): Promise<ChatDispatchRecovery[]>;
   close(): Promise<void>;
 }
 
@@ -139,22 +141,6 @@ export function createLiveAgentDispatchStore(
   };
 
   const store: AwaitableAgentDispatchStore = {
-    recordEligibleTriggers: async (input) => {
-      assertWorkspaceId(input.workspaceId);
-      return await invoke(
-        async (adapter) =>
-          await adapter.request(
-            CHATS_METHOD.dispatchRecordEligibleTriggers,
-            {
-              ...(input.verifiedUserId
-                ? { verifiedUserId: input.verifiedUserId }
-                : {}),
-            },
-            { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
-          ),
-        { retryTransportErrors: true },
-      );
-    },
     recordTrigger: async (input) =>
       await invoke(async (adapter) => await adapter.recordTrigger(input)),
     claimNextPending: async (workspaceId, claimOptions = {}) =>
@@ -169,6 +155,7 @@ export function createLiveAgentDispatchStore(
             CHATS_METHOD.dispatchFailPendingForThread,
             {
               threadId: input.threadId,
+              agentId: input.agentId,
               reason: input.reason,
             },
             { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
@@ -359,8 +346,8 @@ export function createLiveAgentDispatchStore(
         async (adapter) =>
           await adapter.runRecordsForThread(workspaceId, threadId, options),
       )) as Record<string, AgentRunRecord>,
-    latestRunForThread: async (workspaceId, threadId) =>
-      await invoke(async (adapter) => await adapter.latestRunForThread(workspaceId, threadId)),
+    latestRunForThread: async (workspaceId, threadId, agentId) =>
+      await invoke(async (adapter) => await adapter.latestRunForThread(workspaceId, threadId, agentId)),
     getRunRecord: async (
       runId,
       requestOptions?: AgentDispatchRequestOptions,
@@ -445,6 +432,7 @@ export function createLiveAgentDispatchStore(
               page.dispatches.some(
                 (candidate) =>
                   candidate.triggerMessageId === input.triggerMessageId &&
+                  candidate.agentId === input.agentId &&
                   candidate.state === "pending",
               )
             ) {
@@ -457,7 +445,7 @@ export function createLiveAgentDispatchStore(
         { retryTransportErrors: true },
       );
     },
-    listAppQuitRecoveries: async (workspaceId) => {
+    listAppQuitRecoveries: async (workspaceId, threadId) => {
       assertWorkspaceId(workspaceId);
       return await invoke(
         async (adapter) => {
@@ -467,6 +455,7 @@ export function createLiveAgentDispatchStore(
             const page: ChatRecoveriesPage = await adapter.request(
               CHATS_METHOD.dispatchListAppQuitRecoveries,
               {
+                ...(threadId !== undefined ? { threadId } : {}),
                 pageLimit: 500,
                 ...(cursor !== undefined ? { cursor } : {}),
               },

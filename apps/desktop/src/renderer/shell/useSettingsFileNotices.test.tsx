@@ -48,6 +48,11 @@ describe("settingsFileNotice", () => {
       settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", warning: "dohc replaced workspace settings.",
     };
     expect(settingsFileNotice(".dohc/local/settings.local.json", reset)).toBeNull();
+    const notOpened: WorkspaceSettingsResult = {
+      settings: DEFAULT_WORKSPACE_SETTINGS, source: "recovered", notOpened: true,
+      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+    };
+    expect(settingsFileNotice(".dohc/local/settings.local.json", notOpened)).toBeNull();
   });
 });
 
@@ -101,6 +106,132 @@ describe("useSettingsFileNotices", () => {
     expect(result.current.shellErrors.map((row) => row.kind)).toEqual(["user-settings-file"]);
     rerender({ userSettings: user(), ready: true });
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("shows no row for a read before the engine opened the workspace, reads again on its activity, and Try again clears the row after", async () => {
+    const notOpened: WorkspaceSettingsResult = {
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "recovered",
+      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      notOpened: true,
+    };
+    const ignored: WorkspaceSettingsResult = {
+      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", ignored: [{ key: "theme", reason: "unknown" }],
+    };
+    const getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => notOpened);
+    const listeners = new Set<(event: { workspaceId?: string }) => void>();
+    const onWorkspaceActivity = vi.fn((listener: (event: { workspaceId?: string }) => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    });
+    vi.stubGlobal("dohcDesktop", { getWorkspaceSettings, onWorkspaceActivity });
+    const { result } = renderHook(() => {
+      const errors = useShellError("ws-a");
+      useSettingsFileNotices({
+        workspaceId: "ws-a",
+        workspaceIsReady: true,
+        userSettings: user(),
+        show: errors.showSettingsFileNotice,
+        reportError: (message) => errors.reportShellFailure({ message }),
+      });
+      return errors;
+    });
+    await waitFor(() => expect(listeners.size).toBe(1));
+    // It reads once more as it starts listening, and the engine has still not opened it.
+    await waitFor(() => expect(getWorkspaceSettings).toHaveBeenCalledTimes(2));
+    expect(result.current.shellErrors).toEqual([]);
+
+    act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-b" })));
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(2);
+
+    getWorkspaceSettings.mockResolvedValue(ignored);
+    act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-a" })));
+    await waitFor(() => expect(result.current.shellErrors.map((row) => row.message)).toEqual([
+      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+    ]));
+    // Once a read gets the file, activity reads nothing more.
+    expect(listeners.size).toBe(0);
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(3);
+
+    // The person repairs the file; Try again clears its row.
+    getWorkspaceSettings.mockResolvedValue({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    await waitFor(() => expect(result.current.shellErrors).toEqual([]));
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps its own read of the opened workspace when Settings reports a read from before the open", async () => {
+    const notOpened: WorkspaceSettingsResult = {
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "recovered",
+      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      notOpened: true,
+    };
+    const getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => notOpened);
+    const listeners = new Set<(event: { workspaceId?: string }) => void>();
+    vi.stubGlobal("dohcDesktop", {
+      getWorkspaceSettings,
+      onWorkspaceActivity: (listener: (event: { workspaceId?: string }) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
+    const { result } = renderHook(() => {
+      const errors = useShellError("ws-a");
+      const onWorkspaceRead = useSettingsFileNotices({
+        workspaceId: "ws-a",
+        workspaceIsReady: true,
+        userSettings: user(),
+        show: errors.showSettingsFileNotice,
+        reportError: (message) => errors.reportShellFailure({ message }),
+      });
+      return { ...errors, onWorkspaceRead };
+    });
+    await waitFor(() => expect(listeners.size).toBe(1));
+    await waitFor(() => expect(getWorkspaceSettings).toHaveBeenCalledTimes(2));
+
+    // The engine opens and the hook reads the file. Before that read answers,
+    // Settings passes on its own slower read from before the open.
+    let answer: ((read: WorkspaceSettingsResult) => void) | undefined;
+    getWorkspaceSettings.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-a" })));
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(3);
+    act(() => result.current.onWorkspaceRead(notOpened));
+    await act(async () => answer?.({
+      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", ignored: [{ key: "theme", reason: "unknown" }],
+    }));
+    await waitFor(() => expect(result.current.shellErrors.map((row) => row.message)).toEqual([
+      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+    ]));
+  });
+
+  it("reads again when the engine opened the workspace while the first read was answering", async () => {
+    const getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", ignored: [{ key: "theme", reason: "unknown" }],
+    }));
+    // The open's activity came before this refusal, so no activity follows it.
+    getWorkspaceSettings.mockResolvedValueOnce({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "recovered",
+      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      notOpened: true,
+    });
+    vi.stubGlobal("dohcDesktop", { getWorkspaceSettings, onWorkspaceActivity: vi.fn(() => () => undefined) });
+    const { result } = renderHook(() => {
+      const errors = useShellError("ws-a");
+      useSettingsFileNotices({
+        workspaceId: "ws-a",
+        workspaceIsReady: true,
+        userSettings: user(),
+        show: errors.showSettingsFileNotice,
+        reportError: (message) => errors.reportShellFailure({ message }),
+      });
+      return errors;
+    });
+    await waitFor(() => expect(result.current.shellErrors.map((row) => row.message)).toEqual([
+      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+    ]));
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(2);
   });
 
   it("opens each file from its row, and Try again reads it again", async () => {

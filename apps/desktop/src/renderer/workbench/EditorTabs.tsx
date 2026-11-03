@@ -1,5 +1,6 @@
 import { parseTab, TAB_KINDS } from "./workbenchState";
 import { TabGlyph, tabMark, type TabMark } from "./tabGlyph";
+import type { ObjectKind } from "../ui/KindGlyph";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
@@ -700,6 +701,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   /** Display names the tab path cannot supply, keyed by path: moment paths
    * from history records. */
   tabLabels?: ReadonlyMap<string, string>;
+  // A tab whose object its path doesn't name, such as an agent's chat.
+  tabGlyphs?: ReadonlyMap<string, ObjectKind>;
   /** The listing by path: a file tab's header-checked kind and page emoji. */
   files?: ReadonlyMap<string, WorkspaceFileEntry>;
   // Paths with a set-aside draft. Unlike `activeTabDirty`, this is
@@ -948,7 +951,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
             groupId={props.groupId}
             path={tab.path}
             label={props.tabLabels?.get(tab.path)}
-            {...tabMark(tab.path, props.files)}
+            {...tabMark(tab.path, props.files, props.tabGlyphs?.get(tab.path))}
             active={tab.path === props.activeTab}
             dirty={
               (tab.path === props.activeTab && props.activeTabDirty) ||
@@ -1120,7 +1123,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
             // as Explorer's open editors tone the same glyph.
             icon: (
               <TabGlyph
-                {...tabMark(tab.path, props.files)}
+                {...tabMark(tab.path, props.files, props.tabGlyphs?.get(tab.path))}
                 size={TAB_GLYPH_SIZE}
                 className={tab.path === props.activeTab ? "text-ink" : "text-subtle"}
               />

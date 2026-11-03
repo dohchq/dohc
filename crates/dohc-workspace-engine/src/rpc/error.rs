@@ -89,6 +89,13 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
     if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
         return StorageError::is_transient_lock(sqlite);
     }
+    // A shared sync failure is busy when its original is.
+    if let RuntimeError::Sync(sync) = error {
+        return matches!(
+            sync.original(),
+            SyncError::Storage(StorageError::FileLocked)
+        );
+    }
     matches!(
         error,
         RuntimeError::Storage(StorageError::FileLocked)
@@ -97,7 +104,6 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
             ))
             | RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked))
             | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
-            | RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked))
             | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
             // The relay route carries it under its own type rather than a
             // storage error, because `RelayError` is where a relay operation's
@@ -149,6 +155,22 @@ fn engine_folder_not_private(refused: &dohc_macos_files::NotPrivate) -> WireErro
     )
 }
 
+/// The reader failed in a way that clears on its own and the proof has
+/// retries left, so the caller asks again after a backoff. The resolver
+/// bounds those retries and then answers `markdown-reader-unavailable`.
+pub(super) fn reader_retryable(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Collab(CollabError::MarkdownReaderRetryable)
+            | RuntimeError::LiveApplication(ApplicationError::Collab(
+                CollabError::MarkdownReaderRetryable
+            ))
+            | RuntimeError::Sync(SyncError::RetryableState {
+                reason: "markdown-reader-retryable"
+            })
+    )
+}
+
 fn map_runtime_inner(error: &RuntimeError) -> WireError {
     // The volume keeps ACL entries on the engine's folder or store, or what is
     // at one of their paths can't be kept private.
@@ -187,6 +209,20 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
         return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
     }
+    if matches!(
+        error,
+        RuntimeError::MarkdownWriteHeld { .. }
+            | RuntimeError::Sync(SyncError::MarkdownWriteHeld { .. })
+    ) {
+        return WireError::new(ErrorCode::Conflict, "markdown-write-held");
+    }
+    if matches!(
+        error,
+        RuntimeError::Collab(CollabError::MarkdownWitnessCheckPending { .. })
+            | RuntimeError::Sync(SyncError::MarkdownWitnessCheckPending { .. })
+    ) {
+        return WireError::new(ErrorCode::Overloaded, "markdown-witness-check-pending");
+    }
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
@@ -200,6 +236,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         })
     ) {
         return WireError::new(ErrorCode::Overloaded, "settlement-materialization-pending");
+    }
+    if reader_retryable(error) {
+        return WireError::new(ErrorCode::Overloaded, "markdown-reader-retryable");
     }
     if let RuntimeError::Domain(DomainError::WritePreconditionFailed { .. }) = error {
         return WireError::new(ErrorCode::Conflict, "write-precondition-failed");
@@ -350,13 +389,30 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
                 "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
             );
         }
+        // Another held proof holds the workspace; nothing queued, ask again.
+        RuntimeError::HeldReadBusy => {
+            return WireError::new(ErrorCode::Overloaded, "held-read-busy");
+        }
+        // The proof's answer can never fit; asking again answers the same.
+        RuntimeError::HeldReadTooLarge => {
+            return WireError::new(ErrorCode::PayloadTooLarge, "held-read-too-large");
+        }
+        // The store closed with a held read's reader still open; its files
+        // stay as they are until it closes. Ask again.
+        RuntimeError::StoreInUse => {
+            return WireError::new(ErrorCode::Overloaded, "store-in-use");
+        }
         RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
         }
-        RuntimeError::Sync(sync @ SyncError::ProjectionTooLarge { .. }) => {
+        RuntimeError::Sync(sync)
+            if matches!(sync.original(), SyncError::ProjectionTooLarge { .. }) =>
+        {
             return WireError::new(ErrorCode::PayloadTooLarge, sync.to_string());
         }
-        RuntimeError::Sync(SyncError::LiveDocumentBindingActive) => {
+        RuntimeError::Sync(sync)
+            if matches!(sync.original(), SyncError::LiveDocumentBindingActive) =>
+        {
             return WireError::new(ErrorCode::InvalidParams, "live-document-binding-active");
         }
         _ => {}
@@ -509,9 +565,12 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         // recognizer above — which answers OVERLOADED for every route. This
         // arm exists for exhaustiveness and names the backpressure honestly.
         RelayError::StoreBusy => ErrorCode::Overloaded,
+        // The relay coordinator awaits every pending validation and runs the
+        // operation again, so none reaches a reply.
         RelayError::ServerInternal
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
+        | RelayError::ValidationPending(_)
         | RelayError::Local(_) => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
@@ -545,6 +604,9 @@ fn map_domain(error: &DomainError) -> WireError {
         DomainError::ForkBaseNotFound => (InvalidParams, "fork-base-not-found"),
         DomainError::ConflictNotFound => (InvalidParams, "conflict-not-found"),
         DomainError::ConflictStaleTarget => (InvalidParams, "conflict-stale-target"),
+        DomainError::SyncedDeletionRevivalRefused => {
+            (InvalidParams, "synced-deletion-revival-refused")
+        }
         DomainError::BinaryHeadNotText => (InvalidParams, "binary-head-not-text"),
         DomainError::InvalidPath { .. } => (InvalidParams, "invalid-path"),
         DomainError::InvalidText { .. } => (InvalidParams, "invalid-text"),
@@ -595,9 +657,10 @@ fn map_domain(error: &DomainError) -> WireError {
 
 fn map_collab_code(error: &CollabError) -> ErrorCode {
     match error {
-        CollabError::MarkdownReaderPending(_) | CollabError::MarkdownReaderUnavailable => {
-            ErrorCode::Internal
-        }
+        CollabError::MarkdownReaderPending(_)
+        | CollabError::MarkdownReaderUnavailable
+        | CollabError::MarkdownWitnessCheckPending { .. } => ErrorCode::Internal,
+        CollabError::MarkdownReaderRetryable => ErrorCode::Overloaded,
         CollabError::ConfiguredByteBudgetExceeded
         | CollabError::AuthorCapacity
         | CollabError::AuthorEntryTooLarge => ErrorCode::LimitExceeded,
@@ -641,15 +704,20 @@ fn map_collab_code(error: &CollabError) -> ErrorCode {
 
 fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
+        SyncError::Shared(original) => map_sync_code(original),
         SyncError::MarkdownReaderPending(_) => ErrorCode::Internal,
+        SyncError::MarkdownWitnessCheckPending { .. } => ErrorCode::Internal,
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
         // Retryable state conditions are transient by definition; Internal is
         // the retry-eligible class on this surface (InvalidParams is terminal).
         | SyncError::RetryableState { .. }
+        | SyncError::ReleasedLineageUnsettled(_)
+        | SyncError::ValidationPending(_)
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
+        | SyncError::MarkdownWriteHeld { .. }
         | SyncError::LiveDocumentBindingActive
         | SyncError::UnsupportedOperation
         | SyncError::ShareBoundaryViolation
@@ -663,6 +731,7 @@ fn map_sync_code(error: &SyncError) -> ErrorCode {
         | SyncError::ProjectionTooLarge { .. } => {
             ErrorCode::PayloadTooLarge
         }
+        SyncError::Cancelled => ErrorCode::Cancelled,
     }
 }
 
@@ -719,6 +788,20 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn undo_refusal_wire_text_keeps_the_domain_prefix() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(
+            dohc_engine_domain::DomainError::UndoRefused {
+                path: "a.md".into(),
+                reason: "link changed after rename",
+            },
+        ));
+        assert_eq!(
+            error.message,
+            "domain error: Undo refused: link changed after rename: a.md"
+        );
+    }
+
     #[test]
     fn changed_chat_authority_has_a_restartable_wire_reason() {
         let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionAccessChanged);
@@ -1078,6 +1161,35 @@ mod tests {
     use dohc_engine_sync::RelayError;
     use dohc_engine_sync::SyncError;
 
+    /// Opus's r2c-3c-4 finding 5: a held proof's failure, shared by its
+    /// callers, reaches the wire as its original does, and an answer too
+    /// large for a held read is a size refusal.
+    #[test]
+    fn a_shared_sync_failure_maps_as_its_original() {
+        use dohc_engine_storage::StorageError;
+        let originals: [fn() -> SyncError; 5] = [
+            || SyncError::Storage(StorageError::FileLocked),
+            || SyncError::Cancelled,
+            || SyncError::LiveDocumentBindingActive,
+            || SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes: 2,
+                limit_bytes: 1,
+            },
+            || SyncError::Storage(StorageError::corrupt_public(std::io::Error::other("bad"))),
+        ];
+        for original in originals {
+            let direct = map_runtime(RuntimeError::Sync(original()));
+            let shared = map_runtime(RuntimeError::Sync(SyncError::Shared(std::sync::Arc::new(
+                original(),
+            ))));
+            assert_eq!((shared.code, shared.message), (direct.code, direct.message));
+        }
+        let too_large = map_runtime(RuntimeError::HeldReadTooLarge);
+        assert_eq!(too_large.code, ErrorCode::PayloadTooLarge);
+        assert_eq!(too_large.message, "held-read-too-large");
+    }
+
     #[test]
     fn live_application_native_errors_preserve_refusal_and_failure_codes() {
         for (application, expected) in [
@@ -1183,6 +1295,34 @@ mod tests {
         ));
         assert_eq!(error.code, ErrorCode::Overloaded);
         assert_eq!(error.message, "settlement-materialization-pending");
+    }
+
+    #[test]
+    fn a_reader_with_retries_left_asks_for_a_backoff_and_an_exhausted_one_does_not() {
+        for error in [
+            RuntimeError::Collab(CollabError::MarkdownReaderRetryable),
+            RuntimeError::LiveApplication(ApplicationError::Collab(
+                CollabError::MarkdownReaderRetryable,
+            )),
+            RuntimeError::Sync(SyncError::RetryableState {
+                reason: "markdown-reader-retryable",
+            }),
+        ] {
+            let wire = map_runtime(error);
+            assert_eq!(wire.code, ErrorCode::Overloaded);
+            assert_eq!(wire.message, "markdown-reader-retryable");
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::AfterBackoff);
+        }
+        for error in [
+            RuntimeError::Collab(CollabError::MarkdownReaderUnavailable),
+            RuntimeError::Sync(SyncError::RetryableState {
+                reason: "dohc could not verify this file. Try again.",
+            }),
+        ] {
+            let wire = map_runtime(error);
+            assert_eq!(wire.code, ErrorCode::Internal);
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
+        }
     }
 
     /// The artifact lock and a busy engine database are two
@@ -1314,6 +1454,16 @@ mod tests {
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn synced_deletion_refusal_preserves_its_domain_code() {
+        let error = map_runtime(RuntimeError::Domain(
+            DomainError::SyncedDeletionRevivalRefused,
+        ));
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "synced-deletion-revival-refused");
+        assert_eq!(error.retry, dohc_engine_protocol::Retryability::No);
     }
 
     #[test]

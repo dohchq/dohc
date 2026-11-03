@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
-import type { ChatChannelRecord, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent, SitePackageInfo } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { WORKBENCH_PERSIST_DELAY_MS, type Workspace } from "./DesktopWorkspaceShell";
@@ -19,10 +19,9 @@ import { basenameOf } from "./path";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { editorTabTestId } from "../testPins";
-import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
-import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, HOME_STATE, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 vi.mock("./shell/useWorkspaceListing", { spy: true });
@@ -564,7 +563,7 @@ describe("collection folders", () => {
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
+        listener({ sessionId, workspaceId: WORKSPACE.workspaceId, path: "tasks/one.md", state: { kind: "saved-here" }, seq: 1 });
       }
     });
 
@@ -656,20 +655,19 @@ describe("collection folders", () => {
     expect(within(palette).queryByText("New folder")).toBeNull();
   });
 
-  const DOCUMENT = FILE_KIND_RECORDS.markdown.name;
+  const DOCUMENT = "Page";
   const DRAWING = FILE_KIND_RECORDS.drawing.name;
   it.each<[string, Workspace, string[]]>([
-    ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING, "App"]],
+    ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING]],
     ["a View share view", SHARE_VIEW, []],
     ["a Comment share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "comment" } }, []],
-    // An app is a folder, and a received share takes no new folder.
     ["an Edit share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } }, [DOCUMENT, "Collection", DRAWING]],
   ])("offers start tiles in the empty editor of %s only where the palette offers their command", async (_name, workspace, offered) => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))), workspace);
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     const start = within(within(screen.getByTestId("editor-group-primary")).getByTestId("start-surface"));
 
-    for (const label of [DOCUMENT, "Collection", DRAWING, "App"]) {
+    for (const label of [DOCUMENT, "Collection", DRAWING]) {
       expect(start.queryByRole("button", { name: label }) !== null).toBe(offered.includes(label));
     }
     if (offered.length === 0) expect(start.getByText("Select a file")).toBeTruthy();
@@ -685,7 +683,7 @@ describe("start surface", () => {
 
   it("opens a new page from the document tile", async () => {
     const start = await startSurface();
-    fireEvent.click(start.getByRole("button", { name: FILE_KIND_RECORDS.markdown.name }));
+    fireEvent.click(start.getByRole("button", { name: "Page" }));
     expect(await screen.findByTestId("new-page")).toBeTruthy();
   });
 
@@ -702,18 +700,6 @@ describe("start surface", () => {
     await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "Untitled.excalidraw" }),
     ));
-  });
-
-  it("creates one app from App, however often it is pressed", async () => {
-    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
-    const start = await startSurface(bridge);
-    const app = start.getByRole("button", { name: "App" });
-    fireEvent.click(app);
-    fireEvent.click(app);
-    await waitFor(() => expect(bridge.createWorkspaceFolder).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "app" }),
-    ));
-    expect(bridge.createWorkspaceFolder.mock.calls.filter(([payload]) => payload.relativePath === "app")).toHaveLength(1);
   });
 
   it("lists recent files that still exist and opens one", async () => {
@@ -1844,9 +1830,30 @@ describe("settings entry points", () => {
   });
 });
 
+const SITE: SitePackageInfo = {
+  root: "app",
+  title: "App",
+  kind: "static",
+  confidence: "high",
+  entryPath: "app/index.html",
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: ["app/index.html"],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
+};
+
 describe("customize", () => {
-  it("opens the sidebar's settings from its menu, and Add an app here… opens Apps", async () => {
+  it("opens the sidebar's settings from its menu, and Add an app here… opens the Explorer's apps", async () => {
     const bridge = makeBridge(Promise.resolve(null));
+    bridge.listSites.mockResolvedValue({ sites: [{ ...SITE, root: "trip", title: "Trip" }] });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -1857,52 +1864,42 @@ describe("customize", () => {
     await waitFor(() => expect(document.activeElement).toBe(row));
     await user.click(screen.getByLabelText("Close settings"));
 
+    // From another view, the menu opens the Explorer on its first app.
+    await user.click(screen.getByTestId("activity-search"));
     await user.click(screen.getByRole("button", { name: "Sidebar actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Add an app here…" }));
-    // The rail marks Apps at once; its view loads on its own clock.
-    expect(screen.getByTestId("activity-sites").getAttribute("aria-current")).toBe("page");
+    await user.click(await screen.findByRole("menuitem", { name: "Add an app here…" }));
+    expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page");
+    const appRow = await screen.findByTestId("sites-row");
+    await waitFor(() => expect(document.activeElement).toBe(appRow));
+    expect(screen.queryByTestId("activity-sites")).toBeNull();
   });
 
-  it("hands a Chats setting to the person's agent in the agent's chat", async () => {
-    const agentChannel: ChatChannelRecord = {
-      id: "channel-agent", name: "Agent", slug: "agent", kind: "agent",
-      createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0,
-    };
-    // Share answers unlock the channel's composer; without them it fails closed.
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      listChatChannelShares: vi.fn(async () => ({
-        joined: [], sessionKey: null,
-        relay: { state: "answered" as const, granted: [], received: [] },
-      })),
+  it("keeps a listed app's files out of Home's Pages before its folder is read", async () => {
+    const bridge = makeBridge(Promise.resolve(HOME_STATE));
+    bridge.listSites.mockResolvedValue({ sites: [{ ...SITE, root: "trip", title: "Trip" }] });
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      visibility: { status: "ready", rules: [] },
+      files: [{ path: "notes.md", kind: "file" }, { path: "trip/README.md", kind: "file" }, { path: "trip/index.html", kind: "file" }],
+      folders: ["trip"],
     });
-    bridge.listChatChannels = vi.fn(async () => ({ channels: [agentChannel], fileThreads: [] }));
+    renderShell(bridge);
+
+    await screen.findByTestId("sites-row");
+    const pages = screen.getByTestId("explorer-pages");
+    expect(pages.querySelector('[data-path="notes.md"]')).not.toBeNull();
+    expect(pages.querySelector('[data-path="trip"]')).toBeNull();
+    expect(pages.querySelector('[data-path="trip/README.md"]')).toBeNull();
+  });
+
+  it("offers Add an app here… only while the workspace has an app", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(<DesktopWorkspaceShell
-      workspace={WORKSPACE}
-      workspaces={[WORKSPACE]}
-      {...shellBootstrapProps(bridge)}
-      userSettings={{ source: "stored", settings: settingsWithAgent({ name: "Nova" }) }}
-      onSwitchWorkspace={() => {}}
-    />);
+    renderShell(bridge);
 
-    await user.click(await screen.findByTestId("activity-chats"));
+    await waitFor(() => expect(bridge.listSites).toHaveBeenCalled());
     await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
-    const row = await screen.findByTestId("settings-row-your-color");
-    expect(row.dataset.highlighted).toBe("true");
-    await user.click(await within(row).findByRole("button", { name: "Ask my agent" }));
-
-    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
-    expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
-    const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-new-thread-composer");
-    await waitFor(() => expect(composer.value).toBe([
-      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "agents.*.hue" keys in my dohc settings file, /state/dohc-settings.json.',
-      "dohc applies the file when it is saved.",
-      "What I want: ",
-    ].join("\n")));
-    expect(document.activeElement).toBe(composer);
-    expect(composer.selectionStart).toBe(composer.value.length);
+    expect(screen.getByRole("menuitem", { name: "Customize…" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Add an app here…" })).toBeNull();
   });
 });
 
@@ -2084,7 +2081,6 @@ describe("workbench render cost", () => {
       const moments = bridge.listHistory.mock.calls.length;
       const statuses = bridge.getSyncStatus.mock.calls.length;
       const agents = bridge.getAgentRunStatus.mock.calls.length;
-      const tryStates = bridge.getTryInVersionState.mock.calls.length;
 
       act(() =>
         bridge.emitWorkspaceActivity({
@@ -2105,7 +2101,6 @@ describe("workbench render cost", () => {
       // Run state arrives from main's pushes, so a refresh does not read it.
       expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents);
       expect(bridge.readAgentRunState).toHaveBeenCalledTimes(1);
-      expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
       act(() => bridge.emitWorkspaceActivity({
         workspaceId: WORKSPACE.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: false,
       }));

@@ -5,8 +5,9 @@ import type { Socket } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
-import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationSource.js";
+import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationValidation.js";
 import type { LiveJournalValidation } from "./storage/types.js";
+import {WORKER_LIVE_VALIDATION_POLICY} from "@dohc/ydoc-projection/live-journal-validation";
 import { liveRestoreValidator, type LiveRestoreReply, type LiveRestoreValidator, type LiveRestoreWork } from "./liveRestoreValidation.js";
 
 export type SettlementNormalizationInput = {
@@ -74,14 +75,14 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
   let closed = false;
-  const hasCapacity = () => !closed && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
+  const hasCapacity = (auxiliary = false) => !closed && (!auxiliary || ![...slots].some(slot => slot.auxiliary)) && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
   };
-  function waitForCapacity(signal?: AbortSignal): Promise<void> {
+  function waitForCapacity(signal?: AbortSignal, auxiliary = false): Promise<void> {
     signal?.throwIfAborted();
     if (closed) return Promise.reject(new Error("Live validation closed."));
-    if (hasCapacity())
+    if (hasCapacity(auxiliary))
       return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
       const dispose = () => {
@@ -184,7 +185,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       return {
         kind: "retry",
         reason: "admission-unavailable",
-        waitForCapacity,
+        waitForCapacity: (signal?: AbortSignal) => waitForCapacity(signal, auxiliary),
       };
     slot.busy = true;
     slot.auxiliary = auxiliary;
@@ -266,7 +267,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         signal,
       );
   }
-  /** Restore does not wait for a slot either: a busy pool refuses it as busy. */
+  /** Preparation refuses a busy pool; admission waits with its captured reads and cancellation signal. */
   function restore(policy: OrderedLiveUpdateCutPolicy): LiveRestoreValidator {
     const ownedPolicy = Object.freeze({ ...policy });
     return liveRestoreValidator((input, signal) =>
@@ -297,17 +298,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       input: SettlementNormalizationInput,
       signal?: AbortSignal,
     ) {
-      const policy = {
-        maxStructVisits: 1_000_000,
-        maxValueNodeVisits: 5_000_000,
-        maxDecodedPayloadByteVisits: 100_000_000,
-        maxStructClientGroupVisits: 1_000_000,
-        maxDeleteClientGroupVisits: 1_000_000,
-        maxDeleteIntervalVisits: 1_000_000,
-        maxIndexOperations: 10_000_000,
-      };
       return submit<SettlementNormalizationResult>(
-        { kind: "settlement", policy, input },
+        { kind: "settlement", policy: WORKER_LIVE_VALIDATION_POLICY, input },
         { kind: "refused", reason: "capacity-refused", source: "registration-input" },
         signal,
       );
@@ -315,5 +307,4 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     close,
   };
 }
-
 export const liveValidation = createLiveValidationExecutor();

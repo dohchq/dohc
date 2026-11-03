@@ -8,6 +8,7 @@ import { parseHostEpoch, parseRelayAcceptedLiveUpdate } from "@dohc/live-session
 import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import { encodeNativeRestoreInput } from "./nativeRestore";
+import { encodeReplicaJournalPage, type ReplicaRestoreCancellation } from "./replicaJournal";
 import {
   EngineClient,
   EngineClientError,
@@ -23,6 +24,7 @@ import {
   type EngineClientConnectOptions,
   type EngineClientConnection,
 } from "./engineClient";
+import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
 it("tells a hosted document that is not ready from any other conflict", () => {
   const refusal = (code: string, message: string) => new EngineRequestError(1, { code, message, retry: "no" } as never);
@@ -76,6 +78,26 @@ it("streams a replica page's exact admitted metadata and binary spans beyond con
     expect(field()).toEqual(Buffer.from(update));expect(field()).toEqual(Buffer.from(checkpoint));expect(offset).toBe(bytes.length);
     expect(chunks.length).toBeGreaterThan(1);
   } finally {transport.close();}
+});
+
+// A cancellation control entry keeps its place among the rows and adds no span.
+it("encodes a replica cancellation entry in order and without byte spans", () => {
+  const update=Uint8Array.from([1,2,3]), binding={workspaceId:"ws",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1};
+  const metadata={accepted:{receipt:{deliveryId:"replica",updateDigest:createHash("sha256").update(update).digest("hex"),journalCursor:9,acceptingHostEpoch:parseHostEpoch(1)},
+    binding,authority:{principalKind:"owner" as const,principalId:"owner",grantId:null,grantGeneration:null},receivedAtMs:10},firstSeen:[]};
+  const cancellation:ReplicaRestoreCancellation={relayDatabaseNamespace:"relay",journalCursor:8,cancellation:{
+    fence:{operation:{point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...binding,restoreFenceGeneration:0},hostId:"host",newFence:1,
+      origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
+    binding,endpoint:{terminalReceipt:null,eventCount:0,historyEvidenceDigest:"b".repeat(64)},recordedAtMs:11},
+    authority:{lineageClaimId:binding.lineageClaimId,baselineSequence:1,restoreFenceGeneration:1}};
+  const bytes=encodeReplicaJournalPage([cancellation,{admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"c".repeat(64),journalCursor:9,authority:null,restore:null}]);
+  let offset=0;
+  const field=()=>{const size=bytes.readUInt32LE(offset);offset+=4;const value=bytes.subarray(offset,offset+size);offset+=size;return value;};
+  const entries=JSON.parse(field().toString());
+  expect(entries[0]).toEqual(cancellation);
+  expect(entries[1].admitted).toEqual({metadata,updateBytes:[]});
+  expect(field()).toEqual(Buffer.from(update));
+  expect(offset).toBe(bytes.length);
 });
 
 describe("private owner delivery transport", () => {
@@ -864,11 +886,11 @@ describe("outbound backpressure", () => {
     peer.backpressured = true;
     const first = transport.sendRequest(request(1, "first")).catch(error => error);
     const controller = new AbortController();
-    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: mode === "deadline" ? 1 : 1000 }, controller.signal).catch(error => error);
+    const second = transport.sendRequest({ ...request(2, "second"), deadlineMs: mode === "deadline" ? 1 : 1000 }, mode === "abort" ? controller.signal : undefined, undefined, mode === "cancelRequest" ? controller.signal : undefined).catch(error => error);
     let cancellation: Promise<void> | undefined;
     try {
       if (mode === "abort") controller.abort(new Error("cancelled"));
-      if (mode === "cancelRequest") cancellation = transport.cancelRequest(2);
+      if (mode === "cancelRequest") controller.abort();
       expect(await second).toBeInstanceOf(Error);
       peer.drain(); await cancellation; await nextImmediate();
       expect(peer.received.filter(envelope => envelope.type === "request" || envelope.type === "cancel"))
@@ -1636,9 +1658,10 @@ describe("request progress", () => {
     peer.backpressured = true;
     const first = transport.sendRequest(request(1, "first")).catch(error => error);
     const queued = transport.sendRequest({ ...request(2, "queued"), deadlineMs: 1000 }, undefined, onProgress).catch(error => error);
-    const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress).catch(error => error);
+    const cancel = new AbortController();
+    const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress, cancel.signal).catch(error => error);
     try {
-      await transport.cancelRequest(3);
+      cancel.abort();
       expect(await cancelled).toMatchObject({ wireError: { code: "CANCELLED" } });
       clock.mockReturnValue(400);
       peer.drain();
@@ -2419,7 +2442,25 @@ describe("EngineClient", () => {
     transport.close();
   });
 
-  it("cancels the wire request behind a caller id", async () => {
+  it("cancels only the rewrite when two pending requests share a caller id", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = envelope => envelopes.push(envelope);
+    const open = transport.sendRequest(request(1, "workspace.open"));
+    const cancel = new AbortController();
+    const rewrite = transport.sendRequest(request(1, "history.rewriteLinks"), undefined, undefined, cancel.signal);
+    cancel.abort(); await nextImmediate();
+    expect(envelopes).toMatchObject([{type: "request", id: 1, method: "workspace.open"},
+      {type: "request", id: 2, method: "history.rewriteLinks"}, {type: "cancel", id: 2}]);
+    peer.send({type: "error", id: 2, error: {code: "CANCELLED", message: "cancelled", retry: "no"}});
+    await expect(rewrite).rejects.toMatchObject({wireError: {code: "CANCELLED"}});
+    peer.send({type: "response", id: 1, result: {workspace: "other-workspace"}});
+    await expect(open).resolves.toMatchObject({id: 1, result: {workspace: "other-workspace"}});
+    transport.close();
+  });
+
+  it("cancels the exact wire request", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
     peer.acknowledge();
@@ -2427,8 +2468,10 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
-    const operation = transport.sendRequest(request(4_242, "slow.open"));
-    await transport.cancelRequest(4_242);
+    const cancel = new AbortController();
+    const operation = transport.sendRequest(request(4_242, "slow.open"), undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
 
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "slow.open" },
@@ -2457,8 +2500,10 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
-    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"));
-    await transport.cancelRequest(4_243);
+    const cancel = new AbortController();
+    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"), undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
 
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "sync.commitCursor" },
@@ -2480,11 +2525,13 @@ describe("EngineClient", () => {
     const envelopes: Envelope[] = [];
     peer.onEnvelope = (envelope) => envelopes.push(envelope);
 
+    const cancel = new AbortController();
     const settlement = transport.sendRequest({
       ...request(4_244, "liveApplication.settle"),
       deadlineMs: 25,
-    });
-    await transport.cancelRequest(4_244);
+    }, undefined, undefined, cancel.signal);
+    cancel.abort();
+    await nextImmediate();
     expect(envelopes).toMatchObject([
       { type: "request", id: 1, method: "liveApplication.settle", deadlineMs: 25 },
       { type: "cancel", id: 1 },
@@ -2630,6 +2677,19 @@ describe("EngineClient", () => {
     peer.send({ ...event, seq: 2 });
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(2);
+    transport.close();
+  });
+
+  it("runs a handler registered inside an engine run inside that run", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const inside: boolean[] = [];
+    inEngineRun(() => transport.onEvent(() => inside.push(insideEngineRun())));
+    transport.onEvent(() => inside.push(insideEngineRun()));
+    peer.send({ type: "event", seq: 1, sessionGeneration: 7, name: "workspace.changed", payload: { paths: ["note.md"] } });
+    expect(inside).toEqual([true, false]);
     transport.close();
   });
 
@@ -3149,7 +3209,8 @@ describe("EngineClient", () => {
     const transport = client(peer, { maxBlobBytes: 6 });
     peer.acknowledge();
     await transport.ready();
-    const cancelled = transport.sendRequest(request(23, "blob.cancelled"));
+    const cancel = new AbortController();
+    const cancelled = transport.sendRequest(request(23, "blob.cancelled"), undefined, undefined, cancel.signal);
     peer.send({
       type: "blobStart",
       requestId: 1,
@@ -3158,7 +3219,8 @@ describe("EngineClient", () => {
       sha256: null,
     });
     peer.sendRaw(blobChunkFrame(82, Buffer.from("abc"), false));
-    await transport.cancelRequest(23);
+    cancel.abort();
+    await nextImmediate();
     peer.send({
       type: "error",
       id: 1,
@@ -3183,6 +3245,94 @@ describe("EngineClient", () => {
     expect(onBlob).toHaveBeenCalledWith(
       expect.objectContaining({ streamId: 83, bytes: Buffer.from("abcdef") }),
     );
+    transport.close();
+  });
+
+  it("frees an abandoned request's mid-stream blob allocation and drops its late frames", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 6 });
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    const controller = new AbortController();
+    const stopped = new Error("caller left");
+    const abandoned = transport.sendRequest(request(26, "blob.abandoned"), controller.signal);
+    const rejected = expect(abandoned).rejects.toBe(stopped);
+    await nextImmediate();
+    peer.send({ type: "blobStart", requestId: 1, streamId: 84, totalBytes: 6, sha256: null });
+    peer.sendRaw(blobChunkFrame(84, Buffer.from("abc"), false));
+    controller.abort(stopped);
+    await rejected;
+    expect(peer.received).toContainEqual({ type: "cancel", id: 1 });
+
+    // The engine stops at a frame boundary: one more chunk, then its cancellation.
+    peer.sendRaw(blobChunkFrame(84, Buffer.from("de"), false));
+    peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "cancelled", retry: "no" } });
+
+    const following = transport.sendRequest(request(27, "blob.after.abandon"));
+    await nextImmediate();
+    peer.send({ type: "blobStart", requestId: 2, streamId: 85, totalBytes: 6, sha256: null });
+    peer.sendRaw(blobChunkFrame(85, Buffer.from("abcdef"), true));
+    peer.send({ type: "response", id: 2, result: null });
+
+    await expect(following).resolves.toMatchObject({ id: 27 });
+    expect(onBlob).toHaveBeenCalledOnce();
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 85, bytes: Buffer.from("abcdef") }),
+    );
+    transport.close();
+  });
+
+  it("forgets an abandoned request's streams at its answer, however many are abandoned", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 6 });
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    // Each is abandoned mid-stream, and the engine's cancellation, which
+    // carries no FIN, ends it.
+    for (const wireId of [1, 2, 3]) {
+      const controller = new AbortController();
+      const stopped = new Error("caller left");
+      const abandoned = transport.sendRequest(request(40 + wireId, "blob.abandoned"), controller.signal);
+      const rejected = expect(abandoned).rejects.toBe(stopped);
+      await nextImmediate();
+      peer.send({ type: "blobStart", requestId: wireId, streamId: 90 + wireId, totalBytes: 6, sha256: null });
+      peer.sendRaw(blobChunkFrame(90 + wireId, Buffer.from("abc"), false));
+      controller.abort(stopped);
+      await rejected;
+      peer.send({ type: "error", id: wireId, error: { code: "CANCELLED", message: "cancelled", retry: "no" } });
+    }
+
+    // None of their stream IDs is still held, nor any of their bytes: each
+    // ID streams a whole budget again.
+    for (const [wireId, streamId] of [[4, 91], [5, 92], [6, 93]] as const) {
+      const following = transport.sendRequest(request(40 + wireId, "blob.after.abandon"));
+      await nextImmediate();
+      peer.send({ type: "blobStart", requestId: wireId, streamId, totalBytes: 6, sha256: null });
+      peer.sendRaw(blobChunkFrame(streamId, Buffer.from("abcdef"), true));
+      peer.send({ type: "response", id: wireId, result: null });
+      await expect(following).resolves.toMatchObject({ id: 40 + wireId });
+    }
+    expect(onBlob).toHaveBeenCalledTimes(3);
+    transport.close();
+  });
+
+  it("settles a cancelled held read with the engine's cancellation in place of its answer", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const cancelling = new AbortController();
+    const reading = transport.sendRequest({ ...request(50, "sync.heldDocument"), deadlineMs: 30_000 }, undefined, undefined, cancelling.signal);
+    await nextImmediate();
+    cancelling.abort();
+    await vi.waitFor(() => expect(peer.received).toContainEqual({ type: "cancel", id: 1 }));
+    // Its handler had answered; the engine writes the cancellation instead.
+    peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "held document answer cancelled", retry: "no" } });
+    await expect(reading).rejects.toMatchObject({ wireError: { code: "CANCELLED" } });
     transport.close();
   });
 

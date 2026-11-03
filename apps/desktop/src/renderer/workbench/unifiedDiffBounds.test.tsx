@@ -6,6 +6,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineMomentDetailRecord } from "../../ipc/bridgeContract";
+import type { ActiveUndoHandler } from "./EngineMomentDiffPage";
 
 const computeTextDiffSpy = vi.hoisted(() => vi.fn());
 vi.mock("./unifiedDiff", async (importOriginal) => {
@@ -60,7 +61,7 @@ describe("history diff page", () => {
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
-  function renderPage(moment: EngineMomentDetailRecord) {
+  function renderPage(moment: EngineMomentDetailRecord, registerActiveUndo: (handler: ActiveUndoHandler | null) => void = () => {}) {
     bridgeMock.readEngineMoment.mockResolvedValue({ moment });
     const props = {
       workspaceId: "ws-1",
@@ -68,7 +69,7 @@ describe("history diff page", () => {
       onBeforeRestore: async () => () => {},
       onOpenFile: () => {},
       onPathResolved: noop,
-      registerActiveUndo: () => {},
+      registerActiveUndo,
       onRestored: () => {},
       onStopAndRestore: () => {},
       onError,
@@ -110,8 +111,7 @@ describe("history diff page", () => {
       />,
     );
     await act(async () => {});
-    fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
     if (undo) {
       expect(order).toEqual(["restored", "release"]);
       order.length = 0;
@@ -138,8 +138,7 @@ describe("history diff page", () => {
     const status = screen.getByRole("status");
     expect(status.getAttribute("aria-live")).toBe("polite");
     expect(status.textContent).toBe("");
-    fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
     await act(async () => {
       if (failure) reject(new Error("Could not restore this file."));
       else resolve({ restored: "text", restoredMomentId: "restore-1" });
@@ -154,6 +153,31 @@ describe("history diff page", () => {
     expect(onError).not.toHaveBeenCalled();
     expect(status.textContent).toBe("Restored the earlier state. Undo restore is available here.");
     expect(status.contains(screen.getByTestId("engine-diff-restore-status"))).toBe(true);
+    // The button beside the line says Undo restore, so only a screen reader
+    // hears that it is there.
+    expect(status.querySelector(".sr-only")?.textContent).toBe(" Undo restore is available here.");
+  });
+
+  // Restore and Undo restore take each other's place, so a press hands the
+  // focus over and the keyboard can undo at once.
+  it("hands the focus from Restore to Undo restore and back", async () => {
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      restoreEngineMomentFile: vi.fn().mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" }),
+    });
+    const registerActiveUndo = vi.fn<(handler: ActiveUndoHandler | null) => void>();
+    renderPage(momentDetail(), registerActiveUndo);
+    await screen.findByTestId("engine-diff-lines");
+    screen.getByTestId("engine-diff-restore-file").focus();
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
+    expect(document.activeElement).toBe(screen.getByTestId("engine-diff-undo-restore"));
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-undo-restore")); });
+    expect(document.activeElement).toBe(screen.getByTestId("engine-diff-restore-file"));
+    // The Undo shortcut on Undo restore hands it back too.
+    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
+    expect(document.activeElement).toBe(screen.getByTestId("engine-diff-undo-restore"));
+    await act(async () => { await registerActiveUndo.mock.lastCall?.[0]?.run(); });
+    expect(document.activeElement).toBe(screen.getByTestId("engine-diff-restore-file"));
   });
 
   it("diffs a moment once, however often the page renders", async () => {

@@ -40,6 +40,14 @@ pub(super) struct HistoryRead {
     pub doc: Ydoc,
 }
 
+/// Where a lineage's accepted history stood before an event: its last
+/// receipt, its event count and its evidence digest.
+pub(super) struct Tip<'a> {
+    pub terminal: Option<&'a LiveUpdateReceipt>,
+    pub count: i64,
+    pub evidence: &'a str,
+}
+
 fn parameters(held: &Registration) -> [&str; 5] {
     let b = &held.binding;
     [
@@ -188,6 +196,19 @@ pub(super) fn origin_stamp_in(
     Ok(hex_sha256(json.as_bytes()))
 }
 
+/// Check `bytes`, the state `doc` holds, as accepted state: a note the
+/// engine's reader built by the reader's rule, any other by the strict public
+/// rule. Initialization, native replay and every checkpoint use it, so a
+/// lineage whose baseline the reader built replays and checkpoints too.
+fn validate_baseline(doc: &Ydoc, bytes: &[u8]) -> Result<(), ApplicationError> {
+    if doc.has_reader_source() {
+        doc.validate_reader_baseline(bytes)?;
+    } else {
+        doc.validate_public_baseline(bytes)?;
+    }
+    Ok(())
+}
+
 pub(super) fn initialize(
     tx: &Transaction<'_>,
     held: &Registration,
@@ -198,11 +219,7 @@ pub(super) fn initialize(
     }
     let doc = Ydoc::wire();
     doc.apply(baseline)?;
-    if doc.has_reader_source() {
-        doc.validate_reader_baseline(baseline)?;
-    } else {
-        doc.validate_public_baseline(baseline)?;
-    }
+    validate_baseline(&doc, baseline)?;
     let checkpoint = NativeAcceptedCheckpoint {
         canonical_version: None,
         restore_operation_id: None,
@@ -681,11 +698,11 @@ fn append_inner(
         })
         .optional()
         .map_err(read_sql)?;
-    let (count, cursor, previous, binding, prior_events, prior_bytes) = match prior {
+    let (count, cursor, previous, (binding, terminal), prior_events, prior_bytes) = match prior {
         Some((count, cursor, digest, events, bytes)) => {
             // State-only metadata reads never charge discarded records cumulatively.
             // Restore append retains its external proof budget semantics.
-            let binding = if reconstruction.is_some() {
+            let accepted = if reconstruction.is_some() {
                 {
                     let previous = native_state::metadata(tx, held, count)?;
                     if previous.canonical_version == Some(2)
@@ -693,7 +710,7 @@ fn append_inner(
                     {
                         return Err(invalid("accepted history version downgrade"));
                     }
-                    previous.accepted.binding
+                    previous.accepted
                 }
             } else {
                 let sql = format!(
@@ -713,28 +730,46 @@ fn append_inner(
                 let metadata: AdmittedLiveUpdateMetadata =
                     serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
                 require_version_transition(&metadata, &event.metadata)?;
-                metadata.accepted.binding
+                metadata.accepted
             };
-            (count, cursor, digest, binding, events, bytes)
+            (
+                count,
+                cursor,
+                digest,
+                (accepted.binding, Some(accepted.receipt)),
+                events,
+                bytes,
+            )
         }
-        None => (0, 0, c.evidence_digest.clone(), c.binding.clone(), 0, 0),
+        None => (
+            0,
+            0,
+            c.evidence_digest.clone(),
+            (c.binding.clone(), c.terminal.clone()),
+            0,
+            0,
+        ),
     };
     require_document(held, &event.metadata.accepted.binding)?;
     if event.metadata.accepted.receipt.journal_cursor <= cursor || count == SAFE {
         return Err(ApplicationError::Conflict);
     }
+    let tip = Tip {
+        terminal: terminal.as_ref(),
+        count,
+        evidence: &previous,
+    };
     if reconstruction.is_some() {
         native_state::transition(
             tx,
             held,
             &binding,
+            &tip,
             &event.metadata.accepted,
             &next_digest(&previous, count + 1, &event.metadata)?,
-            &previous,
-            count + 1,
         )?;
     } else {
-        require_transition(tx, held, &binding, &event.metadata)?;
+        require_transition(tx, held, &binding, &tip, &event.metadata)?;
     }
     let (events, bytes) = if count == c.event_count {
         (1, event.update_bytes.len() as i64)
@@ -803,11 +838,7 @@ fn append_inner(
         if reconstruction.is_none() {
             budget.charge(state.len())?;
         }
-        if restored.is_some() && doc.has_reader_source() {
-            doc.validate_reader_baseline(&state)?;
-        } else {
-            doc.validate_public_baseline(&state)?;
-        }
+        validate_baseline(doc, &state)?;
         insert_checkpoint(
             tx,
             held,
@@ -869,27 +900,42 @@ pub(super) fn append(
     Ok(())
 }
 
+/// An event changes the generation only as a restore's application, or as
+/// the first event after restores cancelled at `tip`. Cancellations before a
+/// restore's fence lead from `previous` to the generation it fenced.
 fn require_transition(
     conn: &Connection,
     held: &Registration,
     previous: &LiveObjectBinding,
+    tip: &Tip<'_>,
     next: &AdmittedLiveUpdateMetadata,
 ) -> Result<(), ApplicationError> {
     let binding = &next.accepted.binding;
-    if previous.restore_fence_generation == binding.restore_fence_generation {
+    let from = previous.restore_fence_generation;
+    if from == binding.restore_fence_generation {
         return Ok(());
     }
     let json:Option<String>=conn.query_row("SELECT application_json FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND application_delivery_id=?5",params![held.namespace,held.workspace_id,binding.main_version_id,binding.object_id,next.accepted.receipt.delivery_id],|r|r.get(0)).optional().map_err(read_sql)?.flatten();
+    let Some(json) = json else {
+        return restore_fence::require_cancelled(
+            conn,
+            held,
+            from,
+            binding.restore_fence_generation,
+            tip,
+        );
+    };
     let receipt: NativeRestoreApplicationReceipt =
-        serde_json::from_str(&json.ok_or(ApplicationError::Conflict)?)
-            .map_err(|_| ApplicationError::Corrupt)?;
+        serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+    let fenced = receipt.fence.operation.old_binding.restore_fence_generation;
     if receipt.admitted != *next
-        || receipt.fence.operation.old_binding.restore_fence_generation
-            != previous.restore_fence_generation
         || receipt.fence.operation.new_fence != binding.restore_fence_generation
         || receipt.fence.operation.old_binding.lineage_claim_id != binding.lineage_claim_id
     {
         return Err(ApplicationError::Conflict);
+    }
+    if fenced != from {
+        restore_fence::require_cancelled(conn, held, from, fenced, tip)?;
     }
     Ok(())
 }
@@ -942,7 +988,42 @@ pub(super) fn read_state(
     through: i64,
     policy: NativeHistoryReconstruction,
 ) -> Result<Ydoc, ApplicationError> {
-    native_state::read(conn, held, through, policy)
+    native_state::read(
+        conn,
+        held,
+        through,
+        policy,
+        &mut restore_content::Budget {
+            remaining: usize::MAX,
+        },
+    )
+}
+
+/// [`read_state`] for a reader no registration serves: the lineage's history
+/// in `namespace` selected by its durable identity alone, through a view that
+/// is never registered or live. `binding` and `coordinate` are the ones a
+/// durable record kept; only the document and lineage select the history.
+/// The blobs it replays are charged to `budget`.
+pub(super) fn read_state_by_identity(
+    conn: &Connection,
+    namespace: &str,
+    binding: LiveObjectBinding,
+    coordinate: ApplicationHostCoordinate,
+    through: i64,
+    budget: &mut restore_content::Budget,
+) -> Result<Ydoc, ApplicationError> {
+    let view = Registration {
+        workspace_id: binding.workspace_id.clone(),
+        namespace: namespace.to_owned(),
+        coordinate,
+        binding,
+        activation_id: None,
+        live: false,
+    };
+    let policy = NativeHistoryReconstruction {
+        working_reserve_bytes: budget.remaining,
+    };
+    native_state::read(conn, &view, through, policy, budget)
 }
 
 pub(super) fn read(
@@ -1114,7 +1195,12 @@ pub(super) fn read_inner(
         }
         canonical_version = event.metadata.canonical_version;
         require_document(held, &event.metadata.accepted.binding)?;
-        require_transition(conn, held, &binding, &event.metadata)?;
+        let tip = Tip {
+            terminal: terminal.as_ref(),
+            count,
+            evidence: &evidence,
+        };
+        require_transition(conn, held, &binding, &tip, &event.metadata)?;
         let next = next_digest(&evidence, ordinal, &event.metadata)?;
         if next != row.get::<_, String>(4).map_err(read_sql)? {
             return Err(ApplicationError::Corrupt);
@@ -1291,6 +1377,7 @@ mod tests {
                     connection_id: "connection".into(),
                 },
                 binding,
+                activation_id: None,
                 live: true,
             };
             let initial = initial_digest(&held.namespace, &held.binding).unwrap();

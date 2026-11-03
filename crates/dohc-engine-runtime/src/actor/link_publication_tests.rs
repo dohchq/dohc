@@ -691,6 +691,7 @@ fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
 async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pending_jobs() {
     let mut counts = Vec::new();
     let mut initialization = Vec::new();
+    let mut expected_staging_entries = Vec::new();
     for pending in [20, 2000] {
         let sources = pending + 1;
         let f = Fixture::new(sources, sources);
@@ -752,6 +753,13 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
             store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET updated_at_ms=updated_at_ms+1 WHERE workspace_id=?1 AND object_id='source-0000'",[&ws]).map_err(StorageError::persist_public))?;
             Ok(())
         }).await.unwrap();
+        expected_staging_entries.push(
+            std::fs::read_dir(&staging)
+                .unwrap()
+                .collect::<std::io::Result<Vec<_>>>()
+                .unwrap()
+                .len() as u64,
+        );
         let (entered, release) = pause(&f.ws);
         drop(first);
         let next = finish_one_turn(&f, entered, release).await;
@@ -780,10 +788,17 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
         .unwrap();
     }
     assert!(counts[0].reads > 0 && counts[0].writes > 0 && counts[0].rows > 0);
-    assert_eq!(
-        counts[0], counts[1],
-        "one placement turn must not scale with pending jobs"
-    );
+    assert_eq!(counts[0].reads, counts[1].reads);
+    assert_eq!(counts[0].writes, counts[1].writes);
+    assert_eq!(counts[0].rows, counts[1].rows);
+    assert!(expected_staging_entries[0] >= 20);
+    assert!(expected_staging_entries[1] >= 2000);
+    for (actual, expected) in counts.iter().zip(expected_staging_entries) {
+        assert_eq!(
+            actual.staging_entries, expected,
+            "one placement turn must enumerate each staging entry once"
+        );
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_turn_retries_a_staging_error_that_lasts_half_a_second() {

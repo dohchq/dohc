@@ -183,7 +183,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     const header = await screen.findByTestId("markdown-save-state");
     expect(header.getAttribute("data-state")).toBe("saved-to-host");
     expect(header.textContent).toBe("Saved to host");
-    expect(header.getAttribute("title")).toBe("The session host accepted your edits. The local file may still be updating.");
+    expect(header.getAttribute("title")).toBe("The server accepted your edits. The local file may still be updating.");
   });
 
   it("names the outside edit when the file changed on disk", async () => {
@@ -200,7 +200,8 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     expect(header.getAttribute("data-state")).toBe("changed-on-disk");
     expect(header.textContent).toBe("Changed outside dohc");
     expect(header.getAttribute("title")).toContain("changed outside dohc");
-    expect(header.getAttribute("title")).toContain("dohc keeps your text in History.");
+    expect(header.getAttribute("title")).toBe("This file changed outside dohc.");
+    expect(header.getAttribute("title")).not.toContain("History");
     // The tab dot stays dirty: this document's text is not what the file holds.
     await waitFor(() =>
       expect(onSaveStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "changed-on-disk" })),

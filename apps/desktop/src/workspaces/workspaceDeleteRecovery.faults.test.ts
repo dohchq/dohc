@@ -104,7 +104,7 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
     if (!systemAccepts) throw new Error("OS refuses");
     await rename(path, join(os, basename(path)));
   } };
-  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
+  const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})),readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
     notRestored: [], compensationOperationId: "undo", deduped: false, materialized: false })) };
   const remove = (hand = false) => hand ? deleteWorkspacePathByHand(operation, "folder", person, options)
     : prepareDeleteWorkspacePathAs(operation, "folder", person, options).then(finish => finish());

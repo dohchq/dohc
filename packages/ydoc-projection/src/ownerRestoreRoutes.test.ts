@@ -4,6 +4,7 @@ import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "../..
 import type {StorageContext} from "../../../services/sync-relay/src/storage/context.js";
 import {testHandler} from "../../../services/sync-relay/src/testing/index.js";
 import type {OwnerRestoreHost} from "../../../services/sync-relay/src/ownerRestoreRoutes.js";
+import {SyncRelayQuotaExceededError} from "../../../services/sync-relay/src/storage/errors.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 function fixture() {
@@ -16,8 +17,10 @@ function fixture() {
       review: null, close: vi.fn(), invalidated: new AbortController().signal, maxOutputBytes: 100_000,
     })),
     confirmRestore: vi.fn<OwnerRestoreHost["confirmRestore"]>().mockRejectedValue(Error("proposal missing")),
+    declineRestore: vi.fn<OwnerRestoreHost["declineRestore"]>().mockRejectedValue(Error("host offline")),
   };
-  const handler = testHandler(f.storage, {ownerRestoreHost: () => host, newId: () => "restore"});
+  let connected = true;
+  const handler = testHandler(f.storage, {ownerRestoreHost: () => connected ? host : undefined, newId: () => "restore"});
   const request = (suffix: string, body?: unknown, user = "owner", workspace = "workspace") => handler(new Request(
     `https://relay.test/sync/${workspace}/live-restores${suffix}`, {method: body === undefined ? "GET" : "POST",
       headers: {authorization: `Bearer user:${user}`, "content-type": "application/json"},
@@ -25,7 +28,7 @@ function fixture() {
   const planInput = {document: f.input.evidence.document, shareId: "share", grantId: "grant", restorePointCursor: 0,
     restorePointReceiptDigest: f.input.evidence.checkpoint.updateDigest};
   const plan = async () => {const r = await request("/plan", planInput); expect(r.status).toBe(200); return r.json();};
-  return {...f, host, request, planInput, plan};
+  return {...f, host, request, planInput, plan, disconnect: () => {connected = false;}};
 }
 
 it("previews exact access without mutating it, then stops access without replacing content", async () => {
@@ -47,15 +50,97 @@ it("previews exact access without mutating it, then stops access without replaci
   } finally {f.close();}
 });
 
-it.each(["plan", "begin", "status", "prepare", "review", "confirm"])("refuses a recipient at the %s boundary", async action => {
+it.each(["plan", "begin", "status", "prepare", "review", "confirm", "decline", "unfinished"])("refuses a recipient at the %s boundary", async action => {
   const f = fixture();
   try {
     const plan = await f.plan(); await f.request("", {intent: plan.intent});
-    const suffix = action === "plan" ? "/plan" : action === "begin" ? "" : action === "status" ? "/restore" : `/restore/${action}`;
-    const body = action === "status" ? undefined : action === "plan" ? f.planInput : action === "begin" ? {intent: plan.intent}
+    const suffix = action === "plan" ? "/plan" : action === "begin" ? "" : action === "status" ? "/restore" : action === "unfinished" ? "/unfinished" : `/restore/${action}`;
+    const body = action === "status" || action === "unfinished" ? undefined : action === "plan" ? f.planInput : action === "begin" ? {intent: plan.intent}
       : action === "confirm" ? {proposalDigest: "a".repeat(64)} : {};
     expect((await f.request(suffix, body, "reader")).status).toBe(404);
     expect(f.host.prepareRestore).not.toHaveBeenCalled(); expect(f.host.reviewRestore).not.toHaveBeenCalled(); expect(f.host.confirmRestore).not.toHaveBeenCalled();
+    expect(f.storage.readStopRestore({workspaceId: "workspace", ownerUserId: "owner", operationId: "restore"})?.phase).toBe("authority-invalidated");
+  } finally {f.close();}
+});
+
+// Proves: the owner finds each unfinished restore of the workspace, can end
+// one before its fence without the host, and access stays stopped. A
+// declined restore is no longer listed and no later step reopens it.
+it("lists an unfinished restore and declines it before its fence", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    expect(await (await f.request("/unfinished")).json()).toEqual({restores: [{operationId: "restore", path: plan.path,
+      phase: "authority-invalidated", proposalDigest: null}], unreadable: 0, nextCursor: null});
+    const declined = await f.request("/restore/decline", {});
+    expect(declined.status).toBe(200);
+    expect(await declined.json()).toMatchObject({status: {operationId: "restore", phase: "declined"}, result: {kind: "declined"}});
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked", generation: 5});
+    expect(await (await f.request("/unfinished")).json()).toEqual({restores: [], unreadable: 0, nextCursor: null});
+    const prepared = await f.request("/restore/prepare", {});
+    expect(prepared.status).toBe(409);
+    expect(await prepared.json()).toMatchObject({status: {phase: "declined"}, result: {kind: "pending"}});
+    expect(f.host.prepareRestore).not.toHaveBeenCalled();
+    expect(f.rows().documents[0]).toMatchObject({admission_state: "open", restore_fence_generation: 1});
+  } finally {f.close();}
+});
+
+// Proves: after the fence, Decline asks the host that fenced the restore to
+// end it. While that host is away, its reply is lost, or its answer holds no
+// binding, Decline says it is still pending, keeps the fence and access
+// stopped, and a retry asks again.
+it.each(["absent host", "lost reply", "no binding"] as const)("asks the fencing host to end a fenced restore and waits for its answer: %s", async outcome => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    expect((await f.request("/restore/prepare", {})).status).toBe(409);
+    if (outcome === "absent host") f.disconnect();
+    if (outcome === "lost reply") vi.mocked(f.host.declineRestore).mockRejectedValue(Error("The connection closed."));
+    if (outcome === "no binding") vi.mocked(f.host.declineRestore).mockResolvedValue({kind: "pending", reason: "The host holds no binding at the restore's generation."});
+    const before = f.rows().documents;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const declined = await f.request("/restore/decline", {});
+      expect(declined.status).toBe(409);
+      expect(await declined.json()).toEqual({ok: false, code: "conflict", error: "The restore is still being declined. Try again in a moment."});
+      expect(f.host.declineRestore).toHaveBeenCalledTimes(outcome === "absent host" ? 0 : attempt);
+    }
+    if (outcome !== "absent host") expect(f.host.declineRestore).toHaveBeenCalledWith({workspaceId: "workspace", ownerUserId: "owner", operationId: "restore"}, expect.any(AbortSignal));
+    expect(f.rows().documents).toEqual(before);
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
+    expect(await (await f.request("/unfinished")).json()).toMatchObject({restores: [{operationId: "restore", phase: "fenced"}]});
+  } finally {f.close();}
+});
+
+// Proves: when the relay will not record the fencing host's answer, Decline
+// answers with a refusal and where the restore stands, not a retryable wait.
+// The fence and access stay stopped.
+it("answers a refused Decline with the restore it left fenced", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    expect((await f.request("/restore/prepare", {})).status).toBe(409);
+    vi.mocked(f.host.declineRestore).mockResolvedValue({kind: "refused", reason: "Restore cancellation answer does not match the restore."});
+    const before = f.rows().documents;
+    const declined = await f.request("/restore/decline", {});
+    expect(declined.status).toBe(409);
+    expect(await declined.json()).toMatchObject({status: {operationId: "restore", phase: "fenced"}, result: {kind: "refused"}});
+    expect(f.rows().documents).toEqual(before);
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
+  } finally {f.close();}
+});
+
+// Proves: a full workspace is the one cause a waiting restore names, at
+// preparation and at admission.
+it("names a full workspace when preparation or admission runs out of quota", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    const full = new SyncRelayQuotaExceededError("workspace storage quota exceeded");
+    vi.mocked(f.host.prepareRestore).mockRejectedValueOnce(full);
+    vi.mocked(f.host.confirmRestore).mockRejectedValueOnce(full);
+    expect(await (await f.request("/restore/prepare", {})).json()).toMatchObject({result: {kind: "pending", cause: "quota"}});
+    expect(await (await f.request("/restore/confirm", {proposalDigest: "a".repeat(64)})).json()).toMatchObject({result: {kind: "review-required", cause: "quota"}});
+    expect(await (await f.request("/restore/prepare", {})).json()).toEqual({status: expect.anything(), result: {kind: "pending"}});
   } finally {f.close();}
 });
 
@@ -128,6 +213,25 @@ it("closes admission before host preparation and preserves the same cut on retry
       expect(f.storage.readStopRestore(lookup)).toEqual(cut);
     }
     expect(f.host.prepareRestore).toHaveBeenCalledTimes(2);
+  } finally {f.close();}
+});
+
+// Proves: while live editing of the document is still stopping, plan and begin
+// answer a retryable conflict that says why, and access stays as it was.
+it("refuses a restore while live editing is still stopping with a conflict that says why", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(), document = f.input.evidence.document;
+    f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor)
+        VALUES ('restore-history',?,?,'main',?,?,'{}','{}',?,x'0000','owner','share','{}',1,10,1,0)`)
+      .run(`ordinary-activation-${"d".repeat(64)}`, document.workspaceId, document.objectId, document.lineageClaimId, document.lineageClaimId));
+    for (const [suffix, body] of [["/plan", f.planInput], ["", {intent: plan.intent}]] as const) {
+      const response = await f.request(suffix, body);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ok: false, code: "conflict", error: "Live editing is still stopping. Try again in a moment."});
+    }
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "active", generation: 4});
   } finally {f.close();}
 });
 

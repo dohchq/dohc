@@ -1,7 +1,7 @@
 import { DohcMark } from "@dohc/brand";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FolderOpen, Laptop, Link, MoreHorizontal, type LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -15,6 +15,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { Titlebar, workspaceName } from "./Titlebar";
+import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { GhostButton, IconButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
 import { PathLine } from "./ui/PathLine";
@@ -190,9 +191,13 @@ export function WorkspaceManager(props: {
   const crashReportNotice = useCrashReport(connectionNotices);
   // A folder the command line or the OS asked for that did not open.
   useWorkspacePathOpenFailures(null, connectionNotices.reportFailure);
+  const update = useDesktopUpdate(connectionNotices.reportFailure);
+  const { clearKind } = connectionNotices;
+  const clearUpdateFailure = useCallback(() => clearKind("update"), [clearKind]);
+  useUpdateFailureNotices(update, "", connectionNotices.reportFailure, clearUpdateFailure);
   // Without the workspace shell, the manager answers the menu commands that
   // need no workspace.
-  useMenuCommandsWithoutWorkspace(connectionNotices.reportError);
+  useMenuCommandsWithoutWorkspace(connectionNotices.reportError, update.run);
   // The address a failed attempt used, put back when a notice's Try again
   // reopens the route it came from.
   const [retryServerUrl, setRetryServerUrl] = useState("");
@@ -277,6 +282,7 @@ export function WorkspaceManager(props: {
         onWorkspaceReady={onWorkspaceReady}
         onBack={() => props.onDismissShareHandoff?.()}
         onOpened={() => props.onShareHandoffOpened?.()}
+        ownWorkspace={props.workspaces.some((candidate) => candidate.shareView === undefined)}
         onConnectionError={connectionNotices.reporter(reopen("share"))}
         initialServerUrl={retryServerUrl}
       />
@@ -325,7 +331,7 @@ export function WorkspaceManager(props: {
   return (
     <div data-testid="workspace-manager" className="app-chrome flex h-screen flex-col bg-bg text-ink">
       {/* Frameless window: without the drag strip it could not be moved. */}
-      <Titlebar />
+      <Titlebar update={<TitlebarUpdateButton update={update} />} />
       <div className="flex min-h-0 flex-1">
         {hasWorkspaces ? (
           <aside
@@ -392,7 +398,7 @@ export function WorkspaceManager(props: {
               onPointerUp={(event) => resize.commit(event.pointerId)}
               onPointerCancel={(event) => resize.commit(event.pointerId)}
               onLostPointerCapture={(event) => resize.commit(event.pointerId)}
-              className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 focus-visible:bg-accent/35"
+              className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 keyboard:focus-visible:bg-focus"
             />
           </aside>
         ) : null}

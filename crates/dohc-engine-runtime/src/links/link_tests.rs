@@ -1206,6 +1206,10 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             );
         }
         let elapsed = began.elapsed();
+        assert!(
+            elapsed < budget,
+            "{label} catch-up exceeded client busy budget"
+        );
         if label == "MAX_TEXT_BYTES" {
             eprintln!(
                 "BUSY_BUDGET {label} catch_up_us={} refusals={refusals} budget_ms={}",
@@ -1213,11 +1217,31 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
                 budget.as_millis()
             );
         }
-        assert!(
-            elapsed * 4 < budget,
-            "{label} needs at least fourfold catch-up headroom"
-        );
         elapsed
+    }
+    /// Stage one link batch and count the WAL frames it wrote. A WAL restart
+    /// starts the log over and rewrites the header's checkpoint sequence and salts.
+    fn stage_counted(
+        store: &mut EngineStore,
+        wal: &Path,
+        staged: &mut std::collections::VecDeque<Staged>,
+    ) -> i64 {
+        let position = |store: &EngineStore| {
+            let log: i64 = store
+                .read_with(|c| c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1)))
+                .unwrap();
+            let mut header = [0; 24];
+            std::io::Read::read_exact(&mut std::fs::File::open(wal).unwrap(), &mut header).unwrap();
+            (log, header)
+        };
+        let (before, header) = position(store);
+        stage_batch(staged, store, &NoFaults).unwrap();
+        let (after, current) = position(store);
+        if current[12..] == header[12..] {
+            after - before
+        } else {
+            after
+        }
     }
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
@@ -1276,8 +1300,13 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
     reader.execute_batch("COMMIT").unwrap();
     handoff(&mut store, "MAX_TEXT_BYTES", budget);
     drop(reader);
-    // Sixteen maximal parser inputs exercise the row, source and time bounds
-    // through the production batch writer, including replacing prior indexes.
+    // Catches link batches that grow. Catch-up that slows for any other reason fails only at the 10 s budget.
+    const LINK_BATCH_FRAME_CEILING: i64 = 64;
+    let wal = db.with_file_name("engine.db-wal");
+    let mut batch_frames = std::collections::BTreeMap::<&str, Vec<i64>>::new();
+    // Sixteen maximal parser inputs exercise the row and source bounds through
+    // the production batch writer, including replacing prior indexes. The time
+    // bound is lifted so every host writes the same batches.
     let mut text = "[[target]]\n".repeat(4096);
     text.push_str(&"x".repeat(parser::MAX_DOCUMENT_BYTES - text.len()));
     for n in 0..SOURCE_SLICE {
@@ -1290,6 +1319,7 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
         );
     }
     let mut maximum = Duration::ZERO;
+    UNBOUNDED_BATCH_SLICE.set(true);
     for pass in 0..2 {
         if pass == 1 {
             for n in 0..SOURCE_SLICE {
@@ -1313,7 +1343,10 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
                 .collect();
             while !staged.is_empty() {
                 handoff(&mut store, "before_link_batch", budget);
-                stage_batch(&mut staged, &mut store, &NoFaults).unwrap();
+                batch_frames
+                    .entry(if pass == 0 { "links" } else { "relinks" })
+                    .or_default()
+                    .push(stage_counted(&mut store, &wal, &mut staged));
                 maximum = maximum.max(handoff(&mut store, "link_batch", budget));
             }
         }
@@ -1322,7 +1355,8 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             (SOURCE_SLICE * 4096 * (pass + 1)) as i64
         );
     }
-    // Maximum literals stress key-row bytes as well as the occurrence count.
+    UNBOUNDED_BATCH_SLICE.set(false);
+    // These literals exceed the parser's 500-unit wikilink span, so they index no occurrences.
     let literal = "a".repeat(2048);
     let mut long_links = format!("[[{literal}]]\n").repeat(parser::MAX_DOCUMENT_BYTES / 2053);
     long_links.push_str(&"x".repeat(parser::MAX_DOCUMENT_BYTES - long_links.len()));
@@ -1356,6 +1390,18 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
         "BUSY_BUDGET maximal_link_reindex max_catch_up_us={}",
         maximum.as_micros()
     );
+    for (kind, frames) in &batch_frames {
+        let (smallest, largest) = (*frames.iter().min().unwrap(), *frames.iter().max().unwrap());
+        eprintln!(
+            "LINK_BATCH_FRAMES {kind} batches={} total={} smallest={smallest} largest={largest} ceiling={LINK_BATCH_FRAME_CEILING}",
+            frames.len(),
+            frames.iter().sum::<i64>()
+        );
+        assert!(
+            smallest > 0 && largest <= LINK_BATCH_FRAME_CEILING,
+            "{kind} batches wrote {smallest} to {largest} WAL frames, outside 1 to {LINK_BATCH_FRAME_CEILING}"
+        );
+    }
 }
 
 fn seed_phase(s: &EngineStore) -> String {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { confirmRestartDialog } from "./failureDialogs";
+import { confirmDownloadDialog, confirmRestartDialog } from "./failureDialogs";
 
 describe("confirmRestartDialog", () => {
   it("promises an install on quit only where one runs", async () => {
@@ -16,5 +16,32 @@ describe("confirmRestartDialog", () => {
     expect(await detail("linux")).toHaveBeenCalledWith(expect.objectContaining({
       detail: "Restart now to open dohc on the new version.",
     }));
+  });
+});
+
+describe("confirmDownloadDialog", () => {
+  it("asks before anything downloads, and only a failed startup offers Quit", async () => {
+    const asked = async (failure: "startup" | "unfinished-launch" | "window-crash", response: number) => {
+      const showMessageBox = vi.fn(async (..._args: unknown[]) => ({ response, checkboxChecked: false }));
+      const accepted = await confirmDownloadDialog({ showMessageBox }, failure, "1.2.4");
+      return { accepted, options: showMessageBox.mock.calls[0]![0] };
+    };
+    const startup = await asked("startup", 0);
+    expect(startup.accepted).toBe(true);
+    expect(startup.options).toMatchObject({
+      message: "Update 1.2.4 is available.",
+      detail: "It may fix what stopped dohc from starting. Download it?",
+      buttons: ["Download", "Quit"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    for (const failure of ["unfinished-launch", "window-crash"] as const) {
+      const other = await asked(failure, 1);
+      expect(other.accepted).toBe(false);
+      expect(other.options).toMatchObject({
+        detail: "Update 1.2.4 is available and may fix this. Download it?",
+        buttons: ["Download", "Not now"],
+      });
+    }
   });
 });

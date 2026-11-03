@@ -220,6 +220,7 @@ export const CHANNELS = {
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   publishOwnerApp: "desktop:publish-owner-app",
+  appViewEvent: "desktop:app-view-event",
   ownerAppResponses: "desktop:owner-app-responses",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
@@ -239,6 +240,7 @@ export const CHANNELS = {
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
+  chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   switchCollectionAutomation: "desktop:switch-collection-automation",
@@ -337,6 +339,11 @@ export const CHANNELS = {
   // carries a round id; each renderer answers clear, hold, or cancel with it.
   exitRound: "desktop:exit-round",
   exitRoundAnswer: "desktop:exit-round-answer",
+  // Version rounds: before the CLI or MCP changes a workspace's versions,
+  // main asks each window showing it to save its open edits. Each answers
+  // ready or refused with the round id, and hears the round's end.
+  versionRound: "desktop:version-round",
+  versionRoundAnswer: "desktop:version-round-answer",
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",

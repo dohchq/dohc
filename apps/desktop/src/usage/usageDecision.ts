@@ -6,7 +6,6 @@ export const USAGE_DECISION = {
   coveredDays: 30,
   population: "one-person",
   candidates: [
-    { capabilityId: "version.try", question: "removal", requiresNecessityJudgment: false },
     { capabilityId: "chat.export", question: "removal", requiresNecessityJudgment: false },
     { capabilityId: "version.compare", question: "placement", requiresNecessityJudgment: false },
     { capabilityId: "file.kept.save", question: "placement", requiresNecessityJudgment: true },

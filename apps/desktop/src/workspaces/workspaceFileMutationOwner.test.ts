@@ -219,7 +219,7 @@ async function harness(options: {
   };
   let account = "account-alice";
   const deletedBy: string[] = [];
-  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
+  const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})),readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
   const owner = createWorkspaceFileMutationOwner({
     historyFor: () => history,
     assertTrustedSender,

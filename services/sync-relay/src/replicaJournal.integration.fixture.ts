@@ -165,7 +165,8 @@ async function openHost(configured = true) {
       if (!sessionId) {sessionId = String((await rpc("ydoc.open", {versionId: main, path: entry.path, contentKind: "richdoc"})).sessionId); sessions.set(binding.objectId, sessionId);}
       return {nativeSessionId: sessionId, assertCurrent() {assert.equal(hostProcess.exitCode, null);},
         async prepareHandoff(signal) {signal.throwIfAborted();}, async finishHandoff() {},
-        async remoteApplied(update) {Y.applyUpdate(entry.doc, update);}, onDurableLocalChange() {return () => {};}};
+        async remoteApplied(update) {Y.applyUpdate(entry.doc, update);}, onDurableLocalChange() {return () => {};},
+        onSettlementWanted() {return () => {};}};
     });
     consumer = new OwnerCommittedDelivery(storage, deployment.history, {client: bridge.client, workspace: handle, host: coordinate,
       deadlineMs: 120_000, nextRequestId: () => id++, bounds: {maxBytes: 4 * 1024 * 1024, maxEvents: 64},
@@ -320,6 +321,7 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       const position = inspect(replicaDir, db => db.prepare("SELECT event_count,evidence_digest,journal_cursor FROM replica_documents WHERE object_id=?").get(docs.get("doc-0")!.objectId)!);
       const page = await storage.readReplicaLiveJournal({workspaceId: "workspace", after: Number(position.journal_cursor), limit: 1});
       const row = page.rows[0]!;
+      if ("cancellation" in row) throw new Error("Expected a delivery row.");
       const metadata = parseCanonicalAdmittedLiveUpdateMetadata({...row.admitted.metadata,
         accepted: {...row.admitted.metadata.accepted, binding: {...row.admitted.metadata.accepted.binding, restoreFenceGeneration: input.generation}}});
       try {

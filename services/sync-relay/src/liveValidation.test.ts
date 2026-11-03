@@ -7,6 +7,7 @@ import { afterEach, expect, it } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveValidationExecutor, createValidatorFailureLog, LiveValidatorFailure } from "./liveValidation.js";
+import {selfHostLiveProfile} from "./selfHostLiveProfile.js";
 import { LiveRestoreBusy, LiveRestoreTooLarge } from "./liveRestoreValidation.js";
 
 import {registered, cleanupLiveDeliveryFixtures} from '../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js';
@@ -50,6 +51,35 @@ it.each([4093, 4094])("returns state bytes only when %s retained updates reach t
     expect(result).toEqual({kind: "accepted", evidence});
   }
 }, 30_000);
+
+function longCheckpoint(paragraphs: number, mixed: boolean) {
+  const markdown = Array.from({length: paragraphs}, (_, i) => mixed
+    ? `Paragraph ${i} **bold** *italic* \`code\` [link](https://example.com).`
+    : `Paragraph ${i} **bold** text.`).join("\n\n");
+  const doc = markdownToYDoc(markdown);
+  try {return encodeStateAsUpdate(doc);} finally {doc.destroy();}
+}
+
+it("accepts 5000 mixed paragraphs for settlement, journal, activation and restore validation in capped children", async () => {
+  const {pool, input} = fixture(), checkpoint = longCheckpoint(5000, true);
+  const call = {...input, checkpoint};
+  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint})).toMatchObject({kind: "accepted"});
+  const profile = selfHostLiveProfile();
+  const validation = pool.validator(profile.namedLive.validation);
+  expect(await validation(call)).toMatchObject({kind: "accepted"});
+  expect(await pool.ordinaryActivation(profile.service.activation.validation)({
+    document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint})).toMatchObject({kind: "accepted"});
+  expect(await pool.restore(profile.service.restore.validation).point(restorePoint(input, checkpoint)))
+    .toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)});
+}, 60_000);
+
+it("refuses 25000 bold paragraphs by the struct budget before exhausting the worker heap", async () => {
+  const {pool, input} = fixture(), checkpoint = longCheckpoint(25000, false);
+  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
+    .toMatchObject({kind: "refused", reason: "capacity-refused"});
+}, 30_000);
+
+
 
 it.each([18, 19])("returns checkpoint state only when %s large suffix updates and the candidate reach the byte limit", async suffixCount => {
   const {pool, input} = fixture();

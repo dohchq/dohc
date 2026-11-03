@@ -8,7 +8,10 @@ import type {
   ShareViewProjectionStatus,
   ShareViewReconcileOutcome,
 } from "./shareViewFiles";
-import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
+import {
+  withExclusiveWorkspaceOperation,
+  withStaleSensitiveWorkspaceOperation,
+} from "./workspaceAssets";
 
 const target: ShareViewFilesTarget = {
   kind: "mount",
@@ -21,6 +24,7 @@ const validRepair: ShareViewReconcileOutcome = {
   repairedPaths: 0,
   unjournalablePaths: [],
   collisionRecordQuarantined: false,
+  failedPaths: [],
 };
 
 function owner(input?: {
@@ -181,5 +185,95 @@ describe("createOwnedProjectionRepairer", () => {
     await holding;
     await repairing;
     expect(reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  const pending: ShareViewProjectionStatus = {
+    state: "pending",
+    pendingPathCount: 1,
+    pendingPaths: ["a.md"],
+    collisionPathCount: 0,
+    collisionPaths: [],
+    pullInFlight: false,
+  };
+
+  it.each<{
+    name: string;
+    repair: ShareViewReconcileOutcome | Error;
+    after?: ShareViewProjectionStatus | Error;
+    writeLands?: boolean;
+    refusal?: RegExp;
+  }>([
+    { name: "lets a write queued behind a no-op repair land", repair: validRepair, writeLands: true },
+    { name: "refuses a write queued behind a repair that restored a path", repair: { ...validRepair, repairedPaths: 1 } },
+    {
+      name: "refuses a write queued behind a repair that quarantined a recovery record",
+      repair: { ...validRepair, collisionRecordQuarantined: true },
+      refusal: /damaged shared file recovery record/i,
+    },
+    {
+      name: "refuses a write queued behind a repair that found an unjournalable path",
+      repair: { ...validRepair, unjournalablePaths: [{ path: "large.md", reason: "oversized-text" }] },
+      refusal: /large\.md/,
+    },
+    {
+      name: "refuses a write queued behind a repair that left the projection pending",
+      repair: validRepair,
+      after: pending,
+      refusal: /still being restored/i,
+    },
+    { name: "refuses a write queued behind a repair whose capture gave up on a path", repair: { ...validRepair, failedPaths: ["docs/a.md"] } },
+    {
+      name: "refuses a write queued behind a repair that left the projection unavailable",
+      repair: validRepair,
+      after: { state: "unavailable" },
+      refusal: /still being restored/i,
+    },
+    {
+      name: "refuses a write queued behind a repair whose status read failed",
+      repair: validRepair,
+      after: new Error("status unreadable"),
+      refusal: /status unreadable/,
+    },
+    {
+      name: "refuses a write queued behind an outcome from the wrong reconcile operation",
+      repair: { kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: false },
+      refusal: /invalid result/i,
+    },
+    {
+      name: "refuses a write queued behind a repair outcome with no repaired-path count",
+      repair: { kind: "repair", unjournalablePaths: [], collisionRecordQuarantined: false, failedPaths: [] } as unknown as ShareViewReconcileOutcome,
+    },
+    {
+      name: "refuses a write queued behind a repair outcome with no quarantine flag",
+      repair: { kind: "repair", repairedPaths: 0, unjournalablePaths: [], failedPaths: [] } as unknown as ShareViewReconcileOutcome,
+    },
+    {
+      name: "refuses a write queued behind a repair outcome with a field the check does not name",
+      repair: { ...validRepair, restoredFromBackup: true } as ShareViewReconcileOutcome,
+    },
+    { name: "refuses a write queued behind a repair that failed", repair: new Error("disk full"), refusal: /disk full/ },
+  ])("$name", async ({ name, repair, after = { state: "current" }, writeLands = false, refusal }) => {
+    const rootPath = join(tmpdir(), `dohc-owned-projection-write-${name.replaceAll(" ", "-")}`);
+    const statuses: Array<ShareViewProjectionStatus | Error> = [{ state: "current" }, after];
+    let write: Promise<string> | undefined;
+    const repairing = createOwnedProjectionRepairer({
+      projectionStatus: vi.fn(async () => {
+        const status = statuses.shift() ?? { state: "current" as const };
+        if (status instanceof Error) throw status;
+        return status;
+      }),
+      reconcile: vi.fn(async () => {
+        // The write arrives while the repair holds the workspace, so it is
+        // admitted before the repair ends and runs after it.
+        write = withStaleSensitiveWorkspaceOperation(rootPath, async () => "written");
+        if (repair instanceof Error) throw repair;
+        return repair;
+      }),
+    })({ rootPath, target });
+
+    if (refusal) await expect(repairing).rejects.toThrow(refusal);
+    else await repairing;
+    if (writeLands) await expect(write).resolves.toBe("written");
+    else await expect(write).rejects.toThrow(/changed before this write started/);
   });
 });

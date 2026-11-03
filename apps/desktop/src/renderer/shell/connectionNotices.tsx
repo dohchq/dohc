@@ -52,6 +52,7 @@ export function useConnectionNotices() {
     retryShellError,
     hideShellError,
     dismissShellError,
+    clearKind,
   } = useShellError(NO_WORKSPACE);
 
   // One reporter per surface: `reopen` is what that surface does when the
@@ -78,6 +79,7 @@ export function useConnectionNotices() {
         id: error.id,
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
+        ...(error.command ? { command: error.command } : {}),
         details: errorDetails([
           ["Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
@@ -101,6 +103,7 @@ export function useConnectionNotices() {
     retryNotice: retryShellError,
     hideNotice: hideShellError,
     dismissNotice: dismissShellError,
+    clearKind,
   };
 }
 

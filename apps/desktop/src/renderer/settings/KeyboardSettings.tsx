@@ -1,8 +1,7 @@
 import { useMemo } from "react";
 import { shortcutName, shortcutShown } from "../../shortcuts/shortcutNames";
 import { SHORTCUTS, shortcutChords, type ShortcutId, type ShortcutOwner } from "../../shortcuts/shortcutRegistry";
-import { SectionLabel } from "../ui/controls";
-import { SettingRow } from "./SettingRow";
+import { SettingRow, SettingsSection } from "./SettingRow";
 
 // A heading says where its keys work, so a chord with two meanings, such as
 // Ctrl+B for Toggle sidebar and Bold, or Enter for Next match and Open,
@@ -61,10 +60,7 @@ export function KeyboardSettings(props: { platform: string | undefined; devTools
   return (
     <>
       {(named.length > 0 ? named : groups).map(({ heading, rows }) => (
-        <section key={heading} className="mt-8 first:mt-0">
-          <SectionLabel as="h4" className="m-0 mb-1">
-            {heading}
-          </SectionLabel>
+        <SettingsSection key={heading} title={heading}>
           {rows.map((row) => (
             <SettingRow key={row.name} title={row.name} compact>
               <span className="flex flex-wrap justify-end gap-x-3 gap-y-1">
@@ -81,7 +77,7 @@ export function KeyboardSettings(props: { platform: string | undefined; devTools
               </span>
             </SettingRow>
           ))}
-        </section>
+        </SettingsSection>
       ))}
     </>
   );

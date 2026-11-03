@@ -34,6 +34,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "files.resolve"
+                | "documents.keepRetainedVersion"
                 | "capture.reconcile"
                 | "capture.retryHeld"
                 | "capture.importRecovery"
@@ -119,6 +120,9 @@ impl EngineService {
                 | "sync.push"
                 | "sync.createHostedReplica"
                 | "sync.pullHosted"
+                // Read only; each handler checks the caller and attachment again.
+                | "sync.heldDocuments"
+                | "sync.heldDocument"
                 // The claim ledger, so the relay's automations can run the
                 // field changes this host claims when it accepts a live frame.
                 // Nothing that writes files, chats, schedules, or presses.
@@ -143,6 +147,10 @@ impl EngineService {
                     | "liveApplication.openRecoveryStore"
                     | "liveApplication.closeRecoveryStore"
                     | "liveApplication.unloadDocument"
+                    | "liveApplication.prepareRetirement"
+                    | "liveApplication.releaseRetirementPreparation"
+                    | "liveApplication.reconcileActivation"
+                    | "liveApplication.releaseActivation"
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
@@ -151,6 +159,7 @@ impl EngineService {
                     | "liveApplication.appliedRead"
                     | "liveApplication.settle"
                     | "liveApplication.fenceRestore"
+                    | "liveApplication.cancelRestoreFence"
                     | "liveApplication.prepareRestore"
                     | "liveApplication.applyRestore"
                     | "liveApplication.settleRestore"
@@ -278,6 +287,10 @@ impl EngineService {
                 blob_egress,
             });
         }
+        if request.method == "sync.heldDocument" {
+            return Box::pin(self.sync_held_document(&ctx, request.workspace, request.params, id))
+                .await;
+        }
         if request.method == "versionedText.readBlob" {
             let (result, blob_egress) = self
                 .versioned_text_read_blob(&ctx, request.workspace, request.params, id)
@@ -370,6 +383,38 @@ impl EngineService {
                 Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
                     .await?
             }
+            "liveApplication.prepareRetirement" => {
+                Box::pin(self.live_application_prepare_retirement(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
+            }
+            "liveApplication.releaseRetirementPreparation" => {
+                Box::pin(self.live_application_release_retirement_preparation(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
+            }
+            "liveApplication.reconcileActivation" => {
+                Box::pin(self.live_application_reconcile(&ctx, request.workspace, request.params))
+                    .await?
+            }
+            "liveApplication.releaseActivation" => {
+                Box::pin(self.live_application_release(&ctx, request.workspace, request.params))
+                    .await?
+            }
+            "liveApplication.cancelRestoreFence" => {
+                Box::pin(self.live_application_cancel_restore_fence(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
+            }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
@@ -451,7 +496,25 @@ impl EngineService {
                     .await?
             }
             "sync.pullHosted" => {
-                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params)).await?
+                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params, request.id))
+                    .await?
+            }
+            "sync.heldDocuments" => {
+                Box::pin(self.sync_held_documents(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.id,
+                ))
+                .await?
+            }
+            "documents.keepRetainedVersion" => {
+                Box::pin(self.documents_keep_retained_version(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
             }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
@@ -530,6 +593,10 @@ impl EngineService {
                 self.owner_ydoc_outbox_read_pending(&ctx, request.workspace, request.params, id)
                     .await?
             }
+            "ydoc.ownerOutbox.listRestoreFenced" => {
+                self.owner_ydoc_outbox_list_restore_fenced(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "ydoc.ownerOutbox.acknowledge" => {
                 self.owner_ydoc_outbox_acknowledge(&ctx, request.workspace, request.params)
                     .await?
@@ -563,8 +630,7 @@ impl EngineService {
                     .await?
             }
             "conflicts.open" => {
-                self.conflicts_open(&ctx, request.workspace, request.params)
-                    .await?
+                Box::pin(self.conflicts_open(&ctx, request.workspace, request.params)).await?
             }
             "conflicts.resolve" => {
                 Box::pin(self.conflicts_resolve(
@@ -797,6 +863,14 @@ impl EngineService {
                 self.chats_threads_find_channel_id(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.threads.get" => {
+                self.chats_threads_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.stream.list" => {
+                self.chats_stream_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.threads.getProjection" => {
                 self.chats_threads_get_projection(&ctx, request.workspace, request.params)
                     .await?
@@ -874,6 +948,14 @@ impl EngineService {
             }
             "chats.readState.listUnreadFileThreads" => {
                 self.chats_read_state_list_unread_file_threads(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
+            "chats.agentReadState.listUnreadRequests" => {
+                self.chats_agent_read_state_list_unread_requests(
                     &ctx,
                     request.workspace,
                     request.params,
@@ -960,14 +1042,6 @@ impl EngineService {
             "chats.dispatch.enqueue" => {
                 self.chats_dispatch_enqueue(&ctx, request.workspace, request.params)
                     .await?
-            }
-            "chats.dispatch.recordEligibleTriggers" => {
-                self.chats_dispatch_record_eligible_triggers(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                )
-                .await?
             }
             "chats.dispatch.claimNextPending" => {
                 self.chats_dispatch_claim_next_pending(&ctx, request.workspace, request.params)
@@ -1194,6 +1268,12 @@ impl EngineService {
                     "received shares do not host live applications",
                 ));
             }
+            if method == "documents.keepRetainedVersion" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not keep retained versions",
+                ));
+            }
         }
         if read_only
             && !matches!(
@@ -1323,6 +1403,8 @@ mod tests {
             "sync.push",
             "sync.createHostedReplica",
             "sync.pullHosted",
+            "sync.heldDocuments",
+            "sync.heldDocument",
         ] {
             request.method = method.into();
             request.workspace = Some(attached_handle.clone());
@@ -1486,10 +1568,9 @@ mod tests {
         assert_eq!(answer.response.result, json!({ "ok": true }));
     }
 
-    /// Every listed method is registered, and the three retired ones
-    /// (`share.view.push`, `ydoc.apply`, `chats.dispatch.reclaimRunning`) are
-    /// not. A new arm added without a row here is not caught; that needs the
-    /// dispatch table as data.
+    /// Every listed method is registered, and the retired ones are not. A new
+    /// arm added without a row here is not caught; that needs the dispatch
+    /// table as data.
     ///
     /// Without a workspace handle a registered method fails on the missing
     /// handle or on its params; an unregistered one fails `MethodNotFound`.
@@ -1525,6 +1606,7 @@ mod tests {
             "capture.renew",
             "capture.setAuthor",
             "capture.clearRecovery",
+            "chats.agentReadState.listUnreadRequests",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",
@@ -1562,7 +1644,6 @@ mod tests {
             "chats.dispatch.markFailureHandled",
             "chats.dispatch.openRuns",
             "chats.dispatch.recentCount",
-            "chats.dispatch.recordEligibleTriggers",
             "chats.dispatch.recordRunMessage",
             "chats.dispatch.requeueFailedTrigger",
             "chats.dispatch.runIdForMessage",
@@ -1582,8 +1663,10 @@ mod tests {
             "chats.readState.get",
             "chats.readState.listUnreadFileThreads",
             "chats.readState.markThreadRead",
+            "chats.stream.list",
             "chats.threads.create",
             "chats.threads.findChannelId",
+            "chats.threads.get",
             "chats.threads.getProjection",
             "chats.threads.list",
             "chats.threads.listForChannel",
@@ -1598,6 +1681,7 @@ mod tests {
             "conflicts.list",
             "conflicts.open",
             "conflicts.resolve",
+            "documents.keepRetainedVersion",
             "engine.ping",
             "history.page",
             "keptCopies.list",
@@ -1638,6 +1722,8 @@ mod tests {
             "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.createHostedReplica",
+            "sync.heldDocument",
+            "sync.heldDocuments",
             "sync.probe",
             "sync.pull",
             "sync.pullHosted",
@@ -1712,6 +1798,7 @@ mod tests {
             "share.view.push",
             "ydoc.apply",
             "chats.dispatch.reclaimRunning",
+            "chats.dispatch.recordEligibleTriggers",
         ] {
             assert!(
                 !registered(&service, retired).await,

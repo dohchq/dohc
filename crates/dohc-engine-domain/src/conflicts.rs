@@ -868,6 +868,24 @@ impl VersionedTextStore<'_> {
             if !live_state_matches_conflict_current(&live, &conflict.current) {
                 return Err(DomainError::ConflictStaleTarget);
             }
+            if !conflict.current.is_present()
+                && (matches!(input.resolution, ResolveConflictKind::ApplyMerged { .. })
+                    || matches!(input.resolution, ResolveConflictKind::ApplyIncoming)
+                        && conflict.incoming.snapshot.is_some())
+                && let Some(text) = conflict
+                    .incoming
+                    .snapshot
+                    .as_ref()
+                    .or(conflict.base.snapshot.as_ref())
+            {
+                crate::synced_deletion::refuse_synced_deletion_revival(
+                    tx,
+                    &conflict.workspace_id,
+                    &conflict.target_version_id,
+                    &text.object_id,
+                    Some(&conflict),
+                )?;
+            }
             let prepared = before(tx, &conflict, &live)?;
 
             let mut write = None;
@@ -875,7 +893,7 @@ impl VersionedTextStore<'_> {
             let mut binary_write = None;
             let (choice, resolution) = match &input.resolution {
                 ResolveConflictKind::KeepCurrent => {
-                    if keep_current_needs_lineage_effect(tx, &conflict)?
+                    if keep_current_needs_write_effect(&conflict)
                         && let Some(current) = &conflict.current.snapshot
                     {
                         let mut kept = write_input(
@@ -1050,17 +1068,10 @@ impl VersionedTextStore<'_> {
     }
 }
 
-/// A shared lineage resolution needs a durable head that every peer can adopt.
+/// A kept text resolution needs a durable head that every peer can adopt.
 #[doc(hidden)]
-pub fn keep_current_needs_lineage_effect(
-    tx: &Transaction<'_>,
-    conflict: &TextConflict,
-) -> Result<bool, DomainError> {
-    let Some(current) = &conflict.current.snapshot else {
-        return Ok(false);
-    };
-    tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_status='exact')",
-        params![conflict.workspace_id,conflict.target_version_id,current.object_id],|row| row.get(0)).map_err(DomainError::sql_corrupt)
+pub fn keep_current_needs_write_effect(conflict: &TextConflict) -> bool {
+    conflict.current.snapshot.is_some()
 }
 
 #[doc(hidden)]

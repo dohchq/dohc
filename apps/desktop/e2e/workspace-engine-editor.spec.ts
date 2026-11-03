@@ -94,7 +94,6 @@ async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDes
   const kept = await page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId);
   expect(kept.captureRecoveries.map(recovery => recovery.momentId)).toContain(recoveryId);
   await page.getByTestId("engine-diff-restore-file").click();
-  await page.getByTestId("engine-diff-confirm-restore").click();
   await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");
   await expect.poll(() => readFile(join(rootPath,path), "utf8")).toContain(human);
   await expect.poll(() => page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId)).toEqual({captureRecoveries: []});
@@ -197,15 +196,15 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
     await expect(page.getByTestId("markdown-editor")).toBeVisible();
     await expect(page.getByTestId("markdown-editor")).toContainText(sentinel);
 
-    // History says how the typed sentence arrived. The settle names no
-    // author, so the row names the live edit and not a person.
+    // History names who typed the sentence: the settle is this computer's
+    // person's edit, so the row names them.
     await openHistoryView(page);
     await expect(
       page
         .locator('[data-testid="engine-moment-open"][data-moment-path="notes/rich.md"]')
         .first()
         .getByTestId("engine-moment-source"),
-    ).toHaveText("Live edit");
+    ).toHaveText("You");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -305,11 +304,11 @@ test("@restart-durability-overlapping-typing overlapping typing on an externally
     expect(momentTextsForPath(temp.rootPath, recovered!)).toEqual([copy]);
     await restoreRestartTyping(desktop, temp.rootPath, workspace.workspaceId, path, human, external, "notice");
     // History explains the sibling on screen, not only in the database: the
-    // row names the recovery and credits the live edit, not a person.
+    // row names the recovery in words, and the person whose typing it holds.
     await openHistoryView(desktop.page);
     const recoveredRow = desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-path="${recovered!}"]`).first();
     await expect(recoveredRow).toContainText(`Recovered unsaved edits from ${path} after a later write changed the file.`);
-    await expect(recoveredRow.getByTestId("engine-moment-source")).toHaveText("Live edit");
+    await expect(recoveredRow.getByTestId("engine-moment-source")).toHaveText("You");
     await quitDesktop(desktop);
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
@@ -374,13 +373,13 @@ test("renaming a property of a live document keeps its place and comments throug
   // One file with comments and quoting, and one in canonical form.
   const files = [
     {
-      path: "trip.md", to: "cost",
+      path: "trip.md", to: "cost", source: 1,
       written: '---\n# Monthly\nbudget:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
       renamed: '---\n# Monthly\ncost:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.',
     },
     {
-      // The properties show every line, so its section starts closed.
-      path: "plan.md", to: "yearly", collapsed: true,
+      // The pills show every line, so the properties offer no Source button.
+      path: "plan.md", to: "yearly", source: 0,
       written: "---\nbudget: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
       renamed: "---\nyearly: 100\nwifi: hunter2\n---\n\n# Plan\n\nBase paragraph.",
     },
@@ -390,15 +389,14 @@ test("renaming a property of a live document keeps its place and comments throug
   const panel = (page: import("@playwright/test").Page) => page.locator('[data-testid="properties-panel"]:visible');
   const names = (page: import("@playwright/test").Page) =>
     panel(page).getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
-  const asWritten = (page: import("@playwright/test").Page) =>
-    page.locator('[data-testid="frontmatter-as-written"]:visible pre');
   try {
     await writeWorkspaceFiles(temp, files.map(({path, written}) => ({path, contents: written})));
     desktop = await launchDesktopApp({workspace: temp});
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
-    for (const {path, to, renamed, collapsed} of files) {
+    for (const {path, to, renamed, source} of files) {
       await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
       await openEngineDoc(desktop.page, path);
+      await expect(panel(desktop.page).getByTestId("properties-source")).toHaveCount(source);
       const name = panel(desktop.page).getByLabel("Property 1 name");
       await expect(name).toHaveValue("budget");
       await name.fill("");
@@ -406,10 +404,6 @@ test("renaming a property of a live document keeps its place and comments throug
       await name.pressSequentially(to);
       await expect.poll(() => fileText(path), {timeout: 20_000}).toBe(renamed);
       expect(await names(desktop.page)).toEqual([to, "wifi"]);
-      // Once saved, the block shown as written is the file's. A closed section
-      // reads the file when a person opens it.
-      if (collapsed) await desktop.page.locator('[data-testid="frontmatter-as-written"]:visible summary').click();
-      await expect(asWritten(desktop.page)).toHaveText(renamed.slice(0, renamed.indexOf("---\n\n") + 3));
     }
     await quitDesktop(desktop);
 

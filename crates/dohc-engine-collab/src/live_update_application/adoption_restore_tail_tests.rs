@@ -170,7 +170,12 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
                         30,
                     )?;
                     crate::author_coverage::advance_in(tx, &f.key, false)?;
-                    Ok(audit.result(id, "settled".into(), written.snapshot.blob_sha256, false))
+                    Ok(audit.result(
+                        Some(id),
+                        "settled".into(),
+                        written.snapshot.blob_sha256,
+                        false,
+                    ))
                 })?;
                 let TxnOutcome::Committed(result) = result else {
                     return Err(ApplicationError::Interrupted);
@@ -226,6 +231,7 @@ fn native_tail_record_at_depth(
     depth: u32,
 ) -> owner_outbox::OwnerOutboxEntry {
     let key = f.key.clone();
+    let path = f.binding.current_path.clone();
     let attribution = dohc_engine_domain::ChangeAttribution {
         actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
         on_behalf_of: local_person.map(str::to_owned),
@@ -250,9 +256,10 @@ fn native_tail_record_at_depth(
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &key,
-                "owner.md",
+                &path,
                 outcome.seq,
                 &update,
+                &Default::default(),
                 now,
             )
         },
@@ -262,8 +269,8 @@ fn native_tail_record_at_depth(
         .store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1",
-                [f.binding.restore_fence_generation],
+                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1 AND current_path=?2",
+                rusqlite::params![f.binding.restore_fence_generation, f.binding.current_path],
                 |r| r.get(0),
             )
         })
@@ -1070,6 +1077,7 @@ fn native_restore_append_identity_survives_retries_restart_and_acknowledgement()
                         "owner.md",
                         1,
                         &entry.update,
+                        &Default::default(),
                         now,
                     )
                 })
@@ -1191,6 +1199,7 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
                 "owner.md",
                 native_sequence,
                 &entry.update,
+                &Default::default(),
                 99,
             )
         })
@@ -1262,6 +1271,7 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
                     "owner.md",
                     outcome.seq,
                     &update,
+                    &Default::default(),
                     11,
                 )
             },
@@ -1950,7 +1960,7 @@ fn a_recovery_copy_rebuilds_the_accepted_state_once_its_document_unloaded() {
     ));
     refuse_seed(&mut f, &outbox);
     // Nothing read the frozen queue before its idle document unloaded.
-    f._owner.unregister(&mut f.store, "object").unwrap();
+    f._owner.unregister(&mut f.store, "object", Some("adoption")).unwrap();
     let available: i64 = f
         .store
         .read_with(|conn| conn.query_row("SELECT available FROM live_device_application_bindings", [], |r| r.get(0)))
@@ -2034,6 +2044,40 @@ fn a_recovery_copy_rebuilds_an_accepted_history_longer_than_one_update() {
 /// tip the host applied, as the relay's restore does.
 fn fence_next_generation(f: &mut Fixture, operation: &str) {
     try_fence_next_generation(f, operation).unwrap();
+}
+
+#[test]
+fn restore_fenced_discovery_excludes_desktop_hosted_queues() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    native_tail_edit(&mut f, "Owner typed before the restore.", 11);
+    fence_next_generation(&mut f, "desktop-hosted-restore");
+    f.store
+        .read_with(|conn| {
+            let queues: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM owner_ydoc_outboxes WHERE state='quarantined' AND quarantine_reason='restore-fenced' AND pending_bytes>0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(queues > 0);
+            let bindings: i64 = conn
+                .query_row("SELECT count(*) FROM ydoc_owner_bindings", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(bindings, 0);
+            assert!(
+                crate::owner_outbox::list_restore_fenced_in(
+                    conn,
+                    &f.binding.workspace_id,
+                    None,
+                    64,
+                )?
+                .is_empty()
+            );
+            Ok::<_, crate::owner_outbox::OwnerOutboxError>(())
+        })
+        .unwrap();
 }
 
 fn try_fence_next_generation(f: &mut Fixture, operation: &str) -> Result<(), ApplicationError> {
@@ -2363,6 +2407,7 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
                 "owner.md",
                 outcome.seq,
                 &original,
+                &Default::default(),
                 11,
             )?;
             Ok::<_, crate::CollabError>(outcome)
@@ -2672,7 +2717,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
         .unwrap();
     let resume = NativeRestoreResume {
         application: input,
-        settlement_id: settlement.settlement_id,
+        settlement_id: settlement.settlement_id.unwrap(),
     };
     f._owner
         .resume_restore(
@@ -2796,7 +2841,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     let mut selectors = vec!["owner.md".into()];
     selectors.extend((0..99).map(|i| format!("z{i:02}{}", "x".repeat(1020))));
     selectors.sort();
-    let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors);
+    let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors, |_, _| {});
     f.adopt().unwrap();
     mark("fixture");
     let mut terminal = None;
@@ -2910,7 +2955,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             &mut f.store, None,
             NativeRestoreResume {
                 application: input,
-                settlement_id: settled.settlement_id,
+                settlement_id: settled.settlement_id.unwrap(),
             },
             coordinate.clone(),
             PROOF_BYTES,
@@ -3069,4 +3114,47 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     .unwrap();
     assert!(matches!(retry, ApplicationResult::Applied(..)));
     mark("complete");
+}
+
+#[test]
+fn a_new_settlement_refuses_an_equal_cursor_interval() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let result = with_settlement(
+        &mut f.store,
+        &f.handle,
+        None,
+        128,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| {
+            assert!(audit.is_empty());
+            let doc = store.read_with(|conn| durable::load_doc_in(conn, &f.key))?;
+            let text = doc.project(ContentKind::Richdoc)?.content;
+            let vector = hex_sha256(&doc.encode_state_vector());
+            store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+                let written = dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    dohc_engine_domain::ProjectedWriteText {
+                        workspace_id: "workspace", version_id: "main", object_id: "object",
+                        path: std::borrow::Cow::Borrowed("owner.md"),
+                        text: std::borrow::Cow::Borrowed(&text), moment_id: "empty-settlement",
+                        metadata_origin: "ydoc", metadata_summary: None,
+                        metadata_correlation_id: None, author_json: None, now_ms: 30, request_id: None,
+                    },
+                ).map_err(|_| ApplicationError::Corrupt)?;
+                tx.execute("UPDATE ydoc_docs SET last_settled_sha=?1 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'", [&written.snapshot.blob_sha256]).map_err(write_sql)?;
+                audit.record_in_tx(tx, "empty-settlement", &written.snapshot.blob_sha256, &vector, 30)
+            })
+        },
+    );
+    assert!(
+        matches!(result, Err(ApplicationError::InvalidInput(message)) if message == "a new settlement must cover an accepted edit")
+    );
+    assert_eq!(
+        f.store.table_row_count("live_device_settlements").unwrap(),
+        0
+    );
+    assert_eq!(f.store.table_row_count("moments").unwrap(), 1);
 }

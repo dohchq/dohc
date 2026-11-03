@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot } from "lucide-react";
+import { ArrowLeft, Bot, PowerOff, TriangleAlert } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
@@ -142,9 +142,11 @@ export function ChatHeader(props: {
   // Optional calm trailing slot (e.g. presence faces of who else is here).
   trailing?: React.ReactNode;
   action?: React.ReactNode;
+  // A page's header: 48px, with the title at 15px.
+  large?: boolean;
 }) {
   return (
-    <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-2">
+    <div className={`flex shrink-0 items-center border-b border-line ${props.large ? "h-12 gap-2 pl-5 pr-4" : "h-9 gap-1.5 px-2"}`}>
       {props.onBack ? (
         <button
           type="button"
@@ -161,7 +163,7 @@ export function ChatHeader(props: {
       <span className="flex min-w-0 flex-1 items-baseline gap-2">
         <span
           data-testid={`${props.testId}-title`}
-          className="min-w-0 truncate text-[13px] font-medium text-ink"
+          className={`min-w-0 truncate text-ink ${props.large ? "text-[15px] font-semibold" : "text-[13px] font-medium"}`}
         >
           {props.label}
         </span>
@@ -212,12 +214,29 @@ export function ComposerModeBar(props: {
         data-testid={props.cancelTestId}
         aria-label={props.cancelLabel}
         onClick={props.onCancel}
-        className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+        className="rounded px-1 text-subtle hover:text-ink"
       >
         ×
       </button>
     </div>
   );
+}
+
+// A screen reader hears the dispatch strip through a status region that stays
+// mounted, so a run that starts without a new message is still announced. A
+// comma reads better aloud than the strip's middle dot.
+export function DispatchAnnouncement(props: { testId: string; text: string }) {
+  return (
+    <span data-testid={props.testId} role="status" aria-live="polite" className="sr-only">
+      {props.text}
+    </span>
+  );
+}
+
+export function dispatchAnnouncement(working: boolean, pendingCount: number): string {
+  const queued = pendingCount > 0 ? `${pendingCount} queued` : "";
+  if (!working) return queued;
+  return queued ? `Agent working, ${queued}` : "Agent working";
 }
 
 // The read-only / ended composer replacement: honest and quiet.
@@ -232,3 +251,27 @@ export function ComposerNotice(props: { testId: string; children: React.ReactNod
   );
 }
 
+
+// Over an agent DM's composer, only when the agent can't answer: what's
+// wrong, and the one action that fixes it. An agent that's off is a state,
+// not a fault, so it reads without the warning.
+export function AgentProblemLine(props: { words: string; action: string; off?: boolean; onAction?: (() => void) | undefined }) {
+  return (
+    <div data-testid="chats-agent-problem" className="mx-5 mb-1 mt-2 flex min-h-7 items-center gap-2 text-[13px] text-muted">
+      {props.off
+        ? <PowerOff size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+        : <TriangleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />}
+      <span className="min-w-0 truncate">{props.words}</span>
+      {props.onAction ? (
+        <button
+          type="button"
+          data-testid="chats-agent-problem-action"
+          onClick={props.onAction}
+          className="inline-flex h-6 shrink-0 items-center rounded-[5px] border border-line bg-bg px-2 text-[12px] font-medium text-ink hover:bg-hover"
+        >
+          {props.action}
+        </button>
+      ) : null}
+    </div>
+  );
+}

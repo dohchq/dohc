@@ -1,5 +1,5 @@
 use super::*;
-use dohc_engine_collab::live_update_application::passive::ReplicaJournalRow;
+use dohc_engine_collab::live_update_application::passive::ReplicaJournalEntry;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -25,13 +25,18 @@ fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], WireError> {
     Ok(value)
 }
 
-pub(super) fn decode(mut bytes: &[u8]) -> Result<Vec<ReplicaJournalRow>, WireError> {
-    let mut rows: Vec<ReplicaJournalRow> = serde_json::from_slice(field(&mut bytes)?)
+/// Metadata, then each delivery's update and optional checkpoint as binary
+/// spans. A restore cancellation carries no bytes.
+pub(super) fn decode(mut bytes: &[u8]) -> Result<Vec<ReplicaJournalEntry>, WireError> {
+    let mut rows: Vec<ReplicaJournalEntry> = serde_json::from_slice(field(&mut bytes)?)
         .map_err(|_| invalid("invalid replica page metadata"))?;
     if rows.len() > 500 {
         return Err(invalid("replica page row limit"));
     }
     for row in &mut rows {
+        let ReplicaJournalEntry::Update(row) = row else {
+            continue;
+        };
         if !row.admitted.update_bytes.is_empty()
             || row
                 .restore

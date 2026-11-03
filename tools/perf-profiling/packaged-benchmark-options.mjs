@@ -3,15 +3,15 @@ import { mkdir } from 'node:fs/promises';
 import { DOCUMENT_SIZES } from './document-size-fixtures.mjs';
 import { DEFAULT_LIMITS } from './packaged-collection-automations.mjs';
 
-export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'presence', 'soak', 'document-size'];
+export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'presence', 'soak', 'document-size', 'link-rename'];
 export const SWITCHING_SCENARIOS = ['full', 'switches', 'small-switch', 'small-tab', 'soak'];
 export const usage = `node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs <count>] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario ${SCENARIOS.join('|')}] [--soak-minutes 10] [--heap-snapshot-minutes 10,60] [--chat-messages 200] [--presence-peers 2] [--records 500] [--find-cap 50] [--write-cap 200] [--profile-renderer true|false] [--profile-main true|false] [--typing-trace true|false] [--engine-commit <40-digit SHA>]
-Document size: [--document-mib 2,5,8,10] [--relay-sessions 1,2,4] [--updates-per-second 8] [--churn-edits 100000] [--relay-checkout <matching checkout>] [--document-mode gate|pilot|dry-run] [--baseline <completed baseline output directory>]. Gate mode uses 10/20 worst-shape pairs, 3-pair shape proofs, at most one extension per size and one adaptive 60-minute soak, within a six-hour deadline. A gated candidate needs --baseline: its 2 MiB decisions use that receipt, as the comparison does. Dry-run needs no binary on disk and launches nothing.\nRuns default to 20 for document-size, 5 for collection and presence, and 3 for other scenarios.
+Link rename: [--links 2000] [--files 5000]. Runs unrelated and linking rich-document typing during separate renames and Undos.\nDocument size: [--document-mib 2,5,8,10] [--relay-sessions 1,2,4] [--updates-per-second 8] [--churn-edits 100000] [--relay-checkout <matching checkout>] [--document-mode gate|pilot|dry-run] [--baseline <completed baseline output directory>]. Gate mode uses 10/20 worst-shape pairs, 3-pair shape proofs, at most one extension per size and one adaptive 60-minute soak, within a six-hour deadline. A gated candidate needs --baseline: its 2 MiB decisions use that receipt, as the comparison does. Dry-run needs no binary on disk and launches nothing.\nRuns default to 20 for document-size, 5 for collection and presence, and 3 for other scenarios.
 Heap snapshot minutes are distinct positive integers within the soak duration. Capture is opt-in and diagnostic.`;
 
 export function parseOptions(argv) {
   if (argv.length === 1 && argv[0] === '--help') return { help: true };
-  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'soak-minutes', 'heap-snapshot-minutes', 'chat-messages', 'records', 'presence-peers', 'find-cap', 'write-cap', 'profile-renderer', 'profile-main', 'typing-trace', 'document-mib', 'relay-sessions', 'updates-per-second', 'churn-edits', 'relay-checkout', 'document-mode', 'baseline']);
+  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'soak-minutes', 'heap-snapshot-minutes', 'chat-messages', 'records', 'presence-peers', 'find-cap', 'write-cap', 'profile-renderer', 'profile-main', 'typing-trace', 'document-mib', 'relay-sessions', 'updates-per-second', 'churn-edits', 'relay-checkout', 'document-mode', 'baseline', 'links']);
   const args = new Map();
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].slice(2), value = argv[i + 1];
@@ -41,7 +41,7 @@ export function parseOptions(argv) {
     output: resolve(args.get('output')), label: choice('label', ['baseline', 'candidate']),
     packageCommit: args.get('package-commit'), engineCommit: args.get('engine-commit') ?? args.get('package-commit'),
     runCount: integer('runs', scenario === 'document-size' ? 20 : ['collection', 'presence'].includes(scenario) ? 5 : 3), idleSeconds: integer('idle-seconds', 60), keystrokes: integer('keystrokes', scenario === 'document-size' ? 60 : 30),
-    switches: integer('switches', 10), fixtureFiles: integer('files', 2, 2),
+    switches: integer('switches', 10), fixtureFiles: integer('files', scenario === 'link-rename' ? 5000 : 2, 2), links: integer('links', 2000, 0),
     scenario, presencePeers: integer('presence-peers', 2, 2), heapSnapshotMinutes: [],
     soakMinutes: integer('soak-minutes', scenario === 'document-size' ? 60 : 10), chatMessages: integer('chat-messages', 200, 2), records: integer('records', 500),
     findCap: integer('find-cap', DEFAULT_LIMITS.findCap), writeCap: integer('write-cap', DEFAULT_LIMITS.writeCap),
@@ -72,6 +72,8 @@ export function parseOptions(argv) {
     if (args.has(key) && options.scenario !== requiredScenario && !(key === 'soak-minutes' && scenario === 'document-size')) throw Error(`--${key} requires --scenario ${requiredScenario}`);
   }
   if (scenario === 'presence' && options.runCount < 5) throw Error('--scenario presence needs at least 5 runs');
+  if (args.has('links') && scenario !== 'link-rename') throw Error('--links requires --scenario link-rename');
+  if (scenario === 'link-rename' && (options.fixtureFiles < 5000 || options.links > options.fixtureFiles - 2)) throw Error('link-rename needs at least 5000 files and room for its target and unrelated document');
   if (scenario === 'presence' && options.presencePeers > 8) throw Error('--presence-peers must be at most 8 within the fixture connection budget');
   if (args.has('heap-snapshot-minutes')) {
     if (scenario !== 'soak') throw Error('--heap-snapshot-minutes requires --scenario soak');

@@ -7,6 +7,13 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error("markdown-write-held")]
+    MarkdownWriteHeld {
+        key: Box<dohc_engine_collab::DocKey>,
+        path: String,
+        head_sha256: Option<String>,
+        checkpoint_sha256: String,
+    },
     #[error(transparent)]
     CaptureBatchPass(std::sync::Arc<RuntimeError>),
     #[error("chat-mention-access-changed")]
@@ -124,9 +131,33 @@ pub enum RuntimeError {
     #[error("request cancelled")]
     Cancelled,
 
+    /// The workspace already has a held-document proof that asks something
+    /// else, one still stopping, or as many callers as one answers. Nothing
+    /// waits for it; the caller asks again later.
+    #[error("another held document read is running for this workspace")]
+    HeldReadBusy,
+
+    /// What a held document's proof would keep is more than held reads may
+    /// keep: the daemon's proof memory, or a contribution artifact's cap.
+    /// Asking again answers the same.
+    #[error("the held document's answer is larger than a held read may keep")]
+    HeldReadTooLarge,
+
+    /// The actor closed, but a held proof's reader still had the store open
+    /// past the close bound. Nothing may replace or delete the store's files
+    /// until it closes; the caller asks again later.
+    #[error("a held document read still has the workspace database open")]
+    StoreInUse,
+
     /// A fault-injected domain transaction crashed before acknowledgement.
     #[error("operation crashed before acknowledgement")]
     OperationCrashed,
+
+    /// A deferred drain ended its transaction to wait for released-tail
+    /// validation. The actor operation that ran it awaits the validation
+    /// and drains again; it never reaches that operation's caller.
+    #[error("a deferred drain waits for released-tail validation")]
+    DrainWaiting(Box<dohc_engine_collab::live_update_application::PendingValidation>),
 }
 
 impl RuntimeError {
@@ -143,6 +174,7 @@ impl RuntimeError {
     /// The stable machine code, preserving the storage code where wrapped.
     pub fn code(&self) -> &'static str {
         match self {
+            RuntimeError::MarkdownWriteHeld { .. } => "markdown-write-held",
             RuntimeError::CaptureBatchPass(error) => error.code(),
             RuntimeError::ChatMentionAccessChanged => "chat-mention-access-changed",
             RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",
@@ -175,6 +207,7 @@ impl RuntimeError {
                         "owner-outbox-configured-budget-mismatch"
                     }
                     ApplicationError::Interrupted => "operation-crashed",
+                    ApplicationError::Cancelled => "cancelled",
                     ApplicationError::PublicationPending => "live-application-publication-pending",
                     ApplicationError::AcceptedStateIncomplete => {
                         "live-application-accepted-state-incomplete"
@@ -202,7 +235,11 @@ impl RuntimeError {
             RuntimeError::WorkspaceHardlinked => "workspace-hardlinked",
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
+            RuntimeError::HeldReadBusy => "held-read-busy",
+            RuntimeError::HeldReadTooLarge => "held-read-too-large",
+            RuntimeError::StoreInUse => "store-in-use",
             RuntimeError::OperationCrashed => "operation-crashed",
+            RuntimeError::DrainWaiting(_) => "retryable-state",
         }
     }
 }

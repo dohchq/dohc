@@ -5,7 +5,7 @@ import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
+import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials, seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles } from "./helpers/workspace";
 
 const OWNER = "test:e2e-granter";
 const RECIPIENT = "test:e2e-recipient";
@@ -15,6 +15,7 @@ const RECORD_ID = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const record = (title: string) => `---\nid: ${RECORD_ID}\nTitle: ${title}\n---\n`;
 
 async function openCollection(page: Page, path: string) {
+  await showExplorerFiles(page);
   const parts = path.split("/");
   for (let depth = 1; depth <= parts.length; depth++) {
     // Select by the path attribute, which is the Explorer's routing contract.
@@ -35,7 +36,7 @@ for (const surface of ["standalone", "mount"] as const) {
       const ownerId = `shared-tables-${surface}-${access}`;
       const hostId = `recipient-${surface}-${access}`;
       try {
-        relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+        relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
         await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER, workspaceId: ownerId });
         const peer = new RelayFilePeer({ baseUrl: relay.baseUrl, token: OWNER, workspaceId: ownerId, originId: "owner" });
         await peer.writeTextFiles([

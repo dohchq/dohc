@@ -97,10 +97,6 @@
       "label": "View: Graph"
     },
     {
-      "id": "show-sites",
-      "label": "View: Apps"
-    },
-    {
       "id": "show-history",
       "label": "View: History"
     },
@@ -130,7 +126,7 @@
     },
     {
       "id": "install-update",
-      "label": "Update and restart"
+      "label": "Restart to update"
     },
     {
       "id": "toggle-theme",

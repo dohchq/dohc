@@ -111,7 +111,7 @@ describe("AddAgentForm", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-add-agent-check").textContent).toBe("Checking…"),
     );
-    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "default" });
     expectDismissBlocked(onCancel);
 
     await act(async () => {

@@ -97,6 +97,7 @@ Check that the action exists on that surface before you name it.
 
 - Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.
 - Work in progress: the concrete action, with the count when it is known. `Reading 40 files`, not `Working on it…`.
+- When more can load, show the loaded count as a lower bound, `49+`, read aloud as "49 or more files". Never show a loaded count as the total.
 - Waiting on the person: the reason. `Waiting for your review`.
 - Attribution: `Edited by agent`. No invented names or personalities. Use first person only when the agent itself is speaking.
 - Say what the agent did, not that it understood, decided, or thought.
@@ -127,6 +128,11 @@ Existing strings do not all follow these rules, and some surfaces use two words 
 The editor's link picker says `page links` in its accessible name and `No files match` in its empty state.
 Settle the word across every surface before you change any string.
 A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `role`, and accessible name.
+When a list waits on a cause, say what the list will show once the cause is fixed.
+Do not reuse another surface's question.
+Signed out, the Sharing view's **Shared with me** says `Connect a server to get what others share with you.`
+About's Access asks who has access, so it keeps `Connect your server to check who has access.`
+Name a server only when dohc knows it, in the interface font: `Not connected to example.com`.
 `12 items` in the Explorer's delete dialog is correct, because a selection can mix files and folders.
 
 ## Where messages go
@@ -134,28 +140,39 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 | Situation | Where it goes |
 | --- | --- |
 | The whole workspace is unusable | A full-height state over the workbench, which goes inert |
-| One thing failed, and the workspace still works | A toast at the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
+| One thing failed, and the workspace still works | A toast at the bottom right, then a row in Notices until it is retried or dismissed |
+| An update is available or downloaded | The Update button at the top right of the title bar. No toast and no row |
 | Something finished out of sight, such as a background job | A toast at the bottom right that fades, and a row in Notices |
 | An action whose result the person can see | No toast and no row |
 | A control's own input is wrong | Inline, beside the control |
 
 - Use these places. Do not add a new one for a new message.
+- Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own. A state dohc is still fixing by itself shows at once where it lives, as a ring. Its toast and row come only once the ring has shown for 15 s.
+- A dialog shows the failure of an action it started in place, above the button that retries it, and files no toast or row while it is open. If the dialog closed before the answer, the failure takes a toast and a row.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
+- Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
-- Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log.
+- Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
+- A later success for the same thing takes back its failure's toast and row, whichever control started it.
+- Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
-- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
+- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
+- A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
+- In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
 - If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Write a refusal to fit two lines: what failed, then the one thing to do. The cause goes in its details.
 - Restarting or closing the app asks once, in one dialog.
-- Report errors through the shell's `reportError` callback instead of rendering them yourself.
+- Report errors through the shell's `reportError` callback instead of rendering them yourself, except a dialog's own action, as above.
 - For a list or section whose read failed, show `RetryRow`.
 
 ## Controls
+
+A dohc control does the action it names. No control opens a prompt box for an agent. People ask their agents in their own tools or in dohc chat, and an automation they build may message their agent. An agent reaches the same action through the CLI or MCP.
 
 The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
@@ -182,7 +199,7 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `text-ink` | Primary text |
 | `text-muted` | Secondary text, such as labels and inactive items |
 | `text-subtle` | Decorative text only: hints, timestamps, kbd |
-| `bg-accent`, `text-accent` | The brand accent: primary buttons, checked and active states, focus rings |
+| `bg-accent`, `text-accent` | The brand accent: primary buttons, checked and active states, keyboard focus |
 | `bg-agent`, `text-agent` | The default agent color |
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
@@ -195,7 +212,8 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | Dense secondary text | `text-[12px] text-muted` |
 | Hints, timestamps, shortcuts | `text-[12px] text-subtle` |
 | Section labels | `dohc-section-label`: `text-[12px] font-medium text-subtle`, in sentence case |
-| Panel and dialog titles | `text-sm font-semibold text-ink` |
+| Page and dialog titles | `text-base font-semibold text-ink` |
+| Panel titles, and section headings on a page | `text-sm font-semibold text-ink` |
 | Brand moments, such as the first-run headline | `font-serif`, rarely |
 | Code and Markdown source | `font-mono` |
 
@@ -205,6 +223,10 @@ Never uppercase a label.
 
 Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
 `PathLine` in `ui/PathLine.tsx` draws it.
+
+When the title bar is crowded, Go to… and the Restricted Mode pill give way first. Each narrows to its icon and keeps its words as its tooltip and accessible name.
+The Alpha pill stays. The workspace and version names keep at least three letters and an ellipsis, with the full name in the tooltip.
+Nothing in the title bar overlaps, and the buttons at its right never move.
 
 ### Radius and elevation
 
@@ -225,24 +247,85 @@ Use the classes in `styles.css` instead of writing shadows:
 
 Flat panels get borders, not shadows.
 
+### Spacing
+
+Space shows what belongs together. Take it from one scale and use it the same way on every screen.
+
+The scale is 4, 8, 12, 16, 20, 24, 32, 40, and 48 px. In Tailwind these are `1`, `2`, `3`, `4`, `5`, `6`, `8`, `10`, and `12`.
+
+- Take every gap, margin, and padding between things from the scale.
+- Do not use half steps such as `gap-2.5` or `mt-0.5`, or arbitrary values such as `px-[7px]`, between things.
+- Inside one control, follow its recipe. The recipes for inputs, kbd chips, pills, and segmented controls keep their own small values.
+
+Closeness:
+
+- Put things that belong together closer than things that do not.
+- Make each level of grouping at least twice the gap of the level inside it. Rows in a list touch, and their height sets the rhythm.
+- Put a heading closer to what it labels than to what comes before it.
+- Separate sections with space, not a rule. Keep a rule only where it marks an edge you can drag, a band that scrolls, or the rows inside a card.
+
+One left edge:
+
+- In a column, start text, icons, headings, and fields at one left edge.
+- In a panel, that edge is 12 px from the panel's side. Headers and section labels use `px-3`. A list uses `px-1`, and its rows use `px-2`.
+- Let hover and selected fills hang outside the edge. Do not indent a row's text to make room for its fill.
+- A section label starts on the edge. Its collapse chevron follows the label.
+- A tree's first chevron starts on the edge. Each level indents so a child's icon starts where its parent's name starts.
+
+Alignment:
+
+- Put a label on the first line of its control, not at the middle of a control that wraps.
+- Buttons side by side share one height and one text size.
+
+Position:
+
+- Anchor a page-like surface at a fixed top. Do not center it vertically, because content that loads later moves it.
+- Center only a short message that stands alone, such as an empty panel.
+
+| Part | Spacing |
+| --- | --- |
+| Row in a panel, tree, or menu | `h-7` (28 px), `gap-2` between icon and label |
+| Row in a picker or on a page | `h-8` (32 px), `gap-2` |
+| Panel header | `h-9` (36 px), `px-3`, the same height as the tab strip |
+| Panel content | Starts 8 px under the header |
+| Section in a panel | `mt-4` (16 px) before it, except the first. Its label row is `h-6 px-3`, and the first row follows directly. |
+| Icon button | `size-6` (24 px) in panels, rows, and toolbars. `size-7` in the title bar. `size-9` in the rail. |
+| Button | `h-8 px-3 text-[13px]` for `PrimaryButton`, `SecondaryButton`, and `DangerButton`. `h-7` compact, `h-6` in a row. `GhostButton` is `h-6 px-2 text-xs`, with `gap-2` after its icon. |
+| Card | `p-3`, with `gap-2` inside |
+| Popover | `p-3`. A menu's frame is `p-1`, because its rows bring their own `px-2`. |
+| Dialog | `p-6` and `gap-6` between its parts. The title uses the page and dialog title role; its one-line description follows with `gap-1`. A section label sits 8 px over its fields. The buttons end the dialog, right-aligned, `gap-2` apart. No header or footer band. |
+| Dialog with a preview | The title, fields, and buttons form the left column, `p-6`. The preview fills the right column from top to bottom on `bg-panel-2`, `p-6`. |
+| Dialog that scrolls | Only a body that scrolls gets bands: header and footer `px-6 py-4` with a rule, body `p-6`. |
+| Settings page | `px-12 pt-10`, as wide as the page column. The page title is 24 px over the first section. |
+| Settings section | `SettingsSection`: a heading in the panel title role, 8 px over a card. Sections sit 32 px apart. A page with one group has one card and no heading. |
+| Settings row | `SettingRow`: `py-4` with a rule between rows. The name is `text-[13px] font-medium`; its description is `text-[12px] text-muted`, `mt-1` under it. Controls sit on the right and use the default button size; in a narrow pane they wrap under the name and stay on the right edge. Reset appears left of them only when the value differs from its default. A row that can reset keeps Reset's place, so the controls never move or wrap when it appears. When the control is a list, its name and Reset sit beside the list's first row (`top`). |
+| Empty state | `EmptyState`: `gap-4 px-6`. Do not build your own. |
+| Toast and Notices row | `px-3 py-2`, `gap-2` |
+
 ### Recipes
 
 Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
 
-List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
+List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
 - Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
-- Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
-- Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
-- A menu opened with the pointer marks no row, and the hover fill follows the pointer. The first arrow key marks a row with the fill and the accent outline. Until a row is marked, Enter and Space mark the first row and run nothing. A menu opened from the keyboard marks its first row that way at once.
+- Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
+- `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.
+- So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape, Delete and Backspace leave the mark as it was, so closing or removing the focused thing from the keyboard still shows where focus went.
+- Give a row `dohc-focus-row`: the hover fill and a 1px accent line inside its edge. A selected row keeps its fill and adds the line.
+- Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
+- Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
+- To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`.
+- A menu opened with the pointer marks no row, and the hover fill follows the pointer. The first arrow key marks a row with the fill. Until a row is marked, Enter and Space mark the row the menu opened on, its checked row or else its first, and run nothing. A menu opened from the keyboard marks that row at once.
 - In a panel, give the parent `px-1`.
+- A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its fill.
 
 Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.
-It draws the accent outline on the active option, where Enter acts, whether the keyboard or the pointer moved it. The fill alone is about 1.2:1.
+It draws the selected fill on the active option, where Enter acts, whether the keyboard or the pointer moved it. A list that also marks its current row with the fill, such as the tab overflow menu, Turn into and the callout type menu, adds the row's accent line while the keyboard moves. Compose `MENU_ACTIVE_OPTION_BESIDE_CURRENT` for it. A picker you type into, such as Go to, the command palette, / and [[, shows the fill only.
 
-Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-5` and `dohc-elevated`.
+Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-6` and `dohc-elevated`.
 
 Dialog: build it on `Overlay`. Cancel, the X, and Escape close it.
 While closing would discard hand-written work, as with open merge conflicts, only the dialog's own buttons close it.
@@ -278,8 +361,8 @@ A running agent shows a 6px round `bg-agent` dot.
 - End-to-end tests pin every `data-testid`, `aria-*`, `role`, and accessible name. Rewording and restyling keep them. A surface can become something else, such as the right panel changing from Chats to About. Then change them in the same PR as the tests that read them.
 - Surface work adds no dependencies, no `any`, and no `styles.css` edits. Propose a new shared pattern instead of inlining it.
 - Use lucide-react icons only, at 12 to 18px, with `strokeWidth={1.9}` at rail size.
-- Keep the global `:focus-visible` ring. Do not add `outline-none`, with two exceptions, each explained in a comment. Where a ring would clip, opt out only if the frame shows focus another way, as the command palette's `focus-within:border-ink` does. A dialog's panel never wears the ring: it holds focus only until Tab reaches its controls, which show their own.
-- Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface.
+- Keep the global halo and `dohc-focus-row`, and draw no focus ring of your own. Add `outline-none` only where the part shows focus another way, and name that way in a comment. The command palette's frame shows it with `focus-within:border-ink`, and a menu row with its fill, plus its line beside a current row. A dialog's panel never wears the halo: it holds focus only until Tab reaches its controls, which show their own.
+- Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface. Keep every focus mark at 3:1 or more against the surface under it.
 
 ## Before you finish
 

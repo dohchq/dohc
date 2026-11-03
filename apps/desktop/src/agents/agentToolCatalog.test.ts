@@ -13,9 +13,10 @@ describe("agent launch profiles", () => {
     expect(supportsAgentProfile("codex", "0.155.1")).toBe(true);
     expect(supportsAgentProfile("opencode", "1.18.31")).toBe(false);
   });
-  it("uses stdin, workspace writes, no Git requirement, and no persistent Codex session", () => {
+  it("uses stdin, the run's own sandbox, no Git requirement, and no persistent Codex session", () => {
     const profile = { tool: "codex", executable: "C:\\Program Files\\Codex\\codex.exe" } as const;
-    expect(agentProfileArguments(profile)).toEqual(["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"]);
+    expect(agentProfileArguments(profile)).toEqual(["exec", "--config", "approval_policy=never", "--skip-git-repo-check", "--ephemeral", "-"]);
+    expect(agentProfileArguments(profile, ["--config", "x=1"])).toEqual(["exec", "--config", "approval_policy=never", "--config", "x=1", "--skip-git-repo-check", "--ephemeral", "-"]);
     expect(tokenizeRunnerCommand(launchCommand(profile))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
     expect(AgentLaunch.parse(profile)).toEqual(profile);
   });

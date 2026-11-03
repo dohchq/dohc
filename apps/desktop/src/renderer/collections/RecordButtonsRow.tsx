@@ -22,6 +22,8 @@ export function RecordButtonsRow(props: {
   onError: ReportButtonError;
   onNotice: (message: string) => void;
   onOpenHistory: (record: RecordHistoryTarget) => void;
+  // Told which record the file is, as main answers, or that it is none.
+  onRecord?: (record: { workspaceId: string; path: string; id: string } | null) => void;
 }) {
   const { workspaceId, path } = props;
   const [found, setFound] = useState<{ record: CollectionRecord; collectionPath: string; fields: string[] } | null>(null);
@@ -33,6 +35,8 @@ export function RecordButtonsRow(props: {
   const [settings, setSettings] = useState(0);
   const report = useRef(props.onError);
   report.current = props.onError;
+  const tell = useRef(props.onRecord);
+  tell.current = props.onRecord;
 
   useEffect(() => {
     let alive = true;
@@ -43,9 +47,11 @@ export function RecordButtonsRow(props: {
         // A slower answer for an earlier read, or another file, never lands.
         if (!alive || request !== requests.current) return;
         setFound(result.record === null ? null : { record: result.record, collectionPath: result.collectionPath, fields: result.fields });
+        tell.current?.(result.record === null ? null : { workspaceId, path, id: result.record.id });
       } catch (error) {
         if (!alive || request !== requests.current) return;
         setFound(null);
+        tell.current?.(null);
         // The engine is still reading a new workspace's files. Main announces
         // the end as activity for the whole workspace, which reads again below.
         if (isWorkspaceUpdatingError(error)) return;

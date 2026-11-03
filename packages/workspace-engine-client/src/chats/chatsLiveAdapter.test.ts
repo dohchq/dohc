@@ -28,7 +28,7 @@ type ChatRequestCase = {
 
 const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.channelCreate, params: { channelId: "c", name: "C", kind: "channel" } },
-  { method: CHATS_METHOD.channelEnsureAgent, params: { channelId: "agent" } },
+  { method: CHATS_METHOD.channelEnsureAgent, params: { channelId: "agent", agentId: "default", name: "Nova" } },
   { method: CHATS_METHOD.channelEnsureGeneral, params: { channelId: "general" } },
   { method: CHATS_METHOD.channelFindBySlug, params: { slug: "general" } },
   { method: CHATS_METHOD.channelsList, params: {} },
@@ -89,6 +89,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.attachmentsListForThread, params: { threadId: "t" } },
   { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
+  { method: CHATS_METHOD.agentReadListUnreadRequests, params: { runId: "run_1" } },
   { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
   {
     method: CHATS_METHOD.agentReadMarkThreadRead,
@@ -139,9 +140,8 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   },
   {
     method: CHATS_METHOD.dispatchEnqueue,
-    params: { triggerMessageId: "m", threadId: "t" },
+    params: { triggerMessageId: "m", threadId: "t", agentId: "default" },
   },
-  { method: CHATS_METHOD.dispatchRecordEligibleTriggers, params: {} },
   { method: CHATS_METHOD.dispatchClaimNextPending, params: { runId: "r" } },
   { method: CHATS_METHOD.dispatchListPending, params: {} },
   { method: CHATS_METHOD.dispatchOpenRuns, params: {} },
@@ -155,7 +155,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.dispatchRecentCount, params: { threadId: "t", sinceMs: 0 } },
   {
     method: CHATS_METHOD.dispatchFailPendingForThread,
-    params: { threadId: "t", reason: "stop" },
+    params: { threadId: "t", agentId: "default", reason: "stop" },
   },
   {
     method: CHATS_METHOD.dispatchRecordRunMessage,
@@ -252,6 +252,7 @@ const bookmark = {
 const dispatch = {
   workspaceId: "workspace",
   triggerMessageId: "trigger",
+  agentId: "default",
   threadId: "thread",
   state: "pending",
   attemptCount: 0,
@@ -263,6 +264,7 @@ const run = {
   runId: "run",
   threadId: "thread",
   triggerMessageId: "trigger",
+  agentId: "default",
   command: "codex",
   startedAtMs: 3,
   failureHandled: false,
@@ -931,6 +933,17 @@ describe("ChatsLiveAdapter", () => {
     ).resolves.toBe("channel");
   });
 
+  it("moves a group named like an agent's chat to another slug when that chat is made", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "group", name: "My agent codex" });
+
+    const chat = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "codex", name: "Codex" });
+
+    expect(chat.slug).toBe("my-agent-codex");
+    const group = (await adapter.listChannels({ workspaceId: "workspace" })).find((channel) => channel.channelId === "group");
+    expect(group).toMatchObject({ name: "My agent codex", slug: expect.stringMatching(/^my-agent-codex-[0-9a-f]{64}$/) });
+  });
+
   it("matches native reaction validation for keycaps and ZWJ atoms", async () => {
     const loopback = new ChatsLoopbackEngine();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
@@ -955,6 +968,41 @@ describe("ChatsLiveAdapter", () => {
     for (const emoji of ["😀😀", "1", "1\uFE0F", "😀‍x", "🏴\u{E0067}\u{E0062}"]) {
       await expect(adapter.setReaction({ ...reaction, emoji })).rejects.toThrow("invalid-message-body");
     }
+  });
+
+  it("folds pending requests only from the same place: the stream, or one message's thread", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
+    const adapter = new ChatsLiveAdapter(
+      { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const author = { kind: "human" as const, displayName: "Sam" };
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      messageId: "main-1", author, body: "First", namedAgentIds: ["codex"],
+    });
+    for (const [messageId, parentMessageId] of [
+      ["main-2", undefined], ["a-1", "main-1"], ["a-2", "main-1"], ["b-1", "main-2"],
+    ] as const) {
+      await adapter.sendMessage({
+        authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+        messageId, author, body: messageId, namedAgentIds: ["codex"],
+        ...(parentMessageId ? { parentMessageId } : {}),
+      });
+    }
+    const claimed: string[] = [];
+    for (let run = 0; run < 3; run += 1) {
+      const claim = await adapter.claimNextPending("workspace");
+      claimed.push(claim!.dispatch.triggerMessageId);
+      await adapter.completeRun({ runId: claim!.run.runId, exitCode: 0 });
+    }
+    expect(claimed).toEqual(["main-1", "a-1", "b-1"]);
+    const runOf = (trigger: string) => loopback.readDispatch(WORKSPACE, trigger, "codex")?.runId;
+    expect(runOf("main-2")).toBe(runOf("main-1"));
+    expect(runOf("a-2")).toBe(runOf("a-1"));
+    expect(new Set(["main-1", "a-1", "b-1"].map(runOf)).size).toBe(3);
   });
 
   it("uses a fresh idempotency key for added, removed, then added reaction transitions", async () => {
@@ -1419,6 +1467,32 @@ describe("automation authors", () => {
       reactionId: "reaction", threadId: "thread", messageId: "message", emoji: "👍",
       author: { authorId: "ice", kind: "automation", displayName: "Stamp the finish date" }, state: "added", atMs: 1,
     })).toThrow(ProtocolShapeError);
+  });
+});
+
+describe("loopback idempotency", () => {
+  it("refuses a reused key whose message names other agents or another author agent", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const human = { kind: "human" as const, displayName: "Sam" };
+    const agent = { kind: "agent" as const, displayName: "Nova" };
+    const start = { authorActorKey: null, workspaceId: "workspace", channelId: "channel", threadId: "thread", messageId: "first", idempotencyKey: "start", author: human, body: "Hello" };
+    await adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova", "codex"] });
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["codex", "nova"] })).resolves.toMatchObject({ message: { id: "first" } });
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["nova"] })).rejects.toThrow("idempotency-key-reuse-mismatch");
+    // The engine checks the ids before it looks up a retry, so one id can't stand for two.
+    await expect(adapter.startChannelThread({ ...start, namedAgentIds: ["codex,nova"] })).rejects.toThrow("invalid-input");
+    const agentStart = { ...start, threadId: "agent-thread", messageId: "opened", idempotencyKey: "opened", author: agent, authorAgentId: "nova" };
+    await adapter.startChannelThread(agentStart);
+    await expect(adapter.startChannelThread({ ...agentStart, authorAgentId: "codex" })).rejects.toThrow("idempotency-key-reuse-mismatch");
+
+    const send = { authorActorKey: null, workspaceId: "workspace", threadId: "thread", body: "Done" };
+    await adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["nova"] });
+    await expect(adapter.sendMessage({ ...send, messageId: "named", idempotencyKey: "named", author: human, namedAgentIds: ["codex"] }))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
+    await adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "nova" });
+    await expect(adapter.sendMessage({ ...send, messageId: "reply", idempotencyKey: "reply", author: agent, authorAgentId: "codex" }))
+      .rejects.toThrow("idempotency-key-reuse-mismatch");
   });
 });
 

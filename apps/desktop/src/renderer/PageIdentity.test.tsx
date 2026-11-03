@@ -235,6 +235,46 @@ describe("PageIdentity", () => {
       vi.unstubAllGlobals();
     });
 
+    // The picker is a dialog without an Overlay. Opening it from the
+    // keyboard closes Notices, as a click outside Notices does.
+    it("closes Notices when the picker opens from the keyboard", async () => {
+      vi.stubGlobal("dohcDesktop", {
+        platform: "win32",
+        getUpdateState: () => new Promise(() => {}),
+        onUpdateState: () => () => {},
+      });
+      const user = userEvent.setup();
+      const ignore = () => undefined;
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Body\n"} stem="note" />
+          <NoticeCenter
+            workspaceId="ws"
+            syncStatus={null}
+            agentActive={false}
+            conflictSummaries={[]}
+            onOpenHistory={ignore}
+            onOpenSettings={ignore}
+            onOpenConflicts={ignore}
+            onRefreshShareView={ignore}
+            onRebuildEngineStore={ignore}
+            workspaceErrors={[{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: true }]}
+            onRetryWorkspaceError={ignore}
+            onHideWorkspaceError={ignore}
+          />
+        </>,
+      );
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center")).toBeTruthy();
+      screen.getByTestId("page-icon-add").focus();
+      await user.keyboard("{Enter}");
+
+      await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+      expect(screen.getByTestId("page-icon-picker")).toBeTruthy();
+      expect(document.activeElement).toBe(screen.getByLabelText("Use 📄"));
+      vi.unstubAllGlobals();
+    });
+
     it("returns focus to the trigger button when Escape closes the picker", async () => {
       const user = userEvent.setup();
       render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);

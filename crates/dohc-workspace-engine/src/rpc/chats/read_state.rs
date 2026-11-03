@@ -1,6 +1,5 @@
 use crate::EngineService;
 use crate::rpc::chats::ChatKeysetCursor;
-use crate::rpc::chats::ChatPageParams;
 use crate::rpc::chats::bounded_chat_page_len;
 use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::chats::chat_page_limit;
@@ -30,6 +29,27 @@ struct UnreadFileThreadPageParams {
     after_thread_id: Option<String>,
 }
 
+// A run dohc dispatched names itself, and the engine reads its agent from the
+// run's record. Without a run, the reads are those of agents outside a run.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatAgentUnreadThreadPageParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    run_id: Option<String>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatAgentRequestPageParams {
+    run_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    cursor: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatAgentReadCoordinateParams {
@@ -40,6 +60,8 @@ struct ChatAgentReadCoordinateParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatAgentReadMarkParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    run_id: Option<String>,
     thread_id: String,
     up_to: ChatAgentReadCoordinateParams,
     expected_revision: Option<i64>,
@@ -165,12 +187,15 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatPageParams = parse(params)?;
+        let params: ChatAgentUnreadThreadPageParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
-        let binding =
-            chat_cursor_binding("chats.agentReadState.listUnreadThreads", &workspace_id, &[]);
+        let binding = chat_cursor_binding(
+            "chats.agentReadState.listUnreadThreads",
+            &workspace_id,
+            &[params.run_id.as_deref().unwrap_or("")],
+        );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor
             .as_ref()
@@ -179,8 +204,12 @@ impl EngineService {
         let rows = Self::read_under_ctx(
             &cancellation,
             "chats.agentReadState.listUnreadThreads",
-            open.actor
-                .chat_agent_unread_threads(workspace_id, after, page_limit + 1),
+            open.actor.chat_agent_unread_threads(
+                workspace_id,
+                params.run_id,
+                after,
+                page_limit + 1,
+            ),
         )
         .await?;
         let values: Vec<Value> = rows
@@ -210,6 +239,71 @@ impl EngineService {
         }))
     }
 
+    pub(crate) async fn chats_agent_read_state_list_unread_requests(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatAgentRequestPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.agentReadState.listUnreadRequests",
+            &workspace_id,
+            &[params.run_id.as_str()],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.agentReadState.listUnreadRequests",
+            open.actor.chat_agent_unread_requests(
+                workspace_id,
+                params.run_id,
+                after,
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(|row| {
+                json!({
+                    "threadId": row.thread_id,
+                    "messageId": row.message_id,
+                    "authorKind": row.author_kind.as_str(),
+                    "createdAtMs": row.created_at_ms,
+                })
+            })
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: None,
+                first: last.created_at_ms,
+                second: last.message_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "requests": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
     pub(crate) async fn chats_agent_read_state_mark_thread_read(
         &self,
         ctx: &RequestContext,
@@ -224,6 +318,7 @@ impl EngineService {
             "chats.agentReadState.markThreadRead",
             open.actor.chat_agent_mark_thread_read(
                 open.workspace_id.clone(),
+                params.run_id,
                 params.thread_id,
                 params.up_to.created_at_ms,
                 params.up_to.message_id,

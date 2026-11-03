@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  SetAgentColorPayload, DesktopUserSettingsResult, SetAppPinnedPayload, SetUserSettingsPayload,
+  SetAgentColorPayload, DesktopUserSettingsResult, OrderAgentsPayload, SetAppPinnedPayload, SetUserSettingsPayload,
   WorkspaceSettingsPayload, SetWorkspaceSettingsPayload, WorkspaceSettingsResult,
   WorkspaceIdPayload, GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload,
 } from "./bridgeContract";
@@ -27,6 +27,11 @@ export const settingsOperations = {
     capabilityId: "app.pin.set", channel: "desktop:set-app-pinned",
     scope: "device", guard: "trusted-sender",
     payload: SetAppPinnedPayload, result: DesktopUserSettingsResult,
+  },
+  orderAgents: {
+    capabilityId: "settings.agents.order", channel: "desktop:order-agents",
+    scope: "device", guard: "trusted-sender",
+    payload: OrderAgentsPayload, result: DesktopUserSettingsResult,
   },
   setAgentColor: {
     capabilityId: "agent.color.set", channel: "desktop:set-agent-color",

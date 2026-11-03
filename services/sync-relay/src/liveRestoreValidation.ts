@@ -1,3 +1,4 @@
+import {createLiveMarkdownRegistrationValidator, WORKER_LIVE_VALIDATION_POLICY} from "@dohc/ydoc-projection/live-journal-validation";
 import {resolveLiveRestorePoint, validateLiveRestoreProposal, type LiveRestoreProposalBytes,
   type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 
@@ -7,7 +8,7 @@ type History = {binding: Binding; checkpoint: Uint8Array; events: readonly Uint8
 type Validated = ReturnType<typeof validateLiveRestoreProposal>;
 type Receipt = Parameters<typeof validateLiveRestoreProposal>[0]["receipt"];
 type Budget = {maxBytes: number; maxEvents: number};
-type ProposalJob = {selected: History; accepted: History; receipt: Receipt; bytes: LiveRestoreProposalBytes; budget: Budget};
+type ProposalJob = {selected: History; accepted: History; receipt: Receipt; bytes: LiveRestoreProposalBytes; budget: Budget; admission?: boolean};
 /** One restore validation: data copied from authenticated captures, never a storage handle or callback. */
 type LiveRestoreJob = {mode: "point"; selected: History} | ({mode: "proposal"} & ProposalJob) |
   ({mode: "review"; maxOutputBytes: number} & ProposalJob);
@@ -17,7 +18,7 @@ export type LiveRestorePoint = ReturnType<typeof resolveLiveRestorePoint>;
 export type LiveRestoreReview = ReturnType<Validated["projectReview"]>;
 export type LiveRestoreReply = {kind: "point"; point: LiveRestorePoint} |
   {kind: "proposal"; content: Validated["content"]; nativeSourceRanges: Validated["nativeSourceRanges"]; review?: LiveRestoreReview} |
-  {kind: "needs-artifact"; digest: string} | {kind: "refused"; message: string};
+  {kind: "needs-artifact"; digest: string} | {kind: "refused"; message: string} | {kind: "capacity-refused"};
 export type LiveRestoreProposalEvidence = {content: Validated["content"]; nativeSourceRanges: Validated["nativeSourceRanges"];
   candidateBytes: Uint8Array; review: LiveRestoreReview | undefined};
 
@@ -44,11 +45,20 @@ export function runLiveRestoreWork(work: LiveRestoreWork, policy: OrderedLiveUpd
     else {
       const validated = validateLiveRestoreProposal({selected, accepted: history("accepted", work.accepted), receipt: work.receipt,
         assertCurrent}, work.bytes, policy, work.budget);
+      if (work.admission) {
+        const binding = work.selected.binding;
+        const normalized = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY)({
+          document: {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
+            objectId: binding.objectId, lineageClaimId: binding.lineageClaimId},
+          currentPath: binding.currentPath, checkpoint: validated.content.stateUpdate});
+        if (normalized.kind === "refused" && normalized.reason === "capacity-refused") throw new LiveRestoreTooLarge();
+      }
       reply = {kind: "proposal", content: {...validated.content}, nativeSourceRanges: validated.nativeSourceRanges,
         ...(work.mode === "review" ? {review: validated.projectReview(work.maxOutputBytes)} : {})};
     }
   } catch (error) {
-    reply = {kind: "refused", message: error instanceof Error ? error.message : String(error)};
+    reply = error instanceof LiveRestoreTooLarge ? {kind: "capacity-refused"}
+      : {kind: "refused", message: error instanceof Error ? error.message : String(error)};
   }
   return missing === undefined ? reply : {kind: "needs-artifact", digest: missing};
 }
@@ -65,7 +75,7 @@ type Source = {artifact(digest: string): Uint8Array | undefined; assertCurrent()
 type HistoryCapture = {binding: Binding; checkpoint: {bytes: Uint8Array}; events: readonly {updateBytes: Uint8Array}[]; point: Point};
 type ProposalCapture = {selected: HistoryCapture & Source; accepted: HistoryCapture; receipt: Receipt; assertCurrent(): void};
 export type LiveRestoreRun = (work: LiveRestoreWork, signal?: AbortSignal) =>
-  Promise<LiveRestoreReply | {kind: "capacity-refused"} | {kind: "retry"}>;
+  Promise<LiveRestoreReply | {kind: "retry"; waitForCapacity?(signal?: AbortSignal): Promise<void>}>;
 const historyData = (capture: HistoryCapture): History => {
   const {workspaceId, mainVersionId, objectId, lineageClaimId, currentPath} = capture.binding;
   return Object.freeze({binding: Object.freeze({workspaceId, mainVersionId, objectId, lineageClaimId, currentPath}),
@@ -78,12 +88,16 @@ const historyData = (capture: HistoryCapture): History => {
  * authenticated capture and resubmitting the same job. One signal, and so one deadline, covers every run.
  */
 export function liveRestoreValidator(run: LiveRestoreRun) {
-  async function execute(job: LiveRestoreJob, source: Source, signal: AbortSignal | undefined) {
+  async function execute(job: LiveRestoreJob, source: Source, signal: AbortSignal | undefined, wait = false) {
     const answers = new Map<string, Uint8Array | undefined>();
-    for (let execution = 1; ; execution++) {
+    for (let execution = 1; ;) {
       signal?.throwIfAborted();
       const reply = await run({...job, answers}, signal);
-      if (reply.kind === "retry") throw new LiveRestoreBusy("Live validation is busy.");
+      if (reply.kind === "retry") {
+        if (!wait || !reply.waitForCapacity) throw new LiveRestoreBusy("Live validation is busy.");
+        await reply.waitForCapacity(signal);
+        continue;
+      }
       if (reply.kind === "capacity-refused") throw new LiveRestoreTooLarge();
       if (reply.kind === "refused") throw new Error(reply.message);
       if (reply.kind !== "needs-artifact") {
@@ -94,6 +108,7 @@ export function liveRestoreValidator(run: LiveRestoreRun) {
       if (execution === maxExecutions) throw new Error("Restore validation needs too many artifacts.");
       source.assertCurrent();
       answers.set(reply.digest, source.artifact(reply.digest));
+      execution++;
     }
   }
   return Object.freeze({
@@ -103,14 +118,14 @@ export function liveRestoreValidator(run: LiveRestoreRun) {
       return reply.point;
     },
     /** With `maxOutputBytes`, the same run also projects the owner review. */
-    async proposal(capture: ProposalCapture, bytes: LiveRestoreProposalBytes, budget: Budget & {maxOutputBytes?: number},
+    async proposal(capture: ProposalCapture, bytes: LiveRestoreProposalBytes, budget: Budget & {maxOutputBytes?: number; admission?: boolean},
       signal?: AbortSignal): Promise<LiveRestoreProposalEvidence> {
       const job: ProposalJob = Object.freeze({selected: historyData(capture.selected), accepted: historyData(capture.accepted),
-        receipt: structuredClone(capture.receipt), bytes, budget: Object.freeze({maxBytes: budget.maxBytes, maxEvents: budget.maxEvents})});
+        receipt: structuredClone(capture.receipt), bytes, budget: Object.freeze({maxBytes: budget.maxBytes, maxEvents: budget.maxEvents}), ...(budget.admission ? {admission: true} : {})});
       const review = budget.maxOutputBytes;
       const reply = await execute(Object.freeze(review === undefined ? {mode: "proposal" as const, ...job} :
         {mode: "review" as const, maxOutputBytes: review, ...job}), {artifact: digest => capture.selected.artifact(digest),
-        assertCurrent: () => capture.assertCurrent()}, signal);
+        assertCurrent: () => capture.assertCurrent()}, signal, budget.admission);
       if (reply.kind !== "proposal" || (review !== undefined) !== (reply.review !== undefined)) {
         throw new Error("Restore validation answered another job.");
       }

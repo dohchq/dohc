@@ -78,7 +78,7 @@ async function harness(isPackaged = false) {
     assertTrustedSender: event => { if (!isTrustedFrame(event.senderFrame?.url ?? "")) throw new Error("untrusted"); },
     prepareForRendererReload, shell, BrowserWindow, rememberChromeTheme,
     titleBarOverlayOptions, stepWindowZoom, exitRounds, quitGuard, isTrustedFrame,
-    launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged },
+    launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged }, versionRounds: { answer: vi.fn() },
   });
   return {
     ...capability, first, second, handlers, events, order, sessions, retiring,
@@ -110,7 +110,7 @@ describe("registered window IPC", () => {
     expect(h.order).toEqual([
       CHANNELS.reloadRenderer, "registry", CHANNELS.openExternalUrl, "handoff",
       CHANNELS.setTitlebarTheme, CHANNELS.stepWindowZoom,
-      "ui-state", "updates", CHANNELS.exitRoundAnswer, CHANNELS.holdQuit,
+      "ui-state", "updates", CHANNELS.exitRoundAnswer, CHANNELS.versionRoundAnswer, CHANNELS.holdQuit,
       CHANNELS.resumeQuit, CHANNELS.firstPaint, CHANNELS.getLaunchMarks, CHANNELS.getDesktopMarks,
     ]);
   });

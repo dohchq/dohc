@@ -66,6 +66,41 @@ impl Request {
             + self.document.lineage_claim_id.capacity()
     }
 }
+#[derive(Clone)]
+pub struct CheckMarkdownWitness {
+    pub source: Vec<u8>,
+    pub source_sha256: String,
+    pub projection_sha256: String,
+}
+
+#[derive(Clone)]
+pub(crate) enum PreparationRequest {
+    Projection(Request),
+    Witness(CheckMarkdownWitness),
+}
+impl PreparationRequest {
+    fn retained(&self) -> usize {
+        match self {
+            Self::Projection(request) => request.retained(),
+            Self::Witness(request) => {
+                request.source.capacity()
+                    + request.source_sha256.capacity()
+                    + request.projection_sha256.capacity()
+            }
+        }
+    }
+    fn supersedes(&self, prior: &Self) -> bool {
+        match (self, prior) {
+            (Self::Projection(a), Self::Projection(b)) => {
+                a.document == b.document && a.method == b.method
+            }
+            (Self::Witness(a), Self::Witness(b)) => {
+                a.source_sha256 == b.source_sha256 && a.projection_sha256 == b.projection_sha256
+            }
+            _ => false,
+        }
+    }
+}
 /// Created after a complete, byte-bound success from the journal-validating host.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -87,6 +122,12 @@ pub enum RefusalReason {
     JournalRefused,
 }
 pub enum Outcome {
+    WitnessChecked {
+        source_sha256: String,
+        projection_sha256: String,
+        checker_identity: String,
+        keeps_meaning: bool,
+    },
     Constructed {
         proof: Proof,
         delta: Vec<u8>,
@@ -108,6 +149,7 @@ pub enum Outcome {
 impl fmt::Debug for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::WitnessChecked { .. } => f.write_str("WitnessChecked"),
             Self::Constructed { delta, .. } => f
                 .debug_struct("Constructed")
                 .field("delta_bytes", &delta.len())
@@ -120,7 +162,7 @@ impl fmt::Debug for Outcome {
 }
 pub type Result = std::result::Result<Outcome, Failure>;
 struct Pending {
-    request: Request,
+    request: PreparationRequest,
     retained: usize,
     deadline: Instant,
     reply: oneshot::Sender<Result>,
@@ -192,6 +234,18 @@ impl Reader {
     }
     /// Admission is immediate. Dropping the returned future cancels queued work.
     pub fn request(&self, request: Request) -> impl Future<Output = Result> + Send + use<> {
+        self.enqueue(PreparationRequest::Projection(request))
+    }
+    pub fn check_markdown_witness(
+        &self,
+        request: CheckMarkdownWitness,
+    ) -> impl Future<Output = Result> + Send + use<> {
+        self.enqueue(PreparationRequest::Witness(request))
+    }
+    pub fn checker_identity(&self) -> Option<String> {
+        self.shared.state.lock().unwrap().build_digest.clone()
+    }
+    fn enqueue(&self, request: PreparationRequest) -> impl Future<Output = Result> + Send + use<> {
         #[cfg(any(test, feature = "test-support"))]
         self.dispatches
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -199,21 +253,29 @@ impl Reader {
         let mut s = self.shared.state.lock().unwrap();
         expire(&mut s);
         let bytes = request.retained();
-        let metadata = [
-            &request.current_path,
-            &request.document.workspace_id,
-            &request.document.main_version_id,
-            &request.document.object_id,
-            &request.document.lineage_claim_id,
-        ];
+        let too_large = match &request {
+            PreparationRequest::Projection(request) => {
+                let metadata = [
+                    &request.current_path,
+                    &request.document.workspace_id,
+                    &request.document.main_version_id,
+                    &request.document.object_id,
+                    &request.document.lineage_claim_id,
+                ];
+                request.source.len() > 2 * 1024 * 1024
+                    || request.checkpoint.len() > wire::UPDATE
+                    || metadata.iter().map(|s| s.len()).sum::<usize>() > 8192
+            }
+            PreparationRequest::Witness(request) => {
+                request.source.len() > 2 * 1024 * 1024
+                    || !wire::valid_sha(&request.source_sha256)
+                    || !wire::valid_sha(&request.projection_sha256)
+                    || wire::sha(&request.source) != request.source_sha256
+            }
+        };
         let failure = if s.closed {
             Some(Failure::Unavailable)
-        } else if request.source.len() > 2 * 1024 * 1024
-            || request.checkpoint.len() > wire::UPDATE
-            // Even worst-case JSON escaping must fit the 64 KiB control frame.
-            || metadata.iter().map(|s| s.len()).sum::<usize>() > 8192
-            || bytes > 64 * 1024 * 1024
-        {
+        } else if too_large || bytes > 64 * 1024 * 1024 {
             Some(Failure::TooLarge)
         } else {
             None
@@ -221,9 +283,7 @@ impl Reader {
         if let Some(failure) = failure {
             let _ = reply.send(Err(failure));
         } else {
-            let replaced = s.queue.iter().position(|p| {
-                p.request.document == request.document && p.request.method == request.method
-            });
+            let replaced = s.queue.iter().position(|p| request.supersedes(&p.request));
             let previous = replaced.map_or(0, |i| s.queue[i].retained);
             if (replaced.is_none() && s.queue.len() >= 4)
                 || s.retained - previous + bytes > 64 * 1024 * 1024
@@ -303,6 +363,8 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
             }
             continue;
         };
+        let started = Instant::now();
+        let mut phase = "startup";
         let result = (|| {
             if worker.is_none() {
                 let deadline = Instant::now() + d.startup;
@@ -316,6 +378,7 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
                         return Err(failure);
                     }
                 }
+                phase = "hello";
                 if let Err(failure) = wait_event(worker.as_ref().unwrap(), &shared, deadline) {
                     if failure == Failure::Unavailable {
                         shared.state.lock().unwrap().closed = true;
@@ -324,10 +387,16 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
                 }
             }
             let w = worker.as_ref().unwrap();
+            phase = "send";
             w.send(p.request)?;
+            phase = "response";
             wait_event(w, &shared, Instant::now() + d.request)?.ok_or(Failure::Crashed)
         })();
-        if result.is_err() {
+        if let Err(failure) = &result {
+            eprintln!(
+                "engine: Markdown reader {phase} failed: {failure:?} after {} ms",
+                started.elapsed().as_millis()
+            );
             drop(worker.take());
         }
         // Release accounting only after failed I/O has stopped retaining the active request.

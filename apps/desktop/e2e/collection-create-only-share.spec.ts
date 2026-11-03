@@ -117,7 +117,7 @@ test(
 
     try {
       relay = await spawnSyncRelay({
-        dbPath: join(temp.baseDir, "relay.sqlite"),
+        dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
         linkBoundary: {
           linkKey,
           relayExchangeKey,

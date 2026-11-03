@@ -6,7 +6,7 @@ pub const LIVE_OBJECT_BINDING_PATH_MAX_BYTES: usize = 1_024;
 pub const LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT: usize = 100;
 const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiveObjectBinding {
     pub workspace_id: String,

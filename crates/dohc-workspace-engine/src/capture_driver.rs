@@ -24,10 +24,13 @@
 //! whose policy widens re-ingest.
 
 use crate::capture_sink::{
-    CaptureProvenance, CapturedRoot, DeferredWrites, PolicyState, SelfWriteSuppression,
-    StoreCaptureSink, StoreCaptureSinkParams,
+    CaptureProvenance, CapturedRoot, DeferredWrites, FIRST_IMPORT_SUMMARY, PolicyState,
+    SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams,
 };
-use crate::{CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents};
+use crate::{
+    CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT,
+    EngineEvents,
+};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
@@ -1279,6 +1282,7 @@ impl CaptureDriver {
                 scan: drive_scan,
                 import_priority: drive_import_priority,
                 no_atomic_placement_announced: false,
+                first_import: None,
             };
             let run = drive_loop(
                 &mut env,
@@ -2226,6 +2230,9 @@ struct RealEnv {
     /// no atomic no-replace rename. Announced once; `watcher.status` stays
     /// the backstop for a dropped event.
     no_atomic_placement_announced: bool,
+    /// The correlation id of the workspace's unfinished first import, read
+    /// at each layer start from a readable seed.
+    first_import: Option<String>,
 }
 
 impl RealEnv {
@@ -2252,9 +2259,13 @@ impl RealEnv {
     }
 
     /// Context for a live watcher-batch apply: default provenance (per-file
-    /// "Updated <basename>" summaries, no correlation id).
+    /// "Updated <basename>" summaries, no correlation id), except for a file
+    /// an unfinished first import has not recorded yet.
     fn apply_context(&self) -> ApplyRunContext<'_> {
-        self.apply_context_with(CaptureProvenance::default())
+        self.apply_context_with(CaptureProvenance {
+            first_import: self.first_import.clone(),
+            ..CaptureProvenance::default()
+        })
     }
 
     fn apply_context_with(&self, provenance: CaptureProvenance) -> ApplyRunContext<'_> {
@@ -2439,19 +2450,47 @@ impl DriverEnv for RealEnv {
         // The startup baseline is one pass: one correlation id and one
         // summary tie its per-file moments together, retries included, since
         // they finish the same pass. Only the pass that opens the workspace,
-        // with a readable seed, knows where its changes came from: no record
-        // of the workspace means the folder's own files, a record means edits
-        // made while dohc was closed. A rebuild while open (lost watch,
-        // policy edit) or an unreadable seed only found changes. A new layer
-        // also performs one collection reconciliation: its in-memory retry
-        // bit cannot preserve a failed request across a daemon restart, and a
-        // rehydrated manifest may make this plan empty.
+        // with a readable seed, knows where its changes came from: a record
+        // of the workspace means edits made while dohc was closed. A rebuild
+        // while open (lost watch, policy edit) or an unreadable seed only
+        // found changes. The first import starts with the pass that finds no
+        // record of the workspace and keeps its id across retries, timeouts
+        // and restarts until a clean pass ends it (`finish_first_import`).
+        // Only a readable seed tells which files capture never recorded. A
+        // new layer also performs one collection reconciliation: its
+        // in-memory retry bit cannot preserve a failed request across a
+        // daemon restart, and a rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
-        let provenance = startup_provenance(initial_start && seed_loaded, workspace_missing);
+        self.first_import = if !seed_loaded {
+            None
+        } else if workspace_missing {
+            self.actor
+                .begin_first_import(self.workspace_id.clone(), pass_correlation_id("reconcile"))
+                .await
+                .inspect_err(|error| eprintln!("engine: first import start failed: {error}"))
+                .ok()
+        } else {
+            self.actor
+                .unfinished_first_import(self.workspace_id.clone())
+                .await
+                .inspect_err(|error| eprintln!("engine: first import read failed: {error}"))
+                .ok()
+                .flatten()
+        };
+        let provenance = startup_provenance(
+            initial_start && seed_loaded,
+            workspace_missing,
+            self.first_import.clone(),
+        );
         #[cfg(feature = "harness")]
         fence_phase.field(
             "correlation",
-            serde_json::json!(provenance.correlation_id.as_deref()),
+            serde_json::json!(
+                provenance
+                    .first_import
+                    .as_deref()
+                    .or(provenance.correlation_id.as_deref())
+            ),
         );
         let (mut settled, initial_settle_timed_out) = {
             let initial_cancel = cancel.child_token();
@@ -2534,6 +2573,15 @@ impl DriverEnv for RealEnv {
         if initial_settle_timed_out {
             settled = false;
         }
+        if settled && !cancel.is_cancelled() {
+            finish_first_import(
+                &self.actor,
+                &self.workspace_id,
+                &fresh.files.handle(),
+                &mut self.first_import,
+            )
+            .await;
+        }
         let fingerprint_after_apply = policy_fingerprint(&self.root);
         let initial_ready = !initial_settle_timed_out
             && settled
@@ -2598,13 +2646,16 @@ impl DriverEnv for RealEnv {
             return TickIo::RefreshRequired;
         }
         let files = layer.files.handle();
-        offer_unrecorded_after_release(
+        if offer_unrecorded_after_release(
             &self.leases,
             &self.workspace_id,
             &mut self.lease_releases_seen,
             &files,
         )
-        .await;
+        .await
+        {
+            self.actor.offer_released_link_rewrites(&self.workspace_id);
+        }
         let run = reconcile_if_dirty_bound(&self.root, &files, cancel.child_token()).await;
         if matches!(
             &run,
@@ -2616,7 +2667,7 @@ impl DriverEnv for RealEnv {
         {
             probe.pause_if_armed().await;
         }
-        match run {
+        let tick = match run {
             // Converged means at quiescence — except with a NON-EMPTY
             // quarantine: the controller
             // parks persistently failing paths on its own degraded-rescan
@@ -2644,6 +2695,13 @@ impl DriverEnv for RealEnv {
                 if !applied.clean {
                     return TickIo::Applied { clean: false };
                 }
+                finish_first_import(
+                    &self.actor,
+                    &self.workspace_id,
+                    &files,
+                    &mut self.first_import,
+                )
+                .await;
                 if self.status.degraded() {
                     match layer.files.handle().stats().await {
                         Ok(stats) if stats.quarantined > 0 => TickIo::Applied { clean: false },
@@ -2664,6 +2722,15 @@ impl DriverEnv for RealEnv {
                     return TickIo::CollectionBusyExhausted;
                 }
                 let clean = applied.clean;
+                if clean {
+                    finish_first_import(
+                        &self.actor,
+                        &self.workspace_id,
+                        &files,
+                        &mut self.first_import,
+                    )
+                    .await;
+                }
                 // A clean-looking tick with a NON-EMPTY quarantine is not
                 // health: the controller parks persistently failing paths on
                 // its own degraded-rescan backoff and stops self-forcing
@@ -2691,7 +2758,11 @@ impl DriverEnv for RealEnv {
             }
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
-        }
+        };
+        self.actor
+            .retry_pending_link_rewrites(&self.workspace_id)
+            .await;
+        tick
     }
 
     async fn stop_layer(&mut self, layer: FilesLayer) {
@@ -2889,14 +2960,25 @@ struct CaptureThreadOutcome {
 }
 
 const OFFLINE_RECONCILE_SUMMARY: &str = "Changed while dohc was closed";
-const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
 const RESCAN_SUMMARY: &str = "Found changes in the folder";
 
 /// TS parity (`reconcile-${createId()}`): one actor-neutral correlation id
 /// ties a startup pass's per-file moments together as a group without
-/// inventing an author.
-fn startup_provenance(opening: bool, workspace_missing: bool) -> CaptureProvenance {
+/// inventing an author. The first import's own files take its stored id, so
+/// the pass that opens a new workspace mints none: any other change it finds
+/// happened while dohc was running.
+fn startup_provenance(
+    opening: bool,
+    workspace_missing: bool,
+    first_import: Option<String>,
+) -> CaptureProvenance {
     let summary = match (opening, workspace_missing) {
+        (true, true) if first_import.is_some() => {
+            return CaptureProvenance {
+                first_import,
+                ..CaptureProvenance::default()
+            };
+        }
         (true, true) => FIRST_IMPORT_SUMMARY,
         (true, false) => OFFLINE_RECONCILE_SUMMARY,
         (false, _) => RESCAN_SUMMARY,
@@ -2904,6 +2986,28 @@ fn startup_provenance(opening: bool, workspace_missing: bool) -> CaptureProvenan
     CaptureProvenance {
         summary: Some(summary.to_owned()),
         correlation_id: Some(pass_correlation_id("reconcile")),
+        first_import,
+    }
+}
+
+/// Finish the first import after a clean, uncancelled pass. Every file it
+/// found is then recorded, held for a live session, or quarantined after
+/// repeated read failures. A held file keeps the import open. A quarantined
+/// file does not: one unreadable file must not label every later new file as
+/// imported, so a file that stays unreadable through the import lands later
+/// with an ordinary label.
+async fn finish_first_import(
+    actor: &ActorHandle,
+    workspace_id: &str,
+    files: &FilesHandle,
+    first_import: &mut Option<String>,
+) {
+    if first_import.is_none() || !matches!(files.stats().await, Ok(stats) if stats.deferred == 0) {
+        return;
+    }
+    match actor.finish_first_import(workspace_id.to_owned()).await {
+        Ok(()) => *first_import = None,
+        Err(error) => eprintln!("engine: first import finish failed: {error}"),
     }
 }
 
@@ -2998,9 +3102,26 @@ async fn apply_run(
     cancel: &CancellationToken,
 ) -> ApplyOutcome {
     let status = Arc::clone(context.status);
+    let events = context.events.clone();
+    let workspace_id = context.workspace_id;
     let mut outcome = apply_bound_run_with_handle(context, files, run, cancel).await;
     if let Some(writes) = outcome.deferred_writes.take() {
-        *crate::lock(&status.deferred_writes) = writes;
+        let gained = {
+            let mut previous = crate::lock(&status.deferred_writes);
+            let gained: Vec<_> = writes
+                .keys()
+                .filter(|path| !previous.contains_key(*path))
+                .cloned()
+                .collect();
+            *previous = writes;
+            gained
+        };
+        for path in gained {
+            events.emit(
+                CAPTURE_WRITE_DEFERRED_EVENT,
+                serde_json::json!({ "workspaceId": workspace_id, "path": path }),
+            );
+        }
     }
     outcome
 }
@@ -3477,6 +3598,15 @@ async fn apply_bound_run_with_handle(
             }
         }
     }
+    if result.completed() {
+        let observed: Vec<_> = result
+            .applied_paths
+            .iter()
+            .chain(&result.not_owned_paths)
+            .cloned()
+            .collect();
+        actor.offer_captured_link_rewrites(workspace_id, &observed);
+    }
     if result.degraded {
         status.mark_degraded();
     }
@@ -3661,15 +3791,16 @@ async fn offer_unrecorded_after_release(
     workspace_id: &str,
     releases_seen: &mut u64,
     files: &FilesHandle,
-) {
+) -> bool {
     let releases = leases.release_generation(workspace_id);
     if releases == *releases_seen {
-        return;
+        return false;
     }
     *releases_seen = releases;
     if matches!(files.stats().await, Ok(stats) if stats.deferred > 0 || stats.quarantined > 0) {
         files.request_rescan();
     }
+    true
 }
 
 /// Resolve a prepared plan whose apply never ran: acknowledge with every op

@@ -21,6 +21,7 @@ import {
   AccessChecked,
   AccessUnknown,
   LEVELS,
+  SIGNED_OUT_ACCESS,
   useSectionRead,
   type AboutNotices,
   type AccessSetup,
@@ -55,13 +56,17 @@ const LANE = {
     scope: "for this workspace",
     empty: "No shares from this workspace. Right-click a file and choose Share… to share it.",
     unexplained: "Access information is unavailable for this workspace. This does not mean that nothing is shared.",
+    signedOut: SIGNED_OUT_ACCESS,
     failed: "dohc could not check the shares from this workspace.",
   },
+  // What others shared with the account. It needs a signed-in account, never
+  // this workspace's sync, so signed out is the only cause it names.
   received: {
     label: "Shared with me",
     scope: "for your account",
     empty: "No shares to your account.",
     unexplained: "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
+    signedOut: "Connect a server to get what others share with you.",
     failed: "dohc could not check the shares to your account.",
   },
 } as const;
@@ -233,7 +238,7 @@ function ShareRow(props: {
   return (
     <li data-testid={`sharing-${props.lane}-row`} data-share-id={props.shareId} data-status={props.status}>
       <div role="group" aria-label={name} aria-describedby={props.note ? noteId : undefined} data-sharing-row-focus
-        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover focus:bg-selected focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent`}>
+        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover dohc-focus-row`}>
         {subject.glyph}
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="truncate" title={subject.title}>{subject.name}</span>
@@ -525,7 +530,7 @@ function Section(props: {
   return (
     <section data-testid={`sharing-${lane}`} aria-label={words.label}>
       <h3 tabIndex={-1} data-sharing-lane-focus
-        className="dohc-section-label m-0 flex items-center rounded-md px-4 pb-1.5 pt-3.5 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">
+        className="dohc-section-label m-0 flex items-center rounded-md px-4 pb-1.5 pt-3.5">
         {words.label}
         {known ? (
           <span data-testid={`sharing-${lane}-count`} className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal">
@@ -545,7 +550,7 @@ function Section(props: {
           <div data-testid={`sharing-${lane}-answer`} data-freshness={view.answer.freshness} data-coverage={view.answer.coverage.kind}>
             {!known ? (
               <>
-                <AccessUnknown testId={`sharing-${lane}`} unexplained={words.unexplained} answer={view.answer}
+                <AccessUnknown testId={`sharing-${lane}`} unexplained={words.unexplained} signedOut={words.signedOut} answer={view.answer}
                   setup={props.setup} onRetry={() => actions.retry(lane)} />
                 {localList}
               </>
@@ -810,6 +815,7 @@ export function SharingView(props: {
     try {
       const found = await bridge().getRelayReceivedShare({ shareId });
       if (!found.found) throw new Error(found.removed?.message ?? "This share is no longer shared with you.");
+      if ("chats" in found) throw new Error("Join this from Chats.");
       await bridge().mountShare({ workspaceId, shareCode: found.share.shareCode });
       props.onMountsChanged();
     } catch (cause) {

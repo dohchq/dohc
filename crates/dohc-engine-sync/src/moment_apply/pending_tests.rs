@@ -9,9 +9,7 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 use serde_json::json;
 
-use super::{
-    MomentMaterializationChange, pending::drain_and_claim, record_materialization_changes,
-};
+use super::{MomentMaterializationChange, pending::drain_to_end, record_materialization_changes};
 use crate::{
     LeaseProbe, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError, commit_relay_cursor,
 };
@@ -132,21 +130,21 @@ fn leased_page_rotates_without_hot_looping_or_starving_a_later_document() {
         probes: AtomicUsize::new(0),
     };
 
-    let first = drain_and_claim(&mut store, "ws", &NoFaults, &leases).unwrap();
+    let first = drain_to_end(&mut store, "ws", &NoFaults, &leases).unwrap();
     assert!(first.changes.is_empty());
     assert!(first.report_id.is_none());
     assert!(!first.has_more, "a wholly leased page must not hot-loop");
     assert_eq!(leases.probes.load(Ordering::Relaxed), 65);
 
     leases.probes.store(0, Ordering::Relaxed);
-    let second = drain_and_claim(&mut store, "ws", &NoFaults, &leases).unwrap();
+    let second = drain_to_end(&mut store, "ws", &NoFaults, &leases).unwrap();
     assert_eq!(second.changes, vec![expected[64].clone()]);
     assert!(second.report_id.is_some());
     assert!(leases.probes.load(Ordering::Relaxed) <= 65);
     commit_report(&mut store, second.report_id);
     assert_eq!(queued(&store), 64);
 
-    let remaining = drain_and_claim(&mut store, "ws", &NoFaults, &leases).unwrap();
+    let remaining = drain_to_end(&mut store, "ws", &NoFaults, &leases).unwrap();
     assert!(remaining.changes.is_empty());
     assert!(!remaining.has_more);
 }
@@ -155,7 +153,7 @@ fn leased_page_rotates_without_hot_looping_or_starving_a_later_document() {
 fn pending_reports_page_at_64_and_cursor_commit_releases_only_that_page() {
     let (_scratch, mut store) = test_store();
     let expected = seed_applied(&mut store, 65, None);
-    let first = drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
+    let first = drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
     assert_eq!(first.changes, expected[..64]);
     assert!(first.has_more);
     assert_eq!(
@@ -166,7 +164,7 @@ fn pending_reports_page_at_64_and_cursor_commit_releases_only_that_page() {
     commit_report(&mut store, first.report_id);
     assert_eq!(queued(&store), 1);
 
-    let second = drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
+    let second = drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
     assert_eq!(second.changes, expected[64..]);
     assert!(!second.has_more);
     commit_report(&mut store, second.report_id);
@@ -194,12 +192,12 @@ fn reopened_pending_report_replays_collection_facts_and_rejects_stale_ack() {
         }],
     };
     let expected = seed_applied(&mut store, 1, Some(&facts));
-    let first = drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
+    let first = drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
     assert_eq!(first.record_facts, vec![facts.clone()]);
     drop(store);
 
     let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 3_000).unwrap();
-    let replay = drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
+    let replay = drain_to_end(&mut store, "ws", &NoFaults, &NoLiveLeases).unwrap();
     assert_eq!(replay.changes, expected);
     assert_eq!(replay.record_facts, vec![facts]);
     assert_ne!(first.report_id, replay.report_id);

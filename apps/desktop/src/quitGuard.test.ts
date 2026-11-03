@@ -346,6 +346,25 @@ describe("exit rounds", () => {
     expect(r.closings(1)).toEqual(["proceed", "cancelled"]);
   });
 
+  // A late draft stopped one window's unload after the round proceeded, and
+  // the person went back there. Every member hears the exit is off.
+  it("retracts a proceeded round when a member goes back on its exit", async () => {
+    const r = rounds();
+    const round = r.exits.begin("update");
+    r.exits.answer(1, round.roundId, "clear");
+    r.exits.answer(2, round.roundId, "clear");
+    await expect(round.outcome).resolves.toBe("proceed");
+    // A clear, a stranger, or a stale id takes nothing back.
+    expect(r.exits.answer(2, round.roundId, "clear")).toBe(false);
+    expect(r.exits.answer(99, round.roundId, "cancel")).toBe(false);
+    expect(r.exits.answer(2, round.roundId + 1, "cancel")).toBe(false);
+    expect(r.closings(1)).toEqual(["proceed"]);
+    expect(r.exits.answer(2, round.roundId, "cancel")).toBe(true);
+    expect(r.closings(1)).toEqual(["proceed", "cancelled"]);
+    expect(r.closings(2)).toEqual(["proceed", "cancelled"]);
+    expect(r.exits.answer(2, round.roundId, "cancel")).toBe(false);
+  });
+
   // Wait is not authorization. It keeps the quit vetoed, asks nothing more,
   // and the next explicit quit decides afresh.
   it("does not re-prompt after Wait on a silent window, and a new quit asks again", async () => {

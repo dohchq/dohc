@@ -27,6 +27,10 @@ import {
 const flushPendingLocalUpdates = vi.fn(async () => undefined);
 const engineDocState: UseEngineDoc = {
   available: false,
+  // No file head, so a check judges the witness alone.
+  headSha256: null,
+  lastSave: null,
+  pairedInstalls: 0,
   opening: false,
   doc: null,
   objectId: null,

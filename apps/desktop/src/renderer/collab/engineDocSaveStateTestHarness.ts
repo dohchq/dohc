@@ -32,7 +32,7 @@ type LineageReplacementListener = (event: {
 export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   const saveStateListeners = new Set<SaveStateListener>();
   const remoteUpdateListeners = new Set<
-    (event: { sessionId: string; update: Uint8Array }) => void
+    (event: { sessionId: string; update: Uint8Array; head?: { sha256: string | null; committed?: true } }) => void
   >();
   const lineageReplacementListeners = new Set<LineageReplacementListener>();
   const applied: Array<{ sessionId: string; seq: number }> = [];
@@ -130,7 +130,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       return readArtifactAsset(payload.descriptor);
     },
     onEngineYDocRemoteUpdate: (
-      listener: (event: { sessionId: string; update: Uint8Array }) => void,
+      listener: (event: { sessionId: string; update: Uint8Array; head?: { sha256: string | null; committed?: true } }) => void,
     ) => {
       remoteUpdateListeners.add(listener);
       return () => remoteUpdateListeners.delete(listener);
@@ -177,6 +177,15 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     const update = Y.encodeStateAsUpdate(doc, before);
     // Main stamps a remote update with its lineage; without one the editor drops it.
     const event = { sessionId: openedSessionId, update, ...(lineageGeneration === undefined ? {} : { lineageGeneration }) };
+    act(() => {
+      for (const listener of [...remoteUpdateListeners]) listener(event);
+    });
+  }
+
+  // A head with no change, as main sends the head of a save.
+  function emitHead(head: { sha256: string | null; committed?: true }, lineageGeneration = 1): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    const event = { sessionId: openedSessionId, update: new Uint8Array([0, 0]), head, lineageGeneration };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
     });
@@ -300,6 +309,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     emitEditRefusal,
     emitChangedOutside,
     emitRemoteEdit,
+    emitHead,
     emitLineageReplacement,
     applied,
     applyAttempts,

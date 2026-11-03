@@ -49,6 +49,15 @@ const NO_DRAFT_IDS: readonly number[] = [];
 // — the stale response is dropped and its session closed.
 
 export type UseEngineDoc = {
+  // The file head `doc`'s state was installed with: undefined until known,
+  // and while a new source waits for its head.
+  headSha256?: string | null;
+  // This session's newest save: the head it wrote, and pairedInstalls when
+  // its receipt arrived.
+  lastSave: EngineYDocBinding["lastSave"];
+  // Counts the file's states main installed into this open other than its
+  // own saves, including document replacements.
+  pairedInstalls: number;
   // True once the engine session is open and the mirror doc is bound. false
   // permits the local autosave editor only after opening settles without a
   // named refusal outcome.
@@ -334,6 +343,9 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
 
   return {
     available,
+    headSha256: outcome?.kind === "bound" ? outcome.headSha256 : undefined,
+    lastSave: outcome?.kind === "bound" ? outcome.lastSave : null,
+    pairedInstalls: outcome?.kind === "bound" ? outcome.pairedInstalls : 0,
     opening,
     doc,
     objectId,

@@ -7,7 +7,7 @@ import { CopyButton } from "../ui/CopyButton";
 import { SettingRow, SwitchControl } from "./SettingRow";
 
 const BUTTON =
-  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink";
 
 /**
  * The report switches, which apply to this computer, and the diagnostics a

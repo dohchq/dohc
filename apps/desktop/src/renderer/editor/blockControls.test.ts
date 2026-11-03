@@ -545,6 +545,65 @@ describe("blockControls gutter coverage", () => {
     expect(visibleControls(editor)).toEqual([]);
   });
 
+  it("marks each gutter with what its block hangs left of its text, and replaces it when the block changes kind or digits", () => {
+    const text = (value: string) => [{ type: "text", text: value }];
+    const items = (type: string, attrs: Record<string, unknown> = {}) => ({
+      type: type === "taskList" ? "taskItem" : "listItem",
+      attrs,
+      content: [{ type: "paragraph", content: text("Item") }],
+    });
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: text("Text") },
+          { type: "bulletList", content: [items("bulletList")] },
+          { type: "orderedList", content: [items("orderedList")] },
+          { type: "orderedList", attrs: { start: 9 }, content: [items("orderedList")] },
+          { type: "orderedList", attrs: { start: 10 }, content: [items("orderedList")] },
+          { type: "taskList", content: [items("taskList", { checked: false })] },
+          { type: "blockquote", content: [{ type: "paragraph", content: text("Quote") }] },
+          { type: "codeBlock", content: text("code") },
+          { type: "callout", content: [{ type: "paragraph", content: text("Note") }] },
+          {
+            type: "table",
+            content: [
+              {
+                type: "tableRow",
+                content: [{ type: "tableCell", content: [{ type: "paragraph", content: text("Cell") }] }],
+              },
+            ],
+          },
+          { type: "horizontalRule" },
+        ],
+      }),
+    );
+    const gutters = () =>
+      Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"));
+    expect(gutters().map((gutter) => gutter.dataset.hang)).toEqual([
+      undefined, "bullet", "number", "number", "number", "checkbox", "bar", "frame", "frame", "table", undefined,
+    ]);
+    const digits = () =>
+      gutters().slice(2, 5).map((gutter) => gutter.style.getPropertyValue("--dohc-block-digits"));
+    expect(digits()).toEqual(["1", "1", "2"]);
+
+    // A rebuild keeps the gutter of a block that keeps its kind and digits. A
+    // block that changes either gets a new one.
+    const [paragraph, list, , nine] = gutters();
+    editor.commands.insertContentAt(editor.state.doc.content.size, { type: "paragraph", content: text("Last") });
+    expect(gutters()[1]).toBe(list);
+    let ninePos = 0;
+    editor.state.doc.forEach((node, offset) => {
+      if (node.attrs.start === 9) ninePos = offset;
+    });
+    editor.view.dispatch(editor.state.tr.setNodeAttribute(ninePos, "start", 10));
+    expect(gutters()[3]).not.toBe(nine);
+    expect(digits()).toEqual(["1", "2", "2"]);
+    turnBlockInto(editor, 0, "bulleted-list");
+    expect(gutters()[0]).not.toBe(paragraph);
+    expect(gutters()[0]!.dataset.hang).toBe("bullet");
+  });
+
   it("shows the gutter of the block under the pointer, first to last, nested, and across edits", () => {
     const text = (value: string) => [{ type: "text", text: value }];
     const item = (value: string, nested?: Record<string, unknown>) => ({

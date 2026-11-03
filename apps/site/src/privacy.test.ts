@@ -21,6 +21,7 @@ const site = join(import.meta.dirname, "..");
 const sources = [
   "index.html",
   "privacy.html",
+  "404.html",
   "site.js",
   "release-assets.ts",
   ...readdirSync(join(site, "src"))

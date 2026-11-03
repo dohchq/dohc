@@ -373,8 +373,10 @@ export async function resolveRemoteDatasetRevision(data: Pick<OwnerDatasetData, 
 }
 
 export interface DatasetAuthorityRoute {
-  /** Returns the durable local transfer marker; absent means this dataset is local. */
+  /** Returns the durable local transfer marker once its move finished; absent means this dataset is local. */
   status(datasetId: string): Promise<import("./localDatasetTransfer").DatasetTransferStatus | null>;
+  /** The durable local transfer marker as it stands now. Reading it never waits for a move or resumes one. */
+  marker(datasetId: string): import("./localDatasetTransfer").DatasetTransferStatus | null;
   remote(origin: string, datasetId: string): Promise<OwnerDatasetData>;
 }
 
@@ -394,7 +396,9 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
       for (let scannedPages = 0; ; scannedPages++) {
         const localPage = await local.list({ after, limit, includeArchived: true });
         for (let index = 0; index < localPage.datasets.length; index++) {
-          const row = localPage.datasets[index]!, authority = await target(row.datasetId);
+          // A dataset whose move hasn't finished lists from this computer, which still keeps its records.
+          // Listing never waits for a move or resumes a stopped one, so a stop can't fail the whole list.
+          const row = localPage.datasets[index]!, authority = route.marker(row.datasetId)?.state === "imported" ? await target(row.datasetId) : local;
           after = row.datasetId;
           if (authority !== local && authority.deletionStatus && (await authority.deletionStatus({ datasetId: row.datasetId })).deleted) continue;
           const current = authority === local ? row : await authority.describe(row.datasetId, { includeArchived: true });
@@ -443,7 +447,7 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
     },
     setGrant: async value => {
       const authority = await target(value.datasetId);
-      if (!("setGrant" in authority) || !authority.setGrant) throw new Error("Publish this Collection before managing shared access.");
+      if (!("setGrant" in authority) || !authority.setGrant) throw new Error("This Collection is only on this computer. Move it to your server to give a person access.");
       await authority.setGrant(value);
     },
   };

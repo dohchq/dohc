@@ -444,6 +444,23 @@ export function ownerAuditRecord(rootPath: string, deliveryId: string): LiveAudi
   return withEngineDb(rootPath, (db) => readLiveAuditRecord(db, deliveryId));
 }
 
+// The last operation this engine applied from each service host origin of the workspace.
+export function appliedServiceHostSeqs(rootPath: string, workspaceId: string): Record<string, number> {
+  return withEngineDb(rootPath, (db) => Object.fromEntries(db
+    .prepare("SELECT origin_id, acked_seq FROM replication_peers WHERE workspace_id=? AND origin_id LIKE 'service-host:%'")
+    .all(workspaceId)
+    .map((row) => [String(row.origin_id), Number(row.acked_seq)]))) ?? {};
+}
+
+// Each update the engine refused for the workspace's Notices, with its own reason.
+// A Notices row shows only one reason for all the refusals it folds together.
+export function noticedRefusals(rootPath: string, workspaceId: string): { originId: string; originSeq: number; reason: string }[] {
+  return withEngineDb(rootPath, (db) => db
+    .prepare("SELECT origin_id, origin_seq, reason_message FROM replication_pending_refusals WHERE workspace_id=? AND COALESCE(report_id,'') != 'direct-rpc'")
+    .all(workspaceId)
+    .map((row) => ({ originId: String(row.origin_id), originSeq: Number(row.origin_seq), reason: String(row.reason_message) }))) ?? [];
+}
+
 export function replicationOpKindCount(rootPath: string, opKind: string): number {
   return (
     withEngineDb(rootPath, (db) => {
@@ -453,4 +470,23 @@ export function replicationOpKindCount(rootPath: string, opKind: string): number
       return Number(row?.n ?? 0);
     }) ?? 0
   );
+}
+
+/** The committed ordinary pull position and native kept-copy records. Read-only. */
+export function outsideWriteRecoveryState(rootPath: string, workspaceId: string) {
+  return withEngineDb(rootPath, db => ({
+    pull: db.prepare("SELECT * FROM sync_relay_cursors WHERE workspace_id = ?").all(workspaceId),
+    displacements: db.prepare("SELECT * FROM materialization_displacements WHERE workspace_id = ?").all(workspaceId),
+    retained: db.prepare("SELECT * FROM materialization_retained WHERE workspace_id = ?").all(workspaceId),
+  }));
+}
+
+export function outsideCopyPushed(rootPath: string, workspaceId: string, path: string): boolean {
+  return withEngineDb(rootPath, db => {
+    const row = db.prepare(`SELECT EXISTS(SELECT 1 FROM replication_log l
+      JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
+      WHERE l.workspace_id=? AND l.imported=0 AND l.op_kind='moment.append'
+      AND json_extract(l.payload_json,'$.path')=? AND p.pushed_seq >= l.origin_seq) AS pushed`).get(workspaceId, path);
+    return Number(row?.pushed) === 1;
+  }) ?? false;
 }

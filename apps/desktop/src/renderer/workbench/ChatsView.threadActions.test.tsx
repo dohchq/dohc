@@ -9,6 +9,7 @@ import {
   thread,
   message,
   bridgeMock,
+  emitWorkspaceActivity,
   mentionRoster,
   renderView,
 } from "./ChatsView.testHarness";
@@ -229,10 +230,10 @@ describe("ChatsView decisions", () => {
 describe("ChatsView plain posts", () => {
   it("renders a short post's mention as a chip in the visible body", async () => {
     bridgeMock.listChannelThreads.mockResolvedValue({
-      threads: [thread({ title: "Ask @agent to check the exports" })],
+      threads: [thread({ title: "Ask @Nova to check the exports" })],
     });
     bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [message({ body: "Ask @agent to check the exports" })],
+      messages: [message({ body: "Ask @Nova to check the exports" })],
     });
     renderView(vi.fn(), vi.fn(), { mentionCandidates: mentionRoster });
     await userEvent.click(await screen.findByTestId("chats-channel"));
@@ -389,11 +390,11 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
       .mockResolvedValueOnce({
-        liveRunId: "run-1",
+        liveRunId: "run-1", liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
       })
-      .mockResolvedValue({ liveRunId: null, pendingCount: 0, paused: false });
+      .mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
@@ -402,6 +403,9 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "agent working · 2 queued",
     );
+    const announcement = screen.getByTestId("chats-dispatch-announcement");
+    expect(announcement.getAttribute("role")).toBe("status");
+    expect(announcement.textContent).toBe("Agent working, 2 queued");
     await user.click(screen.getByTestId("chats-stop-agent-run"));
     expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -410,6 +414,9 @@ describe("ChatsView dispatch state", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("chats-dispatch-status")).toBeNull(),
     );
+    // The region stays mounted with no text, ready for the next run.
+    expect(screen.getByTestId("chats-dispatch-announcement")).toBe(announcement);
+    expect(announcement.textContent).toBe("");
   });
 
   it("shows a paused status and resumes the open thread in place", async () => {
@@ -418,20 +425,20 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
       .mockResolvedValueOnce({
-        liveRunId: null,
+        liveRunId: null, liveTriggerMessageId: null,
         pendingCount: 3,
         paused: true,
-        pausedReason: "budget",
       })
-      .mockResolvedValue({ liveRunId: null, pendingCount: 3, paused: false });
+      .mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 3, paused: false });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
 
     const status = await screen.findByTestId("chats-dispatch-status");
-    expect(status.textContent).toBe("dispatch paused — Resume");
-    expect(status.getAttribute("title")).toBe("budget");
+    expect(status.textContent).toBe("Agent replies pausedResume");
+    expect(status.hasAttribute("title")).toBe(false);
+    expect(screen.getByTestId("chats-dispatch-announcement").textContent).toBe("Agent replies paused");
     await user.click(screen.getByTestId("chats-resume-dispatch"));
     expect(bridgeMock.resumeThreadDispatch).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
@@ -440,6 +447,7 @@ describe("ChatsView dispatch state", () => {
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe(
       "3 queued",
     );
+    expect(screen.getByTestId("chats-dispatch-announcement").textContent).toBe("3 queued");
   });
 
   it("says when this computer paused dispatch, before the thread's own pause, and resumes it", async () => {
@@ -448,10 +456,9 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.readChatDispatchPaused.mockResolvedValue({ paused: true });
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-      liveRunId: null,
+      liveRunId: null, liveTriggerMessageId: null,
       pendingCount: 2,
       paused: true,
-      pausedReason: "budget",
     });
     renderView();
 
@@ -460,11 +467,130 @@ describe("ChatsView dispatch state", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("chats-dispatch-status").textContent).toBe(
-        "dispatch paused on this computer — Resume",
+        "Agent replies paused on this computerResume",
       ),
+    );
+    expect(screen.getByTestId("chats-dispatch-announcement").textContent).toBe(
+      "Agent replies paused on this computer",
     );
     await user.click(screen.getByTestId("chats-resume-computer-dispatch"));
     expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: false });
-    expect(screen.getByTestId("chats-dispatch-status").textContent).toBe("dispatch paused — Resume");
+    expect(screen.getByTestId("chats-dispatch-status").textContent).toBe("Agent replies pausedResume");
+  });
+});
+
+describe("ChatsView runs that didn't reply", () => {
+  const STOPPED = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
+  const QUIT = "Nova didn't reply. dohc quit during its run.";
+  const failedRun = (retryable = true, words = QUIT) =>
+    ({ ...STOPPED, failedRun: { runId: "run-1", triggerMessageId: "message-1", words, retryable } });
+  const agentPost = (id: string, at: number) =>
+    message({ id, parentMessageId: "message-1", authorKind: "agent", authorDisplayName: "Claude Code", body: "Ferry times are in day-2.md.", createdAtMs: at });
+  const run = { runId: "run-1", threadId: "thread-1", triggerMessageId: "message-1", command: "claude", startedAtMs: NOW, endedAtMs: NOW + 5_000, exitCode: 143 };
+
+  async function openThread() {
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    return user;
+  }
+
+  it("says so under the request when the run posted nothing, and Try again puts it back in line", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread
+      .mockResolvedValueOnce(failedRun())
+      .mockResolvedValue({ ...STOPPED, liveRunId: "run-2", liveTriggerMessageId: null });
+    renderView();
+    const user = await openThread();
+
+    const line = await screen.findByTestId("chats-run-failed");
+    expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("message-1");
+    expect(line.textContent).toBe(`${QUIT}Try again`);
+    await user.click(screen.getByTestId("chats-run-try-again"));
+    expect(bridgeMock.retryStoppedRun).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", runId: "run-1" });
+    await waitFor(() => expect(screen.queryByTestId("chats-run-failed")).toBeNull());
+    expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe("agent working");
+  });
+
+  it("says so once, under the run's last post", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message(), agentPost("reply-2", NOW + 2_000), agentPost("reply-1", NOW + 1_000)],
+    });
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: { "reply-1": run, "reply-2": run } });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...failedRun(true, "Nova stopped before finishing. dohc restarted during its run."),
+    });
+    renderView();
+    await openThread();
+
+    const line = await screen.findByTestId("chats-run-failed");
+    expect(screen.getAllByTestId("chats-run-failed")).toHaveLength(1);
+    expect(line.textContent).toContain("Nova stopped before finishing. dohc restarted during its run.Try again");
+    expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("reply-2");
+    // The earlier post keeps its usual run line.
+    expect(screen.getByTestId("chats-run-line").closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("reply-1");
+  });
+
+  it("puts Try again under the later of two posts made at once", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message(), agentPost("reply-a", NOW + 1_000), agentPost("reply-b", NOW + 1_000)],
+    });
+    bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: { "reply-a": run, "reply-b": run } });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(failedRun());
+    renderView();
+    await openThread();
+
+    const tryAgain = await screen.findByTestId("chats-run-try-again");
+    expect(tryAgain.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("reply-b");
+  });
+
+  it("keeps the words without Try again once the request has had its second attempt", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(failedRun(false));
+    renderView();
+    await openThread();
+
+    expect((await screen.findByTestId("chats-run-failed")).textContent).toBe(QUIT);
+    expect(screen.queryByTestId("chats-run-try-again")).toBeNull();
+  });
+
+  it("reports a failed Try again with a Try again that asks once more", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(failedRun());
+    bridgeMock.retryStoppedRun.mockRejectedValueOnce(new Error("This workspace is not open. Open it again."));
+    const { onError } = renderView();
+    const user = await openThread();
+
+    await user.click(await screen.findByTestId("chats-run-try-again"));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    const [words, , retry] = onError.mock.calls[0]!;
+    expect(words).toContain("dohc could not start your agent's run in \"Should we ship on Friday?\" again.");
+    expect(screen.getByTestId("chats-run-try-again").getAttribute("aria-disabled")).toBeNull();
+    (retry as () => void)();
+    await waitFor(() => expect(bridgeMock.retryStoppedRun).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.retryStoppedRun).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", runId: "run-1" });
+  });
+
+  it("reports a failed Try again that the conversation refreshed under", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue(failedRun());
+    let fail!: (error: Error) => void;
+    bridgeMock.retryStoppedRun.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    const { onError } = renderView();
+    const user = await openThread();
+
+    await user.click(await screen.findByTestId("chats-run-try-again"));
+    const reads = bridgeMock.listChatMessages.mock.calls.length;
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(reads));
+    await act(async () => fail(new Error("This workspace is not open. Open it again.")));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0]![0]).toContain("dohc could not start your agent's run in \"Should we ship on Friday?\" again.");
   });
 });

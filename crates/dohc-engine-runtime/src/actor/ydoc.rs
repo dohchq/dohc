@@ -8,6 +8,12 @@ use super::search::search_domain;
 use super::versions::ensure_mutation_version_on_store;
 use crate::error::RuntimeError;
 use crate::search::upsert_file_search_index;
+use dohc_engine_collab::markdown_write_obligations::{
+    self as write_obligations, Kind as WriteObligationKind, Obligation as WriteObligation,
+};
+use dohc_engine_collab::markdown_write_safety::{
+    self, MarkdownConversionConsent, MarkdownWriteSafety,
+};
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LineageClaimStatus,
     OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
@@ -85,12 +91,15 @@ pub struct YdocSeedMaterialization {
 /// Actor-owned state returned when a live session refreshes its Y.Doc.
 #[derive(Debug)]
 pub struct YdocResyncState {
+    pub head_blob_sha256: Option<String>,
     pub initial_update: Vec<u8>,
     pub lineage_claim_id: Option<String>,
     /// See [`dohc_engine_sync::lineage_originated_here`].
     pub lineage_originated_here: bool,
     pub recovered_paths: Vec<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
+    /// Record facts the resync's deferred drain committed, in drain order.
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -174,10 +183,11 @@ fn inband_settled_content(content: String) -> Option<String> {
     (content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(content)
 }
 
+/// Where a close writes the files its drain changed.
 #[derive(Clone)]
-struct YdocCloseMaterialization {
-    root_dir: PathBuf,
-    self_writes: Arc<dyn SelfWriteRecorder>,
+pub struct YdocCloseMaterialization {
+    pub root_dir: PathBuf,
+    pub self_writes: Arc<dyn SelfWriteRecorder>,
 }
 
 impl ActorHandle {
@@ -215,6 +225,7 @@ impl ActorHandle {
                 let Some((version,object))=found.into_iter().next() else {return Ok(Err(OwnerOutboxError::NotFound));};
                 DocKey::new(&workspace,&version,&object)?
             };
+            let preparations=cache.retirement_preparations();
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
                 "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
                 "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
@@ -224,7 +235,7 @@ impl ActorHandle {
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
                     release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
-                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,outcome,now_ms).map(|_|())
+                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
                     }).map(|row|vec![row])
                 },
                 _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
@@ -344,6 +355,32 @@ impl ActorHandle {
                     conn,
                     &workspace_id,
                     &writes,
+                )
+            }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_list_restore_fenced(
+        &self,
+        workspace_id: String,
+        after: Option<String>,
+        limit: usize,
+        token: CancellationToken,
+    ) -> Result<
+        Result<Vec<dohc_engine_collab::owner_outbox::OwnerOutboxRestoreFenced>, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::list_restore_fenced_in(
+                    conn,
+                    &workspace_id,
+                    after.as_deref(),
+                    limit,
                 )
             }))
         })
@@ -778,7 +815,7 @@ impl ActorHandle {
         seed_from_artifact: bool,
         token: CancellationToken,
     ) -> Result<YdocOpenState, RuntimeError> {
-        self.run_with_reader_retry(move |store, cache| {
+        self.run_draining(token.clone(), move |store, cache| {
             ydoc_open_state_on_store(
                 store,
                 cache,
@@ -922,6 +959,75 @@ impl ActorHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_conversion_consent(
+        &self,
+        key: DocKey,
+        path: String,
+        session_id: String,
+        lineage_claim_id: Option<String>,
+        restore_generation: Option<i64>,
+        source_sha256: String,
+        token: CancellationToken,
+    ) -> Result<Arc<MarkdownConversionConsent>, RuntimeError> {
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let marker = dohc_engine_collab::read_marker(store, &key)?;
+            if marker
+                .as_ref()
+                .map_or(lineage_claim_id.is_some(), |marker| {
+                    marker.path.as_deref() != Some(path.as_str())
+                        || marker.lineage_claim_id != lineage_claim_id
+                })
+            {
+                return Err(DomainError::ConflictStaleTarget.into());
+            }
+            store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::require_ordinary_write(conn, &key)?;
+                dohc_engine_collab::live_update_application::require_restore_generation(
+                    conn,
+                    &key,
+                    restore_generation,
+                )
+            })?;
+            let head = VersionedTextStore::new(store).read_text(
+                &key.workspace_id,
+                &key.version_id,
+                &path,
+            )?;
+            if head
+                .as_ref()
+                .is_some_and(|head| head.object_id != key.object_id)
+            {
+                return Err(DomainError::ConflictStaleTarget.into());
+            }
+            // A note with no Y.Doc state yet seeds from its file, and the seed
+            // records the file's bytes as its source.
+            let source = if marker.as_ref().is_some_and(ydoc_marker_has_durable_state) {
+                let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))?;
+                doc.markdown_source_reference()
+                    .filter(|reference| doc.markdown_source(reference).is_some())
+                    .map(|reference| reference.source_sha256)
+            } else {
+                head.as_ref().map(|head| hex_sha256(head.text.as_bytes()))
+            };
+            if source.as_deref() != Some(source_sha256.as_str()) {
+                return Err(CollabError::MarkdownReaderUnavailable.into());
+            }
+            Ok(Arc::new(MarkdownConversionConsent::new(
+                key,
+                session_id,
+                lineage_claim_id,
+                restore_generation,
+                source_sha256,
+                head.map(|head| head.blob_sha256),
+            )))
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn ydoc_settle(
         &self,
         root_dir: PathBuf,
@@ -936,8 +1042,9 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         restore_generation: Option<i64>,
+        conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
-        self.run_with_reader_retry(move |store, cache| {
+        self.run_draining(token.clone(), move |store, cache| {
             ydoc_settle_on_store(
                 store,
                 cache,
@@ -959,6 +1066,7 @@ impl ActorHandle {
                 restore_generation,
                 SettlementKind::Document,
                 true,
+                conversion_consent.as_deref(),
             )
         })
         .await
@@ -979,6 +1087,7 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         restore_generation: Option<i64>,
+        conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run_with_reader_retry(move |store, cache| {
             ydoc_settle_on_store(
@@ -1002,6 +1111,7 @@ impl ActorHandle {
                 restore_generation,
                 SettlementKind::Document,
                 true,
+                conversion_consent.as_deref(),
             )
         })
         .await
@@ -1014,7 +1124,7 @@ impl ActorHandle {
         token: CancellationToken,
         restore_generation: Option<i64>,
     ) -> Result<YdocResyncState, RuntimeError> {
-        self.run_with_reader_retry(move |store, cache| {
+        self.run_draining(token.clone(), move |store, cache| {
             ydoc_resync_on_store(
                 store,
                 cache,
@@ -1146,6 +1256,9 @@ impl ActorHandle {
         .await
     }
 
+    /// Close the session, then drain what it deferred. The close commits
+    /// once; only the drain, its materialization and its cleanup run again
+    /// after a validation they wait for.
     async fn ydoc_close_session_inner(
         &self,
         key: DocKey,
@@ -1154,8 +1267,68 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
+        let root_dir = materialization
+            .as_ref()
+            .map(|materialization| materialization.root_dir.clone());
+        let (outcome, drains) = self
+            .ydoc_close_commit(
+                key.clone(),
+                root_dir,
+                now_ms,
+                Arc::clone(&faults),
+                token.clone(),
+            )
+            .await?;
+        let record_facts = if drains {
+            self.ydoc_close_drain(key, materialization, now_ms, faults, token)
+                .await?
+        } else {
+            Vec::new()
+        };
+        Ok(YdocCloseSessionOutcome {
+            outcome,
+            record_facts,
+        })
+    }
+
+    /// Commit the close of the session on `key`: its outcome, and whether
+    /// what it deferred drains next through [`Self::ydoc_close_drain`]. A
+    /// failure here committed nothing; the session still stands.
+    pub async fn ydoc_close_commit(
+        &self,
+        key: DocKey,
+        root_dir: Option<PathBuf>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(Option<CloseOutcome>, bool), RuntimeError> {
         self.run_with_reader_retry(move |store, cache| {
             ydoc_close_session_on_store(
+                store,
+                cache,
+                &key,
+                root_dir.as_deref(),
+                now_ms,
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
+    }
+
+    /// Drain, materialize and clean up what the committed close of `key`
+    /// deferred, and answer the record facts it committed. Runs again after
+    /// each validation it waits for; never closes again.
+    pub async fn ydoc_close_drain(
+        &self,
+        key: DocKey,
+        materialization: Option<YdocCloseMaterialization>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Vec<dohc_engine_domain::CollectionRecordApplyFacts>, RuntimeError> {
+        self.run_draining(token.clone(), move |store, cache| {
+            ydoc_close_drain_on_store(
                 store,
                 cache,
                 &key,
@@ -1166,6 +1339,50 @@ impl ActorHandle {
             )
         })
         .await
+    }
+
+    /// Run `stage` on the actor until no drain in it waits for released-tail
+    /// validation. A drain that waits leaves what it committed queued and
+    /// ends its transaction; the actor is free while the store's worker
+    /// validates, and the next run of `stage` checks its conditions again,
+    /// then drains and reports those rows once. A stage that waits for the
+    /// Markdown reader runs again once it answers, as
+    /// [`Self::run_with_reader_retry`] does.
+    async fn run_draining<R: Send + 'static>(
+        &self,
+        token: CancellationToken,
+        stage: impl Fn(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
+        + Clone
+        + Send
+        + 'static,
+    ) -> Result<R, RuntimeError> {
+        let mut reader_attempt = 0;
+        loop {
+            let attempt = stage.clone();
+            match self.run(move |store, cache| attempt(store, cache)).await {
+                Err(RuntimeError::DrainWaiting(pending)) => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                        validated = pending.validate() => {
+                            validated.map_err(super::relay::validation_failed)?;
+                        }
+                    }
+                }
+                outcome => {
+                    if !super::wait_for_reader(
+                        &outcome,
+                        reader_attempt,
+                        self.markdown_recovery.clone(),
+                    )
+                    .await
+                    {
+                        return outcome;
+                    }
+                    reader_attempt += 1;
+                }
+            }
+        }
     }
 
     /// Move disk-conflicted Y.Doc recovery artifacts to deterministic free
@@ -1803,22 +2020,31 @@ pub(super) fn ydoc_open_state_on_store(
     // with the same reason the settle freeze uses; resolution lifts both.
     // Refuse an existing conflict before changing the lineage or draining.
     // If the drain opens a conflict, return its record facts with the refusal.
-    if expected_key_matches
-        && store
-            .read_with(|conn| {
-                dohc_engine_sync::open_sync_conflict_for_object(
-                    conn,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                )
-            })?
-            .is_some()
-    {
-        return Err(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "ydoc-conflict-open",
+    // A conflict a queued row opened before its drain waited is that drain's
+    // own, so this open checks it after the drain and reports it the same way.
+    let conflict_open = |store: &EngineStore| {
+        store.read_with(|conn| {
+            dohc_engine_sync::open_sync_conflict_for_object(
+                conn,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+            )
+            .map(|conflict| conflict.is_some())
+        })
+    };
+    let mut conflict_after_drain = false;
+    if expected_key_matches && conflict_open(store)? {
+        conflict_after_drain = drain_deferred
+            && restore_generation.is_none()
+            && store
+                .read_with(|conn| dohc_engine_sync::deferred_ydoc_opened_conflict(conn, &key))?;
+        if !conflict_after_drain {
+            return Err(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "ydoc-conflict-open",
+            }
+            .into());
         }
-        .into());
     }
     // Retired artifact: the path has NO head (deleted on disk, capture
     // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
@@ -1882,7 +2108,7 @@ pub(super) fn ydoc_open_state_on_store(
     // behind its active editor with no event or resync signal. The RPC layer
     // rejects the mismatched open right after; skipping the drain keeps this
     // read side-effect-free for the foreign key.
-    let mut record_facts = Vec::new();
+    let mut drained = None;
     if drain_deferred
         && restore_generation.is_none()
         && expected_key_matches
@@ -1892,30 +2118,35 @@ pub(super) fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+        let (result, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
             store, doc_cache, &key, &NoFaults,
         )?;
+        // Its rows stay queued; once validation completes, the open runs
+        // its checks again and this drain reports them.
+        if let Some(pending) = result.waiting {
+            return Err(RuntimeError::DrainWaiting(pending));
+        }
         dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, &NoFaults)?;
-        if store
-            .read_with(|conn| {
-                dohc_engine_sync::open_sync_conflict_for_object(
-                    conn,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                )
-            })?
-            .is_some()
-        {
-            return Err(RuntimeError::YdocOpenConflict {
-                record_facts: drained.record_facts,
-            });
-        }
-        for declined in &drained.sharing_declined {
-            eprintln!("engine: {declined}");
-        }
-        record_facts = drained.record_facts;
+        drained = Some(result);
     }
+    // A conflict the earlier check left to the drain is refused here even
+    // when nothing drained.
+    if (drained.is_some() || conflict_after_drain) && conflict_open(store)? {
+        return Err(RuntimeError::YdocOpenConflict {
+            record_facts: drained
+                .map(|drained| drained.record_facts)
+                .unwrap_or_default(),
+        });
+    }
+    let record_facts = match drained {
+        Some(drained) => {
+            for declined in &drained.sharing_declined {
+                eprintln!("engine: {declined}");
+            }
+            drained.record_facts
+        }
+        None => Vec::new(),
+    };
     // A post-lease open starts a live session on this doc: prefer keeping its
     // cache entry resident (eviction order only; a leaked pin never affects
     // correctness).
@@ -2139,6 +2370,7 @@ pub(super) fn ydoc_record_update_on_store(
     let mut sharing_declined: Option<SharingDeclined> = None;
     let mut automation_claims: Vec<dohc_engine_domain::AutomationClaim> = Vec::new();
     let reader_resolver = doc_cache.reader_resolver.clone();
+    let preparations = doc_cache.retirement_preparations();
     // An exact replicated lineage journals the ydoc.update delta in the same
     // transaction as the append. This keeps blob-before-log order and TS
     // parity. Local-only lineages journal nothing; their workspace file is the
@@ -2178,6 +2410,22 @@ pub(super) fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, _update_sha| {
+            // Maintenance appends are accepted live state. Their file index waits for settlement.
+            if !claim_triggers
+                && actor_origin_id.as_deref() == Some("engine")
+                && attribution.is_none()
+                && !super::collections::synchronize_collection_index_from_head_in_tx(tx, key, path)
+                    .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?
+            {
+                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    &serde_json::json!({}),
+                )
+                .map_err(|error| CollabError::Storage(StorageError::persist_public(error)))?;
+            }
             if !journal_local_append_in_tx(
                 tx,
                 &journal_key,
@@ -2188,6 +2436,7 @@ pub(super) fn ydoc_record_update_on_store(
                 attribution.as_ref(),
                 seed_source.as_ref(),
                 reader_resolver.as_deref(),
+                &preparations,
                 &mut sharing_declined,
                 outcome,
                 now_ms,
@@ -2349,6 +2598,13 @@ fn record_file_holds_head(
     publication_state_bytes: Option<&[u8]>,
     now_ms: i64,
 ) -> Result<bool, RuntimeError> {
+    if live_audit.is_none() {
+        store.read_with(|conn| {
+            dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)
+        })?;
+    }
+    // An empty settlement publishes nothing, so it records nothing here.
+    let live_audit = live_audit.filter(|audit| !audit.is_empty());
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
             "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
@@ -2417,6 +2673,8 @@ fn record_file_holds_head(
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
+            #[cfg(any(test, feature = "fault-injection"))]
+            markdown_settlement_test_fault(tx)?;
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -2641,13 +2899,156 @@ pub(super) fn ydoc_settle_on_store(
     restore_generation: Option<i64>,
     kind: SettlementKind,
     use_reader: bool,
+    conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
+    let result = ydoc_settle_attempt_on_store(
+        store,
+        doc_cache,
+        root_dir,
+        key,
+        path,
+        content_kind,
+        drain_deferred,
+        expected_lineage_claim_id,
+        expected_head_sha.clone(),
+        settled_content_override,
+        session_id,
+        self_writes,
+        now_ms,
+        faults,
+        token,
+        root_guard,
+        live_audit,
+        restore_generation,
+        kind,
+        use_reader,
+        conversion_consent,
+    );
+    if super::pending_reader_preparation(&result).is_some() {
+        // Persist the retry before the async driver starts the requested preparation.
+        let head = dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
+        match store.write_with(&NoFaults, |tx| -> Result<(), RuntimeError> {
+            let marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+            if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+                return Err(CollabError::LineageWriteStale {
+                    expected: expected_lineage_claim_id.map(ToOwned::to_owned), observed: marker.lineage_claim_id,
+                }.into());
+            }
+            let mut owed = WriteObligation {
+                order: 0, key: key.clone(), lineage_claim_id: marker.lineage_claim_id.clone().unwrap_or_default(),
+                operation_id: session_id.to_owned(), kind: settlement_obligation_kind(kind, session_id, live_audit.is_some()),
+                path: path.to_owned(),
+                retry_inputs: live_audit.map_or_else(|| serde_json::json!({
+                    "expectedHeadSha256":head,"restoreGeneration":restore_generation,"useReader":use_reader,
+                }), |audit| audit.markdown_retry_inputs()),
+                held_checkpoint_sha256: None, held_head_sha256: head.clone(),
+                source_sha256: None, settled_head_sha256: None,
+            };
+            if live_audit.is_none() {
+                dohc_engine_collab::owner_outbox::draft::require_ordinary_write(tx, key)?;
+                dohc_engine_collab::live_update_application::require_restore_generation(tx, key, restore_generation)?;
+                if let Some(retry) = write_obligations::AuditedRetry::adopted_owner_in(tx, key, marker.head_update_seq)? {
+                    owed.kind = WriteObligationKind::AuditedSettle;
+                    owed.operation_id = retry.operation_id();
+                    owed.retry_inputs = serde_json::to_value(retry).map_err(StorageError::persist_public)?;
+                }
+            }
+            // A preparation retry must not erase a previously confirmed hold or its dismissal identity.
+            if let Some(previous) = write_obligations::pending_in(tx, &key.workspace_id)?.into_iter()
+                .find(|row| row.key == *key && row.lineage_claim_id == owed.lineage_claim_id
+                    && row.kind == owed.kind && row.operation_id == owed.operation_id) {
+                owed.held_checkpoint_sha256 = previous.held_checkpoint_sha256;
+                owed.held_head_sha256 = previous.held_head_sha256;
+                if owed.kind != WriteObligationKind::AuditedSettle {
+                    owed.retry_inputs["headUpdateSeq"] = previous.retry_inputs["headUpdateSeq"].clone();
+                }
+            }
+            if owed.kind == WriteObligationKind::AuditedSettle {
+                write_obligations::record_audited_in(tx, &owed, now_ms)?;
+            } else {
+                write_obligations::record_in(tx, &owed, now_ms)?;
+            }
+            Ok(())
+        })? {
+            TxnOutcome::Committed(()) => {},
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+    } else if matches!(&result, Ok(YdocSettleOutcome::Settled(_))) && live_audit.is_none() {
+        // Equality and replay can complete a preparation intent without entering the write transaction.
+        let owed =
+            store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
+        for owed in owed.into_iter().filter(|owed| {
+            owed.key == *key
+                && owed.lineage_claim_id == expected_lineage_claim_id.unwrap_or("")
+                && owed.operation_id == session_id
+                && owed.kind == settlement_obligation_kind(kind, session_id, false)
+        }) {
+            match store.write_with(&NoFaults, |tx| {
+                write_obligations::complete_in(tx, &owed, now_ms)
+            })? {
+                TxnOutcome::Committed(()) => {}
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+    }
+    result
+}
+
+fn settlement_obligation_kind(
+    kind: SettlementKind,
+    session_id: &str,
+    audited: bool,
+) -> WriteObligationKind {
+    if audited {
+        WriteObligationKind::AuditedSettle
+    } else if kind == SettlementKind::CollectionAdoption {
+        WriteObligationKind::CollectionAdoption
+    } else if session_id.starts_with("collection-relation-cleanup:") {
+        WriteObligationKind::RelationCleanup
+    } else if session_id == "owner-live-stop" {
+        WriteObligationKind::OwnerStop
+    } else if session_id == "link-rewrite-baseline" {
+        WriteObligationKind::LinkBaseline
+    } else {
+        WriteObligationKind::Session
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ydoc_settle_attempt_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    root_dir: &std::path::Path,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    drain_deferred: bool,
+    expected_lineage_claim_id: Option<&str>,
+    expected_head_sha: Option<String>,
+    settled_content_override: Option<String>,
+    session_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
+    live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
+    restore_generation: Option<i64>,
+    kind: SettlementKind,
+    use_reader: bool,
+    conversion_consent: Option<&MarkdownConversionConsent>,
+) -> Result<YdocSettleOutcome, RuntimeError> {
+    #[cfg(any(test, feature = "fault-injection"))]
+    MARKDOWN_BEFORE_SETTLE
+        .with(|slot| slot.borrow_mut().take())
+        .map(|check| check(store))
+        .transpose()?;
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
     if live_audit.is_none() {
         store.read_with(|conn| {
-            dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)?;
+            dohc_engine_collab::owner_outbox::draft::require_ordinary_write(conn, key)?;
             dohc_engine_collab::live_update_application::require_restore_generation(
                 conn,
                 key,
@@ -2730,6 +3131,7 @@ pub(super) fn ydoc_settle_on_store(
         }
     }
     reconcile_author_coverage(store, key, now_ms, faults)?;
+    let witness_resolver = doc_cache.reader_resolver.clone();
     let reader_resolver = if use_reader {
         doc_cache.reader_resolver.clone()
     } else {
@@ -2759,8 +3161,11 @@ pub(super) fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let publication_state_bytes = live_audit.map(|_| doc.encode_full_state());
-    let projection = if use_reader {
+    // A settlement covering no accepted edit still projects, but publishes
+    // nothing. Only its projection is kept locally, for a restore.
+    let recorded_audit = live_audit.filter(|audit| !audit.is_empty());
+    let publication_state_bytes = recorded_audit.map(|_| doc.encode_full_state());
+    let mut projection = if use_reader {
         project_ydoc_on_store_with_reader(store, key, doc, content_kind, reader_resolver.as_deref())
     } else {
         project_ydoc_on_store(store, key, doc, content_kind)
@@ -3054,16 +3459,45 @@ pub(super) fn ydoc_settle_on_store(
             projection,
         })));
     }
+    if let Some(override_text) = settled_content_override.as_deref() {
+        let source_preserving = projection.markdown_write_safety
+            == MarkdownWriteSafety::SourcePreserving
+            && override_text == projection.content;
+        let audited_restore =
+            live_audit.is_some_and(|audit| audit.restored_source() == Some(override_text));
+        let adoption = kind == SettlementKind::CollectionAdoption
+            && dohc_engine_domain::collections::markdown_frontmatter_json_with_body(override_text)
+                .is_some_and(|(fields, _)| fields == doc.frontmatter_json())
+            && head_probe.as_ref().is_some_and(|head| {
+                doc.frontmatter_json()
+                    .get(dohc_engine_domain::collections::RECORD_ID_FRONTMATTER_KEY)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|id| {
+                        dohc_engine_domain::collections::collection_record_markdown_with_id(
+                            &head.text, id,
+                        )
+                    })
+                    .as_deref()
+                    == Some(override_text)
+            });
+        if !(source_preserving || audited_restore || adoption) {
+            return Err(CollabError::FrontmatterEditRefused.into());
+        }
+        projection.markdown_write_safety = MarkdownWriteSafety::SourcePreserving;
+    }
+    let checkpoint_sha256 = hex_sha256(&doc.encode_full_state());
     let Projection {
         content: ydoc_projected_text,
         content_kind: projected_content_kind,
         source_state_vector_sha256,
         destructive: projection_destructive,
+        markdown_write_safety,
+        witness_source_sha256,
     } = projection;
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| -> Result<_, RuntimeError> {
         if live_audit.is_none() {
-            dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(
+            dohc_engine_collab::owner_outbox::draft::require_ordinary_write(tx, key).map_err(
                 |_| DomainError::InvalidInput {
                     reason: "owner-outbox-frozen",
                 },
@@ -3101,6 +3535,68 @@ pub(super) fn ydoc_settle_on_store(
             .map(|snapshot| snapshot.blob_sha256.clone());
         if current_sha != expected_head_sha {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+        }
+        let current_marker = dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+        if current_marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+            return Err(CollabError::LineageWriteStale {
+                expected: expected_lineage_claim_id.map(ToOwned::to_owned), observed: current_marker.lineage_claim_id,
+            }.into());
+        }
+        let holds = markdown_write_safety::holds(&markdown_write_safety, witness_source_sha256.as_deref(), current_sha.as_deref())
+            && !markdown_write_safety::check_witness(doc, key, path, witness_resolver.as_deref())?;
+        let adopted_owner = dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)?;
+        let uses_consent = holds && conversion_consent.is_some_and(|consent| {
+            if let Some(audit) = live_audit {
+                consent.permits_audited(key, current_marker.lineage_claim_id.as_deref(),
+                    audit.binding().restore_fence_generation, witness_source_sha256.as_deref(), current_sha.as_deref())
+            } else {
+                !adopted_owner && consent.permits(key, session_id,
+                    current_marker.lineage_claim_id.as_deref(), restore_generation,
+                    witness_source_sha256.as_deref(), current_sha.as_deref())
+            }
+        });
+        let mut obligation = WriteObligation {
+            order: 0, key: key.clone(), lineage_claim_id: current_marker.lineage_claim_id.clone().unwrap_or_default(),
+            operation_id: session_id.to_owned(),
+            kind: settlement_obligation_kind(kind, session_id, live_audit.is_some()),
+            path: path.to_owned(),
+            retry_inputs: if let Some(audit) = live_audit { audit.markdown_retry_inputs() } else {
+                serde_json::json!({"expectedHeadSha256": expected_head_sha,
+                    "restoreGeneration": restore_generation, "useReader": use_reader,
+                    "headUpdateSeq": current_marker.head_update_seq}) },
+            held_checkpoint_sha256: Some(checkpoint_sha256.clone()), held_head_sha256: current_sha.clone(),
+            source_sha256: None, settled_head_sha256: None,
+        };
+        if holds && !uses_consent {
+            if live_audit.is_none() && adopted_owner {
+                let retry = write_obligations::AuditedRetry::adopted_owner_in(tx, key, current_marker.head_update_seq)?
+                    .ok_or(CollabError::NoMarker)?;
+                obligation.kind = WriteObligationKind::AuditedSettle;
+                obligation.operation_id = retry.operation_id();
+                obligation.retry_inputs = serde_json::to_value(retry)
+                    .map_err(StorageError::persist_public)?;
+            }
+            if let Some(previous) = write_obligations::pending_in(tx, &key.workspace_id)?.into_iter()
+                .find(|row| row.key == *key && row.lineage_claim_id == obligation.lineage_claim_id
+                    && row.kind == obligation.kind
+                    && (row.operation_id == obligation.operation_id
+                        || live_audit.is_some_and(|audit| row.operation_id == audit.markdown_operation_id()))
+                    && row.held_head_sha256 == current_sha
+                    && row.held_checkpoint_sha256.is_some()
+                    && row.retry_inputs.get("headUpdateSeq").and_then(serde_json::Value::as_i64)
+                        == Some(current_marker.head_update_seq)) {
+                obligation.held_checkpoint_sha256 = previous.held_checkpoint_sha256;
+                obligation.held_head_sha256 = previous.held_head_sha256;
+            }
+            if obligation.kind == WriteObligationKind::AuditedSettle {
+                write_obligations::record_audited_in(tx, &obligation, now_ms)?;
+            } else {
+                write_obligations::record_in(tx, &obligation, now_ms)?;
+            }
+            return Ok((None, false));
+        }
+        if live_audit.is_none() && adopted_owner {
+            return Err(CollabError::OwnerOutboxFrozen.into());
         }
         let preimage = if bootstrap_absent {
             Preimage::Absent
@@ -3186,7 +3682,21 @@ pub(super) fn ydoc_settle_on_store(
         .map_err(|error| {
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
-        if let Some(audit) = live_audit {
+        if uses_consent {
+            write_obligations::record_in(tx, &WriteObligation {
+                kind: WriteObligationKind::WitnessRefresh,
+                source_sha256: witness_source_sha256.clone(),
+                settled_head_sha256: Some(result.snapshot.blob_sha256.clone()),
+                held_checkpoint_sha256: None, held_head_sha256: None,
+                ..obligation.clone()
+            }, now_ms)?;
+        }
+        write_obligations::advance_refresh_head_in(tx, key, current_marker.lineage_claim_id.as_deref(),
+            current_sha.as_deref(), &result.snapshot.blob_sha256, now_ms)?;
+        if live_audit.is_none() {
+            write_obligations::complete_in(tx, &obligation, now_ms)?;
+        }
+        if let Some(audit) = recorded_audit {
             let capture = audit.prepare_publication_state_in_tx(tx).map_err(DomainError::Storage)?;
             let state = match &capture {
                 dohc_engine_collab::live_update_application::LiveSettlementPublicationState::New => Some(
@@ -3205,6 +3715,8 @@ pub(super) fn ydoc_settle_on_store(
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state).map_err(DomainError::Storage)?;
             }
+            #[cfg(any(test, feature = "fault-injection"))]
+            markdown_settlement_test_fault(tx)?;
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -3212,6 +3724,10 @@ pub(super) fn ydoc_settle_on_store(
                 now_ms,
             )
             .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        } else if let Some(audit) = live_audit {
+            audit
+                .record_empty_in_tx(tx, &result.moment.moment_id, &result.snapshot.blob_sha256)
+                .map_err(settlement_audit_error)?;
         }
         // Live settlement export owns its companion moment, including when
         // enrollment defers the pair until earlier audit events are exported.
@@ -3229,12 +3745,25 @@ pub(super) fn ydoc_settle_on_store(
             path,
             content_kind == ContentKind::Richdoc,
         )?;
-        Ok((result, reconcile_required))
+        #[cfg(any(test, feature = "fault-injection"))]
+        if recorded_audit.is_none() { markdown_settlement_test_fault(tx)?; }
+        Ok((Some((result, reconcile_required)), uses_consent))
     })?;
-    let (write, collection_reconcile_required) = match outcome {
+    let (settlement, uses_consent) = match outcome {
         TxnOutcome::Committed(write) => write,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
+    let Some((write, collection_reconcile_required)) = settlement else {
+        return Err(RuntimeError::MarkdownWriteHeld {
+            key: Box::new(key.clone()),
+            path: path.to_owned(),
+            head_sha256: probe_sha,
+            checkpoint_sha256,
+        });
+    };
+    if uses_consent && let Some(consent) = conversion_consent {
+        consent.committed();
+    }
     // NO cancellation checks past this point: the settle marker committed
     // with the moment above, so a Cancelled return here would report failure
     // for a settle the lineage already records — and close(settle:false)
@@ -3334,6 +3863,8 @@ pub(super) fn ydoc_settle_on_store(
         content_kind: projected_content_kind,
         source_state_vector_sha256,
         destructive: projection_destructive,
+        markdown_write_safety,
+        witness_source_sha256,
     };
     let content = (projection.content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES)
         .then(|| projection.content.clone());
@@ -3346,6 +3877,232 @@ pub(super) fn ydoc_settle_on_store(
         collection_reconcile_required,
         projection,
     })))
+}
+
+pub(super) fn refresh_markdown_witnesses_on_store(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    let preparations = cache.retirement_preparations();
+    let pending = store.read_with(|conn| write_obligations::pending_in(conn, &key.workspace_id))?;
+    for owed in pending
+        .into_iter()
+        .filter(|owed| owed.key == *key && owed.kind == WriteObligationKind::WitnessRefresh)
+    {
+        let marker = dohc_engine_collab::read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
+        if marker.lineage_claim_id.as_deref().unwrap_or("") != owed.lineage_claim_id
+            || marker.path.as_deref() != Some(owed.path.as_str())
+        {
+            continue;
+        }
+        let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))?;
+        let restore_generation = store.read_with(|conn| {
+            dohc_engine_collab::live_update_application::restore_generation(conn, key)
+        })?;
+        let source = doc.markdown_source_reference().and_then(|reference| {
+            doc.markdown_source(&reference)
+                .map(|_| reference.source_sha256)
+        });
+        if source.as_deref() != owed.source_sha256.as_deref() {
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                dohc_engine_collab::owner_outbox::draft::require_ordinary_write(tx, key)?;
+                dohc_engine_collab::live_update_application::require_restore_generation(
+                    tx,
+                    key,
+                    restore_generation,
+                )?;
+                let current_marker =
+                    dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+                if current_marker.lineage_claim_id != marker.lineage_claim_id
+                    || current_marker.path != marker.path
+                {
+                    return Err(CollabError::MarkdownReaderUnavailable);
+                }
+                let current = dohc_engine_collab::load_doc_in(tx, key)?;
+                let source = current.markdown_source_reference().and_then(|reference| {
+                    current
+                        .markdown_source(&reference)
+                        .map(|_| reference.source_sha256)
+                });
+                if source.as_deref() != owed.source_sha256.as_deref() {
+                    write_obligations::complete_in(tx, &owed, now_ms)?;
+                }
+                Ok::<_, CollabError>(())
+            })? {
+                TxnOutcome::Committed(()) => continue,
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+        let head = VersionedTextStore::new(store).read_text(
+            &key.workspace_id,
+            &key.version_id,
+            &owed.path,
+        )?;
+        let Some(head) = head.filter(|head| {
+            head.object_id == key.object_id
+                && Some(head.blob_sha256.as_str()) == owed.settled_head_sha256.as_deref()
+                && Some(head.blob_sha256.as_str()) != owed.source_sha256.as_deref()
+        }) else {
+            continue;
+        };
+        if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+            != Some(head.blob_sha256.as_str())
+            || store
+                .read_with(|conn| {
+                    dohc_engine_sync::open_sync_conflict_for_object(
+                        conn,
+                        &key.workspace_id,
+                        &key.version_id,
+                        &key.object_id,
+                    )
+                })?
+                .is_some()
+        {
+            continue;
+        }
+        if !store.read_with(|conn| {
+            refresh_head_materialized_in(conn, key, &owed.path, &head.blob_sha256)
+        })? {
+            continue;
+        }
+        let update = doc.clear_markdown_source_witness();
+        let resolver = cache.reader_resolver.clone();
+        let outcome = dohc_engine_collab::record_local_update(
+            store,
+            cache,
+            key,
+            &update,
+            dohc_engine_collab::LocalAppend {
+                marker: None,
+                actor_origin_id: None,
+                attribution: None,
+                lineage_guard: dohc_engine_collab::LineageGuard::Expect(
+                    marker.lineage_claim_id.as_deref(),
+                ),
+                restore_generation,
+                ensure_parent_row: false,
+                require_empty_lineage: false,
+                is_seed: false,
+                seed_source_sha256: None,
+                request_id: None,
+            },
+            &dohc_engine_storage::NoFaults,
+            now_ms,
+            |tx, outcome, _| {
+                let current =
+                    dohc_engine_collab::read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+                let fresh = write_obligations::pending_in(tx, &key.workspace_id)?
+                    .into_iter()
+                    .find(|row| row.order == owed.order);
+                let snapshot: Option<(String, String)> = tx.query_row(
+                    "SELECT object_id,blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                    params![key.workspace_id,key.version_id,owed.path], |row| Ok((row.get(0)?,row.get(1)?)))
+                    .optional().map_err(|error| CollabError::Storage(StorageError::corrupt_public(error)))?;
+                if outcome.seq != marker.head_update_seq + 1 || current.path != marker.path
+                    || current.lineage_claim_id != marker.lineage_claim_id
+                    || snapshot.as_ref() != Some(&(key.object_id.clone(), head.blob_sha256.clone()))
+                    || !refresh_head_materialized_in(tx, key, &owed.path, &head.blob_sha256)?
+                    || tx.query_row("SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 \
+                        AND target_version_id=?2 AND incoming_object_id=?3 AND status='open' AND metadata_origin='sync')",
+                        params![key.workspace_id,key.version_id,key.object_id], |row| row.get::<_,bool>(0))
+                        .map_err(|error| CollabError::Storage(StorageError::corrupt_public(error)))?
+                    || !fresh.is_some_and(|row| row.source_sha256 == owed.source_sha256
+                        && row.settled_head_sha256 == owed.settled_head_sha256) {
+                    return Err(CollabError::MarkdownReaderUnavailable);
+                }
+                journal_local_append_in_tx(
+                    tx,
+                    key,
+                    &owed.path,
+                    marker.content_kind,
+                    &update,
+                    None,
+                    None,
+                    None,
+                    resolver.as_deref(),
+                    &preparations,
+                    &mut None,
+                    outcome,
+                    now_ms,
+                )?;
+                write_obligations::complete_in(tx, &owed, now_ms)
+            },
+        )?;
+        if matches!(outcome, TxnOutcome::Crashed { .. }) {
+            return Err(RuntimeError::OperationCrashed);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "markdown_refresh_tests.rs"]
+mod markdown_refresh_tests;
+
+#[cfg(any(test, feature = "fault-injection"))]
+type MarkdownSettleTestCheck = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError>>;
+#[cfg(any(test, feature = "fault-injection"))]
+type MarkdownBeforeSettle = Box<dyn FnOnce(&mut EngineStore) -> Result<(), RuntimeError>>;
+#[cfg(any(test, feature = "fault-injection"))]
+thread_local! {
+    pub(super) static MARKDOWN_SETTLEMENT_FAULT: std::cell::RefCell<Option<MarkdownSettleTestCheck>> = const { std::cell::RefCell::new(None) };
+    static MARKDOWN_BEFORE_SETTLE: std::cell::RefCell<Option<MarkdownBeforeSettle>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(any(test, feature = "fault-injection"))]
+fn markdown_settlement_test_fault(conn: &rusqlite::Connection) -> Result<(), RuntimeError> {
+    MARKDOWN_SETTLEMENT_FAULT
+        .with(|slot| slot.borrow_mut().take())
+        .map(|fault| fault(conn))
+        .transpose()
+        .map(|_| ())
+}
+
+#[cfg(feature = "fault-injection")]
+impl ActorHandle {
+    #[doc(hidden)]
+    pub async fn markdown_settlement_fault_for_harness(
+        &self,
+        fault: impl FnOnce(&rusqlite::Connection) -> Result<(), RuntimeError> + Send + 'static,
+        after_rollback: impl FnOnce(&mut EngineStore) -> Result<(), RuntimeError> + Send + 'static,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |_, _| {
+            MARKDOWN_SETTLEMENT_FAULT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |conn| {
+                    let result = fault(conn);
+                    if result.is_err() {
+                        MARKDOWN_BEFORE_SETTLE
+                            .with(|slot| *slot.borrow_mut() = Some(Box::new(after_rollback)));
+                    }
+                    result
+                }))
+            });
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+#[path = "markdown_hold_tests.rs"]
+mod markdown_hold_tests;
+
+pub(super) fn refresh_head_materialized_in(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+    path: &str,
+    sha256: &str,
+) -> Result<bool, CollabError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM snapshots s JOIN ydoc_docs d \
+         ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id AND d.object_id=s.object_id \
+         JOIN materialization_jobs j ON j.job_id IN ('ydoc-mat_'||s.latest_moment_id,'sync-mat_'||s.latest_moment_id) \
+         WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 \
+         AND s.blob_sha256=?5 AND d.last_settled_sha=?5 AND j.content_sha256=?5 \
+         AND j.workspace_id=?1 AND j.target_path=?4 AND j.status='complete')",
+        params![key.workspace_id,key.version_id,key.object_id,path,sha256], |row| row.get(0),
+    ).map_err(|error| CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
 fn lineage_originated_here_on_store(
@@ -3444,11 +4201,16 @@ fn ydoc_resync_on_store(
         .flat_map(|replacement| replacement.recovered_paths)
         .collect();
     Ok(YdocResyncState {
+        head_blob_sha256: store.read_with(|conn| conn.query_row(
+            "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0)).optional()
+            .map_err(StorageError::corrupt_public))?,
         initial_update,
         lineage_claim_id,
         lineage_originated_here,
         recovered_paths,
         artifact_assets,
+        record_facts: drained.record_facts,
     })
 }
 
@@ -3546,15 +4308,17 @@ pub(super) fn ydoc_unload_pending(
     Ok((!covered).then_some(UnloadPending::Settlement))
 }
 
+/// Close the session on `key`: its outcome, and whether its deferred work
+/// drains next ([`ydoc_close_drain_on_store`]).
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     key: &DocKey,
-    materialization: Option<&YdocCloseMaterialization>,
+    root_dir: Option<&std::path::Path>,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<YdocCloseSessionOutcome, RuntimeError> {
+) -> Result<(Option<CloseOutcome>, bool), RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -3569,19 +4333,11 @@ fn ydoc_close_session_on_store(
         dohc_engine_collab::live_update_application::restore_generation(conn, key)
     }) {
         Ok(generation) => generation,
-        Err(dohc_engine_collab::CollabError::RestoreFenced) => {
-            return Ok(YdocCloseSessionOutcome {
-                outcome: None,
-                record_facts: Vec::new(),
-            });
-        }
+        Err(dohc_engine_collab::CollabError::RestoreFenced) => return Ok((None, false)),
         Err(error) => return Err(error.into()),
     };
     let Some(mut marker) = dohc_engine_collab::read_marker(store, key)? else {
-        return Ok(YdocCloseSessionOutcome {
-            outcome: None,
-            record_facts: Vec::new(),
-        });
+        return Ok((None, false));
     };
     // Richdoc settles like plaintext now, so the local-only close follows the
     // same workspace-file artifact rule (close_session refuses a dirty local
@@ -3594,7 +4350,7 @@ fn ydoc_close_session_on_store(
             store,
             key,
             &marker,
-            materialization.map(|materialization| materialization.root_dir.as_path()),
+            root_dir,
             doc_cache.reader_resolver.as_deref(),
         )?
     } else {
@@ -3641,32 +4397,62 @@ fn ydoc_close_session_on_store(
         TxnOutcome::Committed(outcome) => outcome,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
-    let mut record_facts = Vec::new();
-    if marker.regime == Regime::Replicated && restore_generation.is_none() {
-        // The drain projects internally now (idempotent-by-sha, dependency-
-        // gated): drained remote content reaches the visible head with no
-        // session left to settle it. The drain holds its queue-row cleanup
-        // until materialization succeeded: a failed materialization would
-        // otherwise error out of this close after the rows — and the record
-        // facts persisted on them — were already deleted, and no retry could
-        // ever emit the events. With the rows kept, the retried
-        // close re-drains content-deduped and reads the facts back.
-        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
-            store, doc_cache, key, faults,
-        )?;
-        for declined in &drained.sharing_declined {
-            eprintln!("engine: {declined}");
-        }
-        if let Some(materialization) = materialization {
-            materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
-        }
-        let _ = dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
-        record_facts = drained.record_facts;
+    Ok((
+        Some(outcome),
+        marker.regime == Regime::Replicated && restore_generation.is_none(),
+    ))
+}
+
+/// Drain what a closed session on `key` deferred, and answer the record
+/// facts it committed. The drain projects internally (idempotent-by-sha,
+/// dependency-gated): drained remote content reaches the visible head with
+/// no session left to settle it. It holds its queue-row cleanup until
+/// materialization succeeded: a failed materialization would otherwise
+/// error out of this close after the rows — and the record facts persisted
+/// on them — were already deleted, and no retry could ever emit the events.
+/// With the rows kept, the retried close re-drains content-deduped and reads
+/// the facts back. A drain that waits for validation keeps its rows the
+/// same way. A restore that fenced the document since drains nothing.
+fn ydoc_close_drain_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    key: &DocKey,
+    materialization: Option<&YdocCloseMaterialization>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Vec<dohc_engine_domain::CollectionRecordApplyFacts>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
     }
-    Ok(YdocCloseSessionOutcome {
-        outcome: Some(outcome),
-        record_facts,
-    })
+    match store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::restore_generation(conn, key)
+    }) {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(dohc_engine_collab::CollabError::RestoreFenced) => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    if !dohc_engine_collab::read_marker(store, key)?
+        .is_some_and(|marker| marker.regime == Regime::Replicated)
+    {
+        return Ok(Vec::new());
+    }
+    let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+        store, doc_cache, key, faults,
+    )?;
+    if let Some(pending) = drained.waiting {
+        return Err(RuntimeError::DrainWaiting(pending));
+    }
+    for declined in &drained.sharing_declined {
+        eprintln!("engine: {declined}");
+    }
+    if let Some(materialization) = materialization {
+        materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
+    }
+    let _ = dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
+    Ok(drained.record_facts)
 }
 
 fn materialize_ydoc_drain(
@@ -3767,6 +4553,11 @@ fn drain_deferred_ydoc_for_live_session_rpc(
         expected_lineage_claim_id,
         faults,
     )?;
+    // Its rows stay queued; once validation completes, the operation runs
+    // its checks again and this drain reports them.
+    if let Some(pending) = drained.waiting {
+        return Err(RuntimeError::DrainWaiting(pending));
+    }
     for declined in &drained.sharing_declined {
         eprintln!("engine: {declined}");
     }
@@ -4528,6 +5319,7 @@ fn journal_local_append_in_tx(
     attribution: Option<&ChangeAttribution>,
     seed_source: Option<&dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    preparations: &dohc_engine_collab::live_update_application::RetirementPreparations,
     sharing_declined: &mut Option<SharingDeclined>,
     outcome: &mut AppendOutcome,
     now_ms: i64,
@@ -4539,6 +5331,7 @@ fn journal_local_append_in_tx(
         path,
         outcome.seq,
         update,
+        preparations,
         now_ms,
     )?;
     if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)? {
@@ -4645,6 +5438,7 @@ pub(super) fn journal_recovery_append_in_tx(
     update: &[u8],
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
+    preparations: &dohc_engine_collab::live_update_application::RetirementPreparations,
     outcome: &mut AppendOutcome,
     now_ms: i64,
 ) -> Result<bool, CollabError> {
@@ -4661,6 +5455,7 @@ pub(super) fn journal_recovery_append_in_tx(
         attribution,
         None,
         None,
+        preparations,
         &mut None,
         outcome,
         now_ms,

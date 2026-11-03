@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+// The app's font, so toasts wrap as they do in the app.
+import "@fontsource-variable/inter";
 import type { EngineMomentRecord } from "../../../src/ipc/bridgeContract";
 import { OwnerRestoreDialog } from "../../../src/renderer/OwnerRestoreDialog";
 import { EngineHistoryView } from "../../../src/renderer/workbench/EngineHistory";
@@ -149,6 +151,9 @@ function SharedRestoreFixture() {
           onClose={() => setOpen(false)}
           onBeforeRestore={async () => ignore}
           onRestored={() => setRestored(true)}
+          onError={ignore}
+          onSettled={ignore}
+          onChanged={ignore}
         />
       ) : null}
     </main>

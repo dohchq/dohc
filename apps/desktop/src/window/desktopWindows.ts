@@ -94,7 +94,8 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   // creation instead of guessed from getAllWindows().
   const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
     (window) => window.isDestroyed(),
-    (window) => window.webContents.isCrashed(),
+    // A closing window's webContents is destroyed before the window is.
+    (window) => window.webContents.isDestroyed() || window.webContents.isCrashed(),
   );
   // The last zoom level any path applied (mutation, settings save, or the
   // persisted read). The bootstrap seeds it from the cached settings read

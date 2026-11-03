@@ -361,7 +361,9 @@ async fn absent_path_live_session_blocks_local_resolve_through_rpc() {
                     "status": "open",
                     "chosenFrom": "current",
                     "resolution": null,
-                    "metadata": { "origin": "sync" },
+                    // The engine refuses incoming text over an absent current side in
+                    // a sync conflict, so this test uses a non-sync conflict.
+                    "metadata": { "origin": "api" },
                     "base": absent,
                     "current": absent,
                     "incoming": incoming

@@ -41,6 +41,7 @@ pub use history_operations::{HistoryOperation, HistoryUndoResult};
 pub use link_documents::{DocumentIsOpen, DocumentResync};
 mod journal;
 mod live_application;
+mod markdown_recovery;
 mod materialization;
 mod relay;
 #[cfg(unix)]
@@ -62,7 +63,11 @@ pub use capture::{
 };
 pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
-pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
+pub use live_application::{
+    ActorLiveApplicationHandle, ActorLiveApplicationOwner, OwnedRetirementScope,
+};
+pub use markdown_recovery::MarkdownRecoveryCandidate;
+use markdown_recovery::MarkdownRecoverySignal;
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
@@ -73,8 +78,8 @@ pub use versioned::{
 };
 pub use versions::{ActiveVersionSwitch, HistoryPageRead};
 pub use ydoc::{
-    ArtifactAssetDescriptor, YdocAppend, YdocCloseSessionOutcome, YdocOpenState, YdocResyncState,
-    YdocSeedMaterialization, YdocSettleOutcome, YdocSettlement,
+    ArtifactAssetDescriptor, YdocAppend, YdocCloseMaterialization, YdocCloseSessionOutcome,
+    YdocOpenState, YdocResyncState, YdocSeedMaterialization, YdocSettleOutcome, YdocSettlement,
 };
 
 use crate::error::RuntimeError;
@@ -82,7 +87,9 @@ use crate::identity::EngineDbIdentity;
 pub use crate::links::LinkDrainMetrics;
 use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
+use dohc_engine_collab::live_update_application::{HeldProofLimit, ReleasedTails};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
+use dohc_engine_sync::HeldProofs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -192,6 +199,7 @@ enum Command {
 /// Owns the worker thread and the command sender. Held by the supervisor;
 /// callers use [`ActorHandle`]s. Dropping it joins the worker.
 pub struct WorkspaceActor {
+    markdown_recovery: Arc<MarkdownRecoverySignal>,
     reader_configured: Arc<AtomicBool>,
     identity: EngineDbIdentity,
     store: Arc<StoreLocation>,
@@ -218,6 +226,11 @@ pub struct WorkspaceActor {
     link_drain_holds: Arc<AtomicU64>,
     link_rewrites: Arc<link_rewrites::RewriteState>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    /// The store's released tails, whose worker validates off the actor.
+    released_tails: ReleasedTails,
+    /// The store's held-document proofs, which run off the actor.
+    held_proofs: HeldProofs,
+    pulls: relay::PullPermit,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
@@ -305,13 +318,15 @@ impl WorkspaceActor {
     ///
     /// `work`, when given, counts the store open's SQLite work and then each
     /// command the actor serves, so a caller can tell a long open from a
-    /// stuck one.
+    /// stuck one. `held_limit` is the daemon's, which the actor's held
+    /// proofs share with every other actor's.
     pub(crate) fn spawn(
         db_path: PathBuf,
         identity: EngineDbIdentity,
         generation: u64,
         now_ms: i64,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -321,6 +336,7 @@ impl WorkspaceActor {
             ActorOpenMode::ReadWrite,
             None,
             work,
+            held_limit,
         )
     }
 
@@ -331,6 +347,7 @@ impl WorkspaceActor {
         now_ms: i64,
         root_token: String,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -340,6 +357,7 @@ impl WorkspaceActor {
             ActorOpenMode::ReadWrite,
             Some(root_token),
             work,
+            held_limit,
         )
     }
 
@@ -350,6 +368,7 @@ impl WorkspaceActor {
         identity: EngineDbIdentity,
         generation: u64,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -359,6 +378,7 @@ impl WorkspaceActor {
             ActorOpenMode::ReadOnly,
             None,
             work,
+            held_limit,
         )
     }
 
@@ -369,6 +389,7 @@ impl WorkspaceActor {
         now_ms: i64,
         root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -378,9 +399,11 @@ impl WorkspaceActor {
             ActorOpenMode::Passive,
             root_token,
             work,
+            held_limit,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_with_mode(
         db_path: PathBuf,
         identity: EngineDbIdentity,
@@ -389,6 +412,7 @@ impl WorkspaceActor {
         mode: ActorOpenMode,
         root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         let writer_lock = if matches!(mode, ActorOpenMode::ReadOnly) {
             let file = std::fs::File::open(&db_path).map_err(|error| RuntimeError::Identity {
@@ -418,6 +442,10 @@ impl WorkspaceActor {
         let worker_link_drain_holds = Arc::clone(&link_drain_holds);
         let store = StoreLocation::new(db_path.clone());
         let worker_state = Arc::clone(&state);
+        let released_tails = ReleasedTails::default();
+        let worker_tails = released_tails.clone();
+        let markdown_recovery = Arc::new(MarkdownRecoverySignal::default());
+        let worker_markdown_recovery = markdown_recovery.clone();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
@@ -433,6 +461,8 @@ impl WorkspaceActor {
                     startup_tx,
                     writer_lock,
                     work,
+                    worker_tails,
+                    worker_markdown_recovery,
                 )
             })
             .map_err(RuntimeError::ThreadSpawn)?;
@@ -441,6 +471,7 @@ impl WorkspaceActor {
             Ok(Ok(store_freshly_created)) => {
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
+                    markdown_recovery,
                     reader_configured: Arc::default(),
                     identity,
                     store,
@@ -460,6 +491,9 @@ impl WorkspaceActor {
                     link_drain_holds,
                     link_rewrites: Arc::default(),
                     current_views: Arc::default(),
+                    released_tails,
+                    held_proofs: HeldProofs::new(held_limit),
+                    pulls: relay::PullPermit::default(),
                     link_resolvers: Arc::default(),
                 };
                 #[cfg(unix)]
@@ -485,6 +519,7 @@ impl WorkspaceActor {
     /// A clonable handle for issuing commands.
     pub fn handle(&self) -> ActorHandle {
         ActorHandle {
+            markdown_recovery: self.markdown_recovery.clone(),
             reader_configured: Arc::clone(&self.reader_configured),
             identity: self.identity.clone(),
             store: Arc::clone(&self.store),
@@ -497,6 +532,9 @@ impl WorkspaceActor {
             link_drain_holds: Arc::clone(&self.link_drain_holds),
             link_rewrites: Arc::clone(&self.link_rewrites),
             current_views: Arc::clone(&self.current_views),
+            released_tails: self.released_tails.clone(),
+            held_proofs: self.held_proofs.clone(),
+            pulls: self.pulls.clone(),
             link_resolvers: Arc::clone(&self.link_resolvers),
         }
     }
@@ -520,6 +558,11 @@ impl WorkspaceActor {
         self.store_freshly_created
     }
 
+    /// The store's held-document proofs, whose readers its close waits for.
+    pub(crate) fn held_proofs(&self) -> HeldProofs {
+        self.held_proofs.clone()
+    }
+
     /// The current lifecycle state.
     pub fn lifecycle(&self) -> LifecycleState {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
@@ -540,9 +583,20 @@ impl WorkspaceActor {
     /// executor thread; a future `close_async` could yield instead (noted for a
     /// later shard). A worker wedged inside a fault gate must be released by the
     /// caller before close (same contract as the storage writer).
+    ///
+    /// A held proof's reader still open, or opening, past the close bound,
+    /// ten seconds from when held proofs start closing, fails close with
+    /// [`RuntimeError::StoreInUse`] once the writer is gone, and so does
+    /// every later close until that reader closes: a caller that replaces or
+    /// deletes the store's files must not touch them first. The supervisor
+    /// keeps the store's entry draining meanwhile.
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         let Some(worker) = self.worker.take() else {
-            return Ok(());
+            return if self.held_proofs.drained() {
+                Ok(())
+            } else {
+                Err(RuntimeError::StoreInUse)
+            };
         };
         #[cfg(unix)]
         if let Some(retention) = &mut self.retention {
@@ -550,6 +604,14 @@ impl WorkspaceActor {
             // Finish an in-flight changed read while the writer can still commit it.
             retention.join();
         }
+        // Validation stops here, off the actor, and its connection closes
+        // before the store's files can be replaced. A request waiting on it
+        // fails as unavailable.
+        self.released_tails.close();
+        // So do held proofs, and no reader starts opening once this begins.
+        // One left running past the bound closes its reader at its next
+        // check; the writer still closes, and close then fails.
+        let drained = self.held_proofs.close();
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {
@@ -563,7 +625,14 @@ impl WorkspaceActor {
             }
         }
         self.link_resolvers.lock().unwrap().close();
-        match worker.join() {
+        let joined = worker.join();
+        if !drained {
+            eprintln!(
+                "engine: a held document read still has its workspace database open after close"
+            );
+            return Err(RuntimeError::StoreInUse);
+        }
+        match joined {
             Ok(()) => Ok(()),
             Err(_) => Err(RuntimeError::WorkerPanicked),
         }
@@ -582,6 +651,7 @@ impl Drop for WorkspaceActor {
 /// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
+    markdown_recovery: Arc<MarkdownRecoverySignal>,
     reader_configured: Arc<AtomicBool>,
     #[cfg(unix)]
     retained_root: retained::Root,
@@ -594,6 +664,9 @@ pub struct ActorHandle {
     link_drain_holds: Arc<AtomicU64>,
     link_rewrites: Arc<link_rewrites::RewriteState>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
+    released_tails: ReleasedTails,
+    held_proofs: HeldProofs,
+    pulls: relay::PullPermit,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
 }
 
@@ -613,11 +686,10 @@ impl Drop for LinkDrainHold {
     }
 }
 
-fn wait_for_reader<R>(
+fn pending_reader_preparation<R>(
     result: &Result<R, RuntimeError>,
-    attempt: usize,
-) -> impl std::future::Future<Output = bool> + Send + 'static {
-    let pending = match result {
+) -> Option<dohc_engine_collab::markdown_write_safety::PendingPreparation> {
+    match result {
         Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownReaderPending(pending)))
         | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::MarkdownReaderPending(
             pending,
@@ -626,18 +698,51 @@ fn wait_for_reader<R>(
             dohc_engine_collab::live_update_application::ApplicationError::Collab(
                 dohc_engine_collab::CollabError::MarkdownReaderPending(pending),
             ),
-        )) => Some(pending.clone()),
+        )) => Some(
+            dohc_engine_collab::markdown_write_safety::PendingPreparation::Reader(pending.clone()),
+        ),
+        Err(RuntimeError::Sync(dohc_engine_sync::SyncError::MarkdownWitnessCheckPending {
+            key,
+            path,
+            pending,
+        }))
+        | Err(RuntimeError::Collab(
+            dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { key, path, pending },
+        ))
+        | Err(RuntimeError::LiveApplication(
+            dohc_engine_collab::live_update_application::ApplicationError::Collab(
+                dohc_engine_collab::CollabError::MarkdownWitnessCheckPending { key, path, pending },
+            ),
+        )) => Some(
+            dohc_engine_collab::markdown_write_safety::PendingPreparation::Witness {
+                key: key.clone(),
+                path: path.clone(),
+                pending: pending.clone(),
+            },
+        ),
         _ => None,
-    };
+    }
+}
+
+fn wait_for_reader<R>(
+    result: &Result<R, RuntimeError>,
+    attempt: usize,
+    recovery: Arc<MarkdownRecoverySignal>,
+) -> impl std::future::Future<Output = bool> + Send + 'static {
+    let pending = pending_reader_preparation(result);
     async move {
         let Some(pending) = pending else {
             return false;
         };
+        recovery.wake.notify_one();
         if attempt < 2 {
             pending.resolve().await;
             true
         } else {
-            tokio::spawn(async move { pending.resolve().await });
+            tokio::spawn(async move {
+                pending.resolve().await;
+                recovery.request();
+            });
             false
         }
     }
@@ -654,7 +759,9 @@ impl ActorHandle {
             configured.store(true, Ordering::Release);
             Ok(())
         })
-        .await
+        .await?;
+        self.request_markdown_recovery();
+        Ok(())
     }
 
     async fn run_with_reader_retry<R: Send + 'static>(
@@ -668,7 +775,10 @@ impl ActorHandle {
         for attempt in 0..=2 {
             let work = work.clone();
             let result = self.run(move |store, cache| work(store, cache)).await;
-            if !wait_for_reader(&result, attempt).await {
+            if !wait_for_reader(&result, attempt, self.markdown_recovery.clone()).await {
+                if result.is_ok() {
+                    self.markdown_recovery.wake.notify_one();
+                }
                 return result;
             }
         }
@@ -693,6 +803,87 @@ impl ActorHandle {
     pub async fn commit_count_for_harness(&self) -> Result<u64, RuntimeError> {
         self.run(|store, _| Ok(store.commit_count_for_harness()))
             .await
+    }
+
+    /// Run `hook` on the actor's own connection, for measurements that
+    /// attribute its statements.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn on_connection(&self, hook: fn(&rusqlite::Connection)) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                hook(conn);
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Run `sql` in a write of the actor's own, admitted as every write is,
+    /// for tests that grow the store's WAL.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn write_for_test(&self, sql: &'static str) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute_batch(sql).map_err(StorageError::persist_public)
+            })?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The released tails the actor decides synced rows on, for tests that
+    /// hold or count its validations.
+    #[doc(hidden)]
+    pub fn released_tails(&self) -> ReleasedTails {
+        self.released_tails.clone()
+    }
+
+    /// The held-document proofs the actor admits, for tests that hold them.
+    #[doc(hidden)]
+    pub fn held_proofs(&self) -> HeldProofs {
+        self.held_proofs.clone()
+    }
+
+    /// Completes once a pull has found another holding the store's pull
+    /// permit and waits for it.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn pull_waiting(&self) {
+        self.pulls.waited.notified().await;
+    }
+
+    /// How many checkpoint requests the store's background worker has
+    /// finished, for tests that wait for the next.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn checkpoints_completed_for_test(&self) -> Result<u64, RuntimeError> {
+        self.run(|store, _| Ok(store.checkpoint_completed_for_test()))
+            .await
+    }
+
+    /// Completes once the store's background worker finished a checkpoint
+    /// request after the `before`th, which it must within a minute.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn wait_for_checkpoint_completion_for_test(
+        &self,
+        before: u64,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            store.wait_for_checkpoint_completion_for_test(before);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Completes once the actor's worker has exited, however it ended: its
+    /// lifecycle is closed and its commands go nowhere.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn worker_exited(&self) {
+        self.tx.closed().await;
     }
 
     /// Engine diagnostics for the derived index; no store read or drain.
@@ -751,7 +942,7 @@ impl ActorHandle {
         workspace: String,
         after: i64,
         epoch_log_floor: i64,
-        rows: Vec<dohc_engine_collab::live_update_application::passive::ReplicaJournalRow>,
+        rows: Vec<dohc_engine_collab::live_update_application::passive::ReplicaJournalEntry>,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<dohc_engine_collab::live_update_application::passive::ReplicaPageResult, RuntimeError>
     {
@@ -951,6 +1142,8 @@ fn worker_main(
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
+    released_tails: ReleasedTails,
+    markdown_recovery: Arc<MarkdownRecoverySignal>,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -1015,12 +1208,15 @@ fn worker_main(
         return;
     }
     drop(startup_tx);
+    // Reports each live document whose history needs attention, one bounded
+    // batch per idle slot.
+    let mut history = Some(dohc_engine_sync::HistoryReport::default());
 
     // The writer thread's cache of live Y.Docs (PR1 of the doc-cache design):
     // serves the replay-parity gate base on the LOCAL append path only. It
     // lives and dies with this thread — exactly the single-writer scope its
     // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
-    let mut doc_cache = WriterDocCache::new();
+    let mut doc_cache = WriterDocCache::with_released_tails(released_tails);
     let mut live_applications = live_application::Registry::default();
 
     // Blocking recv on the tokio channel keeps the SQLite work on this
@@ -1058,6 +1254,23 @@ fn worker_main(
                             links = Some(worker);
                         }
                         Err(_) => eprintln!("links parser could not start; pending work retained"),
+                    }
+                }
+                if let Some(after) = history {
+                    history = match dohc_engine_sync::history_report(&store, after) {
+                        Ok((lines, next)) => {
+                            for line in lines {
+                                eprintln!("{line}");
+                            }
+                            next
+                        }
+                        Err(error) => {
+                            eprintln!("engine: history report stopped: {error}");
+                            None
+                        }
+                    };
+                    if history.is_some() {
+                        continue;
                     }
                 }
                 #[cfg(test)]
@@ -1144,6 +1357,9 @@ fn worker_main(
                 }
             }
         }
+        let changes_before = store
+            .read_with(|conn| Ok::<_, StorageError>(conn.total_changes()))
+            .unwrap_or(0);
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::WakeLinks => {}
@@ -1160,6 +1376,12 @@ fn worker_main(
                 state.store(LifecycleState::Draining.as_u8(), Ordering::Release);
                 break;
             }
+        }
+        let changes_after = store
+            .read_with(|conn| Ok::<_, StorageError>(conn.total_changes()))
+            .unwrap_or(0);
+        if changes_after != changes_before {
+            markdown_recovery.wake.notify_one();
         }
         store.request_checkpoint();
         if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
@@ -1404,6 +1626,7 @@ mod saturation_tests {
         let metrics = SharedMetrics::default();
         let holds = Arc::new(AtomicU64::new(0));
         let mut actor = WorkspaceActor {
+            markdown_recovery: Arc::default(),
             reader_configured: Arc::default(),
             identity,
             store: StoreLocation::new(db.to_path_buf()),
@@ -1422,6 +1645,9 @@ mod saturation_tests {
             link_metrics: metrics,
             link_drain_holds: holds,
             current_views: Arc::default(),
+            released_tails: ReleasedTails::default(),
+            held_proofs: HeldProofs::new(HeldProofLimit::default()),
+            pulls: relay::PullPermit::default(),
             link_resolvers: Arc::default(),
             link_rewrites: Arc::default(),
         };
@@ -1431,6 +1657,7 @@ mod saturation_tests {
         let state = Arc::clone(&actor.state);
         let metrics = Arc::clone(&actor.link_metrics);
         let holds = Arc::clone(&actor.link_drain_holds);
+        let markdown_recovery = actor.markdown_recovery.clone();
         actor.worker = Some(std::thread::spawn(move || {
             worker_main(
                 db,
@@ -1444,6 +1671,8 @@ mod saturation_tests {
                 startup_tx,
                 Some(writer_lock),
                 None,
+                ReleasedTails::default(),
+                markdown_recovery,
             );
         }));
         actor.store_freshly_created = startup_rx
@@ -1887,7 +2116,7 @@ mod saturation_tests {
         std::fs::hard_link(&db, &alias).expect("hard link");
         let identity = EngineDbIdentity::of_existing(&alias).expect("identity");
         assert!(matches!(
-            WorkspaceActor::spawn_read_only(alias, identity, 1, None),
+            WorkspaceActor::spawn_read_only(alias, identity, 1, None, HeldProofLimit::default()),
             Err(RuntimeError::WorkspaceHardlinked)
         ));
     }
@@ -1897,7 +2126,8 @@ mod saturation_tests {
         let scratch = ScratchDir::new().expect("scratch");
         let db = engine_db_path(&scratch).expect("database path");
         let identity = EngineDbIdentity::resolve_or_create(&db).expect("identity");
-        let mut actor = WorkspaceActor::spawn(db, identity, 1, 1, None).expect("spawn");
+        let mut actor = WorkspaceActor::spawn(db, identity, 1, 1, None, HeldProofLimit::default())
+            .expect("spawn");
         assert!(actor.close_permit.is_some());
         let handle = actor.handle();
         let (entered, entered_rx) = oneshot::channel();

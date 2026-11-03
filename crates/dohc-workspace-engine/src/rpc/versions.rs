@@ -190,6 +190,7 @@ fn version_fence_session_view(
         .filter(|session| session.workspace == *handle)
         .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
     Ok(YdocSessionView {
+        conversion_consent: session.conversion_consent.clone(),
         owner_draft: session.owner_draft.clone(),
         key: session.key.clone(),
         path: session.path.clone(),
@@ -197,6 +198,7 @@ fn version_fence_session_view(
         regime: session.regime,
         lineage_claim_id: session.lineage_claim_id.clone(),
         restore_generation: session.restore_generation,
+        activation_id: session.activation_id.clone(),
         lineage_absent: session.lineage_absent,
         first_update_pending: session.first_update_pending,
         last_settled_sha: session.last_settled_sha.clone(),
@@ -229,6 +231,7 @@ async fn settle_ydoc_session_for_version_fence(
             Arc::new(NoFaults),
             token.clone(),
             session.restore_generation,
+            session.conversion_consent.clone(),
         )
         .await
         .map_err(map_runtime)?;
@@ -894,7 +897,16 @@ impl VersionFence {
         // `version-switch-${id}` / `version-create-${id}`): its moments carry
         // the fence's own summary and one correlation id so the pre-switch
         // "nothing is ever lost" capture groups in history instead of
-        // rendering as unrelated per-file rows.
+        // rendering as unrelated per-file rows. A file an unfinished first
+        // import has not recorded yet joins that import instead. The capture
+        // gate is held, so the live driver cannot finish it meanwhile.
+        let first_import = open
+            .actor
+            .unfinished_first_import(open.workspace_id.clone())
+            .await
+            .inspect_err(|error| eprintln!("engine: first import read failed: {error}"))
+            .ok()
+            .flatten();
         let reconcile_provenance = capture_sink::CaptureProvenance {
             summary: Some(settle_summary.clone()),
             correlation_id: Some(capture_driver::pass_correlation_id(match &intent {
@@ -902,6 +914,7 @@ impl VersionFence {
                 VersionFenceIntent::Switch { .. } => "version-switch",
                 VersionFenceIntent::Undo { .. } => "history-undo",
             })),
+            first_import,
         };
         let probe = self.capture_apply_probe.clone();
         let undo = matches!(&intent, VersionFenceIntent::Undo { .. });

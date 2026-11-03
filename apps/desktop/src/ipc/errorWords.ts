@@ -1,5 +1,6 @@
 import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
+import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
@@ -206,6 +207,9 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "newer-version": NEWER_DOHC,
     "*": null,
   },
+  // A file from another person that dohc could not prepare to open in
+  // another app. Its message is the system's own, for Copy details only.
+  MarkedCopyError: { "*": null },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
@@ -310,6 +314,9 @@ function parse(error: unknown) {
 }
 
 export interface ReadError {
+  canRetry?: false;
+  refusal?: "synced-deletion";
+  details?: string;
   title?: string;
   /** What a person reads, or null when only the caller's sentence applies. */
   words: string | null;
@@ -324,6 +331,11 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "SyncedDeletionRevivalError" || name === "SyncedDeletionStaleError" || (name === "DaemonRefusalError" && message === "synced-deletion-revival-refused")) {
+    const path = error instanceof SyncedDeletionRevivalError ? error.path : "this file";
+    return { ...SYNCED_DELETION_REVIVAL_WORDS(path, name === "SyncedDeletionStaleError", error instanceof SyncedDeletionRevivalError && error.restore), mapped: false, cause: text, canRetry: false,
+      ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}) };
+  }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
     return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };
   }
@@ -333,6 +345,10 @@ export function readError(error: unknown): ReadError {
   }
   const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
   if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
+  if (name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError") {
+    const [title = "", ...body] = message.split("\n");
+    return { title, words: body.join("\n"), mapped: false, cause: null };
+  }
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
@@ -359,12 +375,25 @@ export function readError(error: unknown): ReadError {
   return { words: message, mapped: false, cause: plain ? null : text };
 }
 
+export function isConflictStaleTarget(error: unknown): boolean {
+  const { name, message } = parse(error);
+  return (name === "DaemonRefusalError" || name === "VersionedTextStoreError") && message === "conflict-stale-target";
+}
+
 /** A caller's sentence, then the error's words when they add to it. */
 export function withErrorWords(sentence: string, error: unknown): string {
   const { words } = readError(error);
   return words && words !== sentence && !words.startsWith(`${sentence} `)
     ? `${sentence} ${words}`
     : words || sentence;
+}
+
+/** The class of a save refused because an agent it adds is in the settings file by then. */
+export const AGENT_ID_TAKEN_ERROR = "AgentIdTakenError";
+
+/** Whether a settings save was refused because an agent it adds is in the file by then. */
+export function isAgentIdTaken(error: unknown): boolean {
+  return parse(error).name === AGENT_ID_TAKEN_ERROR;
 }
 
 /** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
@@ -429,6 +458,46 @@ export type CollectionsRefusalRead =
   | { kind: Exclude<CollectionsRefusalKind, "elsewhere">; words: string }
   | { kind: "elsewhere"; words: string; computer: string | null };
 
+/** A moved Collection whose server dohc can't reach, with no saved copy on this computer. */
+export class CollectionServerUnreachableError extends Error {
+  override name = "CollectionServerUnreachableError";
+}
+
+/**
+ * A Collection's move to a server that stopped after this computer stopped
+ * changing it. `waited`: the request only waited for a move another request
+ * started, which reports the stop itself.
+ */
+export class CollectionMoveUnfinishedError extends Error {
+  override name = "CollectionMoveUnfinishedError";
+  readonly code: "waited" | undefined;
+  constructor(host: string, options: { cause: unknown; waited?: boolean }) {
+    super(`This Collection didn't finish moving to ${host}. Its records are kept on this computer.`, { cause: options.cause });
+    this.code = options.waited ? "waited" : undefined;
+  }
+}
+
+/** A request that failed only because it waited for another request's Collection move, which stopped. */
+export function waitedForCollectionMove(error: unknown): boolean {
+  const { name, code } = parse(error);
+  return name === "CollectionMoveUnfinishedError" && code === "waited";
+}
+
+/**
+ * A stopped Collection move's error with the Collection's name in place of "This Collection", for a row among others in Notices.
+ * The name goes in quotes, so a name such as "CRM: Accounts" never reads as a code that hides the words.
+ */
+export function namingCollectionMove(error: unknown, collection: string): unknown {
+  const { name, text } = parse(error);
+  return name === "CollectionMoveUnfinishedError" ? text.replace(": This Collection ", () => `: "${collection.replace(/\s+/g, " ")}" `) : error;
+}
+
+/** The words a Collection's page shows in place of its records when its server is out of reach and it has no saved copy. */
+export function readCollectionServerUnreachable(error: unknown): string | null {
+  const { name, message } = parse(error);
+  return name === "CollectionServerUnreachableError" && message ? message : null;
+}
+
 export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead | null {
   const { name, code, computer, message } = parse(error);
   if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
@@ -469,6 +538,13 @@ export function isPathTaken(error: unknown): boolean {
   return parse(error).code === "EEXIST";
 }
 
+/** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */
+export function versionNameRefusal(error: unknown): "taken" | "invalid" | null {
+  const { name, code } = parse(error);
+  if (name !== "VersionedTextStoreError") return null;
+  return code === "version-name-conflict" ? "taken" : code === "invalid-version-name" ? "invalid" : null;
+}
+
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);
@@ -478,6 +554,17 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 /** History's current rules refused a restore. Its words say why and what to do next. */
 export function isRestorePolicyRefusal(error: unknown): boolean {
   return parse(error).name === "RestorePolicyRefusalError";
+}
+
+/** A folder move refused while a page in it has live editing on. Try again reruns the move. */
+export function isLiveFolderMoveRefusal(error: unknown): boolean {
+  return parse(error).name === "LiveFolderMoveError";
+}
+
+/** Any refused folder move, live or with History off. Both carry a title and a body. */
+export function isFolderMoveRefusal(error: unknown): boolean {
+  const { name } = parse(error);
+  return name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError";
 }
 
 /** The engine refuses to move, delete or restore a shared live file this way. */

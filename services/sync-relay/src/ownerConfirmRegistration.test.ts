@@ -10,7 +10,7 @@ const binding: LiveObjectBinding = {...document, currentPath: "document.md", sel
 const lookup = {workspaceId: document.workspaceId, ownerUserId: "owner", operationId: "operation"};
 
 function fixture(kind: "bootstrap" | "owner") {
-  const result = {kind: "resumed" as const, proposalDigest: digest, receipt: {operationId: lookup.operationId}};
+  const result = {kind: "resumed" as const, proposalDigest: digest, receipt: {operationId: lookup.operationId}, moved: false};
   const confirm = vi.fn(async (_options: unknown, expected: string) => {
     if (expected !== digest) throw new Error("Restore continuation does not match the retained proposal.");
     return result;

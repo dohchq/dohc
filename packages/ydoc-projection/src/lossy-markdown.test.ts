@@ -3,7 +3,7 @@ import { expect, it } from 'vitest'
 import * as Y from 'yjs'
 import commonmark from './fixtures/commonmark-edit-meaning.json'
 import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
-import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, sessionVerdict, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
+import { isLossyDocument, isLossyDocumentState, isLossyMarkdown, isLossyMarkdownCached, lossyNoteRefusal, sameMarkdownMeaning, unreadNoteRefusal, witnessKeepsMeaning } from './lossy-markdown.js'
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
 // Markdown the engine wrote for it after an edit, on main at `writtenAt`.
@@ -83,29 +83,32 @@ function seeded(source: string): Y.Doc {
 }
 
 it('judges a live note by the file its witness records', () => {
-  expect(isLossyDocument(seeded('See [the docs][docs].\n\n[docs]: https://example.com/docs\n'))).toBe(true)
-  expect(isLossyDocument(seeded('Title\n=====\n\n* one\n'))).toBe(false)
-  expect(isLossyDocument(seeded('# Plan\n\nText.'))).toBe(false)
+  expect(isLossyDocument(seeded('See [the docs][docs].\n\n[docs]: https://example.com/docs\n'), null)).toBe(true)
+  expect(isLossyDocument(seeded('Title\n=====\n\n* one\n'), null)).toBe(false)
+  expect(isLossyDocument(seeded('# Plan\n\nText.'), null)).toBe(false)
 })
 
-it('does not judge a live note an edit already changed', () => {
+it('still needs consent after an edit while the head holds the unsafe source', () => {
   const doc = seeded('<details>\n\nHidden.\n</details>\n')
-  expect(isLossyDocument(doc)).toBe(true)
+  const source = doc.getMap('meta').get('dohcMarkdownSourceSha256') as string
+  expect(isLossyDocument(doc, source)).toBe(true)
   doc.getMap('frontmatter').set('status', 'done')
-  expect(isLossyDocument(doc)).toBe(false)
+  expect(isLossyDocument(doc, source)).toBe(true)
+  expect(isLossyDocument(doc, null)).toBe(true)
+  expect(isLossyDocument(doc, 'converted-head')).toBe(false)
 })
 
 it('judges a session state as its live note', () => {
   const lossy = seeded('<details>\n\nHidden.\n</details>\n')
   const plain = seeded('# Plan\n\nText.')
-  expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy))).toBe(true)
-  expect(isLossyDocumentState(Y.encodeStateAsUpdate(plain))).toBe(false)
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true)
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(plain), null)).toBe(false)
 })
 
 it('settles a session by its witness when the source keeps its meaning, edited or not', () => {
   const respelled = seeded('Title\n=====\n\n* one\n')
   expect(witnessKeepsMeaning(respelled)).toBe(true)
-  expect(sessionVerdict(Y.encodeStateAsUpdate(respelled))).toEqual({ lossy: false, witnessKeepsMeaning: true })
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(respelled), null)).toBe(false)
   respelled.getMap('frontmatter').set('status', 'done')
   expect(witnessKeepsMeaning(respelled)).toBe(true)
   expect(witnessKeepsMeaning(seeded('# Plan\n\nText.'))).toBe(true)
@@ -114,9 +117,13 @@ it('settles a session by its witness when the source keeps its meaning, edited o
 it('checks the whole session when its witness records a lossy source, or a projection the import no longer gives', () => {
   const lossy = seeded('<details>\n\nHidden.\n</details>\n')
   expect(witnessKeepsMeaning(lossy)).toBe(false)
-  expect(sessionVerdict(Y.encodeStateAsUpdate(lossy))).toEqual({ lossy: true, witnessKeepsMeaning: false })
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true)
   lossy.getMap('frontmatter').set('status', 'done')
-  expect(sessionVerdict(Y.encodeStateAsUpdate(lossy))).toEqual({ lossy: false, witnessKeepsMeaning: false })
+  expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true)
+  const reopened = new Y.Doc()
+  Y.applyUpdate(reopened, Y.encodeStateAsUpdate(lossy))
+  expect(isLossyDocument(reopened, null)).toBe(true)
+  expect(isLossyDocument(reopened, 'converted-head')).toBe(false)
   const older = seeded('Title\n=====\n\n* one\n')
   older.getMap('meta').set('dohcMarkdownSourceProjectionSha256', '0'.repeat(64))
   expect(witnessKeepsMeaning(older)).toBe(false)

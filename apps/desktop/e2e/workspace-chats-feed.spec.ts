@@ -95,6 +95,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // first line becomes the serif card title.
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill(channelName);
+    await page.getByTestId("chats-new-channel-type-posts").click();
     await page.getByTestId("chats-new-channel-name").press("Enter");
     await expect(page.getByTestId("chats-channel-title")).toHaveText(channelName);
 

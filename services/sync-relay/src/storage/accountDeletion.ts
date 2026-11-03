@@ -3,6 +3,7 @@ import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { noticeIdFrom } from "./notices";
 import { revokeShareInTransaction } from "./shares";
+import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare } from "./serviceHostEnrollment";
 import type { StorageContext } from "./context";
 import type { SyncRelayStorage } from "./types";
 
@@ -68,7 +69,11 @@ export function fenceAccount(storage: StorageContext, key: string, userId: strin
       for (const recipient of recipients) storage.db.prepare("INSERT OR IGNORE INTO sync_relay_ended_shares VALUES(?,?,?)").run(shareId,String(recipient.principal_user_id),Date.now());
       revokeShareInTransaction(storage, shareId, Date.now());
     }
+    // Ending the person's grants can end a hosted document's last Edit grant.
+    const covered = storage.db.prepare("SELECT DISTINCT share_id FROM sync_relay_share_grants WHERE status='active' AND (principal_user_id=? OR lower(principal_email)=?)")
+      .all(userId, normalizeEmail(email)).flatMap(row => serviceHostEnrollmentsCoveredByShare(storage, String(row.share_id)));
     storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=?,generation=generation+1 WHERE status='active' AND (principal_user_id=? OR lower(principal_email)=?)").run(Date.now(), userId, normalizeEmail(email));
+    retireUncoveredServiceActivations(storage, covered, Date.now());
     storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
       WHERE voided = 0 AND EXISTS (
         SELECT 1 FROM json_each(grants_json) receipt_grant

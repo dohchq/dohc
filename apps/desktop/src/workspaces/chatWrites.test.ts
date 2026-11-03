@@ -106,7 +106,10 @@ function fixture() {
     currentCredentials: () => credentials,
     currentCredentialGeneration: () => generation,
     localUserDisplayName: () => displayName,
-    agentDisplayName: async () => "Nova",
+    agentDisplayName: async (agentId?: string) => agentId === "codex" ? "Codex" : "Nova",
+    // The person's agents: Nova, the default, and Codex.
+    agentIdsNamedIn: async (body: string) => Object.entries({ default: "@nova", codex: "@codex" })
+      .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
     localInstallationId: () => "local-id",
     // Marks where an answer holds dispatch scans off.
     async betweenDispatchScans(_workspaceId, write) {
@@ -258,6 +261,34 @@ describe("chat writes", () => {
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { channelId: "channel" });
   });
 
+  it("names the agents a person's message wakes, and none for an agent's or the CLI's", async () => {
+    const test = fixture();
+    await test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "@Codex and @nova, plan the day", resolveAttachments: async () => [],
+    });
+    expect(test.store.sendMessage.mock.calls[0]![0].namedAgentIds).toEqual(["default", "codex"]);
+    await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "human" }, threadId: "thread", body: "@Codex plan", resolveAttachments: async () => [],
+    });
+    await test.writes.sendMessage(test.place, {
+      writer: AGENT, threadId: "thread", body: "@Codex plan", resolveAttachments: async () => [],
+    });
+    await test.writes.sendMessage(test.place, {
+      writer: PERSON, threadId: "thread", body: "No one named", resolveAttachments: async () => [],
+    });
+    for (const [input] of test.store.sendMessage.mock.calls.slice(1)) expect(input).not.toHaveProperty("namedAgentIds");
+  });
+
+  it("writes a dispatched run's reply as its agent, by id and settings name", async () => {
+    const test = fixture();
+    await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentId: "codex" }, threadId: "thread", body: "Done", resolveAttachments: async () => [],
+    });
+    expect(test.store.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      author: { kind: "agent", displayName: "Codex" }, authorAgentId: "codex", origin: "cli",
+    }));
+  });
+
   it("writes an automation's post under its own name, its person, its ids, and its chain depth", async () => {
     const test = fixture();
     const automation: ChatWriter = { via: "automation", automationId: "collection:Tasks#tell", name: "Tell the trip", depth: 2 };
@@ -301,7 +332,7 @@ describe("chat writes", () => {
     expect(test.store.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("writes an automation's wake in My agent without waiting for a session", async () => {
+  it("writes an automation's wake in an agent's chat without waiting for a session", async () => {
     const test = fixture();
     test.setCredentials(null);
     await test.writes.sendMessage(test.place, {

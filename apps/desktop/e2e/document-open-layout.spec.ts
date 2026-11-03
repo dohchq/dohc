@@ -15,8 +15,9 @@ import {
 // session binds, the editor replaces it. Every block must already sit where
 // the editor puts it, or the page jumps as the open finishes.
 
-// Enough properties to wrap onto several lines, and a table wider than the
-// reading column, which scrolls in its frame.
+// Enough properties to wrap onto several lines, a table wider than the
+// reading column, which scrolls in its frame, and a table with two resized
+// rows, whose heights the comment above it keeps.
 const WIDE_HEADER = `| ${Array.from({ length: 10 }, (_, i) => `Day ${i + 1}`).join(" | ")} |`;
 const DOC = `---
 status: draft
@@ -56,6 +57,12 @@ const bags = 2;
 ${WIDE_HEADER}
 |${" --- |".repeat(10)}
 |${" Hike |".repeat(10)}
+
+<!-- dohc:table row-heights=1:84,2:120 -->
+| Leg | Hours |
+| --- | --- |
+| Ferry | 3 |
+| Drive | 5 |
 
 The last paragraph.
 `;
@@ -139,6 +146,9 @@ async function measureBlocks(page: Page): Promise<Record<string, Box | null>> {
       wideFrame: box(tables[1]?.parentElement),
       wideTable: box(tables[1]),
       wideLastHeaderCell: box(tables[1]?.querySelector("th:last-child")),
+      resizedTable: box(tables[2]),
+      tallRow: box(tables[2]?.querySelectorAll("tr")[1]),
+      tallerRow: box(tables[2]?.querySelectorAll("tr")[2]),
       lastParagraph: box(paragraphs[paragraphs.length - 1]),
     };
   });

@@ -6,7 +6,7 @@ import {
 
 /**
  * The renderer-side gate every lineage operation (Explorer rename/move/
- * delete, version switch/create/merge, try-in-version, moment restore) takes
+ * delete, version switch/create/merge, moment restore) takes
  * before changing the paths or lineage a collection write targets. It pauses
  * the workspace's cell acceptance immediately, flushes mounted drafts, and
  * drains the queued writes. It refuses the operation — pause released, error

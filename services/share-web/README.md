@@ -477,6 +477,9 @@ The file accepts these fields; all except `settlement` are required. Unknown fie
 | `client` | `{aggregateBytes, maxUploads, connectTimeoutMs, requestDeadlineMs}` for the relay client |
 | `settlement` | Optional `{maxApplicationsPerSettlement}` with a positive integer limit |
 
+Also set `DOHC_ENGINE_READER_CONFIG` to the Markdown reader's JSON configuration, with absolute `node`, `bundle` and `manifest` paths.
+The relay refuses to start a service host without it.
+
 Each root must be an existing canonical directory with the intended workspace
 identity and main version initialized through the engine. Use dedicated service
 roots. Do not point this integration at an active desktop workspace.

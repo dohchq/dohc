@@ -87,9 +87,9 @@ describe("states page", () => {
       fireEvent.mouseLeave(button.parentElement!);
     }
     // The reserved pill is typed when it mounts, and the locked pills are
-    // locked at rest, once per theme.
+    // locked at rest, with and without Source, once per theme.
     expect(screen.getAllByTestId("property-reserved")).toHaveLength(2);
-    expect(screen.getAllByTestId("properties-locked")).toHaveLength(2);
+    expect(screen.getAllByTestId("properties-locked")).toHaveLength(4);
 
     unmount();
     expect(document.documentElement.dataset.theme).toBe("dark");

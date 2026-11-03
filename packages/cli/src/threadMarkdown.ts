@@ -1,8 +1,8 @@
-import type { CliResultByVerb } from "./protocol";
+import type { CliShowMessage, CliShowThreadResult, CliStreamPosition } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 
-type ThreadMarkdownInput = Omit<CliResultByVerb["show"], "dispatch"> &
-  Partial<Pick<CliResultByVerb["show"], "dispatch">>;
+type ThreadMarkdownInput = Omit<CliShowThreadResult, "dispatch"> &
+  Partial<Pick<CliShowThreadResult, "dispatch">>;
 
 function swapEnginePrefix(
   id: string,
@@ -32,6 +32,28 @@ function decisionCount(count: number): string {
   return count === 0 ? "none" : String(count);
 }
 
+/** The `--before` value that reads the page older than this position. */
+export function formatStreamPosition(position: CliStreamPosition): string {
+  return `${position.createdAtMs}:${position.lane}:${position.id}`;
+}
+
+/** A message's author, how it came, when, and what its agents are doing. */
+export function messageMetadata(message: CliShowMessage, handle: string): string[] {
+  return [
+    `**${renderAuthorDisplayName(message.author)}**`,
+    // An automation's message says so, so an agent it woke knows no
+    // person wrote the request. A link holder's says it came through a link.
+    ...(message.author.kind === "automation" ? ["automation"] : []),
+    ...(message.author.kind === "link" ? ["link holder"] : []),
+    new Date(message.createdAtMs).toISOString(),
+    handle,
+    ...(message.agentRequests ?? []).map((request) => {
+      const failure = request.failureReason ?? (request.exitCode === undefined ? undefined : `exit ${request.exitCode}`);
+      return `agent ${request.agentId} ${request.state}${failure ? ` (${failure})` : ""}`;
+    }),
+  ];
+}
+
 export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
   const { thread, messages } = result;
   const lines = [
@@ -40,15 +62,7 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
     ...(result.dispatch ? [`dispatch: ${JSON.stringify(result.dispatch)}`] : []),
   ];
   for (const message of messages) {
-    const metadata = [
-      `**${renderAuthorDisplayName(message.author)}**`,
-      // An automation's message says so, so an agent it woke knows no
-      // person wrote the request. A link holder's says it came through a link.
-      ...(message.author.kind === "automation" ? ["automation"] : []),
-      ...(message.author.kind === "link" ? ["link holder"] : []),
-      new Date(message.createdAtMs).toISOString(),
-      formatMessageHandle(message.id),
-    ];
+    const metadata = messageMetadata(message, formatMessageHandle(message.id));
     if (message.parentMessageId) {
       metadata.push(`replying to ${formatMessageHandle(message.parentMessageId)}`);
     }

@@ -6,8 +6,9 @@ import type { settingsOperations } from "./settingsOperations";
 import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
-  AgentColors, StoredUserSettingsResult, firstAgent, firstAgentWithLaunch, rendererUserSettingsResult,
+  AgentColors, StoredUserSettingsResult, listAgents, rendererUserSettingsResult, runnableAgents,
   settingsDeepEqual,
+  type Agent,
   type DesktopUserSettings,
   type ThemeMode,
   type ZoomStep,
@@ -15,7 +16,7 @@ import {
 import { withAppPinned } from "../settings/pinnedApps";
 import { watchSettingsFile } from "../settings/settingsFileWatcher";
 import {
-  ensureUserSettingsFile, readCachedUserSettingsFile, reloadUserSettingsFile,
+  ensureUserSettingsFile, orderUserSettingsAgents, readCachedUserSettingsFile, reloadUserSettingsFile,
   replaceUserSettingsFile, updateUserSettingsFile, USER_SETTINGS_FILE, writeUserSettingsFile,
 } from "../settings/userSettingsStore";
 import {
@@ -44,7 +45,8 @@ export function createSettingsIpc<
   },
 >(dependencies: {
   stateDir(): string;
-  setCachedPreferredName(preferredName: string | undefined, agentName: string | undefined): void;
+  /** Your name and your agents, as History and chat name them. */
+  setCachedNames(preferredName: string | undefined, agents: readonly Agent[]): void;
   applyZoomLevelToWindows(zoomLevel: number): void;
   // The theme the OS draws dohc's menus, dialogs, and window background in.
   applyThemeMode(themeMode: ThemeMode): void;
@@ -68,7 +70,7 @@ export function createSettingsIpc<
 }) {
   const {
     stateDir,
-    setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray,
+    setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray,
     openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
     broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath, knownWorkspaceIds,
   } = dependencies;
@@ -86,7 +88,7 @@ export function createSettingsIpc<
   // The windows must match whatever zoom level, theme and spellcheck are in
   // the file, however they got there.
   function takeEffect(settings: DesktopUserSettings): void {
-    setCachedPreferredName(settings.profile.preferredName, firstAgent(settings)?.name);
+    setCachedNames(settings.profile.preferredName, listAgents(settings));
     applyZoomLevelToWindows(settings.appearance.zoomLevel);
     applyThemeMode(settings.appearance.themeMode);
     setSpellCheckerEnabled(settings.editor.spellcheck);
@@ -100,12 +102,12 @@ export function createSettingsIpc<
     if (settingsDeepEqual(rendererUserSettingsResult(previous), publicResult)) return;
     broadcastUserSettings(publicResult);
     await refreshDispatchTray();
-    const agent = firstAgentWithLaunch(result.settings);
-    if (!agent?.enabled) return;
-    // A scan finds messages that wait for the agent. Only a change to the
-    // agent that answers can make one due, so a zoom step does not scan
-    // every open workspace.
-    if (settingsDeepEqual(firstAgentWithLaunch(previous.settings), agent)) return;
+    const agents = runnableAgents(result.settings);
+    if (agents.length === 0) return;
+    // A scan gives each agent dohc starts its chat and finds the messages
+    // that wait for it. Only a change to those agents can make one due, so a
+    // zoom step does not scan every open workspace.
+    if (settingsDeepEqual(runnableAgents(previous.settings), agents)) return;
     for (const workspace of openDispatchWorkspaces()) {
       void chatDispatchService.scanWorkspace(workspace.workspaceId).then(() => {
         notifyRenderer({ workspaceId: workspace.workspaceId });
@@ -205,6 +207,10 @@ export function createSettingsIpc<
           withAppPinned(current, input, knownWorkspaceIds())));
     },
 
+    orderAgents: async (input) => {
+      return saveUserSettings(() => orderUserSettingsAgents(stateDir(), input.order));
+    },
+
     setAgentColor: async (input, { operation }) => {
       const key = agentKeyForGroup(input.workspaceId, input.group);
       await saveUserSettings(() => updateUserSettingsFile(stateDir(), current => {
@@ -271,8 +277,9 @@ export function createSettingsIpc<
     // renderer cannot write .dohc through writeWorkspaceText (reserved path),
     // so this narrow pair is the only writer. Both directions are zod-bounded;
     // a corrupt/foreign on-disk file reads as null ("no saved state"), never
-    // an error. A write is refused unless the engine's current open of the
-    // workspace prepared .dohc/local.
+    // an error. A Windows read without the engine's open is refused, and the
+    // renderer then saves nothing. A write is refused unless the engine's
+    // current open of the workspace prepared .dohc/local.
     getWorkspaceUiState: async (_input, { operation }) => {
       const parsed = GetWorkspaceUiStateResult.safeParse(
         await readUiStateFile(operation.workspace.rootPath),

@@ -622,6 +622,8 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     './lossy-markdown': './src/lossy-markdown.ts',
     './markdown-extensions': './src/dohc-markdown-extensions.ts',
     './restore-proof': './src/liveRestoreProof.ts',
+    './list-markdown': './src/list-markdown.ts',
+    './table-row-heights': './src/table-row-heights.ts',
     './named-live-provider': './src/namedLiveProvider.ts',
     './named-live-browser-transport': './src/namedLiveBrowserTransport.ts',
   })

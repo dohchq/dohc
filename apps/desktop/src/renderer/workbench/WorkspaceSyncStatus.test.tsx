@@ -230,6 +230,11 @@ describe("sync status surface", () => {
     {
       delivery: "retrying" as const,
       reason: "live-edit-unadmitted" as const,
+      label: "Live editing stopped",
+    },
+    {
+      delivery: "retrying" as const,
+      reason: "conflict-parent-withheld" as const,
       label: "Live editing can't resume",
     },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
@@ -237,11 +242,29 @@ describe("sync status surface", () => {
     const live = screen.getByTestId("owner-live-delivery-status");
     expect(live.textContent).toBe(label);
     expect(live.getAttribute("data-state")).toBe(delivery);
+    if (reason === "conflict-parent-withheld") {
+      expect(live.querySelector(".bg-warning")).not.toBeNull();
+      expect(live.querySelector(".animate-spin")).toBeNull();
+    }
     // Local saving keeps its own line, and active delivery never claims it.
     const status = screen.getByTestId("sync-status");
     expect(status.textContent).toContain("Local · saved");
     expect(status.contains(live)).toBe(false);
     expect(live.textContent).not.toMatch(/synced|up to date/i);
+  });
+
+  // A retry with no reason is dohc still dialling, so it takes the ring a sync
+  // pass uses. A named reason waits on someone and keeps the filled dot.
+  it("shows a live retry with no reason as a ring", () => {
+    const liveDot = () =>
+      screen.getByTestId("owner-live-delivery-status").querySelector("[data-dot]")?.getAttribute("data-dot");
+    const { rerender } = renderStatus({ syncStatus: liveDeliveryStatus("retrying") });
+    expect(liveDot()).toBe("working");
+
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("retrying", "document-unavailable")} failedSaves={0} />);
+    expect(liveDot()).toBeUndefined();
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("active")} failedSaves={0} />);
+    expect(liveDot()).toBeUndefined();
   });
 
   it("says nothing about live delivery when the status reports none", () => {
@@ -256,6 +279,52 @@ describe("sync status surface", () => {
       },
     });
     expect(screen.queryByTestId("owner-live-delivery-status")).toBeNull();
+  });
+
+  // Live editing needs the server. While the title bar names the server as
+  // the problem, live editing adds nothing, and it comes back by itself.
+  it.each([
+    {
+      label: "Server unreachable",
+      server: {
+        state: "sync-failed" as const,
+        syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      },
+    },
+    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
+  ])("hides live editing while the title bar says $label", ({ label, server }) => {
+    const { rerender } = renderStatus({ syncStatus: { ...liveDeliveryStatus("retrying"), ...server } });
+    expect(screen.getByTestId("sync-status").textContent).toBe(label);
+    expect(screen.queryByTestId("owner-live-delivery-status")).toBeNull();
+
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("preparing")} failedSaves={0} />);
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Preparing live editing");
+    rerender(<WorkspaceSyncStatus syncStatus={liveDeliveryStatus("active")} failedSaves={0} />);
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing active");
+  });
+
+  // Any other failure leaves the server's reach unknown, so live editing still speaks.
+  it("keeps live editing beside a sync failure that does not name the server", () => {
+    renderStatus({
+      syncStatus: {
+        ...liveDeliveryStatus("retrying"),
+        state: "sync-failed",
+        syncFailure: { cause: "unknown", detail: "Error: boom", sinceMs: 1, attempts: 1 },
+      },
+    });
+    expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing retrying");
+  });
+
+  // A failed save or a required update takes the title bar's words from the
+  // server, so live editing shows beside them.
+  it.each([
+    { label: "Couldn't save 1 file", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
+    { label: "Update dohc to sync", status: { state: "cloud-disconnected" as const, updateRequired: "app" as const }, failedSaves: 0 },
+  ])("keeps live editing beside $label", ({ label, status, failedSaves }) => {
+    renderStatus({ syncStatus: { ...liveDeliveryStatus("retrying"), ...status }, failedSaves });
+    expect(screen.getByTestId("sync-status").textContent).toBe(label);
+    expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing retrying");
   });
 
   it.each([

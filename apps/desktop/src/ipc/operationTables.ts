@@ -10,7 +10,9 @@ import {
   systemPrivacySettingsOperations,
   serverAccountOperations,
   chatDispatchNoticeOperations,
+  updateDownloadOperations,
   agentRunStateOperations,
+  stoppedRunOperations,
   chatDispatchPauseOperations,
   crashReportOperations,
   collectionCopiesLeftOperations,
@@ -31,6 +33,7 @@ import {
   folderAppOfferOperations,
   workspaceVersionOperations,
   historyOperations,
+  appViewOperations,
 } from "./bridgeContract";
 import { settingsOperations } from "./settingsOperations";
 import type { OperationTable } from "./operationTable";
@@ -60,6 +63,7 @@ export const OPERATION_TABLES = [
   systemPrivacySettingsOperations,
   serverAccountOperations,
   accessOperations,
+  updateDownloadOperations,
   workspaceVersionOperations,
   historyOperations,
   workspaceSearchOperations,
@@ -77,9 +81,11 @@ export const OPERATION_TABLES = [
   fileObservationOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  stoppedRunOperations,
   chatDispatchPauseOperations,
   scheduleHostOperations,
   noticeOperations,
   sharedViewAccessOperations,
   shareDirectWriteDeliveryOperations,
+  appViewOperations,
 ] as const satisfies readonly OperationTable[];

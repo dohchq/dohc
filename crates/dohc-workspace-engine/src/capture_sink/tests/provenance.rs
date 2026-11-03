@@ -61,6 +61,7 @@ fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
         provenance: CaptureProvenance {
             summary: Some("Reconciled offline edits".to_owned()),
             correlation_id: Some("reconcile-test-pass".to_owned()),
+            first_import: None,
         },
         ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10)
     });
@@ -100,6 +101,60 @@ fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
     let (secret_summary, secret_correlation) = secret_moment_metadata(&db, ".env");
     assert_eq!(secret_summary.as_deref(), Some("Updated .env"));
     assert_eq!(secret_correlation.as_deref(), Some("reconcile-test-pass"));
+}
+
+#[test]
+fn a_first_import_labels_its_secrets_and_an_edit_keeps_the_per_file_label() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let supervisor = WorkspaceSupervisor::new();
+    let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
+    write_file(scratch.path(), ".env", b"TOKEN=existing");
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    // The pass that opens a new workspace carries only the import's id.
+    let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+        cancel: dohc_engine_files::CancellationToken::new(),
+        provenance: CaptureProvenance {
+            first_import: Some("reconcile-first-import".to_owned()),
+            ..CaptureProvenance::default()
+        },
+        ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10)
+    });
+    for (text, reason) in [
+        (b"TOKEN=existing".as_slice(), IngestReason::Added),
+        (b"TOKEN=edited".as_slice(), IngestReason::Changed),
+    ] {
+        write_file(scratch.path(), ".env", text);
+        assert!(matches!(
+            sink.ingest(".env", 0, "advisory-sha", "text/plain", reason)
+                .expect("secret ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+    }
+    drop(sink);
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("reopen store");
+    let moments: Vec<(Option<String>, Option<String>)> = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT metadata_summary, metadata_correlation_id FROM secret_moments \
+                 WHERE workspace_id = ?1 AND path = '.env' ORDER BY moment_order",
+            )?;
+            let rows = statement.query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("secret moments");
+    assert_eq!(
+        moments,
+        vec![
+            (
+                Some(FIRST_IMPORT_SUMMARY.to_owned()),
+                Some("reconcile-first-import".to_owned())
+            ),
+            (Some("Updated .env".to_owned()), None),
+        ],
+        "an imported secret joins the import; a later edit keeps its per-file label"
+    );
 }
 
 #[test]

@@ -1,35 +1,16 @@
 import type { JSONContent } from '@tiptap/core'
-export {yDocToArtifactMarkdown} from '@dohc/ydoc-projection'
+// The renderer copies and shows a note's Markdown with the projection's own
+// exporter, so it gives the bytes the worker's canonical fallback gives,
+// line endings included.
+export {yDocToArtifactMarkdown, yDocToMarkdown} from '@dohc/ydoc-projection'
 import { getHTMLFromFragment } from '@tiptap/core'
-import {
-  getDohcProseMirrorSchema,
-  getDohcYDocFrontmatter,
-  getDohcYDocPlainText,
-  parseRichdocMarkdown,
-  serializeRichdocBody,
-} from '@dohc/ydoc-projection'
-import { escapeHighlightMarkdown } from '@dohc/ydoc-projection/markdown-extensions'
+import { getDohcProseMirrorSchema, parseRichdocMarkdown } from '@dohc/ydoc-projection'
 import { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror'
 import * as Y from 'yjs'
-import { frontmatterBlockFor } from '@dohc/ydoc-projection/frontmatter'
-import { writtenFrontmatterKeys } from '@dohc/ydoc-projection/frontmatter-map'
-import { orderFrontmatter } from '../markdown/frontmatter'
 
 const BODY_FIELD = 'body'
-const FRONTMATTER_FIELD = 'frontmatter'
-const META_FIELD = 'meta'
 
 const schema = getDohcProseMirrorSchema()
-
-export function yDocToMarkdown(doc: Y.Doc): string {
-  const body = yDocBodyToMarkdown(doc).trimEnd()
-  const frontmatter = orderFrontmatter(getDohcYDocFrontmatter(doc))
-  // The frontmatter text the settle keeps, so the source view shows it too.
-  const meta = doc.getMap(META_FIELD)
-  const written = writtenFrontmatterKeys(doc.getMap(FRONTMATTER_FIELD), meta)
-  return `${frontmatterBlockFor(frontmatter, meta.get('dohcFrontmatterSource'), body, '\n', written)}${body}`
-}
 
 // Renders BODY markdown (post-frontmatter — split a full document string
 // with parseFrontmatter first) to HTML through the projection's parser and
@@ -41,20 +22,6 @@ export function yDocToMarkdown(doc: Y.Doc): string {
 export function markdownBodyToHtml(body: string): string {
   const node = ProseMirrorNode.fromJSON(schema, parseRichdocMarkdown(body))
   return getHTMLFromFragment(node.content, schema)
-}
-
-function yDocBodyToMarkdown(doc: Y.Doc): string {
-  const plainText = getDohcYDocPlainText(doc)
-  if (plainText) return plainText.toString()
-  return serializeRichdocBody(escapeHighlightMarkdown(yDocBodyToJSON(doc)))
-}
-
-function yDocBodyToJSON(doc: Y.Doc): JSONContent {
-  const bodyFragment = doc.getXmlFragment(BODY_FIELD)
-  return yXmlFragmentToProseMirrorRootNode(
-    bodyFragment,
-    schema,
-  ).toJSON() as JSONContent
 }
 
 // undefined for an empty or frontmatter-only body (no first XML element

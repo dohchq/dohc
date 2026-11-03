@@ -3120,13 +3120,6 @@ fn checked_staging_dir(
     } else {
         ensure_target_symlink_free(&base, &dir)?;
     }
-    // Check access without walking other jobs' entries.
-    #[cfg(windows)]
-    if let Err(err) = std::fs::read_dir(&dir)
-        && err.kind() != ErrorKind::NotFound
-    {
-        return Err(MaterializeError::io(&dir, &err));
-    }
     Ok(dir)
 }
 
@@ -3168,7 +3161,7 @@ fn staged_name_key(name: &str) -> Option<&str> {
     let lower_hex = |s: &str| s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     let key_ok = match key.strip_prefix('h') {
         Some(hash) => hash.len() == 64 && lower_hex(hash),
-        None => !key.is_empty() && key.len() % 2 == 0 && lower_hex(key),
+        None => key.len() % 2 == 0 && lower_hex(key),
     };
     (n_ok && key_ok).then_some(key)
 }
@@ -4121,17 +4114,11 @@ fn recover_job_displacements(
     let mut rows = store.list_displacements_for_job(&job.job_id)?;
     let mut taken: Vec<String> = rows.iter().map(|row| row.displaced_name.clone()).collect();
     taken.extend(store.retained_names_for_job(&job.job_id)?);
-    // Names are bounded per job. Do not scan other saves' retained originals.
-    let mut rowless = Vec::new();
-    for n in 0..MAX_DISPLACED_NAMES {
-        let name = staged_name(&job.job_id, n);
-        #[cfg(windows)]
-        readonly_link::recover_one(&dir.join(&name), _target)
-            .map_err(|err| MaterializeError::io(&dir, &err))?;
-        if !taken.contains(&name) && entry_exists(&dir.join(&name))? {
-            rowless.push(name);
+    let rowless = job_staged_names(&dir, &job.job_id, _target, &taken).inspect_err(|error| {
+        if matches!(error, MaterializeError::RecoveryUnavailable) {
+            set_recovery_unavailable(root, true);
         }
-    }
+    })?;
     for row in path_rows {
         if !rows
             .iter()
@@ -4178,6 +4165,63 @@ fn recover_job_displacements(
         kept,
     ))
 }
+
+fn job_staged_names(
+    dir: &Path,
+    job_id: &str,
+    _target: &Path,
+    taken: &[String],
+) -> Result<Vec<String>, MaterializeError> {
+    #[cfg(feature = "fault-injection")]
+    dohc_engine_storage::capture_phase::count("publication_recovery_fs_calls", 1);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(if cfg!(windows) {
+                MaterializeError::RecoveryUnavailable
+            } else {
+                MaterializeError::io(dir, &err)
+            });
+        }
+    };
+    let key = staged_key(job_id);
+    let mut found = std::collections::BTreeMap::new();
+    for entry in entries {
+        #[cfg(feature = "fault-injection")]
+        dohc_engine_storage::capture_phase::count("publication_staging_entries", 1);
+        let entry = entry.map_err(|err| MaterializeError::io(dir, &err))?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        #[cfg(windows)]
+        let incoming = readonly_link::incoming_name(&name).unwrap_or(&name);
+        #[cfg(not(windows))]
+        let incoming = name.as_str();
+        if staged_name_key(incoming) != Some(key.as_str()) {
+            continue;
+        }
+        let sequence = incoming.rsplit_once('.').unwrap().1.parse::<u32>().unwrap();
+        let entry = found
+            .entry(sequence)
+            .or_insert_with(|| (incoming.to_owned(), false));
+        entry.1 |= incoming == name.as_str();
+    }
+    // Finish enumeration before recovery removes journals from this directory.
+    let mut rowless = Vec::new();
+    for (name, exists) in found.into_values() {
+        #[cfg(windows)]
+        readonly_link::recover_one(&dir.join(&name), _target)
+            .map_err(|err| MaterializeError::io(dir, &err))?;
+        if exists && !taken.contains(&name) {
+            rowless.push(name);
+        }
+    }
+    Ok(rowless)
+}
+
+#[cfg(test)]
+mod staging_scan_tests;
 
 /// Settle a staged file no row names, for the job its name spells. A write
 /// whose temp is still beside an empty target never placed its content, so

@@ -1,6 +1,5 @@
 import {
   Files,
-  Globe2,
   History,
   MessageCircle,
   Search,
@@ -21,6 +20,5 @@ export const VIEW_IDENTITY: Readonly<Record<ViewId, ViewIdentity>> = {
   chats: { label: "Chats", Icon: MessageCircle },
   search: { label: "Search", Icon: Search },
   graph: { label: "Graph", Icon: Workflow },
-  sites: { label: "Apps", Icon: Globe2 },
   history: { label: "History", Icon: History },
 };

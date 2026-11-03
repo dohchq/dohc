@@ -1,11 +1,11 @@
-import type { CliResultByVerb } from "@dohc/cli/protocol";
+import type { CliShowThreadResult } from "@dohc/cli/protocol";
 import type { AwaitableAgentDispatchStore } from "./awaitableAgentDispatchStore";
 
 export async function readThreadDispatchState(
   store: AwaitableAgentDispatchStore,
   workspaceId: string,
   threadId: string,
-): Promise<CliResultByVerb["show"]["dispatch"]> {
+): Promise<CliShowThreadResult["dispatch"]> {
   const [pause, run] = await Promise.all([
     store.getThreadDispatchPauseState(workspaceId, threadId),
     store.latestRunForThread(workspaceId, threadId),

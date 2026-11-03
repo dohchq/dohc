@@ -1,6 +1,6 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {EngineRequestDeadlineError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
-import {queueLiveHostRequests} from "./liveHostRequests.js";
+import {HeldReadBusyError, heldReadLane, queueLiveHostRequests} from "./liveHostRequests.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -98,7 +98,8 @@ it("does not enqueue the internal RPC of an already queued client method", async
 
 const adoptionCut = (baselineBytes: Uint8Array) => ({
   relayDatabaseNamespace: "namespace", adoptionId: "adoption", sourceMomentId: "source", sourceDigest: "a".repeat(64), sourceByteLength: 0,
-  baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null, baselineBytes, events: [],
+  baselineMomentRelaySequence: 1, baselineRegisteredAtMs: 0, expectedLocalSequence: 0, terminalReceipt: null, retainedPrefix: null,
+  baselineBytes, events: [],
 });
 it("bounds retained borrowed cuts and releases cancelled queued input without borrowing the native budget", async () => {
   const f = fixture(4, 32_000), release = deferred<unknown>(), caller = new AbortController();
@@ -130,4 +131,93 @@ it("refuses an oversized backing allocation before native and leaves no partial 
   await expect(f.client.sendLiveOwnerAdoption({...request(1), sessionId: "owner"}, cut, {maxBytes: 1000, maxEvents: 1})).rejects.toThrow("retained input capacity");
   expect(f.invoke).not.toHaveBeenCalled();
   await f.client.sendRequest(request(2)); expect(f.invoke).toHaveBeenCalledOnce(); f.lifetime.abort();
+});
+
+function heldLane(bounds: {maxRunning?: number; maxQueued?: number; maxWaiters?: number} = {}) {
+  const lifetime = new AbortController(), started: AbortSignal[] = [];
+  const read = heldReadLane({maxRunning: 1, maxQueued: 1, maxWaiters: 2, ...bounds, deadlineMs: 1000, signal: lifetime.signal});
+  // Engine work that answers once `answer` settles, and ends at once when its signal aborts, as the native client does.
+  const work = (answer: Promise<unknown>) => (signal: AbortSignal) => {
+    started.push(signal);
+    return new Promise<unknown>((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), {once: true});
+      void answer.then(resolve);
+    });
+  };
+  return {read, lifetime, started, work};
+}
+const never = new Promise<unknown>(() => {});
+
+it("cancels a queued and a running held read on its caller's signal, and frees the lane", async () => {
+  const l = heldLane(), running = new AbortController(), queued = new AbortController();
+  const first = l.read("workspace-a", "read", running.signal, l.work(never));
+  const second = l.read("workspace-b", "read", queued.signal, l.work(never));
+  expect(l.started).toHaveLength(1);
+  const queuedRefused = expect(second).rejects.toThrow("queued caller left");
+  queued.abort(new Error("queued caller left")); await queuedRefused;
+  expect(l.started).toHaveLength(1);
+  const runningRefused = expect(first).rejects.toThrow("running caller left");
+  running.abort(new Error("running caller left")); await runningRefused;
+  expect(l.started[0]!.aborted).toBe(true);
+  await expect(l.read("workspace-a", "another read", undefined, async () => "a")).resolves.toBe("a");
+  await expect(l.read("workspace-b", "read", undefined, async () => "b")).resolves.toBe("b");
+  l.lifetime.abort();
+});
+
+it("keeps a cancelled running held read's workspace and slot until its work settles", async () => {
+  const l = heldLane({maxRunning: 2}), settle = deferred<void>(), caller = new AbortController();
+  // Work that sees its cancellation at once but settles only when the engine answers.
+  const slow = vi.fn(async (signal: AbortSignal) => {l.started.push(signal); await settle.promise; throw signal.reason;});
+  const first = l.read("workspace-a", "read", caller.signal, slow);
+  const refused = expect(first).rejects.toThrow("caller left");
+  caller.abort(new Error("caller left")); await refused;
+  expect(l.started[0]!.aborted).toBe(true);
+  await expect(l.read("workspace-a", "another read", undefined, async () => "a")).rejects.toBeInstanceOf(HeldReadBusyError);
+  await expect(l.read("workspace-a", "read", undefined, slow), "an identical read is refused too").rejects.toBeInstanceOf(HeldReadBusyError);
+  const other = deferred<unknown>(), third = vi.fn(async () => "c");
+  const beside = l.read("workspace-b", "read", undefined, l.work(other.promise));
+  expect(l.started).toHaveLength(2);
+  const waiting = l.read("workspace-c", "read", undefined, third);
+  expect(third).not.toHaveBeenCalled();
+  settle.resolve();
+  await expect(waiting).resolves.toBe("c");
+  await expect(l.read("workspace-a", "another read", undefined, async () => "a")).resolves.toBe("a");
+  other.resolve("b"); await expect(beside).resolves.toBe("b");
+  expect(slow).toHaveBeenCalledOnce();
+  l.lifetime.abort();
+});
+
+it("refuses a different held read for a workspace that has one, and lets an identical one join it", async () => {
+  const l = heldLane(), answer = deferred<unknown>(), work = vi.fn(l.work(answer.promise));
+  const first = l.read("workspace", "read", undefined, work), joined = l.read("workspace", "read", undefined, work);
+  await expect(l.read("workspace", "another read", undefined, work)).rejects.toBeInstanceOf(HeldReadBusyError);
+  await expect(l.read("workspace", "read", undefined, work), "waiters are bounded").rejects.toBeInstanceOf(HeldReadBusyError);
+  answer.resolve("answer");
+  await expect(Promise.all([first, joined])).resolves.toEqual(["answer", "answer"]);
+  expect(work).toHaveBeenCalledOnce();
+  l.lifetime.abort();
+});
+
+it("keeps a shared held read for the callers that stay, and refuses a new workspace once the lane is full", async () => {
+  const l = heldLane(), answer = deferred<unknown>(), leaving = new AbortController();
+  const left = l.read("workspace-a", "read", leaving.signal, l.work(answer.promise));
+  const staying = l.read("workspace-a", "read", undefined, l.work(answer.promise));
+  const waiting = l.read("workspace-b", "read", undefined, l.work(answer.promise));
+  await expect(l.read("workspace-c", "read", undefined, l.work(never))).rejects.toBeInstanceOf(HeldReadBusyError);
+  const gone = expect(left).rejects.toThrow("caller left"); leaving.abort(new Error("caller left")); await gone;
+  expect(l.started[0]!.aborted).toBe(false);
+  answer.resolve("answer");
+  await expect(Promise.all([staying, waiting])).resolves.toEqual(["answer", "answer"]);
+  l.lifetime.abort();
+});
+
+it("ends a held read at its deadline and when the host retires", async () => {
+  vi.useFakeTimers();
+  const l = heldLane({maxRunning: 2}), expired = expect(l.read("workspace-a", "read", undefined, l.work(never))).rejects.toThrow("deadline");
+  await vi.advanceTimersByTimeAsync(1000); await expired;
+  expect(l.started[0]!.aborted).toBe(true);
+  const retired = expect(l.read("workspace-b", "read", undefined, l.work(never))).rejects.toThrow("retired");
+  l.lifetime.abort(new Error("retired")); await retired;
+  expect(l.started[1]!.aborted).toBe(true);
+  await expect(l.read("workspace-c", "read", undefined, async () => "late")).rejects.toThrow("retired");
 });

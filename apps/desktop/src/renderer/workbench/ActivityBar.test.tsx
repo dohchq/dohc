@@ -101,7 +101,7 @@ describe("ActivityBar order and pinned apps", () => {
   it("shows only the views it is given, in their order", () => {
     render(
       <ActivityBar
-        views={["sites", "explorer"]}
+        views={["graph", "explorer"]}
         activeView="explorer"
         sidebarVisible
         hasConflict={false}
@@ -113,7 +113,7 @@ describe("ActivityBar order and pinned apps", () => {
       [...rail.querySelectorAll("[data-testid^='activity-']")]
         .map((button) => button.getAttribute("data-testid"))
         .filter((id) => id !== "activity-bar" && id !== "activity-sharing" && id !== "activity-settings"),
-    ).toEqual(["activity-sites", "activity-explorer"]);
+    ).toEqual(["activity-graph", "activity-explorer"]);
     expect(screen.queryByTestId("activity-search")).toBeNull();
   });
 

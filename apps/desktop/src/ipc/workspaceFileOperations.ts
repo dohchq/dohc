@@ -11,6 +11,8 @@ import {
   DeleteWorkspacePathResult,
   UndoHistoryOperationPayload,
   UndoHistoryOperationResult,
+  ReadHistoryOperationPayload,
+  ReadHistoryOperationResult,
   ExportWorkspaceZipPayload,
   ExportWorkspaceZipResult,
   ExportDocumentFilePayload,
@@ -25,6 +27,7 @@ import {
   PickImageFilesPayload,
   PickImageFilesResult,
   OpenFileExternallyPayload,
+  ReadExternalOpenResult,
 } from "./bridgeContract";
 import type { OperationTable } from "./operationTable";
 
@@ -76,6 +79,15 @@ export const workspaceFileOperations = {
       reason: "The mutation owner retains renderer admission, writable/share checks, and its mutation lease.",
     },
     payload: DeleteWorkspacePathPayload, result: DeleteWorkspacePathResult,
+  },
+  readHistoryOperation: {
+    capabilityId: "history.operation.read", channel: "desktop:read-history-operation",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: {
+      check: "workspaceFileMutationOwner.runAdmittedMutation + readWorkspaceHistoryOperation/withSharedWorkspaceOperation",
+      reason: "The workspace owner admits the renderer read and applies the person's path floor under a shared lease.",
+    },
+    payload: ReadHistoryOperationPayload, result: ReadHistoryOperationResult,
   },
   undoHistoryOperation: {
     capabilityId: "history.operation.undo", channel: "desktop:undo-history-operation",
@@ -151,5 +163,11 @@ export const workspaceFileOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "External file open stopped because this window changed workspaces.",
     payload: OpenFileExternallyPayload,
+  },
+  readExternalOpen: {
+    capabilityId: "file.external.open", channel: "desktop:read-external-open",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "External file open stopped because this window changed workspaces.",
+    payload: OpenFileExternallyPayload, result: ReadExternalOpenResult,
   },
 } satisfies OperationTable;

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
@@ -10,7 +10,7 @@ import { deferred } from "../testing/deferred";
 import { timelinePage } from "../testing/historyPageFixture";
 import type { ConnectedTransactionalCollectionProps } from "./ConnectedTransactionalCollection";
 import { transactionalCollectionTabPath } from "./workbench/workbenchState";
-import { STORED_STATE, WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
+import { HOME_STATE, STORED_STATE, WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
 
 // The Collection page and its History are real; only the records table,
 // which reads records, stands aside. While `page.loading` is set, the page
@@ -115,7 +115,7 @@ describe("a Collection change in the History timeline", () => {
     page.loading = loading.promise;
     try {
       const user = userEvent.setup();
-      collectionShell();
+      collectionShell(HOME_STATE);
       await user.click(await collectionRow(user));
       await user.click(await screen.findByRole("button", { name: "Close Expenses" }));
       page.loading = null;
@@ -129,5 +129,27 @@ describe("a Collection change in the History timeline", () => {
       page.loading = null;
       loading.resolve();
     }
+  });
+});
+
+describe("the Collections section", () => {
+  it("shows its controls once the list has loaded, and keeps them while the archived list loads", async () => {
+    const user = userEvent.setup();
+    const listed = deferred<DatasetResult>();
+    const bridge = makeBridge(Promise.resolve(HOME_STATE));
+    bridge.dataset = vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
+      if (request.action !== "list") throw new Error(`Unexpected dataset action: ${request.action}`);
+      return request.includeArchived ? await new Promise<DatasetResult>(() => {}) : await listed.promise;
+    });
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.dataset).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
+
+    await act(async () => listed.resolve({ kind: "list", datasets: [], nextCursor: null }));
+    await user.click(await screen.findByRole("button", { name: "Collections actions" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Show archived Collections" }));
+    await user.click(screen.getByRole("button", { name: "Collections actions" }));
+    expect(screen.getByRole("menuitem", { name: "Restore from recovery file…" })).toBeTruthy();
+    expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" }).getAttribute("aria-checked")).toBe("true");
   });
 });

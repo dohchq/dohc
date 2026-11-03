@@ -4,6 +4,7 @@ import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import { filenameStem, MarkdownView, type HeadingTarget, type PageEditor, type ScrollTarget } from "./MarkdownView";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   DocumentControls,
   EngineArtifactAssetsInvalidNotice,
@@ -13,6 +14,8 @@ import {
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
   OpenExternallyButton,
+  OpenExternallyControl,
+  openExternally,
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
@@ -243,25 +246,25 @@ function useTextContent(
   };
 }
 
-function TruncatedNotice(props: { workspaceId: string; path: string }) {
+function TruncatedNotice(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   return (
     <div
       data-testid="truncated-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
       <span>Showing the start of a large file.</span>
-      <button
-        type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
-        className="text-subtle hover:text-ink"
-      >
-        Open the full file externally
-      </button>
+      <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
+        {(describedBy) => (
+          <button
+            type="button"
+            aria-describedby={describedBy}
+            onClick={() => openExternally(props)}
+            className="text-subtle hover:text-ink"
+          >
+            Open the full file externally
+          </button>
+        )}
+      </OpenExternallyControl>
     </div>
   );
 }
@@ -309,6 +312,8 @@ type FileInspectorProps = {
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
   onRetryHeldCapture?: (path: string) => void;
+  // The engine holds a change to this lossy note until someone chooses Edit anyway.
+  changeHeld?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -362,6 +367,8 @@ export const FileInspector = memo(function FileInspector(
     props.path,
     props.engineVersionKey,
   );
+  const currentDocument = useRef(key);
+  currentDocument.current = key;
   const localBuffer = useRetainedLocalDocument(key);
   const fileKind = fileKindForPath(props.path);
   const kind = fileKind.displayKind;
@@ -510,17 +517,27 @@ export const FileInspector = memo(function FileInspector(
   // accepted saving would rewrite: the session seeded from them records them
   // as its source. A session that records another source, as when another
   // pane reloads a change made outside dohc into the shared session, needs
-  // its own check and consent.
-  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null } | null>(null);
+  // its own check and consent. So does a session that installs another
+  // state of the file, as a restore does. `installs` is the session's count
+  // of those at consent, which is none when consent comes before the session
+  // opens with it.
+  const [editAnyway, setEditAnyway] = useState<{
+    open: string; source: string | null; headSha256: string | null | undefined; installs: number;
+  } | null>(null);
   const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
   const consented = editAnyway?.open === lossyOpen;
+  // Edit anyway covers one save. Once that save commits, the open goes on as
+  // an ordinary checked note in the same editor while the file holds what
+  // this session saved last.
+  const [converted, setConverted] = useState<string | null>(null);
+  const convertedOpen = converted === lossyOpen;
   // A session that binds a different note from the one checked, as when the
   // file changed before the open, closes once its own check says lossy. It
   // stays closed until a read brings other bytes; the session that then
   // opens is checked in turn.
   const [sessionLossy, setSessionLossy] = useState<{ open: string; hash: string | null } | null>(null);
   const sessionRefused = sessionLossy?.open === lossyOpen && (contentHash === null || sessionLossy.hash === contentHash);
-  const allowed = consented ? "clear" : sessionRefused ? "lossy" : checked.state;
+  const allowed = consented || convertedOpen ? "clear" : sessionRefused ? "lossy" : checked.state;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -532,27 +549,50 @@ export const FileInspector = memo(function FileInspector(
       (large ? allowed !== "lossy" : allowed === "clear") &&
       !props.readOnly,
     kind: liveDocumentKind ?? undefined,
+    allowLossySourceSha256: consented && editAnyway?.source ? editAnyway.source : undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
     accessEnded: props.accessEnded,
   });
   useEffect(() => setBound(engine.available), [engine.available]);
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
-  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source);
+  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source)
+    && (!engine.available || (engine.headSha256 === editAnyway.headSha256
+      && engine.pairedInstalls === editAnyway.installs));
+  // This session saved over the source the person accepted with nothing
+  // installed in between, and the doc is still that save's: nothing
+  // installed since, or a read of the head it wrote. The note still records
+  // that source, or the engine has since cleared it.
+  const saved = engine.lastSave;
+  const conversionCommitted = consented && !editingAnyway && saved !== null
+    && saved.pairedInstalls === editAnyway.installs
+    && (engine.pairedInstalls === saved.pairedInstalls || engine.headSha256 === saved.sha256)
+    && (boundSource === editAnyway.source || boundSource === undefined);
+  const session = useBoundNoteCheck({
+    open: lossyOpen,
+    // Edit anyway already accepted what saving does. Received shares, the only
+    // sessions with a null head, never offer it, so their source changes stay checked.
+    doc: checksLossyNote && !editingAnyway ? engine.doc : null,
+    headSha256: engine.headSha256,
+  });
   useEffect(() => {
-    if (consented && !editingAnyway) {
+    if (conversionCommitted) {
+      setEditAnyway(null);
+      setSessionLossy(null);
+      setConverted(lossyOpen);
+    } else if (consented && !editingAnyway && engine.headSha256 !== undefined) {
+      // A head that is unknown waits for the state it pairs with.
       setEditAnyway(null);
       // The shared session has other bytes. Read them before asking again.
       setStaleConsentRead({ open: lossyOpen, seq: readSeq });
       refreshAfterConflict();
+    } else if (convertedOpen && (session === "lossy"
+      || (engine.headSha256 !== undefined && engine.headSha256 !== engine.lastSave?.sha256))) {
+      // The file changed outside dohc. Its own check decides from here.
+      setConverted(null);
     }
-  }, [consented, editingAnyway, lossyOpen, readSeq, refreshAfterConflict]);
-  const session = useBoundNoteCheck({
-    open: lossyOpen,
-    // Edit anyway already accepted what saving does.
-    doc: checksLossyNote && !editingAnyway ? engine.doc : null,
-    checkedHash: checked.checkedHash,
-  });
+  }, [consented, editingAnyway, conversionCommitted, convertedOpen, session,
+    engine.headSha256, engine.lastSave, lossyOpen, readSeq, refreshAfterConflict]);
   useEffect(() => {
     if (session === "lossy") setSessionLossy({ open: lossyOpen, hash: contentHash });
   }, [session, lossyOpen, contentHash]);
@@ -671,7 +711,7 @@ export const FileInspector = memo(function FileInspector(
   const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);
   const truncatedNotice =
     isText && truncated ? (
-      <TruncatedNotice workspaceId={props.workspaceId} path={props.path} />
+      <TruncatedNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
     ) : null;
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
@@ -793,6 +833,7 @@ export const FileInspector = memo(function FileInspector(
           <EngineArtifactAssetsInvalidNotice
             workspaceId={props.workspaceId}
             path={props.path}
+            onError={props.onButtonError}
           />
         ) : null}
         {engine.removalInProgress ? (
@@ -866,7 +907,20 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
-            onEditAnyway={() => setEditAnyway({ open: lossyOpen, source: contentHash })}
+            changeHeld={props.changeHeld}
+            // A shared view's session drops Edit anyway's consent, so a
+            // received share doesn't offer it (#2991).
+            onEditAnyway={props.receivedShare ? undefined : () => {
+              const source = typeof boundSource === "string" ? boundSource : contentHash;
+              setEditAnyway({ open: lossyOpen, source, headSha256: engine.available ? engine.headSha256 : contentHash,
+                installs: engine.available ? engine.pairedInstalls : 0 });
+              if (engine.available && source) {
+                void bridge().retryEngineYDocSave({ workspaceId: props.workspaceId, path: props.path,
+                  allowLossySourceSha256: source }).catch((error: unknown) => {
+                  if (currentDocument.current === key) props.onButtonError?.(lossyNoteRefusal(props.path), error, retryEngineOpen);
+                });
+              }
+            }}
             onRetryHeldCapture={props.captureHeld && props.onRetryHeldCapture ? () => props.onRetryHeldCapture?.(props.path) : undefined}
             onRetryEngineOpen={retryEngineOpen}
             onReloadChangedOutside={reloadChangedOutside}
@@ -902,6 +956,7 @@ export const FileInspector = memo(function FileInspector(
           onRetryEngineOpen={retryEngineOpen}
           presenceFactory={props.drawingCollaboration}
           localBuffer={localBuffer}
+          onButtonError={props.onButtonError}
         />
       );
     case "csv":
@@ -999,7 +1054,7 @@ export const FileInspector = memo(function FileInspector(
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
-            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
           </EmptyState>
         </div>
       );
@@ -1037,7 +1092,7 @@ export const FileInspector = memo(function FileInspector(
           <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
-            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
           </EmptyState>
         </div>
       );

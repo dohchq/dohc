@@ -165,7 +165,7 @@ it("checks the deletion review scope, token, acknowledgment and returned identit
 it("does not fall back to a transferred local dataset when deletion is unavailable remotely", async () => {
   const local = {deleteDataset:vi.fn(),deletePreview:vi.fn()} as unknown as OwnerDatasetData;
   const remote = {deleteDataset:vi.fn(async()=>{throw Error("offline");}),deletePreview:vi.fn(async()=>{throw Error("offline");})} as unknown as OwnerDatasetData;
-  const data = createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
+  const data = createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),marker:()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
   await expect(data.deletePreview!({datasetId:id(1)})).rejects.toThrow("offline");
   await expect(data.deleteDataset!({datasetId:id(1),expected:approved.cursor,reviewToken:"c".repeat(64),acknowledge:true})).rejects.toThrow("offline");
   expect(local.deletePreview).not.toHaveBeenCalled(); expect(local.deleteDataset).not.toHaveBeenCalled();
@@ -201,7 +201,7 @@ it.each(["delete", "status"])("bounds %s confirmation by timeout even with an ex
 it("omits only confirmed remote deletions from the transfer catalog and keeps failures visible", async () => {
   const local={list:vi.fn(async()=>({datasets:[description],nextCursor:null}))} as unknown as OwnerDatasetData;
   const remote={deletionStatus:vi.fn(async()=>({deleted:true})),describe:vi.fn(async()=>description)} as unknown as OwnerDatasetData;
-  const data=createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
+  const data=createDatasetAuthorityRouter(local,{status:async()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),marker:()=>({state:"imported",receipt:{},targetOrigin:"https://relay"} as never),remote:async()=>remote});
   expect(await data.list({})).toEqual({datasets:[],nextCursor:null}); expect(remote.describe).not.toHaveBeenCalled();
   expect(await data.deletionStatus!({datasetId:id(1)})).toEqual({deleted:true});
   vi.mocked(remote.deletionStatus!).mockResolvedValue({deleted:false});

@@ -1,12 +1,74 @@
 import { expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { WebSocket } from "ws";
-import { EngineClient,FrameDecoder,FrameType,encodeFrame } from "@dohc/workspace-engine-client/daemon";
+import { EngineClient,EngineRequestError,FrameDecoder,FrameType,encodeFrame } from "@dohc/workspace-engine-client/daemon";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { DeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { startExistingOwnerDeviceTransport } from "./deviceExistingOwnerTransport.js";
 import type {NativeRestoreFence} from "./liveRestoreFence.js";
+
+it.each(["markdown-write-held", "markdown-witness-check-pending"])("keeps simultaneous change and consent wakes on the connection after %s", async reason => {
+  const messages: Record<string, unknown>[] = [];
+  const decoder = new FrameDecoder(1_048_576, 256 * 1024);
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const ws = {readyState: 1, bufferedAmount: 0, send(bytes: Buffer, options: {binary: boolean}, done: () => void) {
+    if (options.binary) decoder.push(bytes, frame => { messages.push(JSON.parse(frame.payload.toString())); });
+    else if (JSON.parse(bytes.toString()).type === "liveHost.transport") started();
+    done();
+  }} as unknown as WebSocket;
+  const limits = {maxPayloadBytes: 4096, maxPendingBytes: 2_000_000} as DeviceControlLimits;
+  const start = {type: "liveHost.start" as const, version: 1 as const, relayNamespace: "namespace", authToken: "A".repeat(43),
+    host: {hostId: "host", hostEpoch: parseHostEpoch(1), instanceId: "instance", connectionId: "connection"}, receive: limits};
+  const changes = new Set<() => void>(), settlements = new Set<() => void>();
+  const owner = {nativeSessionId: "owner-session", assertCurrent: vi.fn(),
+    onDurableLocalChange(listener: () => void) { changes.add(listener); return () => changes.delete(listener); },
+    onSettlementWanted(listener: () => void) { settlements.add(listener); return () => settlements.delete(listener); },
+    prepareHandoff: vi.fn(async () => undefined), finishHandoff: vi.fn(async () => undefined), remoteApplied: vi.fn(async () => undefined)};
+  const native = vi.fn<EngineClient["sendRequest"]>(async request => {
+    if (request.method === "liveApplication.settle") throw new EngineRequestError(request.id, {code: "CONFLICT", message: reason, retry: "no"});
+    return {id: request.id, result: request.method === "liveApplication.register" ? {registrationId: 9}
+      : {adoptionId: "adoption", expectedLocalSequence: 2, throughCursor: 1, outboxId: null, pendingBytes: 0, outboxState: null, retryDeliveryId: null}};
+  });
+  const stop = vi.fn();
+  const transport = startExistingOwnerDeviceTransport({config: {
+    client: {ready: async () => undefined, sendRequest: native} as unknown as EngineClient,
+    workspaces: [{workspaceId: "workspace", workspaceHandle: "handle"}], ownerFor: async () => owner,
+    maxQueuedBytes: 2_000_000, maxFrameBytes: 1_048_576, maxUploads: 2, maxRegistrations: 1, aggregateBytes: 200_000_000,
+    maxAdoptionBytes: 1_000_000, maxAdoptionEvents: 10, requestDeadlineMs: 30_000,
+  }, start, ws, limits, stop});
+  const send = (value: object) => transport.receive(encodeFrame(FrameType.Control, 0, Buffer.from(JSON.stringify(value)), 1_048_576));
+  const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+    currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
+  const events = () => messages.filter(message => message.type === "event");
+  try {
+    await ready;
+    send({type: "hello", protocolVersion: 2, authToken: start.authToken, capabilities: ["blobs"], maxFrameBytes: 1_048_576, lastSessionGeneration: null});
+    send({type: "request", id: 1, method: "liveApplication.register", workspace: "handle", params: {binding, resumeAdoptionId: "adoption"}});
+    await expect.poll(() => events().length).toBe(1);
+    expect(events()[0]).toMatchObject({name: "liveApplication.ownerOutboxChanged"});
+    messages.length = 0;
+    for (const listener of changes) listener();
+    for (const listener of settlements) listener();
+    await expect.poll(() => events().map(event => event.name)).toEqual([
+      "liveApplication.ownerOutboxChanged", "liveApplication.settlementWanted",
+    ]);
+    expect(events().map(event => event.payload)).toEqual([{registrationId: 9, binding}, {registrationId: 9, binding}]);
+    send({type: "request", id: 2, method: "liveApplication.settle", workspace: "handle", params: {registrationId: 9, terminalReceipt: null}});
+    await expect.poll(() => messages.find(message => message.id === 2)).toMatchObject({type: "response", result: {status: "pending", reason}});
+    expect(native.mock.calls.find(([request]) => request.method === "liveApplication.settle")?.[0].params)
+      .toEqual({registrationId: 9, terminalReceipt: null, ownerSessionId: "owner-session"});
+    expect(stop).not.toHaveBeenCalled();
+    // A later request uses the same connection and registration.
+    send({type: "request", id: 3, method: "liveApplication.register", workspace: "handle", params: {binding}});
+    await expect.poll(() => messages.find(message => message.id === 3)).toMatchObject({type: "response", result: {registrationId: 9}});
+    expect(native.mock.calls.filter(([request]) => request.method === "liveApplication.register")).toHaveLength(1);
+    expect(stop).not.toHaveBeenCalled();
+  } finally { await transport.close(); }
+  expect(changes.size).toBe(0);
+  expect(settlements.size).toBe(0);
+});
 
 it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])("releases cancelled %s capacity while its response is still backpressured",async method => {
   const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise,resolve};};
@@ -28,7 +90,7 @@ it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])
   const limits = {maxPayloadBytes:4096,maxPendingBytes:2_000_000} as DeviceControlLimits;
   const start = {type:"liveHost.start" as const,version:1 as const,relayNamespace:"namespace",authToken:"A".repeat(43),
     host:{hostId:"host",hostEpoch:parseHostEpoch(1),instanceId:"instance",connectionId:"connection"},receive:limits};
-  const owner = {nativeSessionId:"session",onDurableLocalChange: () => () => undefined,assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
+  const owner = {nativeSessionId:"session",onSettlementWanted: () => () => undefined,onDurableLocalChange: () => () => undefined,assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
     finishHandoff:vi.fn(async (_adopted:boolean) => undefined),remoteApplied:vi.fn(async () => undefined)};
   let stale = false;
   const staleOwner = {...owner,nativeSessionId:"stale-session",assertCurrent:vi.fn(() => {if (stale) throw new Error("Owner session retired.");})};
@@ -108,7 +170,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
   const relaySocket = { readyState: 1,bufferedAmount: 0,send(bytes: Buffer,options: {binary: boolean},done: () => void) {
     queueMicrotask(() => { if (options.binary) transport.receive(bytes); else transport.credit(JSON.parse(bytes.toString()).receivedBytes); done(); });
   } } as unknown as WebSocket;
-  const owner = { nativeSessionId: "ordinary-session",onDurableLocalChange: () => () => undefined,assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async (_update: Uint8Array) => undefined) };
+  const owner = { nativeSessionId: "ordinary-session",onSettlementWanted: () => () => undefined,onDurableLocalChange: () => () => undefined,assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async (_update: Uint8Array) => undefined) };
   const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}): Promise<{result: Record<string,unknown>}> => ({ result:
     request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null,retryDeliveryId: null } })),
     forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })),
@@ -139,7 +201,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     }));
     const adopt = (id: number) => peer!.sendLiveOwnerAdoption({id,workspace: "ws-ordinary",registrationId: 9,sessionId: "9",deadlineMs: 30_000},
       { relayDatabaseNamespace: "namespace",adoptionId: "adoption",sourceMomentId: "source",sourceDigest: "b".repeat(64),sourceByteLength: 0,baselineMomentRelaySequence: 1,
-        baselineRegisteredAtMs: 0,expectedLocalSequence: 0,terminalReceipt: null,baselineBytes: new Uint8Array([0,0]),events: [] },{maxBytes: 1_000_000,maxEvents: 10});
+        baselineRegisteredAtMs: 0,expectedLocalSequence: 0,terminalReceipt: null,retainedPrefix: null,baselineBytes: new Uint8Array([0,0]),events: [] },{maxBytes: 1_000_000,maxEvents: 10});
     const firstAdoption = adopt(6);
     await expect.poll(() => singleton.forwardLiveOwnerAdoption.mock.calls.length).toBe(1);
     const beforeDuplicate = owner.finishHandoff.mock.calls.length;
@@ -193,6 +255,18 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
     expect((await peer!.sendRequest({id: 13,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}})).result).toEqual({status: "fenced",receipt});
     expect(ownerFor).toHaveBeenCalledTimes(acquired);
+    // A Decline's cancellation names only this fencing host, and only an answer for its document returns.
+    const cancellation = {operationId: "stop",objectId: "object",lineageClaimId: "a".repeat(64),hostId: "host",newFence: 2};
+    const cancelled = {status: "cancelled",hostId: "host",generation: 1,binding};
+    const cancel = (id: number, params: object) => peer!.sendRequest({id,method: "liveApplication.cancelRestoreFence",workspace: "ws-ordinary",params: params as never});
+    const beforeCancel = singleton.sendRequest.mock.calls.length;
+    await expect(cancel(40,{...cancellation,hostId: "foreign"})).rejects.toThrow();
+    expect(singleton.sendRequest).toHaveBeenCalledTimes(beforeCancel);
+    singleton.sendRequest.mockResolvedValueOnce({result: {...cancelled,binding: {...binding,objectId: "other"}}});
+    await expect(cancel(41,cancellation)).rejects.toThrow();
+    singleton.sendRequest.mockResolvedValueOnce({result: cancelled});
+    expect((await cancel(42,cancellation)).result).toEqual(cancelled);
+    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "liveApplication.cancelRestoreFence",params: cancellation});
     const pending = await peer!.sendRequest({id: 14,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "adoption"}});
     expect(pending.result).toMatchObject({status: "pending"});
     expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);
@@ -215,6 +289,9 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {entries: []}});
     await peer!.sendRequest({id: 21,method: "liveApplication.readOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}});
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.readPending",params: {outboxId: "outbox"}});
+    singleton.sendRequest.mockResolvedValueOnce({result: {acknowledged: 0,pendingBytes: 0,oldestEntryAtMs: null}});
+    await peer!.sendRequest({id: 32,method: "liveApplication.acknowledgeOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,receipts: []}});
+    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.acknowledge",params: {outboxId: "outbox",receipts: []}});
     // A refusal carries the head it refused and its key, so native records it once.
     const refused = {deliveryId: "delivery-1",refusalKey: "refusal-1"}, refusal = {deliveryId: "delivery-1",key: "refusal-1"};
     singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
@@ -271,7 +348,7 @@ it("admits one registration per binding while an owner lookup waits, and counts 
   const limits = {maxPayloadBytes:4096,maxPendingBytes:2_000_000} as DeviceControlLimits;
   const start = {type:"liveHost.start" as const,version:1 as const,relayNamespace:"namespace",authToken:"A".repeat(43),
     host:{hostId:"host",hostEpoch:parseHostEpoch(1),instanceId:"instance",connectionId:"connection"},receive:limits};
-  const owner = {nativeSessionId:"session",onDurableLocalChange: () => () => undefined,assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
+  const owner = {nativeSessionId:"session",onSettlementWanted: () => () => undefined,onDurableLocalChange: () => () => undefined,assertCurrent:vi.fn(),prepareHandoff:vi.fn(async () => undefined),
     finishHandoff:vi.fn(async (_adopted:boolean) => undefined),remoteApplied:vi.fn(async () => undefined)};
   const ownerFor = vi.fn(async () => {looking.resolve(); await lookup.promise; return owner;});
   let nextId = 0;

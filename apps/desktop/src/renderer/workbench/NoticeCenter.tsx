@@ -1,8 +1,10 @@
 import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
+import { onOverlayOpen } from "../overlayStack";
 import { createPortal } from "react-dom";
+import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
@@ -16,18 +18,17 @@ import { RELAY_API_VERSION_CAUSE } from "@dohc/workspace-contracts/relay";
 import { SectionLabel } from "../ui/controls";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
-import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
-import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
-import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
+import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
 
 export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  busy?: boolean;
 };
 
 export type Notice = {
@@ -55,12 +56,13 @@ export type Notice = {
   command?: string;
   // Closes the notice's toast once its row is read. The row stays.
   onRead?: () => void;
+  read?: boolean;
   Icon: typeof Bell;
 };
 
 // A workspace error the shell reported. `details` is the report Copy puts
 // on the clipboard; `seen` means its toast was closed and only the row in
-// Notices remains.
+// Notices remains. `read` means the row was read, not only its toast closed.
 export interface WorkspaceErrorNotice {
   copyLabel?: string;
   // Omitted for a failure. A warning needs the person, though nothing failed.
@@ -71,14 +73,20 @@ export interface WorkspaceErrorNotice {
   title?: string;
   message: string;
   lastLine?: string;
+  // A terminal command the message asks the person to run, shown with its copy.
+  command?: string;
   details: string;
   filePaths?: readonly string[];
   atMs: number;
   canRetry: boolean;
+  retryBusy?: boolean;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
   additionalActionLabels?: string[];
   seen: boolean;
+  read?: boolean;
+  // The row has no Dismiss: it stays until its action runs.
+  noDismiss?: boolean;
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
@@ -100,8 +108,9 @@ export interface SentNotice {
   folder: string | null;
   // Open has somewhere to go, or something to say about why it cannot.
   openable: boolean;
-  // A failed run on the owner's self-hosted server, in this workspace: Try
-  // again runs it there.
+  // Try again has a run to start again: a failed run on the owner's
+  // self-hosted server in this workspace, or an agent run on this computer
+  // that dohc's restart or quit stopped.
   retryable: boolean;
 }
 
@@ -115,10 +124,14 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
-// A failed automation run, or an agent run that says why it didn't start. Its
+// A failed automation run, or an agent run that says why it didn't reply. Its
 // toast shows the body and stays until closed, and Copy sits beside its text.
 const isFailure = (notice: NoticeRow): boolean =>
-  notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+  notice.kind === "markdown-write-held" || notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+
+// A held change to a lossy note, from another workspace. dohc held it on
+// purpose, so it shows as a warning, not a failure.
+const isHeld = (notice: NoticeRow): boolean => notice.kind === "markdown-write-held";
 
 // What Copy puts on the clipboard for a failed run's notice. The notice store
 // already bounds the body, so Copy keeps all of the text the person sees.
@@ -186,10 +199,14 @@ const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string
 // Arrow keys move between rows; a row is any element marked with this.
 const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
-  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
+  "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 dohc-focus-row";
 // A row's first line is as tall as its tallest control, so a title that
-// wraps leaves its controls where they were.
+// wraps leaves its controls where they were. It holds only icon controls;
+// worded actions get a line under the text, so they never squeeze the title.
 const ROW_CONTROLS_CLASS = "ml-auto flex h-6 shrink-0 items-center gap-2";
+const ROW_ACTIONS_CLASS = "-ml-1.5 mt-1 flex flex-wrap items-center gap-1";
+const ROW_ACTION_CLASS =
+  "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 aria-busy:opacity-50";
 
 // A row counts as read once the pointer or keyboard focus rests on it this
 // long: longer than crossing a row on the way to another, about when a
@@ -408,12 +425,20 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
-  // The server's copy misses an edit made while live editing was off, and
-  // nothing the owner does in dohc fixes that yet, so nothing offers a Resume.
+  // The server's copy is missing an owner edit. Resume in Live documents
+  // retries it, as it does for a refused document.
   if (reason === "live-edit-unadmitted") {
     return {
+      title: "Live editing stopped",
+      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
+  if (reason === "conflict-parent-withheld") {
+    return {
       title: "Live editing can't resume",
-      body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };
@@ -428,10 +453,27 @@ function liveDeliveryCopy(
   }
   return {
     title: "Live editing retrying",
-    body: "dohc is retrying live editing for this workspace. Your edits are saved on this device.",
+    body: "Your edits are saved on this device.",
     recovery: "retry",
     Icon: RefreshCw,
   };
+}
+
+// A retry dohc is still fixing by itself toasts and adds a row only once its
+// ring has shown in the title bar this long.
+const QUIET_RETRY_MS = 15_000;
+
+// Whether `key` has stayed the same, and not null, for `ms`. A key that
+// changes or clears starts the wait again.
+function useLasted(key: string | null, ms: number): boolean {
+  const [lasted, setLasted] = useState<string | null>(null);
+  if (lasted !== null && lasted !== key) setLasted(null);
+  useEffect(() => {
+    if (key === null || ms === 0) return;
+    const timer = setTimeout(() => setLasted(key), ms);
+    return () => clearTimeout(timer);
+  }, [key, ms]);
+  return key !== null && (ms === 0 || lasted === key);
 }
 
 // Owner live enrollment refusals: one workspace fact, however many shares it
@@ -477,11 +519,13 @@ function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode
 // Toasts sit above every dialog and its scrim (z-30, warning z-50), so a
 // failure in a dialog is seen where it happens. A dialog keeps its actions
 // clear of them with scroll room (Overlay), and F6 reaches them from the
-// dialog's focus trap (modalFocus). Their rows stay in Notices.
+// dialog's focus trap (modalFocus). Their rows stay in Notices, which opens
+// on the same layer.
+// A chat's message box raises them above it (toastClearance).
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
+  rail: "fixed bottom-[calc(var(--dohc-composer-room,0px)+0.75rem)] right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-60 flex flex-col items-end gap-2",
+  corner: "fixed bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))] right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -547,6 +591,15 @@ export function WorkspaceErrorToast(props: {
           <div className="min-w-0 flex-1 select-text">
             <div className="flex min-w-0">{text.title}</div>
             {text.body}
+            {error.command ? (
+              <div className="mt-1 flex min-w-0 items-start gap-1">
+                <code data-testid="workspace-shell-toast-command" className="min-w-0 flex-1 select-text break-all font-mono text-[11px] text-muted">
+                  {error.command}
+                </code>
+                <CopyButton iconOnly pinName label="Copy command" testId="workspace-shell-toast-command-copy"
+                  getText={() => error.command ?? ""} />
+              </div>
+            ) : null}
           </div>
         )}
       </NoticeText>
@@ -572,14 +625,16 @@ export function WorkspaceErrorToast(props: {
         <button
           type="button"
           data-testid="workspace-shell-error-retry"
+          disabled={error.retryBusy}
+          aria-busy={error.retryBusy || undefined}
           onClick={() => props.onRetry?.(error.id)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
         >
           Try again
         </button>
       ) : null}
       </div> : null}
-      {error.filePaths === undefined || error.filePaths.length > 0 ? <CopyButton
+      {error.tone !== "success" && (error.filePaths === undefined || error.filePaths.length > 0) ? <CopyButton
         key={error.id}
         iconOnly
         pinName
@@ -637,17 +692,6 @@ export function LocalNoticeRow(props: {
             <div className="flex min-w-0 items-start gap-2">
               {text.title}
               <span className={ROW_CONTROLS_CLASS}>
-                {(notice.actions ?? []).map((action) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    disabled={action.disabled}
-                    onClick={() => props.onAction(action)}
-                    className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                  >
-                    {action.label}
-                  </button>
-                ))}
                 {notice.copyText !== undefined && !notice.filePaths?.length ? (
                   <CopyButton
                     iconOnly
@@ -692,6 +736,22 @@ export function LocalNoticeRow(props: {
                 ) : null}
               </div>
             ) : null}
+            {notice.actions?.length ? (
+              <div className={ROW_ACTIONS_CLASS}>
+                {notice.actions.map((action) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    disabled={action.disabled}
+                    aria-busy={action.busy || undefined}
+                    onClick={() => props.onAction(action)}
+                    className={ROW_ACTION_CLASS}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             {notice.timeMs !== undefined ? (
               <time
                 dateTime={new Date(notice.timeMs).toISOString()}
@@ -716,6 +776,9 @@ export function NoticeCenter(props: {
   // activity bar.
   host?: NoticeHostPlacement;
   syncStatus: SyncStatusResult | null;
+  // Files in this workspace whose save failed. The title bar names them
+  // ahead of a disconnected server.
+  failedSaves?: number;
   agentActive: boolean;
   conflictSummaries: string[];
   onOpenHistory: () => void;
@@ -728,9 +791,6 @@ export function NoticeCenter(props: {
   // shell owns the dialog and the move; the notice only announces the
   // refusal and offers the way in.
   onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
-  // Opens the restart confirmation for a ready update. Without it the
-  // notice center installs directly.
-  onRestartToUpdate?: () => void;
   // Workspace errors the shell reported. Newest first in the list; the
   // newest unseen one is also a toast, so an error is noticed without
   // pushing the workspace around.
@@ -738,6 +798,8 @@ export function NoticeCenter(props: {
   onRetryWorkspaceError?: (id: string) => void;
   onWorkspaceErrorAction?: (id: string, index?: number) => void;
   onHideWorkspaceError?: (id: string) => void;
+  // Told when an error's row is read. Closing its toast doesn't read it.
+  onReadWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
   // Told each time an error's toast comes on screen.
   onWorkspaceErrorShown?: (id: string) => void;
@@ -802,11 +864,12 @@ export function NoticeCenter(props: {
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
-  useFocusReturn(open, centerRef, () => toggleRef.current);
-  // A toast removed under focus hands it back to the open dialog, if there is
-  // one, at the control F6 left from: the toggle sits behind the dialog,
-  // outside its focus trap.
-  useFocusSurface(toastsRef, () => modalReturnTarget() ?? toggleRef.current);
+  // The panel or a toast removed under focus hands it back to the open dialog,
+  // if there is one, at the control F6 left from: the toggle sits behind the
+  // dialog, outside its focus trap.
+  const returnTarget = () => modalReturnTarget() ?? toggleRef.current;
+  useFocusReturn(open, centerRef, returnTarget);
+  useFocusSurface(toastsRef, returnTarget);
   // How far the toasts reach up from the window's bottom edge: the room an
   // open dialog leaves below its content (Overlay). None while none show.
   useLayoutEffect(() => {
@@ -820,8 +883,11 @@ export function NoticeCenter(props: {
     measure();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(stack);
+    // A chat's message box moves the stack without resizing it.
+    const stopRoom = onComposerRoomChange(measure);
     return () => {
       observer?.disconnect();
+      stopRoom();
       root.style.removeProperty("--dohc-toast-room");
     };
   }, [open]);
@@ -915,7 +981,7 @@ export function NoticeCenter(props: {
       }
       if (controller.signal.aborted) return;
       if (note === null) {
-        toggleRef.current?.focus({ preventScroll: true });
+        (modalReturnTarget() ?? toggleRef.current)?.focus({ preventScroll: true });
         setOpen(false);
         return;
       }
@@ -924,17 +990,6 @@ export function NoticeCenter(props: {
     },
     [cancelOpen, onOpenSentNotice, sentAccount],
   );
-  const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
-    string | null
-  >(null);
-  const [updateActionError, setUpdateActionError] = useState<string | null>(null);
-  const [installPending, setInstallPending] = useState(false);
-  const { updateState: desktopUpdateState, acceptUpdateResult } =
-    useDesktopUpdateStateFeed((update) => {
-      setUpdateActionError(update.status === "error" ? update.message : null);
-    });
-  const updateState =
-    desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
 
   // Closing the toast keeps the row. A newer problem is a new revision, so
   // its toast shows again.
@@ -943,27 +998,33 @@ export function NoticeCenter(props: {
   const crashToastVisible =
     crashReport !== null && crashReport.revision !== closedCrashRevision;
 
-  const readyUpdateKey =
-    updateState?.status === "ready"
-      ? `${updateState.version ?? "unknown"}:${updateState.message}`
-      : null;
-
   // Derived from the status, never accumulated: a snapshot that repeats
   // itself renders the same notice, and delivery that recovers to active (or
   // reports nothing at all) leaves no notice and no toast behind.
   // The workspace is part of the key: a dismissal answers one workspace's
-  // failure, so the same failure in another workspace is still news.
+  // failure, so the same failure in another workspace is still news. While
+  // the title bar names the server, the server's own toast and row report
+  // the outage, so live editing files nothing and its open toast closes.
+  // A retry with no reason waits QUIET_RETRY_MS, counted from when its ring
+  // shows; a named reason stays until someone acts, so it shows at once.
   const liveDeliveryReason = props.syncStatus?.ownerLiveDeliveryReason;
-  const liveDeliveryKey =
+  const liveRetryKey =
     props.syncStatus?.ownerLiveDelivery === "retrying"
       ? `${props.workspaceId}:retrying:${liveDeliveryReason ?? "transient"}`
       : null;
+  const serverNamed = titleBarNamesServer(props.syncStatus, props.failedSaves ?? 0);
+  const liveDeliveryKey = useLasted(
+    serverNamed ? null : liveRetryKey,
+    liveDeliveryReason ? 0 : QUIET_RETRY_MS,
+  )
+    ? liveRetryKey
+    : null;
   const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
     string | null
   >(null);
   // Recovery forgets the dismissal, so the next failure is announced again
   // instead of staying silent behind an answer about an older one.
-  if (liveDeliveryKey === null && dismissedLiveDeliveryKey !== null) {
+  if (liveRetryKey === null && dismissedLiveDeliveryKey !== null) {
     setDismissedLiveDeliveryKey(null);
   }
   // Keyed, so an unchanged status keeps one copy object: the notice list and
@@ -973,7 +1034,7 @@ export function NoticeCenter(props: {
     [liveDeliveryKey, liveDeliveryReason],
   );
   // One report for the row and the toast, so a person who copies from either
-  // pastes the same facts — including when this state was first observed.
+  // pastes the same facts — including when the notice was raised.
   const liveDeliveryDetails = useMemo(
     () =>
       liveDelivery
@@ -1056,31 +1117,6 @@ export function NoticeCenter(props: {
   );
   const { onOpenSharingDeclined } = props;
 
-  const installUpdate = useCallback(async () => {
-    if (installPending) return;
-    try {
-      setInstallPending(true);
-      // Through the guard: with set-aside drafts
-      // present the recovery dialog opens instead of the one-shot install,
-      // and its confirm makes the only quitAndInstall call.
-      const result = await requestGuardedUpdateInstall();
-      if (result === null) return;
-      acceptUpdateResult(result.state);
-      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
-      if (!result.accepted || result.state.status === "error") {
-        setUpdateActionError(
-          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
-        );
-      } else {
-        setUpdateActionError(null);
-      }
-    } catch {
-      setUpdateActionError("Could not restart into the update.");
-    } finally {
-      setInstallPending(false);
-    }
-  }, [acceptUpdateResult, installPending]);
-
   useEffect(() => {
     if (!open) return;
 
@@ -1092,7 +1128,12 @@ export function NoticeCenter(props: {
     };
 
     document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
+    // Opening a dialog closes Notices: the person chose the dialog.
+    const stopOnOverlayOpen = onOverlayOpen(() => setOpen(false));
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      stopOnOverlayOpen();
+    };
   }, [open]);
 
   const notices = useMemo<Notice[]>(() => {
@@ -1127,7 +1168,7 @@ export function NoticeCenter(props: {
         title: crashReport.title,
         body: crashReport.body,
         ...(props.onSendCrashReport
-          ? { action: { label: "Send report", onClick: props.onSendCrashReport } }
+          ? { actions: [{ label: "Send report", onClick: props.onSendCrashReport }] }
           : {}),
         ...(props.onDismissCrashReport ? { onDismiss: props.onDismissCrashReport } : {}),
         onRead: () => setClosedCrashRevision(crashReport.revision),
@@ -1150,6 +1191,7 @@ export function NoticeCenter(props: {
         title: error.title ?? error.message,
         body: error.title ? error.message : "",
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
+        ...(error.command ? { command: error.command } : {}),
         actions: [
           ...(error.actionLabel && props.onWorkspaceErrorAction
             ? [{
@@ -1164,17 +1206,24 @@ export function NoticeCenter(props: {
             ? [{
                 label: "Try again",
                 onClick: () => props.onRetryWorkspaceError?.(error.id),
+                disabled: error.retryBusy,
+                busy: error.retryBusy,
               }]
             : []),
         ],
-        ...(props.onDismissWorkspaceError
+        ...(props.onDismissWorkspaceError && !error.noDismiss
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
-        ...(!error.seen && props.onHideWorkspaceError
-          ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
+        ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)
+          ? { onRead: () => {
+            if (!error.seen) props.onHideWorkspaceError?.(error.id);
+            if (!error.read) props.onReadWorkspaceError?.(error.id);
+          } }
           : {}),
+        read: error.read === true,
         timeMs: error.atMs,
-        copyText: error.filePaths?.length === 0 ? undefined : error.details,
+        // A success has nothing to report, so it has nothing to copy.
+        copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,
         copyLabel: error.copyLabel ?? (error.tone === "warning" ? "Copy notice details" : undefined),
         filePaths: error.filePaths,
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
@@ -1409,38 +1458,6 @@ export function NoticeCenter(props: {
       });
     }
 
-    if (updateState?.status === "ready") {
-      next.push({
-        id: "update-ready",
-        tone: "neutral",
-        title: "Update ready",
-        body: updateActionError ?? updateState.message,
-        ...(updateState.installCommand ? { command: updateState.installCommand } : {}),
-        ...(updateState.canInstall
-          ? {
-              actions: [{
-                label: installPending ? "Restarting" : "Restart",
-                onClick: () => {
-                  if (props.onRestartToUpdate) props.onRestartToUpdate();
-                  else void installUpdate();
-                },
-                disabled: installPending,
-              }],
-            }
-          : {}),
-        Icon: Download,
-      });
-    } else if (updateActionError) {
-      next.push({
-        id: "update-error",
-        tone: "danger",
-        title: "Update failed",
-        body: updateActionError,
-        actions: [{ label: "Open Settings", onClick: props.onOpenSettings }],
-        Icon: AlertTriangle,
-      });
-    }
-
     return next;
   }, [
     crashReport,
@@ -1460,6 +1477,7 @@ export function NoticeCenter(props: {
     props.onWorkspaceErrorAction,
     props.onDismissWorkspaceError,
     props.onHideWorkspaceError,
+    props.onReadWorkspaceError,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onRefreshShareView,
@@ -1479,10 +1497,6 @@ export function NoticeCenter(props: {
     onOpenLiveDocuments,
     refusalsDetails,
     refusalsKey,
-    installPending,
-    installUpdate,
-    updateActionError,
-    updateState,
   ]);
 
   // Set-aside drafts count as one notice: they may belong to paths
@@ -1511,13 +1525,9 @@ export function NoticeCenter(props: {
       return kept.length === current.size ? current : new Set(kept);
     });
   }, [notices, props.workspaceId, setAsideKey]);
-  const unreadNotices = notices.filter((notice) => !localRead.has(localReadKey(props.workspaceId, notice)));
+  const unreadNotices = notices.filter((notice) => !notice.read && !localRead.has(localReadKey(props.workspaceId, notice)));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
-  // The update toast closes once its row is read.
-  const updateRow = notices.find((notice) => notice.id === "update-ready" || notice.id === "update-error");
-  const updateToastVisible = updateRow !== undefined && unreadNotices.includes(updateRow) &&
-    (updateActionError !== null || readyUpdateKey !== dismissedUpdateToastKey);
   // Every row counts until it is read.
   const count = unreadLocal + unreadSent;
   const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
@@ -1656,7 +1666,7 @@ export function NoticeCenter(props: {
     next?.focus();
   };
   const runLocalAction = (action: NoticeAction) => {
-    toggleRef.current?.focus({ preventScroll: true });
+    returnTarget()?.focus({ preventScroll: true });
     action.onClick();
     setOpen(false);
   };
@@ -1690,10 +1700,12 @@ export function NoticeCenter(props: {
           {sentToast ? (
             <div
               data-testid="sent-notice-toast"
-              role={sentToastFades ? "status" : "alert"}
+              role={sentToastFades || isHeld(sentToast.notice) ? "status" : "alert"}
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <SenderMark kind={sentToast.notice.senderKind} />
+              {isHeld(sentToast.notice)
+                ? <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+                : <SenderMark kind={sentToast.notice.senderKind} />}
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
                 {/* About four lines, then it scrolls, so a long reason never
@@ -1725,7 +1737,7 @@ export function NoticeCenter(props: {
                   key={sentToastKey}
                   iconOnly
                   pinName
-                  label="Copy error details"
+                  label={isHeld(sentToast.notice) ? "Copy notice details" : "Copy error details"}
                   testId="sent-notice-toast-copy"
                   getText={() => failureDetails(sentToast.notice)}
                 />
@@ -1740,7 +1752,7 @@ export function NoticeCenter(props: {
                   }}
                   className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >
-                  Open
+                  {isHeld(sentToast.notice) ? "Open note" : "Open"}
                 </button>
               ) : null}
               {onHideSentNoticeToast ? (
@@ -1916,64 +1928,10 @@ export function NoticeCenter(props: {
               </button>
             </div>
           ) : null}
-          {updateToastVisible ? (
-            <div
-              data-testid="update-toast"
-              role="status"
-              className="dohc-popover dohc-pop-in relative flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              <span className="min-w-0">
-                {updateActionError ?? updateState?.message}
-                {updateState?.installCommand ? (
-                  <code data-testid="update-toast-install-command" className="mt-1 block select-text break-all font-mono text-[11px] text-muted">
-                    {updateState.installCommand}
-                  </code>
-                ) : null}
-              </span>
-              {updateState?.installCommand ? (
-                <CopyButton iconOnly pinName label="Copy command" testId="update-toast-install-command-copy"
-                  getText={() => updateState.installCommand ?? ""} />
-              ) : null}
-              {updateState?.canInstall ? (
-                <button
-                  type="button"
-                  disabled={installPending}
-                  onClick={() => {
-                    if (props.onRestartToUpdate) props.onRestartToUpdate();
-                    else void installUpdate();
-                  }}
-                  className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
-                >
-                  {installPending ? "Restarting" : "Restart"}
-                </button>
-              ) : updateActionError ? (
-                <button
-                  type="button"
-                  onClick={props.onOpenSettings}
-                  className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
-                >
-                  Open Settings
-                </button>
-              ) : null}
-              <button
-                type="button"
-                aria-label="Dismiss update notice"
-                onClick={() => {
-                  setUpdateActionError(null);
-                  if (readyUpdateKey) {
-                    setDismissedUpdateToastKey(readyUpdateKey);
-                  }
-                }}
-                className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-              >
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-          ) : null}
         </div>
       ))}
 
-      {open ? (
+      {open ? inToastLayer(host, (
         <div
           ref={centerRef}
           data-focus-surface="notices"
@@ -1991,7 +1949,14 @@ export function NoticeCenter(props: {
             event.stopPropagation();
             setOpen(false);
           }}
-          className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-20 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
+          onBlur={(event) => {
+            // Focus moved out by Tab, F6 or a dialog's trap closes Notices, as
+            // a press outside does. Focus leaving the window keeps it open.
+            const next = event.relatedTarget;
+            if (!(next instanceof Element) || event.currentTarget.contains(next) || toggleRef.current?.contains(next)) return;
+            setOpen(false);
+          }}
+          className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-60 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
             <Bell size={13} aria-hidden className="text-subtle" />
@@ -2121,7 +2086,9 @@ export function NoticeCenter(props: {
                         >
                           <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
                           <span className="flex h-6 w-4 shrink-0 items-center justify-center">
-                            <SenderMark kind={notice.senderKind} className="shrink-0" />
+                            {isHeld(notice)
+                              ? <AlertTriangle size={14} aria-hidden className="shrink-0 text-warning" />
+                              : <SenderMark kind={notice.senderKind} className="shrink-0" />}
                           </span>
                           <NoticeText
                             title={notice.title}
@@ -2134,44 +2101,11 @@ export function NoticeCenter(props: {
                                 <div className="flex min-w-0 items-start gap-2">
                                   {text.title}
                                   <span className={ROW_CONTROLS_CLASS}>
-                                    {runNow ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-run-now`}
-                                        aria-busy={running || undefined}
-                                        disabled={runningKey !== null}
-                                        onClick={runNow}
-                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                                      >
-                                        {running ? "Starting…" : "Run now"}
-                                      </button>
-                                    ) : null}
-                                    {retry ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-retry`}
-                                        onClick={retry}
-                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                                      >
-                                        Try again
-                                      </button>
-                                    ) : null}
-                                    {openNotice ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-open`}
-                                        aria-busy={busy || undefined}
-                                        onClick={openNotice}
-                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50"
-                                      >
-                                        {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
-                                      </button>
-                                    ) : null}
                                     {copies ? (
                                       <CopyButton
                                         iconOnly
                                         pinName
-                                        label="Copy error details"
+                                        label={isHeld(notice) ? "Copy notice details" : "Copy error details"}
                                         testId={`sent-notice-${notice.noticeId}-copy`}
                                         getText={() => failureDetails(notice)}
                                       />
@@ -2193,6 +2127,43 @@ export function NoticeCenter(props: {
                                   </span>
                                 </div>
                                 {text.body}
+                                {runNow || retry || openNotice ? (
+                                  <div className={ROW_ACTIONS_CLASS}>
+                                    {runNow ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-run-now`}
+                                        aria-busy={running || undefined}
+                                        disabled={runningKey !== null}
+                                        onClick={runNow}
+                                        className={ROW_ACTION_CLASS}
+                                      >
+                                        {running ? "Starting…" : "Run now"}
+                                      </button>
+                                    ) : null}
+                                    {retry ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-retry`}
+                                        onClick={retry}
+                                        className={ROW_ACTION_CLASS}
+                                      >
+                                        Try again
+                                      </button>
+                                    ) : null}
+                                    {openNotice ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-open`}
+                                        aria-busy={busy || undefined}
+                                        onClick={openNotice}
+                                        className={ROW_ACTION_CLASS}
+                                      >
+                                        {busy ? "Opening…" : isHeld(notice) ? "Open note" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                ) : null}
                                 <p className="m-0 mt-1 flex min-w-0 gap-2 text-[10px] text-subtle">
                                   <time dateTime={new Date(notice.createdAtMs).toISOString()}>
                                     {relativeTime(notice.createdAtMs)}
@@ -2216,7 +2187,7 @@ export function NoticeCenter(props: {
                       type="button"
                       data-testid="sent-notices-more"
                       onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
-                      className="w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                      className="dohc-focus-row w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                     >
                       Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
                     </button>
@@ -2226,7 +2197,7 @@ export function NoticeCenter(props: {
             </div>
           )}
         </div>
-      ) : null}
+      )) : null}
 
       <button
         ref={toggleRef}

@@ -128,10 +128,13 @@ pub struct CaptureSecret {
     pub path: String,
     pub text: String,
     pub metadata_origin: String,
+    /// None stamps the per-file "Updated <basename>" (TS parity: secret
+    /// writes carry the per-file label, even in a reconcile). Capture sets it
+    /// only for the workspace's first import, so a secret it finds there
+    /// joins the import's label.
+    pub metadata_summary: Option<String>,
     /// The reconcile pass's correlation id, so secret moments group with the
-    /// pass's plaintext moments in history; None for live batches. The
-    /// summary stays the internally stamped "Updated <basename>" (TS parity:
-    /// secret writes always carry the per-file label, even in a reconcile).
+    /// pass's plaintext moments in history; None for live batches.
     pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
     /// Whether this write may overwrite a tip written by a different origin
@@ -153,6 +156,7 @@ impl core::fmt::Debug for CaptureSecret {
                 &format_args!("<redacted, {} bytes>", self.text.len()),
             )
             .field("metadata_origin", &self.metadata_origin)
+            .field("metadata_summary", &self.metadata_summary)
             .field("now_ms", &self.now_ms)
             .finish()
     }
@@ -494,7 +498,12 @@ impl<'a> SecretFileStore<'a> {
                 text: input.text.clone(),
                 moment_id,
                 metadata_origin: input.metadata_origin.clone(),
-                metadata_summary: Some(format!("Updated {basename}")),
+                metadata_summary: Some(
+                    input
+                        .metadata_summary
+                        .clone()
+                        .unwrap_or_else(|| format!("Updated {basename}")),
+                ),
                 metadata_correlation_id: input.metadata_correlation_id.clone(),
                 now_ms: input.now_ms,
                 disk_intent: SecretDiskIntent::AlreadyOnDisk,

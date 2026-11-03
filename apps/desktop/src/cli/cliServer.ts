@@ -27,7 +27,11 @@ import {
   type CliRequest,
   type CliResultByVerb,
   type CliShowMessage,
+  type CliShowThreadResult,
+  type CliStreamPosition,
+  type VersionResolution,
 } from "@dohc/cli/protocol";
+import { versionNameRefusal } from "../ipc/errorWords";
 import { formatMessageHandle, renderThreadMarkdown } from "@dohc/cli/thread-markdown";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { PRESS_WAITING } from "@dohc/automation-executor/press-waiting";
@@ -58,6 +62,7 @@ import type {
   ChannelThreadSummary,
   ChatChannelSummary,
   ChatMessage,
+  ChatStreamItem,
   ChatThread,
   LinkedChatStore,
   VersionedTextMoment,
@@ -106,7 +111,7 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { isInside } from "../security/pathContainment";
-import type { ChatWrites } from "../workspaces/chatWrites";
+import type { ChatWrites, PersonWriter } from "../workspaces/chatWrites";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import type { AutomationRunRetry } from "../automations/automationNotices";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
@@ -224,6 +229,7 @@ export interface CliCollectionsPort {
 export interface CliDocumentsPort {
   read(path: string): Promise<{ path: string; markdown: string }>;
   edit(input: {
+    allowLossySourceSha256?: string;
     path: string;
     edit: DocumentEdit;
     origin: LiveDocumentEditOrigin;
@@ -237,11 +243,28 @@ export interface CliDocumentsPort {
   }): Promise<{ path: string }>;
 }
 
+type CliVersionPage<Verb extends "versionList" | "versionCompare" | "versionConflicts"> = Omit<Extract<CliResultByVerb[Verb], { ok: true }>, "ok">;
+
+// The versions menu's reads, for the owning workspace. Compare and conflict
+// pages leave out secret-backed files and paths the workspace's rules don't
+// track, as History does.
+export interface CliVersionsPort {
+  list(): Promise<CliVersionPage<"versionList">>;
+  compare(versionId: string, afterPath?: string): Promise<Omit<CliVersionPage<"versionCompare">, "version"> | HistoryPolicyRefusal>;
+  conflicts(afterConflictId?: string): Promise<CliVersionPage<"versionConflicts"> | HistoryPolicyRefusal>;
+  // The versions menu's changes. Each first has the windows showing the
+  // workspace save their open edits, and throws their reason when one can't.
+  create(name: string): Promise<{ id: string; name: string }>;
+  switch(versionId: string): Promise<{ changedFileCount: number }>;
+  merge(versionId: string): Promise<{ mergedFileCount: number; unchangedFileCount: number; conflictCount: number }>;
+  resolve(conflictId: string, resolution: VersionResolution): Promise<void>;
+}
+
 // Files dohc moved aside while it saved, because another program changed
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean }>;
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
@@ -297,12 +320,12 @@ export interface CliButtonsPort {
 export type HistoryPolicyRefusal = { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
 export type HistoryReadRefusal = { status: "untracked" } | HistoryPolicyRefusal;
 
-function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
+function historyPolicyUnreadable(refusal: HistoryPolicyRefusal, hidden = "History is hidden") {
   return {
     ok: false as const,
     status: "policy-unreadable" as const,
     unreadable: refusal.unreadable,
-    reason: `History is hidden because dohc can't read ${refusal.unreadable.join(" and ")}`,
+    reason: `${hidden} because dohc can't read ${refusal.unreadable.join(" and ")}`,
   };
 }
 
@@ -348,7 +371,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
   movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
-  // Absent in a shared view, which keeps no copies of its own.
+  // Absent in a shared view, which keeps no copies or versions of its own.
+  versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
   retainedCopies?: CliRetainedCopiesPort;
   keptEdits?: CliKeptEditsPort;
@@ -389,8 +413,14 @@ export interface CliServerOptions {
   // an automation that woke the agent and the agent cannot start each other
   // forever.
   agentRunDepth(workspaceId: string): number;
-  // Whether a run dohc dispatched holds the workspace's run slot.
-  dispatchedAgentRun(workspaceId: string): boolean;
+  // The agent of a run dohc dispatched while it holds the workspace's run
+  // slot, or null.
+  dispatchedAgent(workspaceId: string): string | null;
+  // The engine's id for that run when dohc dispatched it as agent work, or
+  // null. The engine reads the run's agent from it, so a read moves only that
+  // agent's place, whatever the command line says. Without a run, reads are
+  // those of agents outside a run.
+  dispatchedRunId(workspaceId: string): string | null;
   agentRunWorkspace(runId: string): string | undefined;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
@@ -522,7 +552,7 @@ export const FILES_GROUP: CliGroup = {
 function groupForCli(channel: ChatChannelSummary): CliGroup {
   return {
     id: cliChannelId(channel.id),
-    name: channel.kind === "agent" ? "my-agent" : channel.name,
+    name: channel.kind === "agent" ? channel.slug : channel.name,
     slug: channel.slug,
     kind: cliGroupKind(channel.kind),
     ...(channel.purpose ? { purpose: channel.purpose } : {}),
@@ -530,8 +560,8 @@ function groupForCli(channel: ChatChannelSummary): CliGroup {
 }
 
 async function listCliChannelThreads(context: CliWorkspaceContext, channel: ChatChannelSummary) {
-  const lanes = channel.type === "both" ? ["posts", "chat"] as const : [channel.type === "chat" ? "chat" : "posts"] as const;
-  const pages = await Promise.all(lanes.map(lane => context.store.listChannelThreads({
+  // Any group can hold both lanes: an agent DM keeps its old posts beside its conversation.
+  const pages = await Promise.all((["posts", "chat"] as const).map(lane => context.store.listChannelThreads({
     workspaceId: context.workspaceId, channelId: channel.id, lane,
   })));
   return pages.flat();
@@ -580,7 +610,15 @@ function rawChatMessage(
       ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
       ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
     } : {}),
+    ...agentRequestsFor(message),
   };
+}
+
+// The agents still asked to answer a message, as the engine reports them.
+function agentRequestsFor(message: ChatMessage) {
+  return message.agentRequests?.length
+    ? { agentRequests: message.agentRequests.map((request) => ({ ...request })) }
+    : {};
 }
 
 // A history row carries only facts the path admission checked. The moment's
@@ -692,15 +730,27 @@ function writeActor(
   return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
 }
 
-// The name an agent writing through this socket claims: its handshake or
-// --agent name. A run dohc dispatched is one agent that gives no name, as its
-// file edits and replies are, so while it holds the slot no write claims one.
+// The agent writing through this socket: its handshake or --agent name. A
+// run dohc dispatched is its agent, by id, whatever name a write claims, so
+// the run's file edits and replies are one actor.
 function claimedAgentName(
   agent: string | undefined,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): string | undefined {
-  return options.dispatchedAgentRun(context.workspaceId) ? undefined : agent;
+  return options.dispatchedAgent(context.workspaceId) ?? agent;
+}
+
+// Who a chat write through this socket is. An agent's message during a run
+// dohc dispatched is that run's agent's.
+function cliChatWriter(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+  agentName?: string,
+): PersonWriter {
+  const runAgentId = actor === "agent" ? options.dispatchedAgent(context.workspaceId) : null;
+  return { via: "cli", actor, ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}) };
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
@@ -1053,6 +1103,32 @@ function resolveThreadOrMessage(
   };
 }
 
+// Where a run's reply goes when the agent names no message: under the
+// message the asking one replied to, so a question asked in a thread of a
+// conversation is answered in that thread. A post's comments stay top-level.
+async function askingThreadParent(
+  context: CliWorkspaceContext,
+  threadId: string,
+  messages: readonly ChatMessage[],
+  runId: string | null | undefined,
+  onError: CliServerOptions["onError"],
+): Promise<ChatMessage | undefined> {
+  if (!runId) return undefined;
+  try {
+    const run = await context.dispatchStore.getRunRecord(runId);
+    if (!run || run.workspaceId !== context.workspaceId || run.threadId !== threadId) return undefined;
+    const parentId = messages.find((message) => message.id === run.triggerMessageId)?.parentMessageId;
+    const parent = parentId ? messages.find((message) => message.id === parentId) : undefined;
+    if (!parent) return undefined;
+    const { thread } = await context.store.getThread({ workspaceId: context.workspaceId, threadId });
+    return thread.lane === "chat" ? parent : undefined;
+  } catch (error) {
+    // The reply still posts, in the conversation itself.
+    onError?.(new Error(`Could not find the thread for an agent reply, so it posts to the conversation. runId=${runId}`, { cause: error }));
+    return undefined;
+  }
+}
+
 function branchFromMessage(
   messages: readonly ChatMessage[],
   rootMessage: ChatMessage,
@@ -1098,7 +1174,7 @@ async function buildThreadContent(
   loaded: LoadedThread,
   allMessages: readonly ChatMessage[],
   rootMessage?: ChatMessage,
-): Promise<Omit<CliResultByVerb["show"], "dispatch">> {
+): Promise<Omit<CliShowThreadResult, "dispatch">> {
   const decisions = await context.store.listThreadDecisions(
     context.workspaceId,
     loaded.thread.id,
@@ -1110,22 +1186,7 @@ async function buildThreadContent(
   const selected = rootMessage
     ? branchFromMessage(allMessages, rootMessage)
     : [...allMessages];
-  const messages: CliShowMessage[] = selected.map((message) => ({
-    id: cliMessageId(message.id),
-    author: authorForCli(message),
-    body: message.body,
-    createdAtMs: message.createdAtMs,
-    ...(message.parentMessageId
-      ? { parentMessageId: cliMessageId(message.parentMessageId) }
-      : {}),
-    ...(decisionByMessage.has(message.id)
-      ? { decisionState: decisionByMessage.get(message.id)! }
-      : {}),
-    attachments: message.attachments.map((attachment) => ({
-      ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
-      ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
-    })),
-  }));
+  const messages = selected.map((message) => cliShowMessage(message, decisionByMessage.get(message.id)));
   return {
     thread: {
       id: cliThreadId(loaded.thread.id),
@@ -1137,12 +1198,110 @@ async function buildThreadContent(
   };
 }
 
+function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved" | undefined): CliShowMessage {
+  return {
+    id: cliMessageId(message.id),
+    author: authorForCli(message),
+    body: message.body,
+    createdAtMs: message.createdAtMs,
+    ...(message.parentMessageId
+      ? { parentMessageId: cliMessageId(message.parentMessageId) }
+      : {}),
+    ...(decisionState ? { decisionState } : {}),
+    attachments: message.attachments.map((attachment) => ({
+      ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
+      ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
+    })),
+    ...agentRequestsFor(message),
+  };
+}
+
+// One page of a group's stream, read the same way by `dohc chat show <group>`
+// and dohc_read_chat. `ids` picks CLI handles or engine ids for what it names.
+async function readGroupStream(
+  context: CliWorkspaceContext,
+  channel: ChatChannelSummary,
+  page: { before?: CliStreamPosition; limit?: number },
+  ids: "cli" | "engine",
+) {
+  const before = page.before && {
+    ...page.before,
+    id: page.before.lane === "posts"
+      ? engineIdForHandle(page.before.id, "th_", "thread-")
+      : engineIdForHandle(page.before.id, "msg_", "message-"),
+  };
+  const stream = await context.store.listGroupStream({
+    workspaceId: context.workspaceId,
+    channelId: channel.id,
+    ...(before ? { before } : {}),
+    ...(page.limit ? { limit: page.limit } : {}),
+  });
+  // A conversation message's decision comes from its conversation's decisions.
+  const conversations = [...new Set(stream.items.filter((item) => !item.post).map((item) => item.message.threadId))];
+  const decisions = new Map((await Promise.all(conversations.map((threadId) =>
+    context.store.listThreadDecisions(context.workspaceId, threadId)))).flat().map((decision) => [decision.messageId, decision]));
+  const threadId = (id: string) => ids === "cli" ? cliThreadId(id) : id;
+  const messageId = (id: string) => ids === "cli" ? cliMessageId(id) : id;
+  const position = (value: ChatStreamItem["position"]): CliStreamPosition => ({
+    ...value,
+    id: value.lane === "posts" ? threadId(value.id) : messageId(value.id),
+  });
+  return {
+    items: stream.items.map((item) => ({
+      position: position(item.position),
+      threadId: threadId(item.message.threadId),
+      message: item.message,
+      decision: decisions.get(item.message.id),
+      ...(item.post ? {
+        post: {
+          replyCount: item.post.replyCount,
+          repliers: item.post.repliers.map((replier) => ({
+            author: { kind: replier.author.kind, displayName: replier.author.displayName },
+            lastReplyAtMs: replier.lastReplyAtMs,
+          })),
+          ...(item.post.lastReplyAtMs === undefined ? {} : { lastReplyAtMs: item.post.lastReplyAtMs }),
+          ...(item.post.latestAgentReply ? {
+            latestAgentReply: {
+              id: messageId(item.post.latestAgentReply.id),
+              author: {
+                kind: item.post.latestAgentReply.author.kind,
+                displayName: item.post.latestAgentReply.author.displayName,
+              },
+              createdAtMs: item.post.latestAgentReply.createdAtMs,
+              bodyExcerpt: item.post.latestAgentReply.bodyExcerpt,
+            },
+          } : {}),
+          openDecisionCount: item.post.openDecisionCount,
+        },
+      } : {}),
+    })),
+    nextBefore: stream.nextBefore && position(stream.nextBefore),
+    readPosition: stream.readPosition && position(stream.readPosition),
+  };
+}
+
+function engineIdForHandle(id: string, handlePrefix: string, enginePrefix: string): string {
+  return id.startsWith(handlePrefix) ? `${enginePrefix}${id.slice(handlePrefix.length)}` : id;
+}
+
+// A group named exactly, by name, #slug or id. A prefix names a thread or
+// message instead.
+function exactChannel(
+  input: string,
+  channels: readonly { engine: ChatChannelSummary; cli: CliGroup }[],
+): { engine: ChatChannelSummary; cli: CliGroup } | undefined {
+  const normalized = withoutChannelMarker(input);
+  const matches = channels.filter(({ engine, cli }) =>
+    [cli.slug, cli.name, cli.id, engine.name, engine.id].includes(normalized));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 async function buildShowResult(
   context: CliWorkspaceContext,
   loaded: LoadedThread,
   allMessages: readonly ChatMessage[],
   rootMessage?: ChatMessage,
-): Promise<CliResultByVerb["show"]> {
+): Promise<CliShowThreadResult> {
   return {
     ...await buildThreadContent(context, loaded, allMessages, rootMessage),
     dispatch: await readThreadDispatchState(context.dispatchStore, context.workspaceId, loaded.thread.id),
@@ -1152,6 +1311,7 @@ async function buildShowResult(
 async function markShownThreadRead(
   context: CliWorkspaceContext,
   actor: CliActor,
+  runId: string | null,
   threadId: string,
   messages: readonly ChatMessage[],
 ): Promise<void> {
@@ -1164,6 +1324,7 @@ async function markShownThreadRead(
         : current);
     await context.store.markThreadReadByAgent({
       workspaceId: context.workspaceId,
+      ...(runId === null ? {} : { runId }),
       threadId,
       upTo: { createdAtMs: latest.createdAtMs, messageId: latest.id },
     });
@@ -1483,7 +1644,7 @@ function chatReadTarget(
 ): { channelId: string } | { threadId: string } | undefined {
   switch (request.verb) {
     case "chat":
-      return { threadId: request.args.threadId };
+      return "group" in request.args ? { channelId: request.args.group } : { threadId: request.args.threadId };
     case "show":
       return { threadId: request.args.target };
     case "threads":
@@ -1971,10 +2132,9 @@ async function startFileChat(
     return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
   }
   let message: ChatMessage;
-  const agentName = claimedAgentName(input.agent, context, options);
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: { via: "cli", actor: "agent", ...(agentName ? { agentName } : {}) },
+      writer: cliChatWriter("agent", context, options, input.agent),
       threadId: thread.id,
       body,
       resolveAttachments: async () => [],
@@ -2506,21 +2666,41 @@ async function dispatchWorkspace(
     }
 
     case "chat": {
+      if ("group" in request.args) {
+        const { group, before, limit } = request.args;
+        try {
+          const channels = (await context.store.listChannels({ workspaceId: context.workspaceId }))
+            .map((engine) => ({ engine, cli: groupForCli(engine) }));
+          const channel = resolveChannel(group, channels).engine;
+          const page = await readGroupStream(context, channel, { ...(before ? { before } : {}), ...(limit ? { limit } : {}) }, "engine");
+          return {
+            ok: true as const,
+            stream: {
+              group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
+              ...page,
+              items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
+            },
+          };
+        } catch (error) {
+          return mcpFailure(error, `failed to read group: ${group}`);
+        }
+      }
+      const { threadId } = request.args;
       try {
         const messages = await context.store.listMessages({
           workspaceId: context.workspaceId,
-          threadId: request.args.threadId,
+          threadId,
         });
         const threads = await context.store.listThreads({
           workspaceId: context.workspaceId,
         });
         const thread = threads.find(
-          (candidate) => candidate.id === request.args.threadId,
+          (candidate) => candidate.id === threadId,
         );
         if (!thread) {
           return {
             ok: false as const,
-            reason: `chat thread not found: ${request.args.threadId}`,
+            reason: `chat thread not found: ${threadId}`,
           };
         }
         const currentPath = thread.linkedFile
@@ -2547,7 +2727,7 @@ async function dispatchWorkspace(
           },
         };
       } catch (error) {
-        return mcpFailure(error, `failed to read chat: ${request.args.threadId}`);
+        return mcpFailure(error, `failed to read chat: ${threadId}`);
       }
     }
 
@@ -2584,7 +2764,7 @@ async function dispatchWorkspace(
               id: entry.thread.id,
               title: entry.thread.title,
               messageCount: entry.messageCount,
-              ...(channel.type === "both" ? { lane: entry.thread.lane } : {}),
+              lane: entry.thread.lane,
               updatedAtMs: entry.thread.updatedAtMs,
             })),
           });
@@ -2973,6 +3153,95 @@ async function dispatchWorkspace(
       }
     }
 
+    case "versionList":
+    case "versionCompare":
+    case "versionConflicts":
+    case "versionCreate":
+    case "versionSwitch":
+    case "versionMerge":
+    case "versionResolve": {
+      const versions = context.versions;
+      if (!versions || (await callerPaths(context, request.args.cwd)).shared) {
+        return { ok: false as const, reason: "Versions belong to the owning workspace. Open it to continue." };
+      }
+      // A version as version list names it: by its name, then by its ID.
+      const named = async (name: string) => {
+        const { versions: all, activeVersionId } = await versions.list();
+        const version = all.find(candidate => candidate.name === name) ?? all.find(candidate => candidate.id === name);
+        return { version, activeVersionId };
+      };
+      const unknown = (name: string) => ({ ok: false as const, reason: `No version is called ${name}. Run dohc version list to see them.` });
+      try {
+        switch (request.verb) {
+          case "versionList":
+            return { ok: true as const, ...(await versions.list()) };
+          case "versionConflicts": {
+            const page = await versions.conflicts(request.args.afterConflictId);
+            return "status" in page ? historyPolicyUnreadable(page, "Conflicts are hidden") : { ok: true as const, ...page };
+          }
+          case "versionCompare": {
+            const { version } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            if (version.kind === "main") return { ok: false as const, reason: "Versions compare with Main. Name another version." };
+            const page = await versions.compare(version.id, request.args.afterPath);
+            if ("status" in page) return historyPolicyUnreadable(page, "Version files are hidden");
+            return { ok: true as const, version: { id: version.id, name: version.name }, ...page };
+          }
+          case "versionCreate": {
+            const name = request.args.name;
+            try {
+              return { ok: true as const, version: await versions.create(name) };
+            } catch (error) {
+              // The menu's name field says the same.
+              const refusal = versionNameRefusal(error);
+              if (refusal === "taken") return { ok: false as const, reason: `Another version is called ${name}. Choose another name.` };
+              if (refusal === "invalid") return { ok: false as const, reason: "dohc can't use that name. Choose another name." };
+              return pathFreeFailure(error, `dohc could not create the version ${name}.`);
+            }
+          }
+          case "versionSwitch": {
+            const { version, activeVersionId } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            const changed = version.id === activeVersionId ? { changedFileCount: 0 } : await versions.switch(version.id);
+            return { ok: true as const, version: { id: version.id, name: version.name }, changedFileCount: changed.changedFileCount };
+          }
+          case "versionMerge": {
+            const { version } = await named(request.args.version);
+            if (!version) return unknown(request.args.version);
+            if (version.kind === "main") return { ok: false as const, reason: "Versions merge into Main. Name another version." };
+            if (!version.canMergeIntoMain) return { ok: false as const, reason: "Only versions made from Main can merge into Main." };
+            const merged = await versions.merge(version.id);
+            const page = await versions.conflicts();
+            if ("status" in page) return historyPolicyUnreadable(page, "The merge ran, and its conflicts are hidden");
+            return { ok: true as const, version: { id: version.id, name: version.name }, ...merged, ...page };
+          }
+          case "versionResolve": {
+            const { conflictId, resolution } = request.args;
+            // Only a conflict version conflicts shows can be resolved, so a
+            // hidden file's conflict reads as no conflict at all.
+            let conflict: CliVersionPage<"versionConflicts">["conflicts"][number] | undefined;
+            let after: string | undefined;
+            do {
+              const page = await versions.conflicts(after);
+              if ("status" in page) return historyPolicyUnreadable(page, "Conflicts are hidden");
+              conflict = page.conflicts.find(candidate => candidate.conflictId === conflictId);
+              after = page.nextAfterConflictId ?? undefined;
+            } while (!conflict && after !== undefined);
+            if (!conflict) return { ok: false as const, reason: `No open conflict has the ID ${conflictId}. Run dohc version conflicts to see them.` };
+            if (resolution.keep === "combined" && conflict.contentKind === "binary") {
+              return { ok: false as const, reason: "This conflict is between binary files, so it takes no combined text. Keep current or incoming." };
+            }
+            await versions.resolve(conflictId, resolution);
+            const remaining = await versions.conflicts();
+            return "status" in remaining ? historyPolicyUnreadable(remaining, "Conflicts are hidden") : { ok: true as const, ...remaining };
+          }
+        }
+      } catch (error) {
+        return pathFreeFailure(error, request.verb === "versionList" || request.verb === "versionCompare" || request.verb === "versionConflicts"
+          ? "dohc could not read the workspace's versions." : "dohc could not change the workspace's versions.");
+      }
+    }
+
     case "keptCopies": {
       const keptCopies = context.keptCopies;
       if (!keptCopies) return keptCopiesUnavailable();
@@ -3079,6 +3348,7 @@ async function dispatchWorkspace(
       const edit = async (): Promise<{ done: boolean; result: unknown }> => {
         try {
           const outcome = await documents.edit({
+            ...(request.args.allowLossySourceSha256 ? { allowLossySourceSha256: request.args.allowLossySourceSha256 } : {}),
             path,
             edit: { find, replacement },
             origin: documentEditOrigin(agent, context, options),
@@ -3095,7 +3365,7 @@ async function dispatchWorkspace(
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await edit()).result;
-      return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null], edit, completion);
+       return await onceForRequestId(context, options, requestId, [path, find ?? null, replacement, agent ?? null, request.args.allowLossySourceSha256 ?? null], edit, completion);
     }
 
     case "documentCreate": {
@@ -3177,7 +3447,10 @@ async function dispatchWorkspace(
       const summaries = await listCliChannelThreads(context, channel.engine);
       const agentUnread = request.args.actor === "agent"
         ? new Set(
-            (await context.store.listAgentUnreadThreads(context.workspaceId)).map(
+            (await context.store.listAgentUnreadThreads(
+              context.workspaceId,
+              options.dispatchedRunId(context.workspaceId) ?? undefined,
+            )).map(
               (thread) => thread.id,
             ),
           )
@@ -3186,7 +3459,7 @@ async function dispatchWorkspace(
         group: channel.cli,
         threads: summaries.map((summary) => ({
           id: cliThreadId(summary.thread.id),
-          ...(channel.engine.type === "both" ? { lane: summary.thread.lane } : {}),
+          lane: summary.thread.lane,
           title: summary.thread.title,
           commentCount: Math.max(0, summary.messageCount - 1),
           openDecisionCount: summary.openDecisionCount,
@@ -3245,10 +3518,16 @@ async function dispatchWorkspace(
       const loadedById = new Map(
         loadedThreads.map((thread) => [thread.thread.id, thread]),
       );
-      const unread = await context.store.listAgentUnreadThreads(context.workspaceId);
+      // Inside a run dohc dispatched, the inbox is that run's agent's unread
+      // work: its chat, and each message elsewhere that asked it. Outside a
+      // run, a self-connected agent reads every agent chat and the plain
+      // @agent mentions no dohc agent took.
+      const runId = options.dispatchedRunId(context.workspaceId);
+      const runAgentId = runId === null ? null : options.dispatchedAgent(context.workspaceId);
+      const unread = await context.store.listAgentUnreadThreads(context.workspaceId, runId ?? undefined);
       const agentChannelIds = new Set(
         channels
-          .filter(({ engine }) => engine.kind === "agent")
+          .filter(({ engine }) => engine.kind === "agent" && (runAgentId === null || engine.agentId === runAgentId))
           .map(({ engine }) => engine.id),
       );
       const inboxThreads = await Promise.all(
@@ -3275,16 +3554,20 @@ async function dispatchWorkspace(
       );
       inboxThreads.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 
-      const mentionRows = await context.store.listMentionsForHandle(
-        context.workspaceId,
-        "agent",
-        { unreadByAgentOnly: true },
-      );
+      const mentionRows = runId !== null
+        ? await context.store.listAgentUnreadRequests(context.workspaceId, runId)
+        : await context.store.listMentionsForHandle(
+          context.workspaceId,
+          "agent",
+          { unreadByAgentOnly: true },
+        );
       const messageCache = new Map<string, ChatMessage[]>();
       const mentions: CliResultByVerb["inbox"]["mentions"] = [];
       for (const mention of mentionRows) {
         const thread = loadedById.get(mention.threadId);
         if (!thread) continue;
+        // A request in the run's agent's own chat is already in its threads.
+        if (runAgentId !== null && thread.thread.channelId && agentChannelIds.has(thread.thread.channelId)) continue;
         let messages = messageCache.get(thread.thread.id);
         if (!messages) {
           messages = await context.store.listMessages({
@@ -3309,6 +3592,23 @@ async function dispatchWorkspace(
     }
 
     case "show": {
+      const group = exactChannel(request.args.target, channels);
+      if (group) {
+        const page = await readGroupStream(context, group.engine, request.args, "cli");
+        return {
+          stream: {
+            group: group.cli,
+            ...page,
+            items: page.items.map(({ message, decision, ...item }) => ({
+              ...item,
+              message: cliShowMessage(message, decision?.state),
+            })),
+          },
+        };
+      }
+      if (request.args.before || request.args.limit) {
+        throw new CliCommandError("--before and --limit page a group's stream; name a group");
+      }
       const threads = await loadThreads(context, channels);
       const messagesByThread = await loadMessagesByThread(context, threads);
       const target = resolveThreadOrMessage(
@@ -3330,6 +3630,7 @@ async function dispatchWorkspace(
         await markShownThreadRead(
           context,
           request.args.actor,
+          options.dispatchedRunId(context.workspaceId),
           target.thread.thread.id,
           messages,
         );
@@ -3345,10 +3646,15 @@ async function dispatchWorkspace(
           "DMs are streams — use 'dohc chat reply <thread>'",
         );
       }
+      // An agent DM is one conversation; the engine puts the message there.
+      if (channel.engine.kind === "agent" && request.args.title) {
+        throw new CliCommandError("An agent DM is one conversation, so its messages have no title. Drop --title.");
+      }
       const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: { via: "cli", actor },
+        writer: cliChatWriter(actor, context, options),
         channelId: channel.engine.id,
+        // A chat-only group shows only its chat lane.
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
         ...(request.args.title ? { title: request.args.title } : {}),
         body: request.args.body,
@@ -3374,9 +3680,12 @@ async function dispatchWorkspace(
 
     case "reply": {
       const { threadId, messages } = await readReplyThread(context, request.args.thread, options);
+      const actor = writeActor(request.args.actor, context, options);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
-        : undefined;
+        : actor === "agent"
+          ? await askingThreadParent(context, threadId, messages, request.args.runId ?? options.dispatchedRunId(context.workspaceId), options.onError)
+          : undefined;
       let decisionMessage: ChatMessage | undefined;
       if (request.args.resolve) {
         decisionMessage = resolveMessageInThread(request.args.resolve, messages);
@@ -3401,9 +3710,8 @@ async function dispatchWorkspace(
           throw new CliCommandError("This question has no choices to pick from.");
         }
       }
-      const actor = writeActor(request.args.actor, context, options);
       const reply = {
-        writer: { via: "cli" as const, actor },
+        writer: cliChatWriter(actor, context, options),
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -3437,8 +3745,10 @@ async function dispatchWorkspace(
       }
       if (actor === "agent") {
         try {
+          const runId = options.dispatchedRunId(context.workspaceId);
           await context.store.markThreadReadByAgent({
             workspaceId: context.workspaceId,
+            ...(runId === null ? {} : { runId }),
             threadId,
             upTo: { createdAtMs: message.createdAtMs, messageId: message.id },
           });
@@ -3477,7 +3787,7 @@ async function dispatchWorkspace(
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
       const reaction = await options.chatWrites.setReaction(context, {
-        writer: { via: "cli", actor: writeActor(request.args.actor, context, options) },
+        writer: cliChatWriter(writeActor(request.args.actor, context, options), context, options),
         threadId: target.thread.thread.id,
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,

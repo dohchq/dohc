@@ -1,5 +1,6 @@
-import { UpdateActionResult, UpdateCheckResult, type UpdateStateEvent } from "./bridgeContract";
+import { UpdateActionResult, UpdateCheckResult, updateDownloadOperations, type UpdateStateEvent } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { registerOperations, type OperationBoundary } from "./operationTable";
 import type { AutoUpdateController } from "../updates/electronUpdater";
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
 
@@ -69,11 +70,12 @@ export function createUpdateInstall<Participant = unknown>(dependencies: {
   };
 }
 
-export function registerUpdatesIpcHandlers<Event>(dependencies: {
+export function registerUpdatesIpcHandlers<Event, Operation>(dependencies: {
   registerHandler(channel: string, handler: (event: Event) => unknown): void;
+  boundary: OperationBoundary<Event, Operation>;
   assertTrustedSender(event: Event): void;
   currentUpdateState(): UpdateStateEvent;
-  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates"> | null;
+  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates" | "downloadUpdate"> | null;
   installUpdate(): Promise<UpdateActionResult>;
 }): void {
   const { registerHandler, assertTrustedSender, currentUpdateState, installUpdate } = dependencies;
@@ -91,7 +93,12 @@ export function registerUpdatesIpcHandlers<Event>(dependencies: {
         state: currentUpdateState(),
       });
     }
-    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates());
+    return UpdateCheckResult.parse(await dependencies.autoUpdateController.checkForUpdates(true));
+  });
+
+  registerOperations(dependencies.boundary, updateDownloadOperations, {
+    downloadUpdate: () =>
+      dependencies.autoUpdateController?.downloadUpdate() ?? { accepted: false, state: currentUpdateState() },
   });
 
   registerHandler(CHANNELS.installUpdate, async (event) => {

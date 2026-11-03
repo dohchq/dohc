@@ -26,7 +26,7 @@ export async function stageTripPoll(workspaceRoot) {
     ...sources.map(async path => [path, await readFile(join(template, path))]),
     ...dependencies.map(async ([root, name, path]) => [`deps/${name}/${path}`, await readFile(join(root, path))]),
     ...[[react, "react"], [dom, "react-dom"], [scheduler, "scheduler"]].map(async ([root, name]) => [`deps/${name}/LICENSE`, await readFile(join(root, "LICENSE"))]),
-    readFile(join(template, "collection.yaml")).then(bytes => ["responses/collection.yaml", bytes]),
+    readFile(join(template, "responses/collection.yaml")).then(bytes => ["responses/collection.yaml", bytes]),
   ]);
   await mkdir(workspaceRoot, { recursive: true });
   await mkdir(appRoot); // Refuse a concurrent creator instead of overwriting work.

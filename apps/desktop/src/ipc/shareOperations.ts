@@ -189,6 +189,7 @@ export const relayShareOperations = {
       OwnerRestoreActionResponse.options, OwnerRestoreActionResponse.plan,
       OwnerRestoreActionResponse.begin, OwnerRestoreActionResponse.prepare,
       OwnerRestoreActionResponse.review, OwnerRestoreActionResponse.confirm,
+      OwnerRestoreActionResponse.decline, OwnerRestoreActionResponse.unfinished,
     ]),
   },
   listOwnerLiveDocuments: {
@@ -258,7 +259,8 @@ export const relayShareOperations = {
   },
   undoRelayShare: {
     capabilityId: "share.revoke.undo", channel: "desktop:undo-relay-share",
-    scope: "device", guard: "trusted-sender",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: UndoRelaySharePayload, result: UndoRelayShareResult,
   },
   createRelayShareLink: {

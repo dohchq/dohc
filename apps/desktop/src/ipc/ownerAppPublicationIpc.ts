@@ -17,6 +17,13 @@ import { datasetColumnFields, type AppDatasetBinding, type DatasetRevision } fro
 import { resolveAppDatasetCapability, verifyAppDatasetCapability, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { createRemoteDatasetData, resolveRemoteDatasetRevision } from "../workspaces/remoteDataset";
 
+/**
+ * The relay's own refusal of the publication list: a 404 with its not_found body. A 403, or a 404 from something in
+ * front of the relay, says nothing about whether links are live, so it stays a failure.
+ */
+export const publicationListUnavailable = (status: number, body: { ok?: unknown; code?: unknown } | null) =>
+  status === 404 && body?.ok === false && body.code === "not_found";
+
 export function createOwnerAppPublicationHandler<Caller, Workspace extends { workspaceId: string; shareView?: unknown }, Operation extends {
   workspace: Workspace; signal: AbortSignal; scope?: string; assertCurrent(): void;
 }>(dependencies: {
@@ -28,6 +35,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   withAdapter<Result>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<Result>): Promise<Result | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
+  /** Like relayJson, but the relay's not_found 404 resolves to unavailable instead of throwing. */
+  relayJsonOrUnavailable(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "unavailable" }>;
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
   localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null>;
   beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
@@ -55,7 +64,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       const local = await dependencies.localPublication?.(input, callerKey, operation, agent);
       operation.assertCurrent(); operation.signal.throwIfAborted();
       if (local) return local;
-      if (input.action === "prepareLocal" || input.action === "listLocal" || input.action === "launchLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
+      if (input.action === "prepareLocal" || input.action === "listLocal" || input.action === "checkLocal" || input.action === "launchLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
       const remote = await dependencies.remoteForWorkspace(operation.workspace,
         input.action === "withdraw" || input.action === "revokeCollection" ? { allowPaused: true } : undefined);
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
@@ -150,8 +159,11 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
         const query = new URLSearchParams({ appRoot: input.appRoot });
         if (input.cursor) query.set("cursor", input.cursor);
-        const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+        const answer = await session.run(() => dependencies.relayJsonOrUnavailable(remote.credentials,
           `/sync/${encodeURIComponent(input.workspaceId)}/app-publications?${query}`, { signal: operation.signal }));
+        // The server does not publish apps for this workspace and account.
+        if (answer.kind === "unavailable") return OwnerAppPublicationResult.parse({ kind: "listUnavailable" });
+        const raw = answer.body;
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("dohc could not read app publications.");
         const result = OwnerAppPublicationResult.parse({ ...raw, kind: "listed" });
         if (result.kind !== "listed" || result.publications.some(row => !row.manifestUnavailable && row.appRoot !== input.appRoot)) throw new Error("The publication list belongs to another app.");

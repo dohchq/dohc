@@ -36,6 +36,8 @@ export function useCollectionFolders(
   const datasets = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
   const collectionsElsewhere = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.elsewhere : null;
+  // The list has loaded at least once. Showing the archived list again keeps it loaded.
+  const collectionsListed = !shareViewEnded && dataState?.workspaceId === workspaceId;
   // Why this computer cannot list the workspace's Collections, such as
   // another computer keeping them. The list says so in place, so a refresh
   // after each change does not report it again.
@@ -44,7 +46,11 @@ export function useCollectionFolders(
   const datasetRequest = useRef(0);
   const [archiveView, setArchiveView] = useState<{ workspaceId: string; enabled: boolean }>({ workspaceId, enabled: false });
   const includeArchived = !isShareView && archiveView.workspaceId === workspaceId && archiveView.enabled;
-  const setIncludeArchived = useCallback((enabled: boolean) => { datasetRequest.current++; setDataState(null); setArchiveView({ workspaceId, enabled }); }, [workspaceId]);
+  const setIncludeArchived = useCallback((enabled: boolean) => {
+    datasetRequest.current++;
+    setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
+    setArchiveView({ workspaceId, enabled });
+  }, [workspaceId]);
   const refreshDatasets = useCallback(async () => {
     const request = ++datasetRequest.current;
     let result;
@@ -115,5 +121,5 @@ export function useCollectionFolders(
     void refreshCollections();
   }, [workspaceIsReady, isShareView, shareViewReadsCollections, refreshCollections]);
 
-  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere };
+  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed };
 }
