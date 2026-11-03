@@ -72,13 +72,17 @@ describe("owner app publication", () => {
     api.dataset.mockImplementation(datasetAnswer);
   });
 
-  it.each(["missing", "ambiguous"] as const)("distinguishes %s Collection source and keeps the approved name", async status => {
-    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: null, datasetAddressStatus: status }], nextCursor: null });
+  it.each([
+    ["missing", "Collection source missing. Restore its dataset.json file."],
+    ["ambiguous", "Multiple dataset.json files name this Collection. Remove the duplicate file."],
+    ["unreadable", "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History."],
+  ] as const)("distinguishes %s Collection source and keeps the approved name", async (status, words) => {
+    api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: null, datasetAddressStatus: status, ...(status === "missing" ? {} : { datasetPaths: ["data/dataset.json"] }) }], nextCursor: null });
     api.publishOwnerApp.mockImplementation(async request => request.action === "prepare" ? { ...prepared, capabilities: [datasetCapability] } : answer(request));
     const reportError = vi.fn();
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
     await review();
-    await screen.findByText(status === "ambiguous" ? "Multiple dataset.json files name this Collection. Remove the duplicate file." : "Collection source missing. Restore its dataset.json file.");
+    await screen.findByText(words);
     expect(screen.getByTestId("app-publication-capability").textContent).toContain("Orders");
     expect(reportError).not.toHaveBeenCalled();
   });

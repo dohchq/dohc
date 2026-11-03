@@ -1107,11 +1107,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, [fileByPath, focusRow, home, isFolderPath, onModeChange, onRevealed, renderIndexByPath, reveal]);
 
   const showInFiles = useCallback(
-    (path: string | null) => {
+    (paths: readonly string[] | null) => {
       onModeChange("files");
-      if (path === null) return;
-      for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
-      setHomeReveal([path]);
+      if (paths === null) return;
+      for (const path of paths) for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
+      setHomeReveal(paths);
     },
     [onModeChange, onSetFolderExpanded],
   );

@@ -34,8 +34,11 @@ export type HomeRowModel = {
   expanded: boolean;
   // Muted text at the end of the row, such as an Other file's folder.
   detail?: string;
-  // Why the row cannot open, such as a Collection whose source is gone.
+  // Why the row cannot open, as the sentence that says what to fix. It is the
+  // row's tooltip and description.
   unavailable?: string;
+  // The files to fix, which the row's click and menu show in Files.
+  fix?: readonly string[];
 };
 
 export type DataCollection = {
@@ -48,12 +51,6 @@ export type DataCollection = {
   name: string;
   archived?: boolean;
 };
-
-const UNAVAILABLE_WORDS = {
-  ambiguous: "Several dataset.json files name this Collection. Keep one and remove the others.",
-  unreadable: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
-  missing: "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
-} as const;
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -258,26 +255,32 @@ export function recentRows(recent: readonly string[], lookup: HomeLookup): HomeR
   return out;
 }
 
+// A Collection that can't open shows its cause in place of its detail. One
+// whose dataset.json files are in this workspace shows them in Files.
+function unavailableWords(entry: DataCollection): Pick<HomeRowModel, "detail" | "unavailable" | "fix"> {
+  const fix = entry.datasetPaths ?? [];
+  if (entry.datasetAddressStatus === "ambiguous") {
+    return { detail: `${fix.length} dataset.json files`, unavailable: "Several dataset.json files name this Collection. Keep one and remove the others.", fix };
+  }
+  if (entry.datasetAddressStatus === "unreadable") {
+    return { detail: "Can't read dataset.json", unavailable: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.", fix };
+  }
+  return { detail: "Not in this share", unavailable: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." };
+}
+
 // The Collections rows: dataset Collections in the order the engine lists
 // them, then folder Collections by name.
 export function collectionRows(data: readonly DataCollection[], collectionFolders: ReadonlySet<string>): HomeRowModel[] {
   const base = { section: "collections" as const, parentKey: "collections", depth: 1, folder: false, expanded: false };
-  const rows: HomeRowModel[] = data.map((entry) => {
-    // A Collection that can't open still offers the folder of the file to fix.
-    const source = entry.datasetPath ?? entry.datasetPaths?.[0] ?? null;
-    const status = entry.datasetAddressStatus === "ambiguous" || entry.datasetAddressStatus === "unreadable" ? entry.datasetAddressStatus : "missing";
-    return {
-      ...base,
-      key: `collections:${entry.datasetId}:${entry.tableId}`,
-      label: entry.name,
-      glyph: { glyph: "collection", icon: undefined },
-      open: entry.datasetPath === null ? null : transactionalCollectionTabPath(entry.datasetPath, entry.tableId),
-      menu: source === null ? null : datasetMenu(source),
-      ...(entry.datasetPath === null
-        ? { detail: "Source unavailable", unavailable: UNAVAILABLE_WORDS[status] }
-        : entry.archived ? { detail: "Archived" } : {}),
-    };
-  });
+  const rows: HomeRowModel[] = data.map((entry) => ({
+    ...base,
+    key: `collections:${entry.datasetId}:${entry.tableId}`,
+    label: entry.name,
+    glyph: { glyph: "collection", icon: undefined },
+    open: entry.datasetPath === null ? null : transactionalCollectionTabPath(entry.datasetPath, entry.tableId),
+    menu: entry.datasetPath === null ? null : datasetMenu(entry.datasetPath),
+    ...(entry.datasetPath === null ? unavailableWords(entry) : entry.archived ? { detail: "Archived" } : {}),
+  }));
   const folders = [...collectionFolders].sort((a, b) => collator.compare(basenameOf(a), basenameOf(b)));
   for (const folder of folders) rows.push(collectionRow({ ...base, key: `collections:${folder}/` }, folder));
   return rows;

@@ -254,7 +254,6 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
     await expect(explorerRow(page, folder)).toHaveCount(0);
     await openExplorerHome(page);
     await expect(home.getByText("Registration", { exact: true })).toHaveCount(0);
-    await expect(home.getByText("Source unavailable")).toHaveCount(0);
     await expect.poll(async () => (await listed()).length).toBe(0);
     const cliAfterDelete = await cliListed();
     expect(cliAfterDelete).toContain('"kind":"list"');

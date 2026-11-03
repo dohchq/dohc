@@ -62,7 +62,7 @@ export interface ExplorerHomeProps {
   onRename: (path: string, isFolder: boolean) => void;
   onDelete: (paths: string[]) => void;
   // Switches to Files, with this path selected when it has one.
-  onShowInFiles: (path: string | null) => void;
+  onShowInFiles: (paths: readonly string[] | null) => void;
   drag: {
     start: (path: string, event: DragEvent) => void;
     over: (path: string, event: DragEvent) => void;
@@ -378,8 +378,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       return;
     }
     if (row.open === null) {
-      // A pinned folder that is no Collection or app opens in Files.
-      if (row.menu) onShowInFiles(row.menu.path);
+      // A pinned folder that is no Collection or app opens in Files, and so do
+      // the files to fix of a Collection that can't open.
+      if (row.fix) onShowInFiles(row.fix);
+      else if (row.menu) onShowInFiles([row.menu.path]);
       return;
     }
     const tab = parseTab(row.open);
@@ -678,8 +680,9 @@ const HomeRow = memo(function HomeRow(props: {
     : active
       ? "bg-selected font-medium text-ink"
       : "text-muted hover:bg-hover hover:text-ink";
-  const trailing = (onSetPinned ? 1 : 0) + (row.menu ? 1 : 0);
+  const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
+  const [fixMenuOpen, setFixMenuOpen] = useState(false);
   const dragPath = drag && path ? path : null;
   return (
     <li role="none" className="px-1">
@@ -698,7 +701,7 @@ const HomeRow = memo(function HomeRow(props: {
           aria-current={active ? "page" : undefined}
           {...(row.folder ? { "aria-expanded": row.expanded } : {})}
           title={row.unavailable ?? (app ? app.root : path)}
-          aria-disabled={row.unavailable ? true : undefined}
+          aria-disabled={row.unavailable && !row.fix ? true : undefined}
           tabIndex={props.tabbable ? 0 : -1}
           draggable={dragPath !== null ? true : undefined}
           onFocus={() => {
@@ -706,7 +709,12 @@ const HomeRow = memo(function HomeRow(props: {
             props.onFocus(row.key);
           }}
           onClick={() => props.onClick(row)}
-          onContextMenu={(event) => props.onContextMenu(row, event)}
+          onContextMenu={(event) => {
+            props.onContextMenu(row, event);
+            if (!row.fix) return;
+            setReached(true);
+            setFixMenuOpen(true);
+          }}
           onDragStart={dragPath !== null ? (event) => drag!.start(dragPath, event) : undefined}
           onDragOver={dragPath !== null ? (event) => drag!.over(dragPath, event) : undefined}
           onDrop={dragPath !== null ? (event) => drag!.drop(dragPath, event) : undefined}
@@ -761,6 +769,27 @@ const HomeRow = memo(function HomeRow(props: {
               >
                 <MoreHorizontal size={13} aria-hidden />
               </button>
+            ) : null}
+            {row.fix && reached ? (
+              <Menu
+                label={`More actions for ${row.label}`}
+                items={[{ id: "show-in-files", label: "Show in Files", testId: "home-row-show-in-files", onSelect: () => props.onClick(row) }]}
+                open={fixMenuOpen}
+                onOpenChange={setFixMenuOpen}
+                trigger={(trigger) => (
+                  <button
+                    {...trigger}
+                    type="button"
+                    data-testid="home-row-menu"
+                    aria-label={`More actions for ${row.label}`}
+                    title="More actions"
+                    tabIndex={-1}
+                    className="grid size-6 place-items-center rounded text-subtle opacity-0 hover:bg-hover hover:text-ink aria-expanded:opacity-100 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+                  >
+                    <MoreHorizontal size={13} aria-hidden />
+                  </button>
+                )}
+              />
             ) : null}
           </span>
         ) : null}

@@ -33,7 +33,7 @@ function OperationNames({ operations }: { operations: AppDatasetCapability["oper
  * `onPlace` hears where to: a server, null when nothing moves, or undefined until dohc knows.
  */
 function DatasetApproval({ capability, workspaceId, reportError, moves = false, onPlace }: { capability: AppDatasetCapability; workspaceId: string; reportError: ReportError; moves?: boolean; onPlace?(server: CollectionServer | null | undefined): void }) {
-  const [address, setAddress] = useState<{ workspaceId: string; datasetId: string; path: string | null; status: "missing" | "ambiguous" | "failed" | "available" } | null>(null);
+  const [address, setAddress] = useState<{ workspaceId: string; datasetId: string; path: string | null; status: "missing" | "ambiguous" | "unreadable" | "failed" | "available" } | null>(null);
   const [reload, setReload] = useState(0);
   const report = useRef(reportError);
   report.current = reportError;
@@ -79,7 +79,7 @@ function DatasetApproval({ capability, workspaceId, reportError, moves = false, 
   const found = address?.workspaceId === workspaceId && address.datasetId === capability.datasetId ? address : null;
   return <div data-testid="app-publication-capability" className="space-y-2">
     <p className="m-0 font-medium">{capability.name}</p>
-    <p className="m-0 break-all font-mono text-[12px]">{!found ? "Finding Collection…" : found.path ?? (found.status === "ambiguous" ? "Multiple dataset.json files name this Collection. Remove the duplicate file." : found.status === "missing" ? "Collection source missing. Restore its dataset.json file." : "Collection path unavailable")}</p>
+    <p className="m-0 break-all font-mono text-[12px]">{!found ? "Finding Collection…" : found.path ?? (found.status === "ambiguous" ? "Multiple dataset.json files name this Collection. Remove the duplicate file." : found.status === "unreadable" ? "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." : found.status === "missing" ? "Collection source missing. Restore its dataset.json file." : "Collection path unavailable")}</p>
     <p className="m-0">This app uses the Collection's approved actions. Its responses appear in the same Collection.</p>
     <dl className="m-0 space-y-1 text-[12px]">
       <div><dt className="inline font-medium text-ink">Link actions: </dt><dd className="m-0 inline"><OperationNames operations={capability.operations.filter(operation => operation.access === "link" || capability.linkReads?.some(read => read.operationId === operation.operationId))} /></dd></div>
