@@ -161,6 +161,15 @@ it.each([
   expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
 });
 
+it("answers empty at once for a retired generation, so a move's pull is not held", async () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "retired"})), ownerYDocEnroll: vi.fn()};
+  expect(await observedPass(client)).toBe("empty");
+  expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(1);
+  expect(mock.authority).not.toHaveBeenCalled();
+  expect(mock.drain).not.toHaveBeenCalled();
+  expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
+});
+
 it("skips a retired generation without authority or a drain, and the next page delivers", async () => {
   vi.useFakeTimers();
   const second = {...config.documents[0]!, binding: {...binding, objectId: "second", currentPath: "b.md", selectorPaths: ["b.md"]}};

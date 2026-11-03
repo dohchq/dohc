@@ -90,7 +90,8 @@ fn strand(store: &mut EngineStore) {
         .unwrap();
 }
 
-/// Closes every stranded document, as the open sweep does, in one transaction.
+/// Closes every stranded document in one transaction, so one fault rolls back
+/// all of them. The open sweep instead gives each document its own transaction.
 fn close_stranded(tx: &rusqlite::Transaction<'_>) -> Result<usize, OwnerOutboxError> {
     let keys = stranded_in(tx)?;
     for key in &keys {

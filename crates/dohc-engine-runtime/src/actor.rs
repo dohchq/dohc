@@ -1128,7 +1128,8 @@ fn debug_assert_sync_context() {
 
 /// Closes observed-owner bindings whose document is gone, one document per
 /// transaction. A document it cannot close keeps its rows, the others still
-/// close, and the workspace still opens.
+/// close, and the workspace still opens. If finding the stranded documents
+/// fails, for example on an invalid stored key, nothing closes on that open.
 fn close_stranded_owner_bindings(store: &mut EngineStore, now_ms: i64) {
     use dohc_engine_collab::owner_outbox::{
         OwnerOutboxError,

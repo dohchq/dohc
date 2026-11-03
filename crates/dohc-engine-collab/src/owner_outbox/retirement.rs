@@ -102,7 +102,8 @@ pub fn close_retired_in_tx(
 /// The documents whose observed-owner binding outlived their marker, as a
 /// store retired before [`close_retired_in_tx`] existed left them. The
 /// writable open closes each in its own transaction, so one it cannot close
-/// keeps only its own page.
+/// keeps only its own page. That isolation starts after this scan: if the scan
+/// fails, for example on an invalid stored key, nothing closes on that open.
 pub fn stranded_in(conn: &Connection) -> Result<Vec<DocKey>, OwnerOutboxError> {
     let mut stmt = conn
         .prepare(
