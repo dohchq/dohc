@@ -114,6 +114,36 @@ function rowLabels(name: string): string[] {
     .map((element) => element.querySelector(".truncate")?.textContent ?? element.textContent ?? "");
 }
 
+const PAGE_PATHS = Array.from({ length: 500 }, (_, index) => `file-${String(index).padStart(4, "0")}.md`);
+
+// Home with 500 pages and 40 of them open in one group.
+function largeHome(): Partial<ExplorerProps> {
+  return {
+    files: PAGE_PATHS.map(file), folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(),
+    editorGroups: [{ id: "group-1", tabs: PAGE_PATHS.slice(0, 40).map((path) => ({ path })), activeTab: PAGE_PATHS[0]!, size: 1 }],
+  };
+}
+
+function mounted(path: string): boolean {
+  return document.querySelector(`[data-home-key="pages:${path}"]`) !== null;
+}
+
+function rect(top: number, height: number) {
+  return { x: 0, y: top, top, left: 0, right: 280, bottom: top + height, width: 280, height, toJSON: () => ({}) };
+}
+
+// Renders Home in a 280 px scroller, 100 rows into Pages less `offset`: how
+// far Open editors pushes Pages down.
+function scrolledHome(props: ExplorerProps, offset: () => number) {
+  const view = render(<Explorer {...props} />);
+  const scroller = screen.getByTestId("file-tree");
+  Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 280 });
+  vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue(rect(0, 280));
+  vi.spyOn(section("Pages").querySelector("ul")!, "getBoundingClientRect").mockImplementation(() => rect(-2_800 + offset(), 14_000));
+  fireEvent.scroll(scroller);
+  return view;
+}
+
 const showExplorerMenu = vi.fn(async (_input: unknown) => null);
 
 beforeEach(() => {
@@ -303,31 +333,11 @@ describe("Explorer Home", () => {
   it("measures the Pages window again while Open editors above it is resized", () => {
     const originalInnerHeight = window.innerHeight;
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 1_000 });
-    const paths = Array.from({ length: 500 }, (_, index) => `file-${String(index).padStart(4, "0")}.md`);
-    const mounted = (path: string) => document.querySelector(`[data-home-key="pages:${path}"]`) !== null;
-
     try {
-      render(<Explorer {...explorerProps({
-        files: paths.map(file),
-        folders: [],
-        apps: undefined,
-        dataCollections: [],
-        collectionFolders: new Set(),
-        editorGroups: [{ id: "group-1", tabs: paths.slice(0, 40).map((path) => ({ path })), activeTab: paths[0]!, size: 1 }],
-        openEditorsHeight: 56,
-      })} />);
-
-      const scroller = screen.getByTestId("file-tree");
-      const pagesList = section("Pages").querySelector("ul")!;
-      const openEditorsList = screen.getByTestId("open-editors-list");
-      Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 280 });
-      const rect = (top: number, height: number) =>
-        ({ x: 0, y: top, top, left: 0, right: 280, bottom: top + height, width: 280, height, toJSON: () => ({}) });
-      vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue(rect(0, 280));
-      // Scrolled 100 rows into Pages; a taller Open editors pushes Pages down.
-      vi.spyOn(pagesList, "getBoundingClientRect").mockImplementation(() =>
-        rect(-2_800 + Number.parseFloat(openEditorsList.style.maxHeight) - 56, 14_000));
-      fireEvent.scroll(scroller);
+      scrolledHome(
+        explorerProps({ ...largeHome(), openEditorsHeight: 56 }),
+        () => Number.parseFloat(screen.getByTestId("open-editors-list").style.maxHeight) - 56,
+      );
       expect(mounted("file-0100.md")).toBe(true);
       expect(mounted("file-0080.md")).toBe(false);
 
@@ -336,11 +346,26 @@ describe("Explorer Home", () => {
       fireEvent.pointerDown(handle, { button: 0, buttons: 1, clientY: 0, pointerId: 1 });
       fireEvent.pointerMove(handle, { buttons: 1, clientY: 1_000, pointerId: 1 });
 
-      expect(openEditorsList.style.maxHeight).toBe("600px");
+      expect(screen.getByTestId("open-editors-list").style.maxHeight).toBe("600px");
       expect(mounted("file-0080.md")).toBe(true);
     } finally {
       Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
     }
+  });
+
+  it("measures the Pages window again when a tab moves into a new group", () => {
+    const props = explorerProps(largeHome());
+    // Each group heading pushes Pages down, here by an exaggerated 150 px.
+    const view = scrolledHome(props, () => 150 * section("Open editors").querySelectorAll('[role="heading"]').length);
+    expect(mounted("file-0080.md")).toBe(false);
+
+    const tabs = props.editorGroups[0]!.tabs;
+    view.rerender(<Explorer {...props} editorGroups={[
+      { id: "group-1", tabs: tabs.slice(0, 20), activeTab: tabs[0]!.path, size: 1 },
+      { id: "group-2", tabs: tabs.slice(20), activeTab: tabs[20]!.path, size: 1 },
+    ]} />);
+
+    expect(mounted("file-0080.md")).toBe(true);
   });
 
   it("switches to Files to reveal a path", () => {
