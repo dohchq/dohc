@@ -2101,8 +2101,8 @@ fn js_trim(value: &str) -> &str {
 /// `extractChatFileReferenceTokens` reads them: `@[`, a path with no `#`,
 /// then an optional `#` and a heading, neither blank, and no `]` or line
 /// break before the closing `]`. An opener inside code, or a link that holds
-/// another `@[`, is no link, and the scan goes on after its `]`. Every check
-/// is a lookup into arrays built in one backward pass, so the scan is linear.
+/// another `@[`, is no link, and the scan goes on after its `]`. The next `]`
+/// or line break, `#` and `@[` from each index come from one backward pass.
 fn file_link_ranges(body: &str, code: &[(usize, usize)]) -> Vec<(usize, usize)> {
     let mut links = Vec::new();
     if !body.contains("@[") {
