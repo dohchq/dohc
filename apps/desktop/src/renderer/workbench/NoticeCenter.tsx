@@ -29,7 +29,8 @@ export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
-  // Why it is disabled, on hover.
+  // Why it is disabled, shown under the row's actions and read as the
+  // button's description.
   reason?: string;
   busy?: boolean;
 };
@@ -573,6 +574,7 @@ export function WorkspaceErrorToast(props: {
   onHide?: (id: string) => void;
 }) {
   const { error, onHide } = props;
+  const reasonId = useId();
   // A success or a warning is a notice: nothing failed.
   const notice = error.tone !== undefined;
   // A toast for something finished fades, but not while the person reads it.
@@ -586,7 +588,7 @@ export function WorkspaceErrorToast(props: {
       type="button"
       data-testid="workspace-shell-error-retry"
       disabled={error.retryBusy || error.retryBlocked !== undefined}
-      title={error.retryBlocked}
+      aria-describedby={error.retryBlocked === undefined ? undefined : reasonId}
       aria-busy={error.retryBusy || undefined}
       onClick={() => props.onRetry?.(error.id)}
       className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
@@ -637,6 +639,12 @@ export function WorkspaceErrorToast(props: {
                 <CopyButton iconOnly pinName label="Copy command" testId="workspace-shell-toast-command-copy"
                   getText={() => error.command ?? ""} />
               </div>
+            ) : null}
+            {/* A disabled control says why, where the keyboard can't miss it. */}
+            {retry && error.retryBlocked !== undefined ? (
+              <p id={reasonId} data-testid="workspace-shell-error-retry-reason" className="m-0 mt-1 text-muted">
+                {error.retryBlocked}
+              </p>
             ) : null}
           </div>
         )}
@@ -694,6 +702,7 @@ export function LocalNoticeRow(props: {
   onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
   const { notice } = props;
+  const reasonId = useId();
   return (
     <li
       data-testid={`notice-${notice.id}`}
@@ -766,21 +775,28 @@ export function LocalNoticeRow(props: {
               </div>
             ) : null}
             {notice.actions?.length ? (
-              <div className={ROW_ACTIONS_CLASS}>
-                {notice.actions.map((action) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    disabled={action.disabled}
-                    title={action.reason}
-                    aria-busy={action.busy || undefined}
-                    onClick={() => props.onAction(action)}
-                    className={ROW_ACTION_CLASS}
-                  >
-                    {action.label}
-                  </button>
+              <>
+                <div className={ROW_ACTIONS_CLASS}>
+                  {notice.actions.map((action, index) => (
+                    <button
+                      key={action.label}
+                      type="button"
+                      disabled={action.disabled}
+                      aria-describedby={action.reason === undefined ? undefined : `${reasonId}-${index}`}
+                      aria-busy={action.busy || undefined}
+                      onClick={() => props.onAction(action)}
+                      className={ROW_ACTION_CLASS}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+                {notice.actions.map((action, index) => action.reason === undefined ? null : (
+                  <p key={action.label} id={`${reasonId}-${index}`} className="m-0 mt-1 text-[12px] text-muted">
+                    {action.reason}
+                  </p>
                 ))}
-              </div>
+              </>
             ) : null}
             {notice.timeMs !== undefined ? (
               <time

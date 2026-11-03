@@ -958,7 +958,7 @@ describe("notice center", () => {
     expect(worded(screen.getByTestId("notice-shell-error-5"))).toEqual(["Try again", "Open History"]);
   });
 
-  it("shows a Try again that can't run yet as disabled with its reason, on the toast and the row", async () => {
+  it("shows a Try again that can't run yet as disabled with its reason under it, on the toast and the row", async () => {
     const onRetryWorkspaceError = vi.fn();
     const user = userEvent.setup();
     renderNotices({
@@ -970,11 +970,16 @@ describe("notice center", () => {
       onHideWorkspaceError: vi.fn(),
       onDismissWorkspaceError: vi.fn(),
     });
-    const blocked = (button: HTMLButtonElement) => ({ disabled: button.disabled, reason: button.title });
-    const expected = { disabled: true, reason: "Close the open merge first." };
-    expect(blocked(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }))).toEqual(expected);
+    // A disabled button takes no focus, so the reason shows as text, and a
+    // screen reader reads it as the button's description.
+    const reason = "Close the open merge first.";
+    const blocked = (place: HTMLElement) => {
+      expect(within(place).getByRole("button", { name: "Try again", description: reason })).toHaveProperty("disabled", true);
+      expect(within(place).getByText(reason)).toBeTruthy();
+    };
+    blocked(screen.getByTestId("workspace-shell-error"));
     await user.click(screen.getByTestId("notice-center-toggle"));
-    expect(blocked(within(screen.getByTestId("notice-shell-error-4")).getByRole("button", { name: "Try again" }))).toEqual(expected);
+    blocked(screen.getByTestId("notice-shell-error-4"));
     expect(onRetryWorkspaceError).not.toHaveBeenCalled();
   });
 
