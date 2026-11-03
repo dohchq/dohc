@@ -11,7 +11,7 @@ import { expect, vi } from "vitest";
 import { WebSocket } from "ws";
 import * as Y from "yjs";
 import { createNamedLiveBrowserTransport } from "@dohc/ydoc-projection/named-live-browser-transport";
-import { VersionedLiveAdapter, WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
@@ -23,7 +23,7 @@ import type { DesktopOwnerDeliveryDocument } from "../workspaces/desktopOwnerDel
 import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient";
 import { createMoveAcceptedEditsGuard } from "../workspaces/moveAcceptedEditsGuard";
 import { runNativeOwnerDeliveryPass } from "../workspaces/nativeOwnerDelivery";
-import { createRelaySyncEngine } from "../workspaces/relaySyncEngine";
+import { createRelaySyncEngine, type RelaySyncOperations } from "../workspaces/relaySyncEngine";
 import { probeRelayWorkspace } from "../workspaces/relayWorkspaceProbe";
 import { catchUpOwnerDocuments, readyOwnerDeliveryDocuments, startServerOwnerDelivery } from "../workspaces/serverOwnerDelivery";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -44,6 +44,24 @@ export interface LivePage {
 
 type OpenedDaemon = Awaited<ReturnType<typeof openLiveDaemonWorkspace>>;
 
+/** What one relay engine pull answered, recorded before the engine swallows a failure. */
+export type GuardPull =
+  | { result: "succeeded"; elapsedMs: number }
+  | { result: "failed"; wireCode: string | null; message: string; retry: string | null; elapsedMs: number };
+
+/** The pulls the guard's catch-up ran for one guarded move. */
+export interface GuardPulls {
+  pulls: GuardPull[];
+  // Another pass was running when the catch-up began, so a pull here may be that pass's.
+  shared: boolean;
+}
+
+function failedPull(error: unknown, elapsedMs: number): GuardPull {
+  if (error instanceof DaemonRefusalError) return { result: "failed", wireCode: error.wireCode, message: error.message, retry: error.retry, elapsedMs };
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return { result: "failed", wireCode: null, message, retry: null, elapsedMs };
+}
+
 /** One desktop: its engine, its capture, and the guard wired as the desktop wires it. */
 export interface MoveDevice {
   rootPath: string;
@@ -53,9 +71,16 @@ export interface MoveDevice {
   runNative<T>(work: (client: EngineClient, handle: string) => Promise<T>): Promise<T>;
   /** Owner syncs the guard asked the owner loop for. */
   targetedPasses(): number;
-  pull(): Promise<void>;
+  /** One pull outside the relay engine, as setup does. */
+  pull(): Promise<{ fetched: number }>;
   /** Moves by hand, as Explorer does. Resolves with the elapsed milliseconds. */
   move(fromPath: string, toPath: string, options: { guarded: boolean }): Promise<number>;
+  /** Waits for the last guarded move's catch-up to end, then returns the pulls it ran. */
+  guardPulls(): Promise<GuardPulls>;
+  /** Relay engine pulls that no guard's catch-up ran. */
+  backgroundPulls(): readonly GuardPull[];
+  /** Whether the relay engine reports a sync failure, which makes the guard skip its catch-up. */
+  syncFailed(): boolean;
   refusalNotices(): Promise<unknown>;
 }
 
@@ -199,26 +224,80 @@ export async function openLiveMoveFixture(input: {
             assertCurrent() {}, observedOnly: true })));
         },
         onError: () => undefined });
-      const sync = createRelaySyncEngine({ rootDir: rootPath, relay: relayConnection, operations: relay, capture, onChange: () => undefined });
+      // Each relay engine pull is recorded, before the engine swallows a
+      // failure, against the guard catch-up running when the pull started.
+      // The guard hands both of an attempt's catch-ups the same signal, so
+      // the signal ties the pull to the move whose wait started the attempt.
+      interface MoveRecord { catchUps: Array<GuardPulls & { settled: Promise<void> }> }
+      let moving: MoveRecord | undefined;
+      let lastGuarded: MoveRecord | undefined;
+      const attempts = new WeakMap<AbortSignal, MoveRecord>();
+      let catchingUp: GuardPull[] | undefined;
+      let pullsRunning = 0;
+      const background: GuardPull[] = [];
+      const operations: RelaySyncOperations = {
+        claim: () => relay.claim(),
+        push: () => relay.push(),
+        recoverOrigin: () => relay.recoverOrigin(),
+        async pull(materializePage) {
+          const into = catchingUp ?? background;
+          const started = performance.now();
+          pullsRunning++;
+          try {
+            const result = await relay.pull(materializePage);
+            into.push({ result: "succeeded", elapsedMs: performance.now() - started });
+            return result;
+          } catch (error) {
+            into.push(failedPull(error, performance.now() - started));
+            throw error;
+          } finally { pullsRunning--; }
+        },
+      };
+      const sync = createRelaySyncEngine({ rootDir: rootPath, relay: relayConnection, operations, capture, onChange: () => undefined });
       cleanups.push(async () => { await sync.stop(); await delivery.stop(); });
       const guard = createMoveAcceptedEditsGuard({
         liveDocuments: () => documents.map(row => ({ path: row.binding.currentPath, objectId: row.binding.objectId })),
         offline: () => sync.snapshot().syncFailure !== null,
-        ownerCatchUp: (id, objectIds, signal) => delivery.catchUp(id, objectIds, signal),
-        relayCatchUp: (_id, signal) => sync.catchUp({ signal }),
+        ownerCatchUp(id, objectIds, signal) {
+          if (moving) attempts.set(signal, moving);
+          return delivery.catchUp(id, objectIds, signal);
+        },
+        relayCatchUp(_id, signal) {
+          const shared = sync.snapshot().syncing || pullsRunning > 0;
+          const pulls: GuardPull[] = [];
+          catchingUp = pulls;
+          const run = sync.catchUp({ signal });
+          const settled = run.then(() => undefined, () => undefined).finally(() => { if (catchingUp === pulls) catchingUp = undefined; });
+          attempts.get(signal)?.catchUps.push({ pulls, shared, settled });
+          return run;
+        },
       });
       const operation = { workspace: { ...opened.workspace, readOnly: false, shareView: undefined }, assertCurrent() {} };
       return {
         rootPath, capture, relay, runNative,
         targetedPasses: () => targeted,
-        async pull() { await capture.runRelaySync(materializePage => relay.pull(materializePage)); },
+        pull: () => capture.runRelaySync(materializePage => relay.pull(materializePage)),
         async move(fromPath, toPath, { guarded }) {
+          const record: MoveRecord = { catchUps: [] };
+          if (guarded) lastGuarded = record;
+          const beforeMove = async (storedSpelling: () => Promise<string>) => {
+            moving = record;
+            try { await guard.beforeMove(workspaceId, storedSpelling); } finally { moving = undefined; }
+          };
           const started = performance.now();
           await moveWorkspacePathByHand(operation, { fromPath, toPath }, person, { capture, requestId: randomUUID(),
             trashItem: async () => { throw new Error("This test trashes nothing."); }, markDeleted: () => undefined,
-            ...(guarded ? { beforeMove: (storedSpelling: () => Promise<string>) => guard.beforeMove(workspaceId, storedSpelling) } : {}) });
+            ...(guarded ? { beforeMove } : {}) });
           return performance.now() - started;
         },
+        async guardPulls() {
+          if (!lastGuarded) throw new Error("This device made no guarded move.");
+          const { catchUps } = lastGuarded;
+          await Promise.all(catchUps.map(catchUp => catchUp.settled));
+          return { pulls: catchUps.flatMap(catchUp => catchUp.pulls), shared: catchUps.some(catchUp => catchUp.shared) };
+        },
+        backgroundPulls: () => background,
+        syncFailed: () => sync.snapshot().syncFailure !== null,
         refusalNotices: () => opened.sessions.run(opened.workspace, ({ client, workspace }) =>
           new WorkspaceDaemonRequester(client).request("sync.refusalNotices", { workspaceId }, { workspace })),
       };
@@ -381,16 +460,22 @@ export interface GuardTiming {
   guard: "on" | "off";
   proxyDelayMs: number;
   elapsedMs: number;
-  // A refused move is timed until the engine refused it.
-  outcome: "moved" | "refused";
+  // A refused move is timed until the engine refused it. An unbound guarded
+  // move either carried the edit, or went ahead without it after its pull
+  // answered retry later.
+  outcome: "moved" | "refused" | "carried" | "stale-retry-later";
+  // What a guarded move's catch-up pulled.
+  guardPulls?: GuardPulls;
 }
 
 /** Prints the timings, and writes them as JSON when `DOHC_GUARD_TIMINGS_DIR` is set. */
 export async function recordGuardTimings(name: string, timings: readonly GuardTiming[]) {
   const guarded = timings.filter(timing => timing.guard === "on");
   const guardedOver3s = guarded.filter(timing => timing.elapsedMs > 3_000).length;
-  const report = { name, timings, guardedOver3s, guardedMoves: guarded.length };
-  console.log(`guard timings: ${guardedOver3s} of ${guarded.length} guarded moves took over 3 s. ${JSON.stringify(report)}`);
+  const staleRetryLater = guarded.filter(timing => timing.outcome === "stale-retry-later").length;
+  const report = { name, timings, guardedOver3s, guardedMoves: guarded.length, staleRetryLater };
+  console.log(`guard timings: ${guarded.length - guardedOver3s} guarded moves took 3 s or less and ${guardedOver3s} took over 3 s; `
+    + `${staleRetryLater} went ahead without the edit after a pull that answered retry later. ${JSON.stringify(report)}`);
   const directory = process.env.DOHC_GUARD_TIMINGS_DIR;
   if (directory) await writeFile(join(directory, `guard-timings-${name}.json`), `${JSON.stringify(report, null, 2)}\n`);
 }
