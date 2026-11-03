@@ -81,6 +81,8 @@ Write up to three parts, in this order. Leave out any part you do not know.
 
 Never show a raw error code alone, blame the person, or apologize. `Sorry, something went wrong` says nothing.
 
+Write `could not` in an error, not `couldn't`.
+
 The sync strings show the standard: `A file changed on two machines`, `This machine doesn't have this file.`, and `One file has two copies.`
 
 ### Empty states
@@ -142,12 +144,13 @@ Show what the action will change, and write only what the person needs to decide
 
 ### The card
 
-Use `ConfirmDialog` for a dialog with one action: a title, at most one short sentence of body, then the buttons.
+Use `ConfirmDialog` for a dialog with one action: a title, at most one short sentence of body, then the buttons. An action that loses work can take two sentences.
 The card's `p-6` and `gap-6` separate them, so add no dividers.
 A divider only separates a fixed header or footer from a list that scrolls.
 
 - The title names the action and its object: `Merge version-1 into Main`, `Delete 12 files from Research?`.
 - The body states the one fact the title and buttons leave out, such as what stays or what cannot come back. Most dialogs need none.
+- For an action that loses work, the body can say what the action reaches beyond the title, then how to get it back, as [Deletes](#deletes-and-other-actions-that-lose-work) asks.
 - If the fact is a set of things, show the names, the count, or the diff instead of a sentence about them.
 - Never explain how a feature works, what it cannot do in general, or its release stage.
 - If a limit changes what this action does, say what happens to the person's things: `2 files over 5 MB stay as they are.`
@@ -162,7 +165,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 ### Focus and keys
 
 - If the dialog has a field, the first field takes focus.
-- If it has none, the panel holds focus. A screen reader then reads the title and body, and Tab reaches Cancel first.
+- If it has none, the dialog panel takes focus. Give the panel `aria-labelledby` on its title and `aria-describedby` on its body, so a screen reader reads both. Tab then reaches Cancel first.
 - Enter in a single-line field runs the primary.
 - Escape and Cancel close the dialog, except where the Dialog recipe says only its own buttons close it.
 - When the dialog closes, focus goes back to the control that opened it.
@@ -225,7 +228,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
 - Put a copy control beside text a person might need to report. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - If the copy text is exactly what the message shows, such as a command, use a Copy icon beside it.
-- If it holds anything more, even the dohc version or the time, give the message a **Details** action instead of the icon, so a person always sees what they copy. On a toast, Details sits under the text, where Show more would. On a row, it comes last on the actions line.
+- If it holds anything more, even the dohc version or the time, give the message a **Details** action instead, so a person sees what they copy. On a toast, Details sits under the text. On a row, it comes last on the actions line.
 - **Details** opens the copy text under the message, selectable, scrolling past 240px. A Copy icon at its top right copies exactly that text.
 - While open, the action reads **Hide details** and holds the toast. It also lifts the clamp, so a message never offers both **Details** and **Show more**.
 - **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's Copy.
@@ -236,12 +239,13 @@ The after also drops the sentence about unsaved changes, because saving first is
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
+- F6 moves focus to the newest toast's first worded action, such as **Try again**. With no worded action, it lands on **Details**, and with neither, on the toast. **Details** is one Shift+Tab back.
 - A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Server disconnected**, has no × and stays until it ends.
-- **Clear**, beside **Mark all read**, dismisses every row that has a ×, under **On this computer** and **Sent to you**, and shows only while such a row exists. Set-aside edits stay, because their Dismiss deletes the text for good.
-- Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared.
+- **Clear**, beside **Mark all read**, dismisses every row that has a ×, under **On this computer** and **Sent to you**, and shows only while such a row exists. Two kinds stay: a row that holds the only Undo for a change, and set-aside edits, whose Dismiss deletes the text for good.
+- Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared. Notices also closes when a dialog opens or the app quits, and each commits the dismissals. A dismissal that fails brings its row back.
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
 - A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
-- A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text, with **Details** last.
+- A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text. A toast keeps its worded actions in a column at its right, beside the text.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
