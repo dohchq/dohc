@@ -32,11 +32,9 @@ import type {
   ChatMessageRecord,
   ChatReactionRecord,
 } from "../../ipc/bridgeContract";
+import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import {
-  findMentions,
-  type MentionCandidate,
-} from "@dohc/workspace-contracts/chat-mentions";
-import {
+  chatMentions,
   extractChatFileReferenceTokens,
   fileReferenceKey,
   resolveFileMentionNavigationTargets,
@@ -75,14 +73,7 @@ export function MentionText(props: {
     fileTokens,
     props.attachments ?? [],
   );
-  // A file token owns its complete source range. A handle-like substring in a
-  // filename is part of the attachment syntax, not a person mention.
-  const mentions = findMentions(props.body, props.candidates, { ignoreCode: true }).filter(
-    (mention) =>
-      !fileTokens.some(
-        (token) => mention.start < token.end && mention.end > token.start,
-      ),
-  );
+  const mentions = chatMentions(props.body, props.candidates, fileTokens);
   const content: ReactNode[] = [];
   let cursor = 0;
   let mentionIndex = 0;

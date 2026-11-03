@@ -6,9 +6,10 @@ import {
   hasPreferredNameControlCharacters,
 } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "../renderer/tokens";
+import { chatMentionTokens } from "../renderer/workbench/chatFileMentions";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
-import { handleForName, normalizeHandle, scanMentionTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { handleForName, normalizeHandle, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 const PreferredNameForIpc = z
   .string()
@@ -172,11 +173,11 @@ export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name
 
 /**
  * The agents dohc can start that a message names, in any case, outside
- * code. A message wakes each one it names, so only your own messages read
- * your agents' names.
+ * code and file links. A message wakes each one it names, so only your own
+ * messages read your agents' names.
  */
 export function agentIdsNamedIn(settings: Pick<DesktopUserSettings, "agents">, body: string): string[] {
-  const named = new Set(scanMentionTokens(body, { ignoreCode: true }).map(({ handle }) => normalizeHandle(handle)));
+  const named = new Set(chatMentionTokens(body).map(({ handle }) => normalizeHandle(handle)));
   return listAgents(settings)
     .filter((agent) => {
       const handle = agentHandle(agent.name);
