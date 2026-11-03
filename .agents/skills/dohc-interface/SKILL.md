@@ -191,7 +191,7 @@ The Words rules apply, and these too:
 - Use no em or en dashes. End the sentence, or use a comma.
 - Cut `please`, `simply`, `just`, `note that`, `make sure`, `currently`, `for now`, and `at the moment`.
 - If dohc knows the answer, do not hedge with `may` or `might`.
-- Do not start a sentence with a name in lowercase. Put the name later: `You can keep working in version-1.`
+- Do not start a sentence with a name a person chose, such as a version or a file. Put it later: `You can keep working in version-1.`
 - Check every claim in the code before you write it. The merge dialog said versions cover only text files, but binary files merge too.
 
 ### Before and after: the merge dialog
