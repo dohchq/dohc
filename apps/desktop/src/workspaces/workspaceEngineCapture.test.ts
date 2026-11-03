@@ -9,8 +9,8 @@ import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { existsSync, type PathLike } from "node:fs";
+import { lstat, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -71,6 +71,7 @@ import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import { bridgeWriteDeferred, CAPTURE_WRITE_DEFERRED_EVENT } from "./captureActivityBridge";
 
 vi.mock("node:timers/promises", { spy: true });
+vi.mock("node:fs/promises", { spy: true });
 
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
@@ -3527,6 +3528,23 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     } finally { await engine.stop(); }
   });
 
+  it("applies a pulled delete after this device's folder was removed", async () => {
+    const root = await createTestScratch("relay-delete-missing-folder-");
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: "page", path: "notes/page.md", text: "recorded" });
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.deleteTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/page.md", metadata: { origin: "sync" } });
+    const notice = vi.fn();
+    const engine = capture(root, { store, rustEngineSessions: sessions, onOutsideWriteCopies: notice });
+    try {
+      await engine.runRelaySync(page => page([{ versionId: "main", path: "notes/page.md", operation: "delete", contentKind: "text" }]));
+      expect(existsSync(join(root, "notes"))).toBe(false);
+      expect(notice).not.toHaveBeenCalled();
+    } finally { await engine.stop(); }
+  });
+
   it("discovers a delete in the active version and compares recorded hashes across versions", async () => {
     const root = await createTestScratch("relay-delete-version-");
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: root });
@@ -4480,6 +4498,91 @@ describe("createDefaultDiskWriter symlink containment", () => {
     await writer.deletePath(join(root, "gone.md"));
     expect(existsSync(join(root, "gone.md"))).toBe(false);
     expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
+
+  it("deletes a link whose target is missing", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await mkdir(join(root, "notes"));
+    await symlink(join(root, "nowhere.md"), join(root, "notes", "dangling.md"));
+    await createDefaultDiskWriter(root).deletePath(join(root, "notes", "dangling.md"));
+    expect(await readdir(join(root, "notes"))).toEqual([]);
+  });
+
+  // A device that never had the folder still receives the delete: a late join
+  // after a rename, or a folder removed on this device.
+  it("deletes under an absent folder chain without creating it, twice", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const writer = createDefaultDiskWriter(root);
+    for (const path of [join(root, "notes", "before.md"), join(root, "a", "b", "c", "deep.md")]) {
+      await writer.deletePath(path);
+      await writer.deletePath(path);
+    }
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  // The folder the check found absent can appear before a delete would run,
+  // even as a link out of the workspace. Nothing was there, so the delete
+  // removes nothing.
+  it("removes nothing under a folder that was absent when the delete was checked", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
+    await write(outside, "keep.md", "must survive\n");
+    const folder = join(root, "notes");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(lstat).mockImplementationOnce((async (path: PathLike) => {
+      try {
+        return await actual.lstat(path);
+      } finally {
+        await symlink(outside, folder, "dir");
+      }
+    }) as typeof lstat);
+    vi.mocked(rm).mockClear();
+    await createDefaultDiskWriter(root).deletePath(join(folder, "keep.md"));
+    expect((await actual.lstat(folder)).isSymbolicLink(), "the folder appeared as a link after the check").toBe(true);
+    expect(rm).not.toHaveBeenCalled();
+    expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
+  });
+
+  it("refuses a delete through an ancestor link that leaves the workspace", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
+    await write(outside, "keep.md", "must survive\n");
+    await symlink(outside, join(root, "escape"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    for (const path of [join(root, "escape", "keep.md"), join(root, "escape", "missing", "keep.md")]) {
+      await expect(writer.deletePath(path)).rejects.toThrow(/Engine delete path escapes the workspace/);
+    }
+    expect(await readdir(outside)).toEqual(["keep.md"]);
+  });
+
+  it("refuses a delete through an alias of .dohc", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await write(root, ".dohc/settings.json", "{}\n");
+    await symlink(join(root, ".dohc"), join(root, "meta"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    for (const path of [join(root, "meta", "settings.json"), join(root, "meta", "absent", "x.md")]) {
+      await expect(writer.deletePath(path)).rejects.toThrow(/Engine delete path leads to a reserved area/);
+    }
+    expect(await readdir(join(root, ".dohc"))).toEqual(["settings.json"]);
+  });
+
+  it("refuses a delete under a dangling or looping ancestor link", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    await symlink(join(root, "nowhere"), join(root, "dangling"), "dir");
+    await symlink(join(root, "loop-b"), join(root, "loop-a"), "dir");
+    await symlink(join(root, "loop-a"), join(root, "loop-b"), "dir");
+    const writer = createDefaultDiskWriter(root);
+    await expect(writer.deletePath(join(root, "dangling", "x.md"))).rejects.toThrow(/symlink with no target/);
+    await expect(writer.deletePath(join(root, "loop-a", "x.md"))).rejects.toThrow(/symlink dohc cannot resolve/);
+    expect(existsSync(join(root, "nowhere"))).toBe(false);
+  });
+
+  it("refuses a delete when the workspace folder is gone", async () => {
+    const root = join(await createTestScratch("dohc-engine-capture-"), "workspace");
+    await expect(
+      createDefaultDiskWriter(root).deletePath(join(root, "notes", "page.md")),
+    ).rejects.toThrow(/could not read the workspace folder/);
+    expect(existsSync(root)).toBe(false);
   });
 });
 
