@@ -8561,8 +8561,9 @@ mod tests {
         let claim = dohc_engine_storage::hex_sha256(&base);
         apply_peer_ydoc(&mut store, ("peer", 0, 1), &claim, &base, true);
         apply_peer_ydoc(&mut store, ("peer", 1, 2), &claim, &first, false);
+        // Move it the way the runtime does, so its editor history moves too.
         VersionedTextStore::new(&mut store)
-            .rename_text_file(
+            .rename_text_file_with(
                 &dohc_engine_domain::RenameTextFile {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
@@ -8577,6 +8578,17 @@ mod tests {
                     now_ms: 24,
                 },
                 &NoFaults,
+                |tx, result| {
+                    let resulting = crate::ResultingHead::Text {
+                        path: &result.after.path,
+                        text: &result.after.text,
+                    };
+                    crate::reconcile_local_resulting_head_in_tx(
+                        tx, "ws", "main", "object-a", resulting, None, None, 24,
+                    )
+                    .map(drop)
+                    .map_err(sync_as_domain)
+                },
             )
             .unwrap();
         let predecessor = dohc_engine_collab::Ydoc::wire();
