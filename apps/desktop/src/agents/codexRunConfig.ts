@@ -143,8 +143,9 @@ function attempt<T>(read: () => T): T | null {
 // drops a folder that
 // - doesn't exist, is a drive-relative Windows path, or reads as a pattern;
 // - is .dohc under another name, such as a share;
-// - is inside the workspace, a temp folder or another folder dohc keeps,
-//   because the run can write there and swap it for a link into .dohc;
+// - is inside the workspace, a temp folder or another folder dohc keeps, as
+//   written or resolved, because the run can write there and swap it for a
+//   link that this run or the next one would follow;
 // - contains the workspace, because the run could move the workspace away
 //   from .dohc's rule.
 function writableRootEntries(tables: readonly ConfigTable[], input: {
@@ -175,28 +176,29 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
   };
   const writable = new Set([
     workspace, attempt(() => input.fileId(path.join(input.rootPath, ".dohc"))),
-    ...[input.env.TMPDIR, input.env.TEMP, input.env.TMP, input.platform === "win32" ? undefined : "/tmp"]
+    ...[input.env.TMPDIR, input.env.TEMP, input.env.TMP, ...(input.platform === "win32" ? [] : ["/tmp", "/var/tmp"])]
       .map((folder) => folder && path.isAbsolute(folder) ? attempt(() => input.fileId(folder)) : null),
   ].filter((id): id is string => id !== null));
-  const listed = new Map<string, string>();
+  const listed: { id: string; real: string; above: string[] }[] = [];
   for (const root of setting.roots) {
     const expanded = (input.platform === "win32" ? /^~(?:[\\/]|$)/u : /^~(?:\/|$)/u).test(root) ? path.join(input.home, root.slice(1)) : root;
     if (input.platform === "win32" && /^[a-z]:(?![\\/])/iu.test(expanded)) continue;
-    const real = attempt(() => input.realPath(path.resolve(path.dirname(setting.file), expanded)));
+    const written = path.resolve(path.dirname(setting.file), expanded);
+    const real = attempt(() => input.realPath(written));
     const id = real === null ? null : attempt(() => input.fileId(real));
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
     if (real === null || id === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
-    listed.set(id, real);
+    listed.push({ id, real, above: [...above(written), ...above(real)] });
   }
-  // Codex may name the workspace by either path. A kept folder reaches Codex
-  // by its real path, so only that path's folders matter.
+  // Codex may name the workspace by either path.
   const aboveWorkspace = new Set([input.rootPath, attempt(() => input.realPath(input.rootPath)) ?? input.rootPath].flatMap(above));
-  const kept = [...listed].map(([id, real]) => ({ id, real, above: above(real) }))
-    .filter((root) => !aboveWorkspace.has(root.id) && !root.above.some((each) => writable.has(each)));
-  const keptIds = new Set(kept.map((root) => root.id));
-  return kept
-    .filter((root) => !root.above.some((each) => each !== root.id && keptIds.has(each)))
-    .map((root) => `${tomlKey(root.real)}='write'`);
+  const safe = listed.filter((root) => !aboveWorkspace.has(root.id) && !root.above.some((each) => writable.has(each)));
+  const safeIds = new Set(safe.map((root) => root.id));
+  // One entry per folder, however many of its spellings are safe.
+  const kept = new Map(safe
+    .filter((root) => !root.above.some((each) => each !== root.id && safeIds.has(each)))
+    .map((root): [string, string] => [root.id, root.real]));
+  return [...kept.values()].map((real) => `${tomlKey(real)}='write'`);
 }
 
 // The --config entries a dohc Codex run adds over the person's config, which

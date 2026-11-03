@@ -284,22 +284,24 @@ describe("a dohc Codex run", () => {
   });
 
   it("drops writable folders the run could swap for a link, and gives linked ones by their real paths", () => {
-    const roots = [
-      "/home/sam/notes", "/home/sam/dohc", "/data", "/home/sam/ws/out", "/srv/tmp/me/out", "/tmp/out", "/opt/a", "/opt/a/b",
-    ];
-    const entries = codexRunConfig({
+    const run = (roots: string[]) => filesystem(codexRunConfig({
       rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/home/sam/.codex/config.toml"] },
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
-      ...disk("linux", ["/data/ws/.dohc", "/data/notes", "/cache/build", "/srv/tmp/me/out", "/tmp/out", "/opt/a/b"], {
+      ...disk("linux", ["/data/ws/.dohc", "/data/notes", "/cache/build", "/srv/tmp/me/out", "/srv/elsewhere", "/tmp/out", "/var/tmp/out", "/opt/a/b"], {
         "/home/sam/ws": "/data/ws",
         "/home/sam/notes": "/data/notes",
         "/home/sam/dohc": "/data/ws/.dohc",
         "/home/sam/ws/out": "/cache/build",
+        "/opt/a/link": "/srv/elsewhere",
       }),
       env: { TMPDIR: "/srv/tmp/me" },
-    });
-    // Codex gets out's real path, so swapping the link changes nothing until dohc checks it again.
-    expect(filesystem(entries)).toEqual({
+    }));
+    const roots = [
+      "/home/sam/notes", "/home/sam/dohc", "/data", "/home/sam/ws/out", "/srv/tmp/me/out", "/tmp/out", "/var/tmp/out",
+      "/opt/a", "/opt/a/b", "/opt/a/link",
+    ];
+    expect(run(roots)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/data/notes": "write", "/opt/a": "write" });
+    expect(run([...roots, "/cache/build"])).toEqual({
       ":workspace_roots": { ".dohc": "read" }, "/data/notes": "write", "/cache/build": "write", "/opt/a": "write",
     });
   });
