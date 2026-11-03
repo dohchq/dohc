@@ -1522,6 +1522,7 @@ fn record_file_edit_held_by_a_live_session_converges_after_it_closes() {
 #[test]
 fn a_resolution_retires_a_bare_lineage_whatever_an_earlier_lineage_journaled() {
     let (_scratch, mut b) = device("device-b");
+    a_creates_apollo(&mut b, &md(PLANNED));
     b.write_with(&NoFaults, |tx| {
         tx.execute(
             "INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,\
