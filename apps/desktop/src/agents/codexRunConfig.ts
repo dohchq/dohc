@@ -306,7 +306,9 @@ export function codexRunConfig(input: {
   return [
     ...[
       ...(input.readOnly
-        ? ["default_permissions=':read-only'", ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`), "web_search='disabled'", "notify=[]"]
+        // A model can start sub-agents whatever multi_agent says, unless
+        // agents.enabled is false and multi_agent_v2 is off.
+        ? ["default_permissions=':read-only'", ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`), "web_search='disabled'", "notify=[]", "agents.enabled=false"]
         : [`permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`, `default_permissions='${profile}'`]),
       `projects={${projects.join(",")}}`,
       ...(tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
@@ -321,7 +323,7 @@ export function codexRunConfig(input: {
 // reply. Codex refuses a name it doesn't know.
 export const READ_ONLY_DISABLED_FEATURES = [
   "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
-  "multi_agent", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
+  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
 ] as const;
 
 // A reply-only run also turns off the shell and view_image.

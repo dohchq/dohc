@@ -29,12 +29,12 @@ if (profileTool && ["auth", "login", "status"].includes(process.argv[3])) {
 const threadId = process.env.DOHC_CHAT_THREAD;
 const runId = process.env.DOHC_RUN_ID;
 // A reply-only Codex run also turns off each MCP server the person's config
-// names, web search, the command run after each turn, and these features
+// names, web search, the command run after each turn, sub-agents, and these features
 // (codexRunConfig.ts), and loads no saved command rules (agentToolCatalog.ts).
 // A reply-only run also turns off the shell and view_image.
 const READ_ONLY_DISABLED_FEATURES = [
   "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
-  "multi_agent", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
+  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
 ];
 const REPLY_ONLY_DISABLED_FEATURES = ["shell_tool", "unified_exec", "view_image"];
 const CODEX_TAIL = ["--skip-git-repo-check", "--ephemeral", "-"];
@@ -108,10 +108,10 @@ function codexReplyServer(args) {
   const owners = [...config.keys()].filter((key) => /^mcp_servers\.[\w-]+\.enabled$/u.test(key));
   const tail = readOnly ? ["--ignore-rules", ...CODEX_TAIL] : CODEX_TAIL;
   const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", ...(readOnly ? [] : [`permissions.${profile}`]), "default_permissions", ...(readOnly ? [...owners, "web_search", "notify"] : []), "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", ...(readOnly ? [] : [`permissions.${profile}`]), "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled"] : []), "projects", ...sandbox];
   if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
     owners.some((key) => key === "mcp_servers.dohc.enabled" || config.get(key) !== "false") ||
-    (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]"))) {
+    (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]" || config.get("agents.enabled") !== "false"))) {
     return null;
   }
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");

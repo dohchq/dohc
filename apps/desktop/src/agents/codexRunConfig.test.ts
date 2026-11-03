@@ -116,10 +116,11 @@ describe("a dohc Codex run", () => {
       "--config", "mcp_servers.github.enabled=false",
       "--config", "web_search='disabled'",
       "--config", "notify=[]",
+      "--config", "agents.enabled=false",
       "--config", "projects={'c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'},'\\\\?\\c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'}}",
       "--config", "windows.sandbox='unelevated'",
       ...["plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
-        "multi_agent", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
+        "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
         "shell_tool", "unified_exec", "view_image"].flatMap((feature) => ["--disable", feature]),
     ]);
   });
