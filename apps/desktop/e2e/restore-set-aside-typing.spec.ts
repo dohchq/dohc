@@ -171,15 +171,17 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await info.attach("History More menu", {contentType: "image/png", body: await page.screenshot()});
       await page.keyboard.press("Escape");
     });
-    await test.step("Restore earlier state on the shared note says where its text is, with no Try again", async () => {
-      const title = `dohc can't restore "${PATH}" because it has been shared live`;
-      const body = "Copy the text you want from History into the file.";
-      // The title and body both show whole, with no Show more and no Try again.
+    await test.step("Restore earlier state on the shared note says to stop live editing first", async () => {
+      const title = `dohc can't restore "${PATH}" while it has live editing on`;
+      const body = "In Live documents, stop live editing for this page, then restore it again.";
+      // The title and body both show whole, with no Show more, and the
+      // refusal offers Try again and Open Live documents.
       const expectRefusal = async (shown: Locator) => {
         await expect(shown.locator("[id$='-title']")).toHaveText(title);
         await expect(shown.locator("[id$='-body']")).toHaveText(body);
         await expect(shown.locator("[data-testid$='-more']")).toHaveCount(0);
-        await expect(shown.getByRole("button", {name: "Try again"})).toHaveCount(0);
+        await expect(shown.getByRole("button", {name: "Try again"})).toBeVisible();
+        await expect(shown.getByRole("button", {name: "Open Live documents", exact: true})).toBeVisible();
       };
       await page.getByTestId("engine-diff-restore-file").click();
       const refusal = page.getByTestId("workspace-shell-error");
@@ -192,6 +194,30 @@ test("@restore-set-aside-typing a shared restore keeps the owner's later typing 
       await expectRefusal(row);
       await info.attach("Restore refusal in Notices", {contentType: "image/png", body: await page.screenshot()});
       await page.getByTestId("notice-center-toggle").click();
+      await expect.poll(async () => normalized(await readFile(join(ownerTemp.rootPath, PATH), "utf8"))).toContain(R1);
+    });
+    await test.step("Restore earlier state on the note's creation is refused too, and the note stays", async () => {
+      // Restoring to before the creation would delete the shared note.
+      const title = `dohc can't restore "${PATH}" while it has live editing on`;
+      const body = "In Live documents, stop live editing for this page, then restore it again.";
+      // Clear the earlier refusal, so the toast below can only be this one.
+      const toasts = page.getByTestId("notice-toasts").getByTestId("workspace-shell-error");
+      for (const shown of await toasts.all()) await shown.getByRole("button", {name: "Dismiss workspace error"}).click();
+      await expect(toasts).toHaveCount(0);
+      await openHistoryView(page);
+      const creation = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`)
+        .filter({hasText: "Added existing files"});
+      await expect(creation).toHaveCount(1, {timeout: 60_000});
+      await creation.click();
+      await page.getByTestId("engine-diff-restore-file").click();
+      const refusal = toasts.filter({hasText: title});
+      await expect(refusal).toHaveCount(1, {timeout: 30_000});
+      await expect(refusal.locator("[id$='-title']")).toHaveText(title);
+      await expect(refusal.locator("[id$='-body']")).toHaveText(body);
+      await expect(refusal.getByRole("button", {name: "Try again"})).toBeVisible();
+      await expect(refusal.getByRole("button", {name: "Open Live documents", exact: true})).toBeVisible();
+      await expect(page.getByText("Removed the file this change created.")).toHaveCount(0);
+      await info.attach("Creation restore refusal toast", {contentType: "image/png", body: await page.screenshot()});
       await expect.poll(async () => normalized(await readFile(join(ownerTemp.rootPath, PATH), "utf8"))).toContain(R1);
     });
     // A restore that stops a note's last Edit access can leave it and other
