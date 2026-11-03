@@ -128,6 +128,8 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
   it.each([
     ["a text field", <textarea key="field" aria-label="Note" />],
     ["editable text", <div key="field" aria-label="Note" role="textbox" contentEditable suppressContentEditableWarning />],
+    // An app's frame may hold a text field the renderer can't see.
+    ["an app's frame", <iframe key="field" title="Note" />],
   ])("keeps focus on its panel when it opens while someone types in %s", async (_name, field) => {
     const user = userEvent.setup();
     const onConfirm = vi.fn();
@@ -143,7 +145,9 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
       </>
     );
     const { rerender } = render(shown(false));
-    screen.getByRole("textbox", { name: "Note" }).focus();
+    const typed = document.querySelector<HTMLElement>("[aria-label=Note], iframe[title=Note]")!;
+    typed.focus();
+    expect(document.activeElement).toBe(typed);
     rerender(shown(true));
     const panel = screen.getByTestId("confirm").parentElement!;
     expect(document.activeElement).toBe(panel);

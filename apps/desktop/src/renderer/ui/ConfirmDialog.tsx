@@ -80,10 +80,12 @@ function onDialogKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
   buttons[from === null ? (step === 1 ? 0 : buttons.length - 1) : (from + step + buttons.length) % buttons.length]!.focus();
 }
 
-// Where someone types. A dialog that opens there, such as one that waited
-// for a list, keeps focus on its panel, so their next Enter does nothing.
+// Where someone may be typing: a text field, editable text, or an app's
+// frame, whose fields the renderer can't see. A dialog that opens there,
+// such as one that waited for a list, keeps focus on its panel, so their
+// next Enter does nothing.
 const TEXT_ENTRY =
-  'textarea, input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"], [type="range"], [type="color"], [type="file"]), [contenteditable]:not([contenteditable="false"])';
+  'textarea, input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"], [type="range"], [type="color"], [type="file"]), [contenteditable]:not([contenteditable="false"]), iframe, webview';
 
 // Focus starts on the confirm button, so Enter confirms and Escape cancels.
 // A confirm that waits for a choice starts on the dialog's first control.
