@@ -194,9 +194,10 @@ export interface ExplorerProps {
   // Asks for a listing and answers its request.
   onRefresh: () => number;
   // Failed tree operations go to the shell's error toast and Notices row,
-  // with Try again when asking again can succeed. A refused folder move
-  // names itself, so a later success of the same move clears it.
+  // with Try again when asking again can succeed. A failed move names
+  // itself, so a later success of the same move clears it.
   onError: (message: string, cause?: unknown, retry?: () => void, identity?: string) => void;
+  onChangeSucceeded?: (identity: string) => void;
   // A finished rename, move or delete: a toast and a Notices row, with Undo
   // while main can still reverse it.
   onNotice: (message: string, undo?: () => void) => void;
@@ -580,6 +581,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onRefresh,
     onError,
     onNotice,
+    onChangeSucceeded,
     onBeginChanges,
     onPathsChanged,
     onSetFolderExpanded,
@@ -989,7 +991,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // each success with what its IPC returned, including a Try again's.
   // `failed` reports a failure in the caller's own words instead.
   const runChanges = useCallback(
-    async <Result,>(
+    async function runChangesOnce<Result>(
       changes: PendingTreeChange[],
       run: (change: PendingTreeChange) => Promise<Result>,
       options: {
@@ -997,7 +999,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         failed?: (change: PendingTreeChange, cause: unknown) => void;
         answered?: (succeeded: { change: PendingTreeChange; result: Result }[]) => void;
       } = {},
-    ): Promise<{ change: PendingTreeChange; result: Result }[]> => {
+    ): Promise<{ change: PendingTreeChange; result: Result }[]> {
       if (changes.length === 0) return [];
       // Land the stable active draft and drain queued collection writes
       // before paths move underneath them. The operation cannot preserve
@@ -1015,22 +1017,26 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         setPending((current) => [...current, ...changes]);
         for (const change of changes) {
+          const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
             succeeded.push({ change, result: await run(change) });
+            if (identity) onChangeSucceeded?.(identity);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
             if (options.failed) {
               options.failed(change, cause);
               continue;
             }
-            // Try again reruns a refused folder move as it was asked.
-            const again = isLiveFolderMoveRefusal(cause)
-              ? () => void runChanges([{ ...change, id: nextChangeId() }], run, { answered: options.answered })
-              : undefined;
-            const identity = change.kind === "folder" && isFolderMoveRefusal(cause)
+            // A refused folder move keeps the folder-move identity, with Try again
+            // only when live editing refused it. Any other failed move names its
+            // source, and Try again runs it as it was asked.
+            const folderIdentity = change.kind === "folder" && isFolderMoveRefusal(cause)
               ? folderMoveIdentity(workspaceId, change)
               : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, identity);
+            const rerun = () =>
+              void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered });
+            const again = folderIdentity ? (isLiveFolderMoveRefusal(cause) ? rerun : undefined) : identity ? rerun : undefined;
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, folderIdentity ?? identity);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -1057,7 +1063,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       options.answered?.(succeeded);
       return succeeded;
     },
-    [onBeginChanges, onError, onPathsChanged, onRefresh, workspaceId],
+    [onBeginChanges, onChangeSucceeded, onError, onPathsChanged, onRefresh, workspaceId],
   );
 
   // Undo runs as a tree change of its own: drafts settle first, the row

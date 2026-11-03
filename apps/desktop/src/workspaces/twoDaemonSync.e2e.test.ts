@@ -7,6 +7,7 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { HostedLogClientClosedError, startServerProxy, type HostedLogResponseBarrier } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
+import { existsSync } from "node:fs";
 import { once } from "node:events";
 import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
@@ -42,6 +43,7 @@ import {
   createWorkspaceEngineCapture,
   LIVE_FOLDER_MOVE_BODY,
   LiveFolderMoveError,
+  liveFolderMoveTitle,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -68,7 +70,10 @@ import {createRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
 import {LIVE_STOP_EDITS_PENDING, liveStopRelayError, readLiveStopRefusal} from "../ipc/liveEditingStop";
 import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
+import { MOVE_ACCEPTED_EDITS_WAIT_MS } from "./moveAcceptedEditsGuard";
 import {openLiveFolderMoveFixture} from "../testing/liveFolderMoveFixture";
+import { ipcWireError } from "../ipc/errorWords";
+import { openLiveMoveFixture, recordGuardTimings, type GuardPull, type GuardTiming, type LiveMoveFixture, type MoveDevice } from "../testing/liveMoveFixture";
 
 const engine = requireEngineBinaryOrSkip();
 
@@ -3088,4 +3093,259 @@ describe.skipIf(engine.missing)("a folder move over a page the owner has live", 
       await refused(fixture);
     } finally { await fixture.close(); }
   }, 240_000);
+});
+
+// #3089: before a live page moves, the guard tries to catch this device up
+// with the server, so the move carries the edit the live host already accepted.
+describe("the move guard over a real relay and live host", () => {
+  const PROXY_DELAY_MS = 50;
+  const timings: GuardTiming[] = [];
+  const marker = (name: string) => ` ${name}-${randomUUID().slice(0, 8)}`;
+  const RETRY_LATER = { wireCode: "OVERLOADED", message: "markdown-witness-check-pending", retry: "afterBackoff" };
+  const describePull = (pull: GuardPull) => pull.result === "succeeded" ? "succeeded"
+    : `refused ${pull.wireCode ?? "without a wire code"} ${pull.message} (retry ${pull.retry ?? "unknown"})`;
+  const answeredRetryLater = (pull: GuardPull | undefined) => pull?.result === "failed"
+    && pull.wireCode === RETRY_LATER.wireCode && pull.message === RETRY_LATER.message && pull.retry === RETRY_LATER.retry;
+
+  // Pulls outside the relay engine until one finds nothing new, so the next
+  // pull has no backlog. A pull that answers retry later is pulled again.
+  async function drain(device: MoveDevice) {
+    await expect.poll(async () => (await device.pull()).fetched, { timeout: 120_000 }).toBe(0);
+    expect(device.syncFailed()).toBe(false);
+    expect(device.backgroundPulls(), "the relay engine pulled outside a guard's catch-up").toEqual([]);
+  }
+
+  // The link holder's edit is accepted, saved and published; nothing on the
+  // device has pulled it, unless `before` does. Times only the move.
+  // `unbound` decides what an unbound guarded move must show:
+  // - backlog: its pull either carries the edit, or answers retry later and
+  //   the move goes ahead without it, as the guard allows.
+  // - drained: the device had nothing else to pull, so the pull must succeed
+  //   inside the wait and carry the edit.
+  async function editThenMove(fixture: LiveMoveFixture, device: MoveDevice, input: { name: string; route: GuardTiming["route"];
+    guarded: boolean; proxyDelayMs: number; unbound?: "backlog" | "drained"; beforeEdit?: () => Promise<void>; before?: () => Promise<void> }) {
+    const { path } = fixture.page(input.name);
+    const text = marker(input.name);
+    await input.beforeEdit?.();
+    const cursor = await fixture.edit(input.name, text);
+    await fixture.waitPublished(input.name, cursor);
+    await input.before?.();
+    const unchanged = await fixture.read(device, path);
+    expect(unchanged).not.toContain(text);
+    const destination = `notes/${input.name}-moved.md`;
+    const requested = device.targetedPasses();
+    fixture.proxy.setDelayMs(input.proxyDelayMs);
+    let elapsedMs: number;
+    try { elapsedMs = await device.move(path, destination, { guarded: input.guarded }); }
+    finally { fixture.proxy.setDelayMs(0); }
+    // A move past the wait goes ahead while its catch-up still runs, so read once the catch-up ends.
+    const guardPulls = input.guarded ? await device.guardPulls() : undefined;
+    const moved = await fixture.read(device, destination).catch(() => undefined);
+    const pull: GuardPull | undefined = guardPulls?.pulls[0];
+    const outcome: GuardTiming["outcome"] = !input.unbound ? "moved" : moved?.includes(text) ? "carried"
+      : answeredRetryLater(pull) && moved === unchanged ? "stale-retry-later" : "moved";
+    // Recorded before any check, so a failed check still leaves the timing.
+    timings.push({ name: input.name, route: input.route, guard: input.guarded ? "on" : "off", proxyDelayMs: input.proxyDelayMs, elapsedMs,
+      outcome, ...(guardPulls ? { guardPulls } : {}) });
+    expect(existsSync(join(device.rootPath, path))).toBe(false);
+    if (!guardPulls) {
+      expect(device.targetedPasses()).toBe(requested);
+      expect(moved).toBe(unchanged);
+      return false;
+    }
+    expect(device.targetedPasses()).toBe(requested + 1);
+    const carriedInTime = elapsedMs <= MOVE_ACCEPTED_EDITS_WAIT_MS && moved !== undefined && moved.includes(text);
+    if (!input.unbound) {
+      // The guard attempts one owner sync, then one pull while time remains. It
+      // doesn't promise the edit. These bound moves expect it inside the wait;
+      // one past the wait may go ahead without it.
+      if (elapsedMs <= MOVE_ACCEPTED_EDITS_WAIT_MS || moved !== unchanged) expect(moved).toContain(text);
+      return carriedInTime;
+    }
+    if (input.unbound === "drained" && elapsedMs > MOVE_ACCEPTED_EDITS_WAIT_MS) {
+      throw new Error(`The move ran over the wait: ${Math.round(elapsedMs)} ms. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
+    }
+    expect(guardPulls.shared, "another pass was running when the guard's catch-up began").toBe(false);
+    if (pull === undefined) throw new Error(`The guard's catch-up ran no pull, ${Math.round(elapsedMs)} ms into the move.`);
+    expect(guardPulls.pulls.map(describePull), "the guard's catch-up ran one pull").toHaveLength(1);
+    expect(fixture.ownerBound(device, input.name)).toBe(false);
+    if (input.unbound === "drained") {
+      if (pull.result === "failed") throw new Error(`The guard's pull was refused: ${describePull(pull)}.`);
+      expect(moved).toContain(text);
+      return carriedInTime;
+    }
+    // The guard doesn't promise the edit. A pull that answers retry later lets
+    // the move go ahead without it, and the edit stays published under the page's binding.
+    if (pull.result === "succeeded") expect(moved, "the guard's pull succeeded").toContain(text);
+    else {
+      expect({ wireCode: pull.wireCode, message: pull.message, retry: pull.retry }, "the guard's pull failed").toEqual(RETRY_LATER);
+      expect(moved).toBe(unchanged);
+      await fixture.waitPublished(input.name, cursor);
+    }
+    return carriedInTime;
+  }
+
+  afterAll(async () => {
+    if (timings.length) await recordGuardTimings("two-daemon-sync", timings);
+  });
+
+  it.skipIf(engine.missing)("carries the accepted edit on a bound and an unbound device, and keeps the engine's refusal", async () => {
+    const fixture = await openLiveMoveFixture({ workspaceId: "guard-carries-accepted", compiledRelayMain, engineExecutable: engine.require(),
+      pages: ["pending", "unpulled", "slow", "refused", "peer"], peer: true });
+    try {
+      const { owner, peer } = fixture;
+      const recorded = timings.length;
+      // Whether each guarded move finished inside the wait, and so carried the edit.
+      const carriedInTime = [
+        // Bound, S already pending: an earlier pull parked the save, and the file holds the page as it was.
+        await editThenMove(fixture, owner, { name: "pending", route: "bound", guarded: true, proxyDelayMs: 0, before: async () => {
+          await owner.pull();
+          expect(fixture.ownerPendingSettlements("pending")).toBeGreaterThan(0);
+        } }),
+        // Bound, S not yet pulled.
+        await editThenMove(fixture, owner, { name: "unpulled", route: "bound", guarded: true, proxyDelayMs: 0 }),
+        await editThenMove(fixture, owner, { name: "slow", route: "bound", guarded: true, proxyDelayMs: PROXY_DELAY_MS }),
+      ];
+
+      // The owner feed installs a newer edit, and the pull that would save it
+      // into the page fails. The engine refuses the move and keeps the edit.
+      const refused = fixture.page("refused");
+      const text = marker("refused");
+      const notices = await owner.refusalNotices();
+      fixture.refuseLogPulls(true);
+      let failure: unknown;
+      try {
+        const cursor = await fixture.edit("refused", text);
+        const requested = owner.targetedPasses();
+        const started = performance.now();
+        failure = await owner.move(refused.path, "notes/refused-moved.md", { guarded: true }).then(() => undefined, (error: unknown) => error);
+        const elapsedMs = performance.now() - started;
+        timings.push({ name: "refused", route: "bound", guard: "on", proxyDelayMs: 0, elapsedMs, outcome: "refused", guardPulls: await owner.guardPulls() });
+        expect(owner.targetedPasses()).toBe(requested + 1);
+        expect(fixture.ownerAccepted("refused").cursor).toBeGreaterThanOrEqual(cursor);
+        await fixture.waitPublished("refused", cursor);
+      } finally { fixture.refuseLogPulls(false); }
+      // The engine's refusal reaches the window unmapped, as on main. The move-refusal words follow-up to #3089 changes this line.
+      expect(String(ipcWireError(failure))).toBe("Error: live-document-binding-active dohc put everything back.");
+      expect(existsSync(join(owner.rootPath, "notes/refused-moved.md"))).toBe(false);
+      expect(await fixture.read(owner, refused.path)).not.toContain(text);
+      expect(await owner.refusalNotices()).toEqual(notices);
+      // Once the save is pulled into the page, the same move succeeds.
+      await owner.pull();
+      expect(await fixture.read(owner, refused.path)).toContain(text);
+      const retryElapsedMs = await owner.move(refused.path, "notes/refused-moved.md", { guarded: true });
+      timings.push({ name: "refused-retry", route: "bound", guard: "on", proxyDelayMs: 0, elapsedMs: retryElapsedMs, outcome: "moved",
+        guardPulls: await owner.guardPulls() });
+      expect(await fixture.read(owner, "notes/refused-moved.md")).toContain(text);
+
+      // Unbound, behind the owner's cases: the peer never enrolls, so the pull
+      // alone can carry the save, and its first pull meets everything those
+      // cases published. That pull may answer retry later.
+      carriedInTime.push(await editThenMove(fixture, peer, { name: "peer", route: "unbound", guarded: true, proxyDelayMs: 0, unbound: "backlog" }));
+      const peerOutcome = timings.at(-1)?.outcome;
+      expect(["carried", "stale-retry-later"]).toContain(peerOutcome);
+      // Every guarded move here reaches the timing record, the refusal and its retry included.
+      expect(timings.slice(recorded).map(({ name, guard, outcome }) => `${name} ${guard} ${outcome}`)).toEqual([
+        "pending on moved", "unpulled on moved", "slow on moved", "refused on refused", "refused-retry on moved",
+        `peer on ${peerOutcome}`,
+      ]);
+      // If every move ran past the wait, the run tested nothing about the catch-up.
+      expect(carriedInTime.filter(Boolean).length).toBeGreaterThan(0);
+      // The peer's guard ran owner syncs, and none of them made the peer an owner.
+      expect(fixture.ownerBound(owner, "slow")).toBe(true);
+      expect(fixture.ownerBound(peer, "peer")).toBe(false);
+    } finally {
+      await fixture.close();
+    }
+  }, 600_000);
+
+  // Unbound, with nothing else to pull: the peer pulls until no backlog is
+  // left before each edit, and pulls nothing between the edit and the move.
+  it.skipIf(engine.missing)("carries the accepted edit on an unbound device whose pull has nothing else to do", async () => {
+    const fixture = await openLiveMoveFixture({ workspaceId: "guard-carries-unbound", compiledRelayMain, engineExecutable: engine.require(),
+      pages: ["peer-alone", "peer-slow"], peer: true });
+    try {
+      const { peer } = fixture;
+      const recorded = timings.length;
+      const carriedInTime = [
+        await editThenMove(fixture, peer, { name: "peer-alone", route: "unbound", guarded: true, proxyDelayMs: 0, unbound: "drained",
+          beforeEdit: () => drain(peer) }),
+        await editThenMove(fixture, peer, { name: "peer-slow", route: "unbound", guarded: true, proxyDelayMs: PROXY_DELAY_MS, unbound: "drained",
+          beforeEdit: () => drain(peer) }),
+      ];
+      expect(timings.slice(recorded).map(({ name, guard, outcome }) => `${name} ${guard} ${outcome}`)).toEqual([
+        "peer-alone on carried", "peer-slow on carried",
+      ]);
+      expect(carriedInTime).toEqual([true, true]);
+    } finally {
+      await fixture.close();
+    }
+  }, 600_000);
+
+  // A folder that holds a page this computer owns, whose newer edit is
+  // installed but not yet saved into the file. The live-folder refusal comes
+  // before the guard catches anything up, and the next pull saves the edit
+  // into the page where it is. The live-folder suite covers an edit that
+  // hasn't reached the owner; this one covers an installed one, with the
+  // guard wired.
+  it.skipIf(engine.missing)("refuses a folder move over an installed, unsaved edit before catching up, and keeps the edit", async () => {
+    const fixture = await openLiveMoveFixture({ workspaceId: "guard-folder-refused", compiledRelayMain, engineExecutable: engine.require(),
+      pages: ["box/refused"] });
+    try {
+      const { owner } = fixture;
+      const page = fixture.page("box/refused");
+      const text = marker("box-refused");
+      const recorded = timings.length;
+      const files = async () => (await readdir(join(owner.rootPath, "notes"), { recursive: true })).map(String).sort();
+      fixture.refuseLogPulls(true);
+      let failure: unknown;
+      let accepted: ReturnType<LiveMoveFixture["ownerAccepted"]>;
+      try {
+        const cursor = await fixture.edit("box/refused", text);
+        await fixture.ownerSync("box/refused");
+        accepted = fixture.ownerAccepted("box/refused");
+        expect(accepted.cursor).toBeGreaterThanOrEqual(cursor);
+        await fixture.waitPublished("box/refused", cursor);
+        expect(await fixture.read(owner, page.path)).not.toContain(text);
+        const before = { files: await files(), outbound: fixture.outbound("box/refused"), notices: await owner.refusalNotices(),
+          requested: owner.targetedPasses() };
+        const started = performance.now();
+        failure = await owner.move("notes/box", "notes/box-moved", { guarded: true }).then(() => undefined, (error: unknown) => error);
+        const elapsedMs = performance.now() - started;
+        timings.push({ name: "folder-refused", route: "bound", guard: "on", proxyDelayMs: 0, elapsedMs, outcome: "refused", guardPulls: await owner.guardPulls() });
+        expect(failure).toBeInstanceOf(LiveFolderMoveError);
+        expect((failure as Error).message).toBe(`${liveFolderMoveTitle("notes/box")}\n${LIVE_FOLDER_MOVE_BODY}`);
+        // The guard caught nothing up, and the refused move changed nothing.
+        expect(owner.targetedPasses()).toBe(before.requested);
+        expect(await files()).toEqual(before.files);
+        expect(existsSync(join(owner.rootPath, "notes/box-moved"))).toBe(false);
+        expect(fixture.outbound("box/refused")).toBe(before.outbound);
+        expect(await owner.refusalNotices()).toEqual(before.notices);
+        expect(fixture.ownerAccepted("box/refused")).toEqual(accepted);
+        expect(await fixture.read(owner, page.path)).not.toContain(text);
+      } finally { fixture.refuseLogPulls(false); }
+      expect(timings.slice(recorded).map(({ name, guard, outcome }) => `${name} ${guard} ${outcome}`)).toEqual(["folder-refused on refused"]);
+      // The next pull saves the kept edit into the page at its old path.
+      await owner.pull();
+      expect(await fixture.read(owner, page.path)).toContain(text);
+    } finally {
+      await fixture.close();
+    }
+  }, 600_000);
+
+  // A fresh fixture, so no guard's pull has run on either device.
+  it.skipIf(engine.missing)("without the guard, the same moves leave the accepted edit out", async () => {
+    const fixture = await openLiveMoveFixture({ workspaceId: "guard-off-control", compiledRelayMain, engineExecutable: engine.require(),
+      pages: ["off", "off-slow", "peer-off", "peer-off-slow"], peer: true });
+    try {
+      const { owner, peer } = fixture;
+      await editThenMove(fixture, owner, { name: "off", route: "bound", guarded: false, proxyDelayMs: 0,
+        before: async () => { expect(fixture.ownerPendingSettlements("off")).toBe(0); } });
+      await editThenMove(fixture, owner, { name: "off-slow", route: "bound", guarded: false, proxyDelayMs: PROXY_DELAY_MS });
+      await editThenMove(fixture, peer, { name: "peer-off", route: "unbound", guarded: false, proxyDelayMs: 0 });
+      await editThenMove(fixture, peer, { name: "peer-off-slow", route: "unbound", guarded: false, proxyDelayMs: PROXY_DELAY_MS });
+    } finally {
+      await fixture.close();
+    }
+  }, 600_000);
 });

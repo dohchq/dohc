@@ -3033,8 +3033,11 @@ export function DesktopWorkspaceShell(props: {
       onNotice: (message: string, undo?: () => void) => {
         if (current()) showSuccessNotice(message, whileCurrent(undo));
       },
+      onChangeSucceeded: (identity: string) => {
+        if (current()) clearIdentity(identity);
+      },
     };
-  }, [workspaceId, reportFailureMessage, showSuccessNotice]);
+  }, [workspaceId, reportFailureMessage, showSuccessNotice, clearIdentity]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
@@ -5353,6 +5356,7 @@ export function DesktopWorkspaceShell(props: {
         onRefresh={onExplorerRefresh}
         onError={explorerReports.onError}
         onNotice={explorerReports.onNotice}
+        onChangeSucceeded={explorerReports.onChangeSucceeded}
         onNewCollection={setNewCollectionFolder}
       />
     </>

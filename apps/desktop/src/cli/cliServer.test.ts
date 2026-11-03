@@ -43,6 +43,7 @@ import { createChatWrites } from "../workspaces/chatWrites";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import { createLocalAuthorship } from "../workspaces/localAuthorship";
 import { deferred } from "../testing/deferred";
+import { createMoveAcceptedEditsGuard, MOVE_ACCEPTED_EDITS_WAIT_MS } from "../workspaces/moveAcceptedEditsGuard";
 import { createUsageStore } from "../usage/usageStore";
 import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -1011,6 +1012,27 @@ describe("CLI socket server", () => {
       reason: "dohc could not move a.txt. It stays at dest, because something new is at a.txt.",
     });
   });
+
+  // #3089: a move of a live page waits up to the guard's limit, well inside the request's deadline.
+  it("finishes an agent's fileMove after a catch-up that runs out of time", async () => {
+    const owner = deferred<boolean>();
+    const guard = createMoveAcceptedEditsGuard({ liveDocuments: () => [{ path: "a.txt", objectId: "page" }], offline: () => false,
+      ownerCatchUp: () => owner.promise, relayCatchUp: async () => undefined });
+    context.movePath = async input => {
+      await guard.beforeMove(WORKSPACE_ID, async () => input.fromPath);
+      return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, ...input };
+    };
+    // The socket takes moves only from a context that can also delete.
+    const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>();
+    context.deletePath = deletePath;
+    const started = performance.now();
+    try {
+      expect(await invoke("fileMove", { cwd: workspaceRoot, actor: "agent", requestId: "slow-catch-up", fromPath: "a.txt", toPath: "b.txt" }))
+        .toMatchObject({ ok: true, fromPath: "a.txt", toPath: "b.txt" });
+      expect(performance.now() - started).toBeGreaterThanOrEqual(MOVE_ACCEPTED_EDITS_WAIT_MS - 50);
+      expect(deletePath).not.toHaveBeenCalled();
+    } finally { owner.resolve(false); }
+  }, 20_000);
 
   it("rebases whole path tokens and descendants without rewriting ordinary words", async () => {
     const cwd = join(workspaceRoot, "app");

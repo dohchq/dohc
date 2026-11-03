@@ -326,6 +326,28 @@ it("moves a folder with no live page, and keeps a page's own move check as it wa
   await capture.stop();
 });
 
+// #3089: a move checks this before it catches a live page up, so the
+// refusal comes first. It gives the same words and changes nothing.
+it("checks a folder move ahead of the move, with the folder words, and passes a folder with no live page", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-folder-move-check-");
+  await mkdir(join(rootPath, "notes/box"), { recursive: true });
+  await writeFile(join(rootPath, "notes/box/page.md"), "original");
+  state.ownedUnder = "notes/box/page.md";
+  await expect(capture.checkFolderMove("notes")).rejects.toMatchObject({ name: "LiveFolderMoveError", message: FOLDER_REFUSAL });
+  await expect(capture.checkFolderMove("drafts")).resolves.toBeUndefined();
+  state.ownedUnder = null;
+  state.moveRefusalAt = "preflight";
+  await expect(capture.checkFolderMove("notes")).rejects.toMatchObject({ name: "LiveFolderMoveError", message: FOLDER_REFUSAL });
+  expect(state.checkedFolders).toEqual([
+    { path: "notes", folder: true },
+    { path: "drafts", folder: true },
+    { path: "notes", folder: true },
+  ]);
+  expect(state.moveRequests.every(method => method === "versionedText.checkMove")).toBe(true);
+  expect(await readFile(join(rootPath, "notes/box/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
 it("deletes a folder that holds an owned page as it did before", async () => {
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-delete-");
   await mkdir(join(rootPath, "notes"));

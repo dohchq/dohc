@@ -136,6 +136,9 @@ export interface CloudSyncEngine {
   // Runs passes until a push leaves nothing behind, so what the workspace
   // recorded before the call is on the relay. Rejects when a pass fails.
   pushRecorded(): Promise<void>;
+  // One pass for a waiting move. It leaves every ordinary timer alone, and
+  // once `signal` aborts it skips its pull. It never rejects.
+  catchUp(options: { signal: AbortSignal }): Promise<void>;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
@@ -180,8 +183,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // otherwise yield to a pass that has already pulled.
   let pulled: { cursor: number; servedChange: number | undefined } | undefined;
   let retryQueued = false;
-  // Passes queued on the chain or running. Each of them pulls.
+  // Passes queued on the chain or running. Each of them pulls, except a
+  // guard pass whose move stopped waiting.
   let passesPending = 0;
+  let guardPassesPending = 0;
   // Counts change events, so a quiet pass knows whether anything announced
   // `syncing` while it ran.
   let changeEvents = 0;
@@ -346,10 +351,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // appends. It yields to a queued or running pass and to failure backoff,
   // because those pull too. Each local write restarts the debounce, so the
   // pull keeps its own deadline: steady writes cannot postpone it past one
-  // debounce interval.
+  // debounce interval. A guard pass may skip its pull, so it never serves this one.
   function queuePull(fromWatch = false): void {
     if (authExpired || stopped) return;
-    if (passesPending > 0 || backoffTimer !== undefined || pullTimer !== undefined) return;
+    if (passesPending > guardPassesPending || backoffTimer !== undefined || pullTimer !== undefined) return;
     // Our own append wakes the held read too. Give queued durable uploads the
     // same fixed pull deadline as local writes waiting on the settle debounce.
     const uploading = fromWatch && watched && (watchedQueued || watchedDirty || watchedTimer !== undefined);
@@ -460,7 +465,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // Resolves true when the workspace pull or the shared-channel pass applied
   // ops. The shared-channel pass tells the renderer itself, and the renderer
   // then reads `syncing`, so a quiet pass must announce that it ended.
-  async function doPass(retryClaim: boolean, pushed?: { hasMore: boolean }): Promise<boolean> {
+  async function doPass(retryClaim: boolean, pushed?: { hasMore: boolean }, guard?: { signal: AbortSignal }): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const recovered = syncFailure !== null;
     const bootstrapPass = bootstrapPullPending;
@@ -509,6 +514,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         await push();
       }
     }
+    // A move that stopped waiting needs no pull. The pass then changes nothing
+    // a person sees, a bootstrap engine stays pull-only, and the change it
+    // would have served waits for the next pull.
+    const skipPull = () => { changeReported ??= servedChange; return false; };
+    if (guard?.signal.aborted) return skipPull();
     let pullResult: PullWorkspaceFromRelayResult;
     try {
       pullResult = await pull();
@@ -521,6 +531,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       if (!bootstrapPass) {
         await push();
       }
+      if (guard?.signal.aborted) return skipPull();
       pullResult = await pull();
     }
     // Only a fully successful pull (materialized + cursor committed inside
@@ -563,12 +574,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // A bounded push leaves the rest to another pass, and each pass releases
     // the capture chain after its pull, so document opens and writes can
     // proceed between them. Bootstrap also needs a normal pass after its
-    // initial pull.
-    if ((pushHasMore || bootstrapPass) && !stopped && !authExpired) {
+    // initial pull. After a guard pass the continuation waits one debounce,
+    // so the waiting move queues its capture work first. Writes and later
+    // guards do not move it.
+    if ((pushHasMore || bootstrapPass) && !stopped && !authExpired && !(guard && continuationTimer !== undefined)) {
       continuationTimer = setTimeout(() => {
         continuationTimer = undefined;
         void runPass(false);
-      }, 0);
+      }, guard ? debounceMs : 0);
     }
     return pullResult.applied > 0 || sharedChannelsApplied;
   }
@@ -608,20 +621,23 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     quiet = false,
     retry?: { countsAsAttempt: boolean },
     pushed?: { hasMore: boolean },
+    // A guard pass never cancels, moves or re-arms ordinary work.
+    guard?: { signal: AbortSignal },
   ): Promise<void> {
     passesPending += 1;
+    if (guard) guardPassesPending += 1;
     // This pass pulls, so it serves a pull waiting on its own deadline.
-    if (pullTimer !== undefined) {
+    if (!guard && pullTimer !== undefined) {
       clearTimeout(pullTimer);
       pullTimer = undefined;
     }
-    if (idlePullTimer !== undefined) {
+    if (!guard && idlePullTimer !== undefined) {
       clearTimeout(idlePullTimer);
       idlePullTimer = undefined;
     }
     const result = chain.then(async () => {
       try {
-        if (stopped || (claimRefusal && !retry?.countsAsAttempt)) return;
+        if (stopped || (claimRefusal && !retry?.countsAsAttempt) || guard?.signal.aborted) return;
         const retryClaim = claimRefusal !== null && retry?.countsAsAttempt === true;
         if (retry?.countsAsAttempt) claimRefusal = null;
         // A retry someone asked for keeps the automatic pass it displaces, in
@@ -635,11 +651,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // start another is now stale. Its own outcome sets the next one. Done
         // here, in the serialized lifecycle, so a pass that ends before this
         // one starts cannot leave its backoff behind.
-        clearPassTimers();
+        if (!guard) clearPassTimers();
         // Its push covers edits already queued.
         if (!bootstrapPullPending) watchedDirty = false;
         watchedPushPaused = false;
-        retryQueued = false;
+        if (!guard) retryQueued = false;
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
         let applied = false;
@@ -649,7 +665,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
-          applied = await doPass(retryClaim, pushed);
+          applied = await doPass(retryClaim, pushed, guard);
         } catch (error) {
           failed = !(error instanceof EngineWorkspaceShuttingDownError);
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
@@ -664,6 +680,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         }
       } finally {
         passesPending -= 1;
+        if (guard) guardPassesPending -= 1;
         if (pulled !== undefined) {
           const { cursor, servedChange } = pulled;
           pulled = undefined;
@@ -713,6 +730,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         await runPass(true, false, undefined, pushed);
         if (!pushed.hasMore) return;
       }
+    },
+
+    catchUp({ signal }) {
+      if (authExpired || stopped || signal.aborted) return Promise.resolve();
+      return runPass(false, true, undefined, undefined, { signal });
     },
 
     snapshot() {
