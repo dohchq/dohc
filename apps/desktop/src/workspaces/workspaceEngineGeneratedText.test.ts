@@ -576,7 +576,8 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     await capture.stop();
   });
 
-  it("finishes an archive whose page already moved at its own path, once a person archives again", async () => {
+  // With `conflict`, another page is saved at the old path after the move.
+  async function archiveAfterCommittedMove(conflict: boolean) {
     const rootPath = await root();
     const workspace = { workspaceId: "ws", rootPath };
     const { store: chats, seed } = makeChats("ws", rootPath);
@@ -639,6 +640,24 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(deleted).toEqual([join(rootPath, destinationPath)]);
     expect(await current()).toMatchObject({ projectionState: "failed", generation: 2 });
 
+    if (conflict) {
+      // The archive still holds the page, so archiving again keeps its
+      // generation. It refuses without touching the other page.
+      const other = await capture.writeAuthoredFile(join(rootPath, destinationPath), "# Another page\n", { kind: "human", humanId: "local-person" });
+      expect(other.objectId).not.toBe(ready.projectionObjectId);
+      expect(await capture.generatedTextArchiveMoved({ fromPath: destinationPath, toPath: archivedPath,
+        expectedObjectId: ready.projectionObjectId! })).toBe(true);
+      await expect(owner.archiveChatBookmark(workspace, capture, "viewer", saved.bookmarkId)).rejects.toThrow(/identity no longer matches/u);
+      expect(await current()).toMatchObject({ state: "archived", projectionState: "failed", generation: 2 });
+      expect(await readFile(join(rootPath, destinationPath), "utf8")).toBe("# Another page\n");
+      expect(await capture.fileObjectIdForPath(destinationPath)).toBe(other.objectId);
+      expect(await capture.fileObjectIdForPath(archivedPath)).toBe(ready.projectionObjectId);
+      expect(await capture.fileObjectIdForPath("Bookmarks/Chats/Archived/moved--g3.md")).toBeNull();
+      owner.stop();
+      await capture.stop();
+      return;
+    }
+
     // The bookmark's own control finishes the archive where the page is.
     await expect(owner.archiveChatBookmark(workspace, capture, "viewer", saved.bookmarkId))
       .resolves.toMatchObject({ state: "archived", projectionState: "ready", generation: 2 });
@@ -648,7 +667,11 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(await capture.fileObjectIdForPath("Bookmarks/Chats/Archived/moved--g3.md")).toBeNull();
     owner.stop();
     await capture.stop();
-  });
+  }
+
+  it("finishes an archive whose page already moved at its own path, once a person archives again", () => archiveAfterCommittedMove(false));
+
+  it("keeps an archive's generation when another page was saved at its old path", () => archiveAfterCommittedMove(true));
 
   it("fails closed when an archive retry finds edited or binary source content", async () => {
     const scenarios: Array<{ name: string; replacement: string | Buffer }> = [

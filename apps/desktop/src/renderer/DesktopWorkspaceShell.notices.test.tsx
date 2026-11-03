@@ -4575,6 +4575,34 @@ In Live documents, stop live editing for this page, then move it again.`);
     expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, fromPath: "a.md", toPath: "renamed.md" });
     await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
+
+  it("names the page it would replace when that page has live editing on", async () => {
+    const REPLACE_TITLE = `dohc can't replace "b.md" while it has live editing on`;
+    const REPLACE_BODY = "In Live documents, stop live editing for this page, then try again.";
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn().mockRejectedValueOnce(new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: ${REPLACE_TITLE}\n${REPLACE_BODY}`)),
+    });
+    // b.md's file is gone, but this computer still has live editing on for it.
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }], folders: [] });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "b.md", objectId: "object-b", status: "ready" as const, canResume: false }] }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "b{Enter}");
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(REPLACE_TITLE)).toBeTruthy();
+    expect(within(toast).getByText(REPLACE_BODY)).toBeTruthy();
+    expect(within(toast).queryByText(TITLE)).toBeNull();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(toast).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-b.md").getAttribute("aria-current")).toBe("true"));
+  });
 });
 
 describe("a refused delete of a page this computer owns live", () => {

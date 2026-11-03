@@ -6157,9 +6157,12 @@ export function createWorkspaceEngineCapture(
   async function generatedTextArchiveMoved(input: { fromPath: string; toPath: string; expectedObjectId?: string }): Promise<boolean> {
     const engine = await engineStore();
     const versionId = await activeVersionIdOf(engine);
-    const [source, destination] = await Promise.all([input.fromPath, input.toPath].map(path =>
-      engine.readTextFile({ workspaceId, versionId, path: assertGeneratedMarkdownPath(path) })));
-    return !source && !!destination && (input.expectedObjectId === undefined || destination.objectId === input.expectedObjectId);
+    const read = (path: string) => engine.readTextFile({ workspaceId, versionId, path: assertGeneratedMarkdownPath(path) });
+    // The page's own object at this generation's path: the move committed,
+    // whatever was saved at the old path since.
+    if (input.expectedObjectId !== undefined) return (await read(input.toPath))?.objectId === input.expectedObjectId;
+    const [source, destination] = await Promise.all([read(input.fromPath), read(input.toPath)]);
+    return !source && !!destination;
   }
 
   async function resolveFileForPath(path: string) {

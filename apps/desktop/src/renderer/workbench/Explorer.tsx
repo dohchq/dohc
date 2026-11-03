@@ -58,7 +58,7 @@ import { ExplorerHome } from "./ExplorerHome";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -73,7 +73,7 @@ export type TreeChangeOperation = {
   release: () => void;
 };
 
-export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" };
+export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" | "replace" };
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -903,8 +903,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             if (identity) onChangeSucceeded?.(identity);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
+            // A move onto a page this computer owns live is refused for that page.
+            const replaced = change.kind === "file" && readError(cause).title === livePageTitle(change.toPath, "replace");
             const livePage: LivePageRefused | undefined = !isLivePageOwnedRefusal(cause) ? undefined
-              : change.kind === "file" ? { path: change.fromPath, action }
+              : change.kind === "file" ? (replaced ? { path: change.toPath, action: "replace" } : { path: change.fromPath, action })
               : change.kind === "delete-file" ? { path: change.path, action: "delete" }
               : undefined;
             // A change refused for live editing or History off keeps its refusal's

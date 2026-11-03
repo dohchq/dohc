@@ -3220,9 +3220,10 @@ describe("the move guard over a real relay and live host", () => {
 
   // This computer owns the page live, so its move is refused with the move
   // words. A guarded move is refused before the guard catches anything up,
-  // inside the wait. The page stays where it was, the owner keeps the accepted
-  // edit, and a later pull saves it into the page there. `pullsRefused`
-  // fails the pulls that would save the edit until the move is refused.
+  // inside the wait. The page stays where it was, and the refusal leaves the
+  // owner's accepted state as it was. Once an owner pass installs the edit, a
+  // later pull saves it into the page there. `pullsRefused` fails the pulls
+  // that would save the edit until the move is refused.
   async function editThenRefusedMove(fixture: LiveMoveFixture, device: MoveDevice, input: { name: string; guarded: boolean;
     proxyDelayMs: number; pullsRefused?: boolean; before?: () => Promise<void> }) {
     const { path } = fixture.page(input.name);
@@ -3235,6 +3236,7 @@ describe("the move guard over a real relay and live host", () => {
       cursor = await fixture.edit(input.name, text);
       await fixture.waitPublished(input.name, cursor);
       await input.before?.();
+      const accepted = fixture.ownerAccepted(input.name);
       const requested = device.targetedPasses();
       fixture.proxy.setDelayMs(input.proxyDelayMs);
       const started = performance.now();
@@ -3252,11 +3254,14 @@ describe("the move guard over a real relay and live host", () => {
       expect(existsSync(join(device.rootPath, path)), "the page stays where it was").toBe(true);
       expect(existsSync(join(device.rootPath, destination))).toBe(false);
       expect(fixture.ownerBound(device, input.name)).toBe(true);
-      expect(fixture.ownerAccepted(input.name).cursor, "the owner keeps the accepted edit").toBeGreaterThanOrEqual(cursor);
+      expect(fixture.ownerAccepted(input.name), "the refusal leaves the owner's accepted state as it was").toEqual(accepted);
       expect(await device.refusalNotices()).toEqual(notices);
     } finally { if (input.pullsRefused) fixture.refuseLogPulls(false); }
     await fixture.waitPublished(input.name, cursor);
-    // The kept edit is saved into the page at its old path.
+    // Only the guard syncs the owner here, and the refusal came before it, so
+    // an owner pass installs the accepted edit. A pull then saves it into the page at its old path.
+    await fixture.ownerSync(input.name);
+    expect(fixture.ownerAccepted(input.name).cursor, "the owner installed the accepted edit").toBeGreaterThanOrEqual(cursor);
     await expect.poll(async () => { await device.pull(); return fixture.read(device, path); }, { timeout: 120_000 }).toContain(text);
   }
 
