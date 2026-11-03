@@ -939,6 +939,25 @@ describe("notice center", () => {
     expect(listed("notice-shell-error-3-paths")).toEqual(paths);
   });
 
+  it("puts Try again before a step that asks to come after it, on the toast and the row", async () => {
+    const user = userEvent.setup();
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-5", title: "dohc could not finish merging Draft into Main", message: "Some of Draft's changes are in Main, and History shows which.",
+        details: "Error: disk full", atMs: 1_000, canRetry: true, actionLabel: "Open History", actionAfterRetry: true, seen: false,
+      }],
+      onWorkspaceErrorAction: vi.fn(),
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    const worded = (container: HTMLElement) => within(container).getAllByRole("button").map((button) => button.textContent)
+      .filter((label) => label === "Try again" || label === "Open History");
+    expect(worded(screen.getByTestId("workspace-shell-error"))).toEqual(["Try again", "Open History"]);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(worded(screen.getByTestId("notice-shell-error-5"))).toEqual(["Try again", "Open History"]);
+  });
+
   it("shows a Try again that can't run yet as disabled with its reason, on the toast and the row", async () => {
     const onRetryWorkspaceError = vi.fn();
     const user = userEvent.setup();

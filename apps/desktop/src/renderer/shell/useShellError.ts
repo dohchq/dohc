@@ -106,7 +106,8 @@ export interface ShellError {
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs; one that `reads` it
   // closes its toast and keeps the row.
-  action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; additional?: {label: string; run: () => void}[] };
+  // afterRetry puts the action after Try again, so F6 lands on Try again.
+  action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; afterRetry?: true; additional?: {label: string; run: () => void}[] };
   onDismiss?: () => void;
   // The row has no Dismiss: it stays until its action runs or the workspace
   // closes.

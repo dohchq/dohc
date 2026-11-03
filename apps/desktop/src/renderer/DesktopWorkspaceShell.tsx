@@ -3294,7 +3294,7 @@ export function DesktopWorkspaceShell(props: {
       ...(decideFrom === undefined
         ? {}
         : { noDismiss: true, action: { label: "Decide what to keep", run: () => setConflictReviewOpen(true), reads: true } }),
-      ...(offersHistory ? { action: { label: "Open History", run: openHistoryView, reads: true } } : {}),
+      ...(offersHistory ? { action: { label: "Open History", run: openHistoryView, reads: true, afterRetry: true } } : {}),
     });
   }, [openHistoryView, reportShellFailure]);
   const closeConflictReview = useCallback(() => {
@@ -5563,6 +5563,7 @@ export function DesktopWorkspaceShell(props: {
         retryBusy: error.retryBusy,
         ...(versionMergeOpen && isVersionMergeIdentity(error.identity) ? { retryBlocked: "Close the open merge first." } : {}),
         ...(error.action ? { actionLabel: error.action.label } : {}),
+        ...(error.action?.afterRetry ? { actionAfterRetry: true } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),

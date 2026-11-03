@@ -90,6 +90,8 @@ export interface WorkspaceErrorNotice {
   retryBlocked?: string;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
+  // The step comes after Try again, so F6 lands on Try again.
+  actionAfterRetry?: boolean;
   additionalActionLabels?: string[];
   seen: boolean;
   read?: boolean;
@@ -579,6 +581,19 @@ export function WorkspaceErrorToast(props: {
   const [open, setOpen] = useState(false);
   const fades = error.tone === "success" && !error.stays;
   const held = pointer || focus || open;
+  const retry = error.canRetry && props.onRetry ? (
+    <button
+      type="button"
+      data-testid="workspace-shell-error-retry"
+      disabled={error.retryBusy || error.retryBlocked !== undefined}
+      title={error.retryBlocked}
+      aria-busy={error.retryBusy || undefined}
+      onClick={() => props.onRetry?.(error.id)}
+      className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+    >
+      Try again
+    </button>
+  ) : null;
   useEffect(() => {
     if (!fades || held || !onHide) return;
     const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
@@ -627,6 +642,7 @@ export function WorkspaceErrorToast(props: {
         )}
       </NoticeText>
       {(error.actionLabel && props.onAction) || (error.additionalActionLabels?.length && props.onAction) || (error.canRetry && props.onRetry) ? <div className="flex shrink-0 flex-col gap-1">
+      {error.actionAfterRetry ? retry : null}
       {error.actionLabel && props.onAction ? (
         <button
           type="button"
@@ -644,19 +660,7 @@ export function WorkspaceErrorToast(props: {
           {label}
         </button>
       )) : null}
-      {error.canRetry && props.onRetry ? (
-        <button
-          type="button"
-          data-testid="workspace-shell-error-retry"
-          disabled={error.retryBusy || error.retryBlocked !== undefined}
-          title={error.retryBlocked}
-          aria-busy={error.retryBusy || undefined}
-          onClick={() => props.onRetry?.(error.id)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-        >
-          Try again
-        </button>
-      ) : null}
+      {error.actionAfterRetry ? null : retry}
       </div> : null}
       {error.tone !== "success" && (error.filePaths === undefined || error.filePaths.length > 0) ? <CopyButton
         key={error.id}
@@ -1211,6 +1215,26 @@ export function NoticeCenter(props: {
     for (const error of [...(props.workspaceErrors ?? [])].reverse().sort(
       (a, b) => b.atMs - a.atMs,
     )) {
+      const steps: NoticeAction[] = [
+        ...(error.actionLabel && props.onWorkspaceErrorAction
+          ? [{
+              label: error.actionLabel,
+              onClick: () => props.onWorkspaceErrorAction?.(error.id),
+            }]
+          : []),
+        ...(props.onWorkspaceErrorAction ? (error.additionalActionLabels ?? []).map((label, index) => ({
+          label, onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
+        })) : []),
+      ];
+      const retry: NoticeAction[] = error.canRetry && props.onRetryWorkspaceError
+        ? [{
+            label: "Try again",
+            onClick: () => props.onRetryWorkspaceError?.(error.id),
+            disabled: error.retryBusy || error.retryBlocked !== undefined,
+            busy: error.retryBusy,
+            ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
+          }]
+        : [];
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",
@@ -1218,26 +1242,7 @@ export function NoticeCenter(props: {
         body: error.title ? error.message : "",
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.command ? { command: error.command } : {}),
-        actions: [
-          ...(error.actionLabel && props.onWorkspaceErrorAction
-            ? [{
-                label: error.actionLabel,
-                onClick: () => props.onWorkspaceErrorAction?.(error.id),
-              }]
-            : []),
-          ...(props.onWorkspaceErrorAction ? (error.additionalActionLabels ?? []).map((label, index) => ({
-            label, onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
-          })) : []),
-          ...(error.canRetry && props.onRetryWorkspaceError
-            ? [{
-                label: "Try again",
-                onClick: () => props.onRetryWorkspaceError?.(error.id),
-                disabled: error.retryBusy || error.retryBlocked !== undefined,
-                busy: error.retryBusy,
-                ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
-              }]
-            : []),
-        ],
+        actions: error.actionAfterRetry ? [...retry, ...steps] : [...steps, ...retry],
         ...(props.onDismissWorkspaceError && !error.noDismiss
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
