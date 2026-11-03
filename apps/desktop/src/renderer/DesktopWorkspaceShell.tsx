@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isLiveFolderMoveRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isSharedLiveFileRefusal, livePageMoveBody, livePageMoveTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -209,9 +209,9 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
-import { Explorer, type LivePageMoveRefused } from "./workbench/Explorer";
+import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -966,11 +966,11 @@ export function DesktopWorkspaceShell(props: {
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageMoveRefused) => {
-      if (!livePage && !isLiveFolderMoveRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
+    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
+      if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
-        ...(livePage ? { title: livePageMoveTitle(livePage.path, livePage.action), message: livePageMoveBody(livePage.action) } : { message }),
+        ...(livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
@@ -3299,6 +3299,13 @@ export function DesktopWorkspaceShell(props: {
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
+      // This computer owns the page live: Stop in Live documents, then Try again.
+      if (isLivePageOwnedRefusal(error)) {
+        const id = workspaceId;
+        reportShellFailure({ title: livePageTitle(path, "restore"), message: livePageBody("restore"), cause: error, retry, identity,
+          action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, path); } } });
+        return;
+      }
       if (isSharedLiveFileRefusal(error)) {
         reportShellFailure({ title: `dohc can't restore "${path}" because it has been shared live`, message: "Copy the text you want from History into the file.", identity });
         return;
@@ -3309,7 +3316,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellFailure({ title: fallback.replace(/\.$/u, ""), message: words, cause: error, retry, identity });
       } else reportShellError(fallback, error, retry, undefined, identity);
     },
-    [captureRecoveries, reportShellError, reportShellFailure],
+    [captureRecoveries, reportShellError, reportShellFailure, openLiveDocuments, workspaceId],
   );
   // Try again on a failed restore opens the change's tab, and that page
   // restores again once a fresh read allows it, with its Undo restore after.
@@ -3877,6 +3884,7 @@ export function DesktopWorkspaceShell(props: {
       // A move that succeeds takes back its earlier refusal.
       for (const change of changes) {
         if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
+        if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
       }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the

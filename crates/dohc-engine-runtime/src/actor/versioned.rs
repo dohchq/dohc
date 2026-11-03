@@ -1370,6 +1370,11 @@ fn versioned_text_delete_on_store(
                 reason: "record-delivery-unknown",
             }));
         }
+        // Recording a file already gone from disk is not refused: the delete
+        // happened, and History must say so.
+        if !confirm_absent {
+            refuse_owned_page(tx, &input.workspace_id, &input.version_id, &input.path)?;
+        }
         let result = dohc_engine_domain::delete_text_in_tx_checked(tx, input, expected_object_id, None)
             .map_err(RuntimeError::from)?;
         let asset_jobs = if !result.deduped {
@@ -1429,6 +1434,20 @@ fn versioned_text_delete_on_store(
     }
 }
 
+/// A delete of a page this computer owns live would leave its owner binding
+/// behind and stall the workspace's publication.
+fn refuse_owned_page(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    if dohc_engine_sync::live_page_owned(conn, workspace_id, version_id, path)? {
+        return Err(DomainError::LivePageOwned.into());
+    }
+    Ok(())
+}
+
 fn checked_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
@@ -1442,6 +1461,7 @@ fn checked_delete_on_store(
         let replayed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)", [&input.request_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
         if !replayed {
             ensure_publication_version(tx, &input.workspace_id, &input.version_id)?;
+            refuse_owned_page(tx, &input.workspace_id, &input.version_id, &input.path)?;
             check_restore_content_in_tx(tx, &input.workspace_id, &input.version_id, &input.path, expected)?;
             WriteConditions {create_only: false, expected_sha256: Some(expected.to_owned())}.check(root, &input.path, true)?;
             let unresolved: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM share_direct_write_plan p,json_each(p.objects_json) o JOIN snapshots s ON s.workspace_id=p.workspace_id AND s.object_id=json_extract(o.value,'$[0]') WHERE p.workspace_id=?1 AND p.result_json IS NULL AND s.version_id=?2 AND s.path=?3)",params![input.workspace_id,input.version_id,input.path],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
@@ -6400,5 +6420,125 @@ mod doc_cache_reset_tests {
                 .is_none(),
             "the lineage must be retired"
         );
+    }
+}
+
+#[cfg(test)]
+mod owned_page_delete_tests {
+    use super::*;
+    use dohc_engine_storage::{NoFaults, hex_sha256};
+    use dohc_engine_testkit::ScratchDir;
+
+    fn page(store: &mut EngineStore, root: &std::path::Path, path: &str, object: &str) {
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: object.into(),
+                    path: path.into(),
+                    text: "Owned\n".into(),
+                    moment_id: format!("{object}-write"),
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        std::fs::write(root.join(path), "Owned\n").unwrap();
+    }
+
+    fn bind(store: &mut EngineStore, object: &str) {
+        let claim = store.put_binary_blob(b"lineage").unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO ydoc_owner_bindings VALUES('workspace','main',?1,?2,'{}','relay',1,0,0,?2,100,100)", params![object, claim])
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+    }
+
+    fn delete(
+        store: &mut EngineStore,
+        root: &std::path::Path,
+        path: &str,
+        expected_sha256: Option<&str>,
+        confirm_absent: bool,
+    ) -> Result<DeleteResult, RuntimeError> {
+        let input = DeleteTextFile {
+            workspace_id: "workspace".into(),
+            version_id: "main".into(),
+            path: path.into(),
+            moment_id: format!("delete-{path}-{}", expected_sha256.is_some()),
+            request_id: None,
+            metadata_origin: "user".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 3,
+        };
+        versioned_text_delete_on_store(
+            store,
+            &input,
+            None,
+            expected_sha256,
+            confirm_absent,
+            root,
+            &(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+    }
+
+    fn head(store: &EngineStore, path: &str) -> bool {
+        store
+            .read_with(|conn| conn.query_row("SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id='workspace' AND path=?1)", [path], |r| r.get(0)))
+            .unwrap()
+    }
+
+    /// A delete of a page this computer owns live is refused before anything
+    /// changes, plain or checked. Recording a file already gone from disk is
+    /// not, and once Stop releases the binding the page deletes.
+    #[test]
+    fn an_owned_page_refuses_its_delete_but_not_a_record_of_its_absence() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = scratch.path();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults).unwrap();
+        page(&mut store, root, "a.md", "a");
+        page(&mut store, root, "gone.md", "gone");
+        page(&mut store, root, "plain.md", "plain");
+        bind(&mut store, "a");
+        bind(&mut store, "gone");
+        for expected in [None, Some(hex_sha256(b"Owned\n"))] {
+            let error = delete(&mut store, root, "a.md", expected.as_deref(), false).unwrap_err();
+            assert!(
+                matches!(error, RuntimeError::Domain(DomainError::LivePageOwned)),
+                "{expected:?}: {error:?}"
+            );
+            assert!(head(&store, "a.md"));
+            assert_eq!(
+                std::fs::read_to_string(root.join("a.md")).unwrap(),
+                "Owned\n"
+            );
+        }
+        std::fs::remove_file(root.join("gone.md")).unwrap();
+        delete(&mut store, root, "gone.md", None, true).unwrap();
+        assert!(!head(&store, "gone.md"));
+        delete(&mut store, root, "plain.md", None, false).unwrap();
+        assert!(!head(&store, "plain.md"));
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM ydoc_owner_bindings WHERE object_id='a'", [])
+                    .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        delete(&mut store, root, "a.md", None, false).unwrap();
+        assert!(!head(&store, "a.md"));
     }
 }

@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { LIVE_FOLDER_MOVE_BODY, LiveDocumentMutationError, LiveFolderMoveError, liveFolderMoveTitle, LivePageMoveError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   CollectionMoveUnfinishedError,
@@ -27,10 +27,10 @@ import {
   isChatMentionPageChanged,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
-  isLiveFolderMoveRefusal,
-  isLivePageMoveRefusal,
-  livePageMoveBody,
-  livePageMoveTitle,
+  isLiveFolderRefusal,
+  isLivePageOwnedRefusal,
+  livePageBody,
+  livePageTitle,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   namingCollectionMove,
@@ -370,26 +370,26 @@ describe("error words", () => {
   });
 
   it("reads a refused folder move across IPC as its title and body", () => {
-    const title = liveFolderMoveTitle("notes/box");
-    const received = acrossIpc(new LiveFolderMoveError([title, LIVE_FOLDER_MOVE_BODY].join(String.fromCharCode(10))), "desktop:move-workspace-path");
-    expect(isLiveFolderMoveRefusal(received)).toBe(true);
-    expect(readError(received)).toMatchObject({ title: `dohc can't move "notes/box" while a page in it has live editing on`, words: LIVE_FOLDER_MOVE_BODY });
+    const title = liveFolderTitle("notes/box", "move");
+    const received = acrossIpc(new LiveFolderError([title, liveFolderBody("move")].join(String.fromCharCode(10))), "desktop:move-workspace-path");
+    expect(isLiveFolderRefusal(received)).toBe(true);
+    expect(readError(received)).toMatchObject({ title: `dohc can't move "notes/box" while a page in it has live editing on`, words: liveFolderBody("move") });
     expect(isSharedLiveFileRefusal(received)).toBe(false);
   });
 
   it("reads a refused page move across IPC as its title and body, with a word for each action", () => {
-    const received = acrossIpc(new LivePageMoveError([livePageMoveTitle("docs/a.md", "move"), livePageMoveBody("move")].join(String.fromCharCode(10))),
+    const received = acrossIpc(new LivePageOwnedError([livePageTitle("docs/a.md", "move"), livePageBody("move")].join(String.fromCharCode(10))),
       "desktop:move-workspace-path");
-    expect(isLivePageMoveRefusal(received)).toBe(true);
+    expect(isLivePageOwnedRefusal(received)).toBe(true);
     expect(readError(received)).toMatchObject({ title: `dohc can't move "docs/a.md" while it has live editing on`,
       words: "In Live documents, stop live editing for this page, then move it again.", cause: null });
-    expect(isLiveFolderMoveRefusal(received)).toBe(false);
+    expect(isLiveFolderRefusal(received)).toBe(false);
     expect(isSharedLiveFileRefusal(received)).toBe(false);
-    expect([livePageMoveTitle("docs/a.md", "rename"), livePageMoveBody("rename")]).toEqual([
+    expect([livePageTitle("docs/a.md", "rename"), livePageBody("rename")]).toEqual([
       `dohc can't rename "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then rename it again.",
     ]);
-    expect(isLivePageMoveRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-page-owned")))).toBe(false);
+    expect(isLivePageOwnedRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-page-owned")))).toBe(false);
   });
 
   it("explains an open editing session across IPC and keeps its refusal for Copy", () => {

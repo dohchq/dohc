@@ -20,7 +20,7 @@ describe.skipIf(process.platform !== "win32")("Windows tree naming", () => {
         markDeleted: vi.fn(), trashItem: vi.fn(),
       });
     expect(changePathsAs).not.toHaveBeenCalled();
-    expect(beginFileRename).toHaveBeenCalledWith(fromPath, "short.md");
+    expect(beginFileRename).toHaveBeenCalledWith(fromPath, "short.md", false);
     expect(await readFile(join(rootPath, "short.md"), "utf8")).toBe("keep this");
   });
 

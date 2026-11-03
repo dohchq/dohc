@@ -18,6 +18,12 @@ export function moveRefusalIdentity(workspaceId: string, move: Pick<PendingTreeM
   return `move:${JSON.stringify([workspaceId, move.fromPath, move.toPath])}`
 }
 
+// One refused delete in the shell's Notices: a later delete of the same path
+// removes it.
+export function deleteRefusalIdentity(workspaceId: string, path: string): string {
+  return `delete:${JSON.stringify([workspaceId, path])}`
+}
+
 export type PendingTreeChange =
   | PendingTreeMove
   | { id: string; kind: 'create-folder'; path: string }

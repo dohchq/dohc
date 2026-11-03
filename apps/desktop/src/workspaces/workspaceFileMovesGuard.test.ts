@@ -6,7 +6,7 @@ import { deferred } from "../testing/deferred";
 import { createMoveAcceptedEditsGuard, type LiveDocumentPath } from "./moveAcceptedEditsGuard";
 import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
-import { LiveFolderMoveError } from "./workspaceEngineCapture";
+import { LiveFolderError } from "./workspaceEngineCapture";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
 
 // #3089: every route that renames or moves a live page waits for the move
@@ -161,7 +161,7 @@ it.each([
   { route: "agent", move: async (f: MoveFixture, options: Guarded, from: string, to: string) => (await prepareMoveWorkspacePathAs(f.operation,
     { fromPath: from, toPath: to }, { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId }, { ...base(f), ...options }))() },
 ])("an $route folder move over a page live here catches nothing up and is refused; other moves still catch up", async ({ route, move }) => {
-  const refusal = new LiveFolderMoveError("refused for a page live here");
+  const refusal = new LiveFolderError("refused for a page live here");
   for (const { from, to, check, checked } of [
     { from: "Notes", to: "Archive", check: refusal, checked: true },
     { from: "Notes", to: "Archive", check: null, checked: true },

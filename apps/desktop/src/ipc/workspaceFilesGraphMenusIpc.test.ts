@@ -218,14 +218,14 @@ describe("registered workspace file handlers", () => {
     expect(readHistoryPage).not.toHaveBeenCalled();
   });
 
-  it("moves a file through the registered move channel", async () => {
+  it("moves an ordinary file through the registered move channel", async () => {
     const h = await harness();
-    await writeFile(join(h.workspace.rootPath, "before.md"), "move me");
+    await writeFile(join(h.workspace.rootPath, "before.txt"), "move me");
     await expect(h.invoke(workspaceFileOperations.moveWorkspacePath.channel, {
-      workspaceId: "workspace", fromPath: "before.md", toPath: "after.md",
-    })).resolves.toEqual({ path: "after.md", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
-    expect(await readFile(join(h.workspace.rootPath, "after.md"), "utf8")).toBe("move me");
-    await expect(readFile(join(h.workspace.rootPath, "before.md"))).rejects.toMatchObject({ code: "ENOENT" });
+      workspaceId: "workspace", fromPath: "before.txt", toPath: "after.txt",
+    })).resolves.toEqual({ path: "after.txt", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
+    expect(await readFile(join(h.workspace.rootPath, "after.txt"), "utf8")).toBe("move me");
+    await expect(readFile(join(h.workspace.rootPath, "before.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("replaces text through the registered write-text channel", async () => {

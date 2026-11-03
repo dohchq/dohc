@@ -7,7 +7,7 @@ import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryS
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
-import { livePageMoveBody, livePageMoveTitle } from "../ipc/errorWords";
+import { livePageBody, livePageTitle, type LivePageAction } from "../ipc/errorWords";
 import { findRestoreReceipt } from "./restoreWriteIdentity";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -151,9 +151,10 @@ function liveDocumentMutationRefusal(
   path: string,
   action: "move" | "delete" | "restore" | "duplicate",
 ): Error | null {
-  if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
-    return null;
-  }
+  if (!(error instanceof DaemonRefusalError)) return null;
+  if (action !== "duplicate" && error.message === "live-page-owned") return livePageRefusal(error, path, action);
+  if (action === "delete" && error.message === "live-folder-page-owned") return liveFolderRefusal(error, path, "delete");
+  if (error.message !== "live-document-binding-active") return null;
   return new LiveDocumentMutationError(
     `dohc could not ${action} ${path}. This action is unavailable for shared live files. Continue editing at the current location.`,
     { cause: error },
@@ -166,38 +167,40 @@ export class LiveDocumentMutationError extends Error {
   override name = "LiveDocumentMutationError";
 }
 
-export const LIVE_FOLDER_MOVE_BODY = "In Live documents, stop live editing for every page in this folder, then move the folder again.";
-
-export function liveFolderMoveTitle(folder: string): string {
-  return `dohc can't move "${folder}" while a page in it has live editing on`;
+export function liveFolderBody(action: "move" | "delete"): string {
+  return `In Live documents, stop live editing for every page in this folder, then ${action} the folder again.`;
 }
 
-// A folder move the engine refuses because a page under the folder is live on
-// this computer. The message is the title, a line break, then the body.
-export class LiveFolderMoveError extends LiveDocumentMutationError {
-  override name = "LiveFolderMoveError";
+export function liveFolderTitle(folder: string, action: "move" | "delete"): string {
+  return `dohc can't ${action} "${folder}" while a page in it has live editing on`;
 }
 
-function liveFolderMoveRefusal(error: unknown, folder: string): Error | null {
-  if (!(error instanceof DaemonRefusalError)) return null;
-  // A hosted page and an owned page read the same.
-  if (error.message !== "live-document-binding-active" && error.message !== "live-folder-page-owned") return null;
-  return new LiveFolderMoveError(`${liveFolderMoveTitle(folder)}\n${LIVE_FOLDER_MOVE_BODY}`, { cause: error });
+// A folder move or delete the engine refuses because a page under the folder
+// is live on this computer. The message is the title, a line break, then the body.
+export class LiveFolderError extends LiveDocumentMutationError {
+  override name = "LiveFolderError";
 }
 
-// A single-page move the engine refuses because this computer owns the page
-// live. The message is the move title, a line break, then the move body.
-export class LivePageMoveError extends LiveDocumentMutationError {
-  override name = "LivePageMoveError";
+function liveFolderRefusal(error: DaemonRefusalError, folder: string, action: "move" | "delete"): Error {
+  return new LiveFolderError(`${liveFolderTitle(folder, action)}\n${liveFolderBody(action)}`, { cause: error });
 }
 
-function livePageMoveRefusal(error: unknown, path: string): Error | null {
-  if (!(error instanceof DaemonRefusalError) || error.message !== "live-page-owned") return null;
-  return new LivePageMoveError(`${livePageMoveTitle(path, "move")}\n${livePageMoveBody("move")}`, { cause: error });
+// A change the engine refuses because this computer owns the page live. The
+// message is the title, a line break, then the body.
+export class LivePageOwnedError extends LiveDocumentMutationError {
+  override name = "LivePageOwnedError";
+}
+
+function livePageRefusal(error: DaemonRefusalError, path: string, action: LivePageAction): Error {
+  return new LivePageOwnedError(`${livePageTitle(path, action)}\n${livePageBody(action)}`, { cause: error });
 }
 
 function moveRefusal(error: unknown, path: string, folder: boolean): Error | null {
-  return (folder ? liveFolderMoveRefusal(error, path) : livePageMoveRefusal(error, path)) ?? liveDocumentMutationRefusal(error, path, "move");
+  // A hosted page and an owned page under a folder read the same.
+  if (folder && error instanceof DaemonRefusalError && ["live-document-binding-active", "live-folder-page-owned"].includes(error.message)) {
+    return liveFolderRefusal(error, path, "move");
+  }
+  return liveDocumentMutationRefusal(error, path, "move");
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
@@ -6356,7 +6359,7 @@ export function createWorkspaceEngineCapture(
         // because an owner handoff can finish while its session closes.
         const ensureDeleteAllowed = async (): Promise<void> => {
           try {
-            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix });
+            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix, change: "delete" });
           } catch (error) {
             throw liveDocumentMutationRefusal(error, pathOrPrefix, "delete") ?? error;
           }
@@ -6415,8 +6418,10 @@ export function createWorkspaceEngineCapture(
           for (const [index, path] of paths.entries()) {
             const moving = index === 0 && authored.operation === "move";
             const folder = moving && authored.folder === true;
+            // The source of a move or delete; a duplicate's source stays where it is.
+            const change = moving ? (folder ? "moveFolder" : "movePage") : index === 0 && authored.operation === "delete" ? "delete" : undefined;
             try {
-              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}), ...(moving ? { moving: folder ? "folder" : "page" } : {}) });
+              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}), ...(change ? { change } : {}) });
             } catch (error) {
               throw (moving ? moveRefusal(error, path, folder) : liveDocumentMutationRefusal(error, path, authored.operation)) ?? error;
             }
@@ -7542,7 +7547,7 @@ export function createWorkspaceEngineCapture(
           return {status:"deleted" as const,momentId:result.moment.id};
         } catch(error) {
           const reason=error && typeof error==="object" ? ("code" in error?error.code:"message" in error?error.message:undefined):undefined;
-          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active")return {status:"conflict" as const};
+          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active" || reason==="live-page-owned")return {status:"conflict" as const};
           throw error;
         }
       });
@@ -7915,9 +7920,9 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
       try {
-        await engine.checkMove({ workspaceId, versionId, path: folder, folder: true });
+        await engine.checkMove({ workspaceId, versionId, path: folder, change: "moveFolder" });
       } catch (error) {
-        throw liveFolderMoveRefusal(error, folder) ?? liveDocumentMutationRefusal(error, folder, "move") ?? error;
+        throw moveRefusal(error, folder, true) ?? error;
       }
     },
 
@@ -7932,7 +7937,7 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const ensureMoveAllowed = async (): Promise<void> => {
           try {
-            await engine.checkMove({ workspaceId, versionId, path: fromPath, moving: folder ? "folder" : "page" });
+            await engine.checkMove({ workspaceId, versionId, path: fromPath, change: folder ? "moveFolder" : "movePage" });
           } catch (error) {
             throw moveRefusal(error, fromPath, folder) ?? error;
           }

@@ -1,5 +1,6 @@
 import { caseOnlyMoveReason, linkUndoRefusal, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
 import { placeBack } from "./workspaceFileMoves";
+import { LIVE_PAGE_UNDO_BODY, livePageUndoTitle, type LivePageUndone } from "../ipc/errorWords";
 import { lstat, readdir } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { posix, join } from "node:path";
@@ -216,10 +217,17 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         }
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
+      // The page an Undo would move back or delete, and the change it reverses.
+      let undone: { path: string; change: LivePageUndone } | undefined = move
+        ? { path: move.to, change: moveWord(move.from, move.to) === "rename" ? "renaming" : "moving" } : undefined;
       const history: OperationHistory = { ...options.history, undoHistoryOperation: async input => {
         let result;
         try { result = await options.history.undoHistoryOperation(input); }
         catch (error) {
+          // The engine refuses while this computer owns the page live.
+          if (undone && error instanceof Error && error.message === "live-page-owned") {
+            throw new Error(`${livePageUndoTitle(undone.path, undone.change)}\n${LIVE_PAGE_UNDO_BODY}`, { cause: error });
+          }
           const refusal = linkUndoRefusal(error);
           // These reasons name the operation; the other Undo refusals name workspace paths.
           const path = refusal && !["Operation already undone", "Undo in progress", "operation unavailable", "active version changed"].includes(refusal[1]!) ? refusal[2] : undefined;
@@ -237,6 +245,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         const member = members[0];
         if (!member) throw new Error("This Duplicate is not in the active workspace version. Open its version to undo it.");
         await duplicateFloor(member.path);
+        undone = { path: member.path, change: "creating" };
         const result = await history.undoHistoryOperation({workspaceId, operationId: input.operationId, requestId: `duplicate-undo:${input.operationId}`, author: {...author}});
         markChanged();
         return {ok: true as const, tracked: {state: result.materialized ? "restored" as const : "restoring" as const, momentCount: result.momentCount}, restored: [],

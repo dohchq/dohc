@@ -9,7 +9,7 @@ import { HostedLogClientClosedError, startServerProxy, type HostedLogResponseBar
 import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { once } from "node:events";
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,9 +41,9 @@ import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import {
   createWorkspaceEngineCapture,
-  LIVE_FOLDER_MOVE_BODY,
-  LiveFolderMoveError,
-  liveFolderMoveTitle,
+  liveFolderBody,
+  LiveFolderError,
+  liveFolderTitle,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -65,6 +65,7 @@ import { runNativeOwnerDeliveryPass } from "./nativeOwnerDelivery";
 import { readyOwnerDeliveryDocuments } from "./serverOwnerDelivery";
 import { startServerOwnerDelivery } from "./serverOwnerDelivery";
 import { relayShareOperations } from "../ipc/shareOperations";
+import type { OwnerLiveDocumentsResult } from "../ipc/bridgeContract";
 import { registerOperations } from "../ipc/operationTable";
 import {createRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
 import {LIVE_STOP_EDITS_PENDING, liveStopRelayError, readLiveStopRefusal} from "../ipc/liveEditingStop";
@@ -74,7 +75,7 @@ import { MOVE_ACCEPTED_EDITS_WAIT_MS } from "./moveAcceptedEditsGuard";
 import {openLiveFolderMoveFixture} from "../testing/liveFolderMoveFixture";
 import { ipcWireError } from "../ipc/errorWords";
 import { openLiveMoveFixture, recordGuardTimings, type GuardPull, type GuardTiming, type LiveMoveFixture, type MoveDevice } from "../testing/liveMoveFixture";
-import {moveWorkspacePathByHand} from "./workspaceFileMoves";
+import {deleteWorkspacePathByHand, moveWorkspacePathByHand} from "./workspaceFileMoves";
 import {readLocalStateFrom, type LocalStateBindings} from "./workspaceLocalState";
 
 const engine = requireEngineBinaryOrSkip();
@@ -3106,8 +3107,8 @@ describe.skipIf(engine.missing)("a folder move over a page the owner has live", 
   const refused = async (fixture: Awaited<ReturnType<typeof openLiveFolderMoveFixture>>) => {
     const before = fixture.outbound(page);
     const moving = fixture.moveByHand("notes/box", "notes/moved");
-    await expect(moving).rejects.toBeInstanceOf(LiveFolderMoveError);
-    await expect(moving).rejects.toThrow(LIVE_FOLDER_MOVE_BODY);
+    await expect(moving).rejects.toBeInstanceOf(LiveFolderError);
+    await expect(moving).rejects.toThrow(liveFolderBody("move"));
     expect(await fixture.read(`notes/${page}.md`)).toContain(`Page ${page} body.`);
     await expect(stat(join(fixture.rootPath, "notes", "moved"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(fixture.outbound(page)).toBe(before);
@@ -3350,8 +3351,8 @@ describe("the move guard over a real relay and live host", () => {
         failure = await owner.move("notes/box", "notes/box-moved", { guarded: true }).then(() => undefined, (error: unknown) => error);
         const elapsedMs = performance.now() - started;
         timings.push({ name: "folder-refused", route: "bound", guard: "on", proxyDelayMs: 0, elapsedMs, outcome: "refused", guardPulls: await owner.guardPulls() });
-        expect(failure).toBeInstanceOf(LiveFolderMoveError);
-        expect((failure as Error).message).toBe(`${liveFolderMoveTitle("notes/box")}\n${LIVE_FOLDER_MOVE_BODY}`);
+        expect(failure).toBeInstanceOf(LiveFolderError);
+        expect((failure as Error).message).toBe(`${liveFolderTitle("notes/box", "move")}\n${liveFolderBody("move")}`);
         // The guard caught nothing up, and the refused move changed nothing.
         expect(owner.targetedPasses()).toBe(before.requested);
         expect(await files()).toEqual(before.files);
@@ -3386,12 +3387,9 @@ describe("the move guard over a real relay and live host", () => {
     }
   }, 600_000);
 });
-// dohc refuses to rename a page whose owner native owner delivery has bound,
-// so its workspace keeps publishing. Each workspace renames A in Explorer,
-// creates B and saves a change to the file C. In "bound" the rename is
-// refused, B and C still publish, and after Stop the rename succeeds and
-// publishes. "unbound" edits A live but never binds its owner, and renames.
-// Each sync pass prints as one `REPRO-OBS` JSON line.
+
+// A rename of an owner-bound page is refused, so B and C still publish, and
+// after Stop it renames. "unbound" never binds A. Each pass prints one `REPRO-OBS` line.
 type RenameReproCase = "bound" | "unbound";
 type RenameReproDocument = ReturnType<typeof readyOwnerDeliveryDocuments>[number];
 type RenameReproPush = Awaited<ReturnType<EngineRelayWorkspaceClient["push"]>>;
@@ -3760,7 +3758,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     observe({ renamed, onDisk: await onDisk() });
     if (bound) {
       expect(renamed, "the rename is refused with the move words").toEqual({ ok: false, code: "live-page-owned",
-        error: `LivePageMoveError: ${ownedRenameRefusal}` });
+        error: `LivePageOwnedError: ${ownedRenameRefusal}` });
       expect(await onDisk(), "A stays at its old path").toEqual({ old: true, new: false });
     } else {
       expect(renamed).toEqual({ ok: true, path: newPath });
@@ -3834,3 +3832,531 @@ it.skipIf(engine.missing)("refuses renaming an owner-bound live page, keeps its 
     vi.unstubAllEnvs();
   }
 }, 300_000);
+
+// dohc refuses to delete a page whose owner native owner delivery has bound,
+// so its workspace keeps publishing. Each case removes A, creates B and saves
+// a change to the file C; each observation prints as one `REPRO-OBS` line.
+// "bound" deletes in Explorer, "restore" restores A to before its creation,
+// and "unbound" never binds A. "stop-then-delete" stops live editing first;
+// "deferred-stop" leaves an unsent edit that Stop keeps. "file-manager"
+// deletes A's file outside dohc while it runs. In "file-manager-capture" A
+// starts as a file saved outside dohc and is bound with no live edit, so
+// capture owns A's head.
+type DeleteReproCase = "bound" | "unbound" | "restore" | "stop-then-delete" | "deferred-stop" | "file-manager" | "file-manager-capture";
+const ownedDeleteRefusal = (action: "delete" | "restore") => `LivePageOwnedError: dohc can't ${action} "${renameRepro.oldPath}" while it has live editing on
+In Live documents, stop live editing for this page, then ${action} it again.`;
+
+async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<typeof mintLocalhostCa>>,
+  trustEnv: Record<string, string>, localStates: Map<string, LocalStateBindings>): Promise<void> {
+  const { oldPath, newPage, existing } = renameRepro;
+  const workspaceId = `repro-delete-${kind}-${randomUUID().slice(0, 8)}`;
+  const bound = kind !== "unbound";
+  const rootA = await createTestScratch("dohc-repro-delete-owner-");
+  const rootB = await createTestScratch("dohc-repro-delete-peer-");
+  const relayRoot = await createTestScratch("dohc-repro-delete-relay-");
+  const trashRoot = await createTestScratch("dohc-repro-delete-trash-");
+  const ownerDb = join(rootA, SECRET_FILE_STORE_RELATIVE_PATH);
+  const proxy = await startServerProxy(ca);
+  const token = `test:${workspaceId}`, connection = { baseUrl: proxy.origin, token };
+  const profile = selfHostLiveProfile(), nativeConfigPath = join(rootA, "owner-ingress.json");
+  let step = "setup";
+  const observe = (entry: Record<string, unknown>) =>
+    console.log(`REPRO-OBS ${JSON.stringify({ case: `delete-${kind}`, workspaceId, step, ...entry })}`);
+  // The engine's refusals as its sidecar and capture print them. Each file-manager case runs alone, so each line is its own.
+  const refusalLines: string[] = [];
+  const spies = !kind.startsWith("file-manager") ? [] : (["error", "warn"] as const).map(level => {
+    const print = console[level].bind(console);
+    return vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+      const line = args.map(arg => arg instanceof Error ? `${arg.name}: ${arg.message}` : String(arg)).join(" ");
+      if (/live-page-owned|owns the page live|LivePageOwned/u.test(line)) refusalLines.push(line.slice(0, 400));
+      print(...args);
+    });
+  });
+  let peer: LiveDaemonCapture | undefined;
+  // The owner's engine reads its live host configuration at startup, so the relay and the file come first.
+  const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
+    editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
+    linkBoundary: { linkKey: "repro-delete-link-key-".repeat(2), relayExchangeKey: "repro-delete-exchange-".repeat(2),
+      publicViewerOrigin: proxy.origin } });
+  proxy.routeRelayTo(relayServer.baseUrl);
+  await writeFile(nativeConfigPath, JSON.stringify(profile.nativeIngress));
+  const opened = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0,
+    allowInsecureLoopbackForTests: false, privateOwnerHost: { configPath: nativeConfigPath, client: profile.nativeClient } })
+    .catch(async (error: unknown) => { try { await relayServer.stop(); } finally { await proxy.close(); } throw error; });
+  localStates.set(rootA, opened.sessions);
+  const relay = opened.relay.bind({ ...opened.workspace, relay: connection });
+  // A fresh adapter per use: setup replaces the workspace handle after the open.
+  const adapter = () => opened.sessions.run(opened.workspace, async ({ client, workspace }) => new VersionedLiveAdapter(client, workspace, { workspaceId }));
+  const pages = createWorkspaceEngineCapture({ ...opened.workspace, rustEngineSessions: opened.sessions, settleDebounceMs: 60_000 });
+  const refusals = new OwnerKnownRefusals();
+  const call = (endpoint: string, body?: unknown) => fetch(`${proxy.origin}${endpoint}`, { method: body === undefined ? "GET" : "POST",
+    headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  let discoveryPayload: unknown;
+  const ready = async (): Promise<RenameReproDocument[]> => {
+    if (!bound) return [];
+    const response = await call(`/sync/${workspaceId}/live-host`);
+    if (response.status !== 200) throw new Error(`Live-host discovery answered ${response.status}: ${await response.text()}`);
+    discoveryPayload = await response.json();
+    return readyOwnerDeliveryDocuments(discoveryPayload, workspaceId);
+  };
+  const diagnostics = () => JSON.stringify({ discoveryPayload, diagnostics: relayServer.diagnostics() });
+  const hostStore = async () => {
+    const stores = join(relayRoot, "relay-deployment", "live-host");
+    const store = (await readdir(stores).catch(() => [])).find(entry => /^[0-9a-f]{64}$/u.test(entry));
+    return store === undefined ? undefined : join(stores, store);
+  };
+  let objectIdA = "";
+  // A's owner binding and its Stop row, whose state reads requested or released.
+  const ownerRowsOfA = () => {
+    const db = new DatabaseSync(ownerDb, { readOnly: true });
+    try {
+      return {
+        ownerBindings: db.prepare(`SELECT json_extract(binding_json,'$.currentPath') AS currentPath, binding_revision AS revision,
+          accepted_cursor AS acceptedCursor FROM ydoc_owner_bindings WHERE workspace_id=? AND object_id=?`).all(workspaceId, objectIdA),
+        stops: db.prepare("SELECT state, json_extract(binding_json,'$.currentPath') AS currentPath FROM owner_live_stops WHERE workspace_id=? AND object_id=?")
+          .all(workspaceId, objectIdA),
+        activations: db.prepare(`SELECT json_extract(binding_json,'$.currentPath') AS currentPath, released_at_ms AS releasedAtMs
+          FROM live_owner_activations WHERE workspace_id=? AND object_id=?`).all(workspaceId, objectIdA),
+      };
+    } finally { db.close(); }
+  };
+  // The server's Live documents rows for A, from the current and the stopped list.
+  const serverRowsOfA = async () => {
+    const rows: Record<string, unknown> = {};
+    for (const [list, query] of [["active", ""], ["retired", "?retired=1"]] as const) {
+      const response = await call(`/sync/${workspaceId}/live-host${query}`);
+      if (response.status !== 200) { rows[list] = { error: response.status }; continue; }
+      const payload = await response.json() as { documents?: Array<{ objectId?: string }> };
+      rows[list] = payload.documents?.find(row => row.objectId === objectIdA) ?? null;
+    }
+    return rows;
+  };
+  const deliveryPass = async (document: RenameReproDocument, documents: RenameReproDocument[]) =>
+    opened.sessions.run(opened.workspace, async ({ workspace }) => runNativeOwnerDeliveryPass({
+      client: opened.nativeClient(), workspaceHandle: workspace, document,
+      config: { ...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents },
+      refusals, signal: AbortSignal.timeout(60_000), bearer: token, accountId: workspaceId, assertCurrent() {} }));
+  const retire = async (binding: { currentPath: string; restoreFenceGeneration?: number }, signal: AbortSignal) => {
+    const response = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, { method: "DELETE", signal,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration }) });
+    const retired = await response.json() as { acceptedCursor?: number };
+    return response.ok && typeof retired.acceptedCursor === "number" ? retired.acceptedCursor : null;
+  };
+  // One pass of what the desktop runs: Stop reconciliation, a delivery of each
+  // ready page, then its relay sync pass (push until drained, then pull).
+  const syncPass = async () => {
+    const stops = await opened.sessions.run(opened.workspace, async ({ workspace }) => reconcileOwnerLiveStops({
+      client: opened.nativeClient(), workspaceHandle: workspace, workspaceId, signal: AbortSignal.timeout(60_000),
+      assertCurrent() {}, retire })).then(() => "ok", reproErrorText);
+    const delivery: Array<{ path: string; result: string }> = [];
+    const documents = await ready().catch((error: unknown) => { delivery.push({ path: "*", result: reproErrorText(error) }); return []; });
+    for (const document of documents) {
+      delivery.push({ path: document.binding.currentPath, result: await deliveryPass(document, documents).then(String, reproErrorText) });
+    }
+    const pushes: Array<Pick<RenameReproPush, "pushed" | "hasMore" | "ownerAdmissionPending" | "sharingDeclined"> | { error: string }> = [];
+    let pending: RenameReproPush["ownerAdmissionPending"] | undefined;
+    for (let index = 0; index < 20; index++) {
+      try {
+        const result = await relay.push();
+        pushes.push({ pushed: result.pushed, hasMore: result.hasMore,
+          ownerAdmissionPending: result.ownerAdmissionPending, sharingDeclined: result.sharingDeclined });
+        pending = result.ownerAdmissionPending;
+        if (!result.hasMore) break;
+      } catch (error) { pushes.push({ error: reproErrorText(error) }); pending = undefined; break; }
+    }
+    const pull = await pages.runRelaySync(page => relay.pull(page))
+      .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
+    // The desktop keeps the last push's list, and Notices shows one row per entry (NoticeCenter.tsx).
+    const notices = (pending ?? []).map(entry => ({ id: `owner-admission-pending-${entry.originId}-${entry.originSeq}`,
+      title: "Saved locally · Pending share", body: `Your edits to "${entry.path}" are saved on this device. The shared file update is pending.` }));
+    return { stops, delivery, pushes, pending, notices, pull };
+  };
+  // What reached the owner's second device.
+  const relayHas = async () => {
+    const device = peer;
+    if (!device) throw new Error("The second device is not open.");
+    const pulled = await device.capture.runRelaySync(page => device.relay.pull(page))
+      .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
+    const text = (path: string) => readFile(join(rootB, path), "utf8").catch(() => null);
+    const [a, b, c] = await Promise.all([text(oldPath), text(newPage), text(existing)]);
+    return { pulled, a: a?.includes("# A") === true, b: b?.includes("# B") === true, cChanged: c?.includes("C changed.") === true, bText: b, cText: c };
+  };
+  const ownerFiles = async () => {
+    const text = (path: string) => readFile(join(rootA, path), "utf8").catch(() => null);
+    const [b, c] = await Promise.all([text(newPage), text(existing)]);
+    return { b, c };
+  };
+  type Relay = Awaited<ReturnType<typeof relayHas>>;
+  type Observed = { relay: Relay; pending: RenameReproPush["ownerAdmissionPending"] | undefined; owner: Awaited<ReturnType<typeof ownerFiles>> };
+  // Passes until `done` holds with nothing pending, or `maxPasses` ran. Each pass is one line.
+  const settle = async (maxPasses: number, done: (relay: Relay) => boolean): Promise<Observed> => {
+    let last: Observed | undefined;
+    for (let pass = 1; pass <= maxPasses; pass++) {
+      const sync = await syncPass();
+      const has = await relayHas();
+      const files = await ownerFiles();
+      observe({ pass, ...sync, relay: has, ownerFiles: files, ownerA: objectIdA ? ownerRowsOfA() : null,
+        serverA: objectIdA && bound ? await serverRowsOfA() : null });
+      last = { relay: has, pending: sync.pending, owner: files };
+      if (done(has) && sync.pending?.length === 0) break;
+    }
+    return last!;
+  };
+  const savedC = "# C\n\nC changed.\n";
+  const arrived = (relay: Relay) => !relay.a && relay.b && relay.cChanged;
+  const editPage = async (path: string, note: string, settleIt: boolean) => {
+    const session = await pages.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    try {
+      await session.applyDecidedLocalUpdate(doc => {
+        const scratch = new Y.Doc();
+        try {
+          Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+          const before = Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch, new Map([["note", note]]));
+          return Y.encodeStateAsUpdate(scratch, before);
+        } finally { scratch.destroy(); }
+      }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: `repro-${note}` });
+      if (settleIt) await session.settleNow();
+    } finally { await session.close(settleIt ? undefined : { settle: false }); }
+  };
+  const writePage = async (path: string, text: string) => {
+    await (await adapter()).writeTextFile({ workspaceId, versionId: "main", path, text, publish: true, metadata: { origin: "api" },
+      author: { kind: "human", humanId: "local-person" } });
+    const session = await pages.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    try { await session.settleNow(); } finally { await session.close(); }
+  };
+  const saveFile = async (path: string, text: string) => {
+    const before = (await pages.listMoments({ limit: 1_000 })).moments.filter(moment => moment.path === path).length;
+    await writeFile(join(rootA, path), text);
+    pages.observeFileEvents([{ path, operation: "update" }]);
+    await waitForPathMoments(pages, path, before + 1);
+  };
+  // Explorer's Delete, through the same route the desktop's delete operation runs.
+  const appDelete = (path: string) => deleteWorkspacePathByHand({ workspace: { ...opened.workspace, readOnly: false, shareView: undefined }, assertCurrent() {} },
+    path, { kind: "human", humanId: "local-person" }, { capture: pages, requestId: randomUUID(), markDeleted: () => undefined,
+      trashItem: target => rename(target, join(trashRoot, randomUUID())) })
+    .then(result => ({ ok: true as const, trashed: result.trashed }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error),
+      code: error instanceof Error && error.cause instanceof DaemonRefusalError ? error.cause.message : null }));
+  // History's Restore earlier state on A's creation moment, as restoreEngineMomentFile runs it.
+  const historyRestoreBeforeCreation = async () => {
+    const moments = (await pages.listMoments({ limit: 1_000 })).moments
+      .filter(moment => moment.objectId === objectIdA).sort((left, right) => left.recordedAtMs - right.recordedAtMs);
+    const creation = moments[0];
+    if (!creation) throw new Error(`${oldPath} has no moments.`);
+    return pages.restoreFileToBeforeMoment(creation.id, { kind: "human", humanId: "local-person" })
+      .then(result => ({ ok: true as const, result, creation: { id: creation.id, operation: creation.operation }, moments: moments.length }),
+        (error: unknown) => ({ ok: false as const, error: reproErrorText(error),
+          code: error instanceof Error && error.cause instanceof DaemonRefusalError ? error.cause.message : null }));
+  };
+  // The desktop's Live documents operations, through its operation table and relay share handlers.
+  const appHandlers = () => {
+    const handlers = new Map<string, (event: {sender: {id: number}}, payload: unknown) => unknown>();
+    const credentials = {serverUrl: proxy.origin, relayUrl: proxy.origin, userId: workspaceId, email: "owner@dohc.test", token};
+    const unexpected = (): never => {throw new Error("Unexpected Stop dependency");};
+    const ownerHandlers = createRelaySharesIpcHandlers({
+      remoteForWorkspace: async () => ({credentials, credentialGeneration: 1}), currentCredentialGeneration: () => 1,
+      currentCredentials: () => credentials, warmCredentialCache: async () => {}, relayShareJson: unexpected,
+      relayShareJsonWithCredentials: async <R,>(_credentials: unknown, endpoint: string, init?: RequestInit): Promise<R> => {
+        const response = await fetch(`${proxy.origin}${endpoint}`, {...init, headers: {authorization: `Bearer ${token}`, "content-type": "application/json"}});
+        if (!response.ok) {
+          const text = await response.text();
+          let data: unknown = null;
+          try {data = JSON.parse(text);} catch {/* Not JSON: fail below with the relay's answer. */}
+          throw liveStopRelayError(data) ?? new Error(`${init?.method ?? "GET"} ${endpoint} answered ${response.status}: ${text}`);
+        }
+        return await response.json() as R;
+      }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+      listOwnerLiveStops: () => opened.sessions.run(opened.workspace, async ({workspace}) => opened.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
+      ownerLiveStop: (_workspace, action, _stopPath, binding, acceptedCursor) => opened.sessions.run(opened.workspace, async ({workspace}) => {
+        const client = opened.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
+        if (action === "clear") {await client.ownerYDocStopClear(request, binding as {mainVersionId: string; objectId: string; currentPath: string});return;}
+        if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
+        return action === "request" ? client.ownerYDocStopRequest(request, binding as {mainVersionId: string; objectId: string; currentPath: string})
+          : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, {acceptedCursor: acceptedCursor!});
+      }), liveDocument: async (_workspace, target) => {
+        const resolved = await opened.sessions.run(opened.workspace, async ({client, workspace}) =>
+          new VersionedLiveAdapter(client, workspace, {workspaceId}).resolveFiles({workspaceId, targets: [target]}));
+        const [file] = resolved.results;
+        return file?.status === "found" ? {mainVersionId: resolved.versionId, objectId: file.objectId, currentPath: file.path} : null;
+      }, pushRecorded: async () => {}, withoutEditors: (_workspace, _path, change) => change(), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
+      sendRendererActivity: () => {},
+      sharesChanged: unexpected, reconcileReceivedShares: unexpected,
+    });
+    registerOperations({
+      handle: (channel, handler) => {handlers.set(channel, handler);},
+      assertTrustedSender() {},
+      withActiveWorkspace: async (_event: {sender: {id: number}}, _id, _message, work) => work({workspace: opened.workspace, assertCurrent() {}}),
+    }, relayShareOperations, ownerHandlers);
+    return handlers;
+  };
+  // Stop live editing on A's row, as its Stop button does.
+  const stopViaApp = (input: { path: string; objectId?: string }) =>
+    Promise.resolve(appHandlers().get(relayShareOperations.stopOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, ...input}));
+  // A's row in Live documents, exactly as the dialog's list returns it.
+  const liveRowOfA = async () => {
+    const listed = await Promise.resolve(appHandlers().get(relayShareOperations.listOwnerLiveDocuments.channel)!({sender: {id: 1}}, {workspaceId})) as OwnerLiveDocumentsResult;
+    return listed.documents.find(row => row.objectId === objectIdA) ?? null;
+  };
+  // This computer's Stops for A that still owe the server a retirement.
+  const owedStopsOfA = async () => {
+    const rows = await opened.sessions.run(opened.workspace, async ({ workspace }) =>
+      opened.nativeClient().ownerYDocStopList({ id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS }));
+    return rows.filter(row => row.document.objectId === objectIdA && row.retirementOwed).length;
+  };
+  try {
+    await relay.claim();
+    await opened.chats.ensureGeneralChannel({ workspaceId });
+    await pushUntilDrained(relay);
+    await (await adapter()).ensureMainVersion({ workspaceId });
+
+    // Step 1: A and C exist and reach the owner's second device. The owner
+    // shares docs with Edit access and edits A once; native owner delivery binds it.
+    step = "1-synced";
+    if (kind === "file-manager-capture") {
+      // A starts as a file saved outside dohc, so capture writes its head.
+      await mkdir(join(rootA, dirname(oldPath)), { recursive: true });
+      await writeFile(join(rootA, oldPath), "# A\n");
+      pages.observeFileEvents([{ path: oldPath, operation: "update" }]);
+      await waitForPathMoments(pages, oldPath, 1);
+      // Live editing starts once the owner opens A in dohc; opening, with no edit, gives A its history.
+      const session = await pages.openYDocSession({ path: oldPath, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+      await session.close({ settle: false });
+    } else {
+      await writePage(oldPath, "# A\n");
+    }
+    await writePage(existing, "# C\n");
+    await pushUntilDrained(relay);
+    peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+    const fileA = (await (await adapter()).resolveFiles({ workspaceId, versionId: "main", targets: [{ path: oldPath }] })).results[0];
+    if (fileA?.status !== "found") throw new Error(`${oldPath} has no object.`);
+    objectIdA = fileA.objectId;
+    await settle(3, has => has.a);
+    step = "1-live";
+    if (bound) {
+      const share = await call(`/sync/${workspaceId}/shares`, { recipientEmail: "repro-recipient@dohc.test", paths: ["docs"], access: "edit" });
+      expect(share.status).toBe(200);
+      const enrollment = await call(`/sync/${workspaceId}/live-host`, { shareId: (await share.json() as { shareId: string }).shareId });
+      expect([200, 202]).toContain(enrollment.status);
+      await expect.poll(async () => (await ready()).map(document => document.binding.currentPath), { timeout: 120_000 })
+        .toEqual([oldPath]).catch(error => { throw new Error(diagnostics(), { cause: error }); });
+      const document = (await ready())[0]!;
+      expect(document.binding.objectId).toBe(objectIdA);
+      if (kind === "file-manager-capture") {
+        // Delivery binds A with no live edit, so capture still owns A's head.
+        await expect.poll(async () => {
+          await deliveryPass(document, [document]);
+          return ownerRowsOfA().ownerBindings.length;
+        }, { timeout: 60_000, interval: 500 }).toBeGreaterThan(0).catch(error => { throw new Error(JSON.stringify(ownerRowsOfA()), { cause: error }); });
+        observe({ boundWithoutEdit: true });
+      } else {
+        await editPage(oldPath, "a-live", false);
+        await expect.poll(async () => {
+          await deliveryPass(document, [document]);
+          await pages.runRelaySync(page => relay.pull(page));
+          const store = await hostStore();
+          return store === undefined ? "" : readFile(join(store, oldPath), "utf8").catch(() => "");
+        }, { timeout: 120_000 }).toContain("note: a-live");
+        const fileMatches = await expect.poll(async () => {
+          await pages.flush();
+          await pages.runRelaySync(page => relay.pull(page));
+          return readFile(join(rootA, oldPath), "utf8");
+        }, { timeout: 60_000 }).toContain("note: a-live").then(() => true, () => false);
+        observe({ ownerFileHasAcceptedEdit: fileMatches });
+      }
+    } else {
+      // The same live edit with no session host: nothing binds A's owner.
+      await editPage(oldPath, "a-live", true);
+    }
+    pages.start();
+    const before = ownerRowsOfA();
+    observe({ ownerA: before });
+    expect({ bound: before.ownerBindings.length > 0, currentActivation: before.activations.some(row => row.releasedAtMs === null) },
+      `${kind}: before the delete, A's owner binding`).toEqual({ bound, currentActivation: false });
+    await settle(3, has => has.a);
+
+    const onDisk = () => stat(join(rootA, oldPath)).then(() => true, () => false);
+    const deletesOfA = async () => (await pages.listMoments({ limit: 1_000 })).moments
+      .filter(moment => moment.objectId === objectIdA && moment.operation === "delete").length;
+    // B and C reach the second device as the owner has them, with nothing pending.
+    const expectPublished = (label: string, published: Observed, aOnPeer: boolean) => {
+      expect.soft(published.owner.b ?? "", `${kind} ${label}: B is intact on the owner's device`).toContain("# B");
+      expect.soft(published.owner.c, `${kind} ${label}: C is intact on the owner's device`).toBe(savedC);
+      expect.soft({ a: published.relay.a, b: published.relay.b, cChanged: published.relay.cChanged }, `${kind} ${label}: what reaches the owner's second device`)
+        .toEqual({ a: aOnPeer, b: true, cChanged: true });
+      expect.soft(published.pending, `${kind} ${label}: no owner admission is left pending`).toEqual([]);
+      expect.soft({ b: published.relay.bText, c: published.relay.cText }, `${kind} ${label}: B and C match the owner's bytes`).toEqual(published.owner);
+    };
+    const newAndChanged = async () => {
+      step = "3-new-and-changed";
+      await writePage(newPage, "# B\n");
+      await saveFile(existing, savedC);
+    };
+
+    if (kind === "stop-then-delete" || kind === "deferred-stop") {
+      // Step 2: Stop live editing on A's row. "deferred-stop" first leaves more
+      // unsent edits than Stop sends (release.rs:332-339): 40 notes, over
+      // MAX_RELEASE_ENTRIES, with no delivery pass after them.
+      step = "2-stop";
+      if (kind === "deferred-stop") for (let edit = 0; edit < 40; edit++) await editPage(oldPath, `unsent-${edit}`, false);
+      const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA })
+        .then(result => ({ ok: true as const, result }), (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }));
+      observe({ stopped, ownerA: ownerRowsOfA(), liveRow: await liveRowOfA() });
+      expect(stopped.ok, `${kind}: Stop live editing is accepted`).toBe(true);
+      let row: Awaited<ReturnType<typeof liveRowOfA>> = null;
+      if (kind === "stop-then-delete") {
+        // The row reads Stopped once the server retired A and no retirement is owed.
+        await expect.poll(async () => {
+          if (await owedStopsOfA() > 0) await syncPass();
+          row = await liveRowOfA();
+          return row?.status === "retired" && await owedStopsOfA() === 0;
+        }, { timeout: 120_000, interval: 500 }).toBe(true).catch(error => { throw new Error(JSON.stringify({ row, diagnostics: diagnostics() }), { cause: error }); });
+      } else {
+        row = await liveRowOfA();
+      }
+      const afterStop = ownerRowsOfA();
+      // The dialog files a Notices row for a Stop only when it kept edits (LiveDocumentsDialog.tsx:395).
+      const keptEdits = stopped.ok ? (stopped.result as { keptEdits?: string } | undefined)?.keptEdits : undefined;
+      const stopNotice = keptEdits !== undefined && keptEdits !== "none" ? { onStopped: oldPath, keptEdits } : null;
+      observe({ liveRow: row, ownerBindingGone: afterStop.ownerBindings.length === 0, ownerA: afterStop, stopNotice });
+
+      // Step 3: delete A in Explorer, then B and C.
+      step = "3-delete";
+      const deleted = await appDelete(oldPath);
+      observe({ deleted, onDisk: await onDisk(), ownerA: ownerRowsOfA() });
+      if (kind === "stop-then-delete") {
+        expect(afterStop.ownerBindings, "Stop released A's owner binding").toEqual([]);
+        expect({ ok: deleted.ok, onDisk: await onDisk() }, "the delete goes through").toEqual({ ok: true, onDisk: false });
+        await newAndChanged();
+        expectPublished("after Stop and delete", await settle(6, arrived), false);
+      } else {
+        // The deferred Stop keeps A's owner binding, so the delete is refused.
+        expect(deleted, "the delete is refused with the delete words").toEqual({ ok: false, code: "live-page-owned", error: ownedDeleteRefusal("delete") });
+        // A refused delete leaves A's file in place.
+        expect(await onDisk(), "A stays on the owner's disk").toBe(true);
+        await newAndChanged();
+        // Whether B and C publish is recorded, not asserted.
+        const published = await settle(6, relay => relay.a && relay.b && relay.cChanged);
+        observe({ bAndCPublished: published.relay.b && published.relay.cChanged && published.pending?.length === 0 });
+      }
+      return;
+    }
+
+    if (kind === "file-manager" || kind === "file-manager-capture") {
+      // A's head and the origin that wrote it, or null once nothing heads A.
+      const headOfA = () => {
+        const db = new DatabaseSync(ownerDb, { readOnly: true });
+        try {
+          const row = db.prepare("SELECT path, metadata_origin AS origin FROM snapshots WHERE workspace_id=? AND object_id=?").get(workspaceId, objectIdA);
+          return row === undefined ? null : { path: String(row.path), origin: String(row.origin) };
+        } finally { db.close(); }
+      };
+      // Step 2: A's file goes from disk outside dohc. The engine's own watcher
+      // captures it; the desktop's watcher feeds the same event to capture
+      // (workspaceActivity.ts:508). No dohc delete, move or restore runs.
+      step = "2-file-manager-delete";
+      const headBefore = headOfA();
+      const startedAt = new Date().toISOString();
+      await unlink(join(rootA, oldPath));
+      pages.observeFileEvents([{ path: oldPath, operation: "delete" }]);
+      const retired = await expect.poll(deletesOfA, { timeout: 30_000, interval: 250 }).toBeGreaterThan(0).then(() => true, () => false);
+      observe({ startedAt, headBefore, retired, deletesOfA: await deletesOfA(), headAfter: headOfA(), onDisk: await onDisk(), ownerA: ownerRowsOfA() });
+      await newAndChanged();
+      const perPass: Array<{ pass: number; deletesOfA: number; head: ReturnType<typeof headOfA>; onDisk: boolean; refusalLines: number }> = [];
+      // Every Notices row the passes produced, as the desktop titles them (NoticeCenter.tsx).
+      const noticeRows = new Map<string, { title: string; body: string }>();
+      let published: Observed | undefined;
+      for (let pass = 1; pass <= 6; pass++) {
+        published = await settle(1, arrived);
+        for (const entry of published.pending ?? []) {
+          noticeRows.set(`owner-admission-pending-${entry.originId}-${entry.originSeq}`, { title: "Saved locally · Pending share",
+            body: `Your edits to "${entry.path}" are saved on this device. The shared file update is pending.` });
+        }
+        perPass.push({ pass, deletesOfA: await deletesOfA(), head: headOfA(), onDisk: await onDisk(), refusalLines: refusalLines.length });
+        if (arrived(published.relay) && published.pending?.length === 0) break;
+      }
+      observe({ startedAt, endedAt: new Date().toISOString(), headBefore, perPass, refusalLines, noticeRows: [...noticeRows.values()],
+        firstPending: published?.pending?.[0] ?? null, ownerA: ownerRowsOfA(),
+        bAndCPublished: published!.relay.b && published!.relay.cChanged && published!.pending?.length === 0 });
+      // No refusal reaches capture, and A's file stays gone.
+      expect({ refusalLines: refusalLines.length, onDisk: await onDisk() }, `${kind}: no refusal, and A stays gone`)
+        .toEqual({ refusalLines: 0, onDisk: false });
+      if (kind === "file-manager") {
+        // Capture retires only a head it or a Y.Doc wrote (capture_write.rs:827-846); A's head is the delivered edit's, pulled as sync.
+        expect({ headBefore: headBefore?.origin, deletesOfA: await deletesOfA() }, "capture leaves a head it did not write")
+          .toEqual({ headBefore: "sync", deletesOfA: 0 });
+      } else {
+        // Whatever capture does with a head it may retire, it does it once.
+        expect(headBefore?.origin, "capture wrote A's head").toBe("capture");
+        expect(await deletesOfA(), "capture retires A at most once").toBeLessThanOrEqual(1);
+      }
+      return;
+    }
+
+    // Step 2: with A's tab closed, the owner deletes A in Explorer, or restores it to before its creation.
+    step = kind === "restore" ? "2-restore" : "2-delete";
+    const deleted = kind === "restore" ? await historyRestoreBeforeCreation() : await appDelete(oldPath);
+    observe({ deleted, onDisk: await onDisk(), ownerA: ownerRowsOfA(), serverA: bound ? await serverRowsOfA() : null });
+    if (bound) {
+      expect(deleted, `${kind}: refused with the ${kind === "restore" ? "restore" : "delete"} words`)
+        .toEqual({ ok: false, code: "live-page-owned", error: ownedDeleteRefusal(kind === "restore" ? "restore" : "delete") });
+      expect(await onDisk(), `${kind}: A stays on the owner's disk`).toBe(true);
+    } else {
+      expect({ ok: deleted.ok, onDisk: await onDisk() }, `${kind}: the delete runs and A leaves the owner's disk`).toEqual({ ok: true, onDisk: false });
+    }
+
+    // Step 3: a new page B, and an ordinary saved change to the file C.
+    await newAndChanged();
+    expectPublished("after B and C", await settle(6, relay => relay.a === bound && relay.b && relay.cChanged), bound);
+  } catch (error) {
+    observe({ failed: reproErrorText(error), stack: error instanceof Error ? error.stack : undefined, diagnostics: diagnostics() });
+    throw error;
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+    await peer?.close().catch(() => undefined);
+    try { await pages.stop().catch(() => undefined); } finally {
+      await opened.close();
+      localStates.delete(rootA);
+      try { await relayServer.stop(); } finally { await proxy.close(); }
+    }
+  }
+}
+
+async function runDeleteRepros(cases: DeleteReproCase[]): Promise<void> {
+  const ca = await mintLocalhostCa(await createTestScratch("dohc-repro-delete-ca-"));
+  const previousRoots = getCACertificates("default");
+  setDefaultCACertificates([...previousRoots, ca.ca]);
+  const trustEnv = { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+    DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath, DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" };
+  for (const [name, value] of Object.entries(trustEnv)) vi.stubEnv(name, value);
+  const localStates = new Map<string, LocalStateBindings>();
+  readLocalStateFrom({
+    currentBinding: workspace => localStates.get(workspace.rootPath)?.currentBinding(workspace) ?? null,
+    openInProgress: workspace => localStates.get(workspace.rootPath)?.openInProgress?.(workspace) ?? null,
+    localStateOpenAt: rootPath => localStates.get(rootPath)?.localStateOpenAt(rootPath) ?? Promise.resolve(null),
+  });
+  try {
+    const outcomes = await Promise.allSettled(cases.map(kind => runDeleteRepro(kind, ca, trustEnv, localStates)));
+    const failed = outcomes.flatMap((outcome, index) => outcome.status === "rejected" ? [`${cases[index]}: ${reproErrorText(outcome.reason)}`] : []);
+    expect(failed, "every workspace reached the end of its steps").toEqual([]);
+  } finally {
+    readLocalStateFrom(null);
+    setDefaultCACertificates(previousRoots);
+    vi.unstubAllEnvs();
+  }
+}
+
+it.skipIf(engine.missing)("refuses deleting an owner-bound live page and keeps its workspace publishing (bound, unbound)",
+  () => runDeleteRepros(["bound", "unbound"]), 300_000);
+
+it.skipIf(engine.missing)("refuses restoring an owner-bound live page to before its creation and keeps its workspace publishing",
+  () => runDeleteRepros(["restore"]), 300_000);
+
+it.skipIf(engine.missing)("deletes a live page after Stop, and refuses it after a deferred Stop (stop-then-delete, deferred-stop)",
+  () => runDeleteRepros(["stop-then-delete", "deferred-stop"]), 300_000);
+
+it.skipIf(engine.missing)("leaves an owner-bound live page deleted outside dohc to its delivered head, with no refusal (file-manager)",
+  () => runDeleteRepros(["file-manager"]), 300_000);
+it.skipIf(engine.missing)("records an owner-bound live page that capture wrote and that is deleted outside dohc, with no refusal (file-manager-capture)",
+  () => runDeleteRepros(["file-manager-capture"]), 300_000);
