@@ -1814,7 +1814,9 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     writeTextFile: writeEngineFile,
     writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
-      await assertContainedDir(dirname(absolutePath));
+      // The parent may be absent: a device that never had the folder still
+      // receives the delete. The resolver places an absent tail inside the
+      // root and refuses a missing root or a broken ancestor link.
       const target = await assertResolvedArea(absolutePath, "Engine delete path");
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.

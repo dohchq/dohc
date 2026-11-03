@@ -1572,6 +1572,41 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
     3 * REAL_DAEMON_DEADLINE_MS,
   );
 
+  // A pull runs every delete before every write. A device that joins after a
+  // rename receives the delete of the old name before the write that would
+  // create its folder.
+  it("joins after a page in a folder was renamed in dohc", async () => {
+    const workspaceId = `two-daemon-join-after-rename-${randomUUID()}`;
+    const rootA = await createTestScratch("dohc-join-after-rename-a-");
+    const rootB = await createTestScratch("dohc-join-after-rename-b-");
+    const connection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    try {
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      await daemonA.chats.ensureGeneralChannel({ workspaceId });
+      await pushUntilDrained(daemonA.relay);
+      await writeAndCapture(daemonA, rootA, "notes/before.md", "body\n");
+      const finish = await daemonA.capture.beginFileRename("notes/before.md", "notes/after.md");
+      await rename(join(rootA, "notes", "before.md"), join(rootA, "notes", "after.md"));
+      await finish(true);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      const receiver = daemonB;
+      const pull = await receiver.capture.runRelaySync(materializePage => receiver.relay.pull(materializePage));
+      expect(pull.fastForwardedPaths.filter(({ path }) => path.startsWith("notes/"))
+        .map(({ operation, path }) => [operation, path])).toEqual([["delete", "notes/before.md"], ["write", "notes/after.md"]]);
+      expect(await readdir(join(rootB, "notes"))).toEqual(["after.md"]);
+      expect(await readFile(join(rootB, "notes", "after.md"), "utf8")).toBe("body\n");
+      const again = await receiver.capture.runRelaySync(materializePage => receiver.relay.pull(materializePage));
+      expect(again).toMatchObject({ fetched: 0, applied: 0, fastForwardedPaths: [] });
+    } finally {
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+    }
+  }, 60_000);
+
 });
 
 it.skipIf(engine.missing)(
