@@ -1289,6 +1289,16 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toEqual([]);
   });
 
+  it.each(["2.1.315", null])("doesn't start a self-test of Claude Code that reports %s", async (claudeVersion) => {
+    const fixture = await createFixture({ runner: { command: "", profile: { tool: "claude", executable: resolve("test-claude.exe") } }, claudeVersion });
+
+    await expect(fixture.service.runnerSelfTest(WORKSPACE_ID, "default")).resolves.toEqual({
+      ok: false,
+      detail: "Update Claude Code to 2.1.316 or later to use this agent.",
+    });
+    expect(fixture.spawnCalls).toEqual([]);
+  });
+
   it("doesn't let an automation start an agent that runs the person's own command", async () => {
     const fixture = await createFixture();
     await activate(fixture);
