@@ -629,7 +629,7 @@ describe("Try again on a failed run of the owner's server", () => {
   });
 });
 
-describe("Try again on an agent run dohc's restart or quit stopped", () => {
+describe("Try again on a failed agent run", () => {
   const stoppedRun = (threadId: string, runId: string, overrides: Partial<NoticeRow> = {}) => notice({
     store: "local", noticeId: `agent-run:notes:${runId}`, kind: "agent-run", workspaceId: "notes", recipientShareId: null,
     senderKind: "agent", postedHere: true, target: { thread: threadId, run: runId }, ...overrides,

@@ -3246,8 +3246,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   private failedCompletedRun(state: WorkspaceState, run: ChatRun): boolean {
-    return (run.exitCode !== undefined && run.exitCode !== 0) ||
-      (run.failureHandled && ![...state.runLinks.values()].includes(run.runId));
+    return ((run.exitCode !== undefined && run.exitCode !== 0) || run.failureHandled) &&
+      ![...state.runLinks.values()].includes(run.runId);
   }
 
   private failedRunRecoveries(

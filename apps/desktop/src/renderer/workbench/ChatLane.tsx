@@ -439,7 +439,7 @@ export function ChatLane(props: {
     }
   }, [liveRunId, load, onError, stopping, workspaceId]);
 
-  // Try again on a run a quit or restart stopped puts its request back in
+  // Try again on an eligible failed run puts its request back in
   // line. The failure's own Try again only asks again: the run's update
   // refreshes the conversation.
   const failedRun = dispatch?.failedRun ?? null;

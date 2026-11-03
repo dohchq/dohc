@@ -897,9 +897,9 @@ impl<'a> LinkedChatStore<'a> {
                          WHERE r.workspace_id = ?1 AND r.run_id = ?3 \
                            AND r.trigger_message_id = ?2 \
                            AND r.agent_id = chat_dispatch_ledger.agent_id \
-                           AND (r.exit_code <> 0 OR (r.failure_handled = 1 AND NOT EXISTS ( \
+                           AND (r.exit_code <> 0 OR r.failure_handled = 1) AND NOT EXISTS ( \
                              SELECT 1 FROM run_message_links m \
-                             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))))))",
+                             WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))))",
                     params![workspace_id, trigger_message_id, run_id, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
@@ -941,10 +941,10 @@ impl<'a> LinkedChatStore<'a> {
                        AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
                        AND l.run_id = r.run_id \
                      WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
-                       AND (l.state = 'failed' OR (l.state = 'done' AND (r.exit_code <> 0 \
-                         OR (r.failure_handled = 1 AND NOT EXISTS ( \
+                       AND (l.state = 'failed' OR (l.state = 'done' \
+                         AND (r.exit_code <> 0 OR r.failure_handled = 1) AND NOT EXISTS ( \
                            SELECT 1 FROM run_message_links m \
-                           WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))))) \
+                           WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))) \
                        AND (SELECT COUNT(*) FROM agent_run_records all_runs \
                          WHERE all_runs.run_id = r.run_id) <> 1)"
                     ),
@@ -966,10 +966,10 @@ impl<'a> LinkedChatStore<'a> {
                       AND l.trigger_message_id = r.trigger_message_id AND l.agent_id = r.agent_id \
                       AND l.run_id = r.run_id \
                      WHERE r.workspace_id = ?1 AND {thread_filter} AND r.ended_at_ms IS NOT NULL \
-                       AND (l.state = 'failed' OR (l.state = 'done' AND (r.exit_code <> 0 \
-                         OR (r.failure_handled = 1 AND NOT EXISTS ( \
+                       AND (l.state = 'failed' OR (l.state = 'done' \
+                         AND (r.exit_code <> 0 OR r.failure_handled = 1) AND NOT EXISTS ( \
                            SELECT 1 FROM run_message_links m \
-                           WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))))) \
+                           WHERE m.workspace_id = r.workspace_id AND m.run_id = r.run_id))) \
                        AND (?3 = 0 OR r.started_at_ms > ?4 \
                          OR (r.started_at_ms = ?4 AND r.run_id > ?5)) \
                      ORDER BY r.started_at_ms, r.run_id LIMIT ?6"
