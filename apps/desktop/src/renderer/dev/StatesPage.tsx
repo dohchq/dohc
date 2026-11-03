@@ -1304,7 +1304,7 @@ const fieldMenuItems: MenuEntry[] = [
       onChange: noop,
       onSubmit: noop,
       onCancel: noop,
-      hint: "Starts as a copy of Main",
+      hint: "Starts from Main",
     },
   },
 ];

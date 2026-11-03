@@ -320,6 +320,9 @@ export interface WorkspaceVersionMergeResult {
   // rows themselves are open conflicts in the engine; readers page them
   // through listOpenConflictsPage instead of carrying them here.
   conflictCount: number;
+  // Protected files whose Main copy this merge replaced with the version's,
+  // in merge order. They never conflict, so the result has to name them.
+  replacedProtectedPaths: string[];
 }
 
 // One page of open conflicts, the engine's own `conflicts.list` page passed
@@ -6982,6 +6985,7 @@ export function createWorkspaceEngineCapture(
         // history — restorable, so nothing is lost.
         const secrets = secretStoreFor();
         const secretChanges: SecretFileComparePage["entries"] = [];
+        const replacedProtectedPaths: string[] = [];
         {
           let secretAfterPath: string | undefined;
           do {
@@ -7014,6 +7018,7 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           mergedFileCount += 1;
+          replacedProtectedPaths.push(change.path);
           if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
             const materialized = await secrets.materializeSecretFile({
               workspaceId,
@@ -7037,7 +7042,7 @@ export function createWorkspaceEngineCapture(
         if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
           await materialize(deletesBeforeWrites(materializations), policy);
         }
-        return { mergedFileCount, unchangedFileCount, conflictCount };
+        return { mergedFileCount, unchangedFileCount, conflictCount, replacedProtectedPaths };
       });
     },
 

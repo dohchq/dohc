@@ -1,10 +1,11 @@
-import { Pill, SecondaryButton, PrimaryButton } from "../ui/controls";
+import { GhostButton, Pill, RetryRow, SecondaryButton, PrimaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isWorkspaceUpdatingError, isConflictStaleTarget, readError, versionNameRefusal } from "../../ipc/errorWords";
 import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
 import { ChevronDown, ChevronsUpDown, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -23,6 +24,7 @@ import {
 } from "../../workspaces/workspaceTextLimits";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
@@ -102,7 +104,7 @@ export function VersionMenu(props: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [newName, setNewName] = useState<string | null>(null);
   // Why the field or the engine refused the name being typed.
-  const [nameError, setNameError] = useState<string | null>(null);
+  const [nameError, setNameError] = useState<ReactNode>(null);
   const [busy, setBusy] = useState<"switch" | "create" | null>(null);
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
@@ -165,7 +167,7 @@ export function VersionMenu(props: {
       // versions surface for the session.
       if (!cancelled) {
         props.onError(
-          ipcErrorMessage(lastError, "Version controls are unavailable right now."),
+          ipcErrorMessage(lastError, "dohc could not load this workspace's versions."),
           lastError,
         );
       }
@@ -236,7 +238,7 @@ export function VersionMenu(props: {
         await refresh();
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
-        props.onError(ipcErrorMessage(error, "Could not switch versions."), error);
+        props.onError(ipcErrorMessage(error, "dohc could not switch versions."), error);
         // The switch may have partially applied before failing; make the
         // selector and editors reflect reality. Whatever stuck is what the
         // re-read reports, and if that read fails too, nobody knows.
@@ -293,7 +295,7 @@ export function VersionMenu(props: {
     async (name: string) => {
       const trimmed = name.trim();
       if (trimmed.length === 0) {
-        setNameError("Give the new version a name.");
+        setNameError("Enter a name for the version.");
         return;
       }
       const identity = `version-create:${workspaceId}:${trimmed}`;
@@ -319,11 +321,11 @@ export function VersionMenu(props: {
         const refusal = versionNameRefusal(error);
         if (refusal !== null) {
           setNameError(refusal === "taken"
-            ? `Another version is called ${trimmed}. Choose another name.`
+            ? <>Another version is called <span className="font-medium">{trimmed}</span>. Choose another name.</>
             : "dohc can't use that name. Choose another name.");
           return;
         }
-        props.onError(ipcErrorMessage(error, `Could not create the version ${trimmed}.`), error, () => {
+        props.onError(ipcErrorMessage(error, `dohc could not create the version ${trimmed}.`), error, () => {
           setMenuOpen(true);
           setNewName(trimmed);
           void performCreate(trimmed);
@@ -343,7 +345,7 @@ export function VersionMenu(props: {
     (version: WorkspaceVersionRecord, error: unknown) => {
       setMergeSource(null);
       void refresh().catch(() => undefined);
-      const fallback = `Could not merge ${version.name} into Main.`;
+      const fallback = `dohc could not merge ${version.name} into Main.`;
       const identity = mergeIdentity(workspaceId, version.id);
       const retry = () => {
         const token = snapshotToken.current;
@@ -352,7 +354,7 @@ export function VersionMenu(props: {
             if (current === null) return;
             const found = current.versions.find((candidate) => candidate.id === version.id);
             if (found) setMergeSource({ version: found, runOnOpen: true });
-            else props.onError(`${version.name} no longer exists, so it can't merge into Main.`, null, undefined, identity);
+            else props.onError(`The version ${version.name} no longer exists, so it can't merge into Main.`, null, undefined, identity);
           },
           (readError: unknown) => {
             if (token !== snapshotToken.current) return;
@@ -402,12 +404,15 @@ export function VersionMenu(props: {
               setNewName(null);
               setNameError(null);
             },
-            placeholder: "Version name",
             maxLength: 80,
             busy: busy === "create",
-            hint: nameError !== null ? (
-              <span data-testid="version-menu-error" role="alert" className="text-danger">{nameError}</span>
-            ) : busy === "create" ? "Creating…" : onMain ? "Starts as a copy of Main" : `Starts as a copy of ${activeName}. It can't merge into Main.`,
+            error: nameError,
+            errorTestId: "version-menu-error",
+            hint: busy === "create"
+              ? "Creating…"
+              : onMain
+                ? "Starts from Main"
+                : <>Starts from <span className="font-medium">{activeName}</span>, so it can't merge into Main.</>,
             testId: "version-new-input",
           },
         },
@@ -485,47 +490,25 @@ export function VersionMenu(props: {
       />
 
       {pendingSwitch !== null ? (
-        <Overlay onClose={() => setPendingSwitch(null)}>
-          <div
-            data-testid="version-switch-save-confirm"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="version-switch-save-title"
-            className="dohc-elevated w-[min(420px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
-          >
-            <h3
-              id="version-switch-save-title"
-              className="m-0 text-sm font-semibold text-ink"
-            >
-              Save your changes first?
-            </h3>
-            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              You have unsaved changes. dohc will save them into{" "}
-              <span className="font-semibold text-ink">{activeName}</span> and then
-              switch to{" "}
-              <span className="font-semibold text-ink">
-                {versionName(snapshot, pendingSwitch)}
-              </span>
-              .
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <SecondaryButton data-testid="version-switch-save-cancel" onClick={() => setPendingSwitch(null)}>
-                Cancel
-              </SecondaryButton>
-              <PrimaryButton
-                data-testid="version-switch-save-continue"
-                autoFocus
-                onClick={() => {
-                  const target = pendingSwitch;
-                  setPendingSwitch(null);
-                  if (target) void performSwitch(target);
-                }}
-              >
-                Save and switch
-              </PrimaryButton>
-            </div>
-          </div>
-        </Overlay>
+        // The panel holds focus, so a screen reader reads the title and body
+        // before Tab reaches Cancel.
+        <ConfirmDialog
+          title={`Switch to ${versionName(snapshot, pendingSwitch)}`}
+          confirmLabel="Save and switch"
+          testId="version-switch-save-confirm"
+          cancelTestId="version-switch-save-cancel"
+          confirmTestId="version-switch-save-continue"
+          onCancel={() => setPendingSwitch(null)}
+          onConfirm={() => {
+            const target = pendingSwitch;
+            setPendingSwitch(null);
+            if (target) void performSwitch(target);
+          }}
+        >
+          <p className="m-0 mt-1 text-[13px] leading-5 text-muted">
+            dohc saves your changes in <span className="font-medium text-ink">{activeName}</span> first.
+          </p>
+        </ConfirmDialog>
       ) : null}
 
       {mergeSource ? (
@@ -533,7 +516,6 @@ export function VersionMenu(props: {
           workspaceId={workspaceId}
           source={mergeSource.version}
           runOnOpen={mergeSource.runOnOpen}
-          activeTabDirty={props.activeTabDirty}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           onMerged={() => props.clearError(mergeIdentity(workspaceId, mergeSource.version.id))}
@@ -569,7 +551,6 @@ export function VersionMergeDialog(props: {
   source: WorkspaceVersionRecord;
   // Merge as soon as the dialog opens, for a Try again.
   runOnOpen?: boolean;
-  activeTabDirty: boolean;
   // VersionMenu's contract: drain writes, hold the release across the IPC.
   beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active now when this operation set it. The
@@ -589,6 +570,9 @@ export function VersionMergeDialog(props: {
 }) {
   const { workspaceId, source } = props;
   const [stage, setStage] = useState<MergeStage>({ stage: props.runOnOpen ? "running" : "confirm" });
+  // Protected files this merge gave the version's copy. They never become
+  // conflicts, so whichever stage the merge ends in lists them once.
+  const [replacedProtectedPaths, setReplacedProtectedPaths] = useState<string[]>([]);
   const liveToken = useRequestSequence();
   // Which loaded conflict window a "Show more" answer belongs to. Every
   // replacement of the window (the merge result, each resolution's remaining
@@ -611,6 +595,7 @@ export function VersionMergeDialog(props: {
       if (!liveToken.isCurrent(token)) return;
       props.onWorkspaceStateChanged();
       props.onMerged();
+      setReplacedProtectedPaths(result.replacedProtectedPaths);
       // The merge's own count decides the stage: the rows are the first page
       // of all open conflicts, and a lingering sync conflict must not turn a
       // clean merge into a conflicted one. The rows gate it too: a count
@@ -687,12 +672,69 @@ export function VersionMergeDialog(props: {
   // Closing while merging is never allowed. While conflicts are open, closing
   // is explicit only ("Finish later"): Escape must not unmount
   // ConflictResolver and discard a hand-written combined copy.
-  const canCloseExplicitly = stage.stage !== "running";
   const canCloseByEscape =
     stage.stage !== "running" && stage.stage !== "conflicts";
 
   const finish = props.onClose;
+  const hasProtected = replacedProtectedPaths.length > 0;
 
+  if (stage.stage === "conflicts") {
+    // The one stage whose body scrolls, so it alone gets bands.
+    return (
+      <Overlay onClose={() => undefined}>
+        <div
+          data-testid="version-merge-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="version-merge-title"
+          className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel"
+        >
+          <header className="border-b border-line px-6 py-4">
+            <h3 id="version-merge-title" className="m-0 text-base font-semibold text-ink">
+              Decide what Main should keep
+            </h3>
+            <p className="m-0 mt-1 text-[13px] leading-5 text-muted" role="status" data-testid="version-merge-status">
+              {conflictCountCopy(stage.conflicts.length, stage.nextAfterConflictId !== null)}
+            </p>
+          </header>
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-6">
+            {hasProtected ? (
+              <ReplacedProtectedFiles paths={replacedProtectedPaths} sourceName={source.name} collapsible />
+            ) : null}
+            <ConflictList
+              workspaceId={workspaceId}
+              beginLineageOperation={props.beginLineageOperation}
+              onWorkspaceStateChanged={props.onWorkspaceStateChanged}
+              conflicts={stage.conflicts}
+              hasMore={stage.nextAfterConflictId !== null}
+              onLoadMore={loadMoreConflicts}
+              sourceNameFor={() => source.name}
+              onResolved={onResolved}
+              onError={props.onConflictError}
+            />
+          </div>
+          <footer className="flex justify-end gap-2 border-t border-line px-6 py-4">
+            <SecondaryButton data-testid="version-merge-done" onClick={finish}>
+              Finish later
+            </SecondaryButton>
+          </footer>
+        </div>
+      </Overlay>
+    );
+  }
+
+  // Every other stage is one card. Main is out of sight from here, so the
+  // result stays: the title becomes the result above one Done, which takes
+  // focus so Enter or Escape closes it.
+  const result = stage.stage === "clean" || stage.stage === "resolved-all";
+  const title =
+    stage.stage === "clean"
+      ? stage.mergedFileCount === 0
+        ? `Main already has everything in ${source.name}`
+        : `Merged ${stage.mergedFileCount} file${stage.mergedFileCount === 1 ? "" : "s"} into Main`
+      : stage.stage === "resolved-all"
+        ? `Merged ${source.name} into Main`
+        : `Merge ${source.name} into Main`;
   return (
     <Overlay onClose={() => (canCloseByEscape ? finish() : undefined)}>
       <div
@@ -700,106 +742,98 @@ export function VersionMergeDialog(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="version-merge-title"
-        className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel"
+        className="dohc-elevated flex w-[min(420px,calc(100vw-32px))] flex-col gap-6 rounded-xl border border-line bg-panel p-6"
       >
-        <header className="border-b border-line px-4 py-3">
-          <h3 id="version-merge-title" className="m-0 text-sm font-semibold text-ink">
-            {stage.stage === "conflicts"
-              ? `Decide what Main should keep`
-              : `Merge ${source.name} into Main`}
-          </h3>
-          {stage.stage === "confirm" ? (
-            <p className="mb-0 mt-1 text-xs leading-5 text-muted">
-              Everything {source.name} changed will be brought into Main.{" "}
-              {source.name} stays as it is, so you can keep working in it.
-              {props.activeTabDirty ? " Your unsaved changes are saved first." : ""}
-            </p>
-          ) : null}
-        </header>
-
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-          {stage.stage === "confirm" ? (
-            <p className="m-0 text-xs leading-5 text-muted">
-              Versions cover text files during the alpha — other files stay exactly
-              as they are. If Main changed in ways that clash with {source.name},
-              you'll choose what to keep, file by file.
-            </p>
-          ) : null}
-          {stage.stage === "running" ? (
-            <p
-              data-testid="version-merge-status"
-              className="m-0 text-xs leading-5 text-muted"
-              role="status"
-            >
-              Merging {source.name} into Main…
-            </p>
-          ) : null}
-          {stage.stage === "clean" ? (
-            <p
-              data-testid="version-merge-status"
-              className="m-0 text-xs leading-5 text-success"
-              role="status"
-            >
-              {stage.mergedFileCount === 0
-                ? "Main already has everything from this version."
-                : `Merged ${stage.mergedFileCount} file${
-                    stage.mergedFileCount === 1 ? "" : "s"
-                  } into Main.`}
-            </p>
-          ) : null}
-          {stage.stage === "resolved-all" ? (
-            <p
-              data-testid="version-merge-status"
-              className="m-0 text-xs leading-5 text-success"
-              role="status"
-            >
-              All conflicts are resolved. Main is up to date.
-            </p>
-          ) : null}
-          {stage.stage === "conflicts" ? (
-            <>
-              <p className="m-0 text-xs leading-5 text-muted" role="status" data-testid="version-merge-status">
-                {conflictCountCopy(
-                  stage.conflicts.length,
-                  stage.nextAfterConflictId !== null,
-                )}{" "}
-                Choose which copy Main should keep — nothing is lost either way.
-              </p>
-              <div className="mt-3">
-                <ConflictList
-                  workspaceId={workspaceId}
-                  beginLineageOperation={props.beginLineageOperation}
-                  onWorkspaceStateChanged={props.onWorkspaceStateChanged}
-                  conflicts={stage.conflicts}
-                  hasMore={stage.nextAfterConflictId !== null}
-                  onLoadMore={loadMoreConflicts}
-                  sourceNameFor={() => source.name}
-                  onResolved={onResolved}
-                  onError={props.onConflictError}
-                />
+        <div>
+          <div {...(result ? { role: "status", "data-testid": "version-merge-status" } : {})}>
+            <h3 id="version-merge-title" className="m-0 break-words text-base font-semibold text-ink">
+              {title}
+            </h3>
+          </div>
+          {result ? (
+            hasProtected ? (
+              <div className="mt-1">
+                <ReplacedProtectedFiles paths={replacedProtectedPaths} sourceName={source.name} />
               </div>
-            </>
-          ) : null}
+            ) : null
+          ) : (
+            <p className="m-0 mt-1 text-[13px] leading-5 text-muted">
+              You can keep working in <span className="font-medium text-ink">{source.name}</span>.
+            </p>
+          )}
         </div>
-
-        <footer className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          {stage.stage === "confirm" ? (
+        <div className="flex justify-end gap-2">
+          {result ? (
+            <SecondaryButton data-testid="version-merge-done" autoFocus onClick={finish}>
+              Done
+            </SecondaryButton>
+          ) : (
             <>
-              <SecondaryButton data-testid="version-merge-cancel" onClick={finish}>
+              <SecondaryButton data-testid="version-merge-cancel" disabled={stage.stage === "running"} onClick={finish}>
                 Cancel
               </SecondaryButton>
-              <PrimaryButton data-testid="version-merge-confirm" autoFocus onClick={() => void runMerge()}>
-                Merge into Main
+              <PrimaryButton data-testid="version-merge-confirm" disabled={stage.stage === "running"} onClick={() => void runMerge()}>
+                {stage.stage === "running" ? "Merging…" : "Merge into Main"}
               </PrimaryButton>
             </>
-          ) : (
-            <SecondaryButton data-testid="version-merge-done" disabled={!canCloseExplicitly} onClick={finish}>
-              {stage.stage === "conflicts" ? "Finish later" : "Done"}
-            </SecondaryButton>
           )}
-        </footer>
+        </div>
       </div>
     </Overlay>
+  );
+}
+
+// The protected files a merge replaced. They never become conflicts, so the
+// merge's last stage names them: one line in the body style, then an inset
+// box of paths from the workspace root. A long path gives up its folders
+// before its file name, with the whole path on hover, and the box scrolls
+// after five rows. The box is open on every result. Only the conflict stage,
+// where the cards are the task, keeps it behind "Show files".
+function ReplacedProtectedFiles(props: { paths: string[]; sourceName: string; collapsible?: boolean }) {
+  const [open, setOpen] = useState(!props.collapsible);
+  const count = props.paths.length;
+  return (
+    <div data-testid="version-merge-protected">
+      <div className="flex items-center gap-2">
+        <p className="m-0 min-w-0 text-[13px] leading-5 text-muted">
+          {count === 1 ? "This protected file" : `These ${count} protected files`} took{" "}
+          <span className="font-medium text-ink">{props.sourceName}</span>'s copy.
+        </p>
+        {props.collapsible ? (
+          <GhostButton
+            data-testid="version-merge-protected-toggle"
+            aria-expanded={open}
+            aria-controls="version-merge-protected-list"
+            className="shrink-0"
+            onClick={() => setOpen((current) => !current)}
+          >
+            {open ? "Hide files" : "Show files"}
+            <ChevronDown size={12} aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`} />
+          </GhostButton>
+        ) : null}
+      </div>
+      {open ? (
+        <ul
+          id="version-merge-protected-list"
+          aria-label="Protected files"
+          tabIndex={count > 5 ? 0 : undefined}
+          className="m-0 mt-2 max-h-[calc(5*1.75rem+2px)] list-none overflow-y-auto rounded-lg border border-line p-0"
+        >
+          {props.paths.map((path) => {
+            const slash = path.lastIndexOf("/");
+            return (
+              <li key={path} title={path} className="flex h-7 min-w-0 items-center gap-2 px-2 text-[13px]">
+                <Lock size={12} aria-hidden className="shrink-0 text-subtle" />
+                <span className="flex min-w-0">
+                  <span className="min-w-0 truncate text-muted">{path.slice(0, slash + 1)}</span>
+                  <span className="max-w-full shrink-0 truncate text-ink">{path.slice(slash + 1)}</span>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -1096,8 +1130,8 @@ function ConflictResolver(props: {
           ? new SyncedDeletionRevivalError(conflict.path, { cause: caught })
           : conflict.origin === "sync" && conflict.contentKind === "text" && conflict.currentText !== null && conflict.incomingText === null && isConflictStaleTarget(caught)
             ? new SyncedDeletionStaleError(conflict.path, { cause: caught }) : caught;
-        setError(readError(error).title ?? ipcErrorMessage(error, "Could not apply that choice."));
-        props.onError?.("Could not apply that choice.", error);
+        setError(readError(error).title ?? ipcErrorMessage(error, "dohc could not apply that choice."));
+        props.onError?.("dohc could not apply that choice.", error);
         setBusy(false);
       } finally {
         releaseOperation?.();
@@ -1202,7 +1236,7 @@ function ConflictResolver(props: {
                 className="dohc-section-label"
                 htmlFor={`combined-${conflict.conflictId}`}
               >
-                Combined copy for Main
+                Combined copy
               </label>
               {combineSeed !== null ? (
                 <p
@@ -1330,7 +1364,7 @@ function ConflictList(props: {
       .catch((error) => {
         if (token !== loadToken.current) return;
         setLoadMoreError(
-          ipcErrorMessage(error, "Couldn't load more conflicting files."),
+          ipcErrorMessage(error, "dohc could not load more files."),
         );
       })
       .finally(() => {
@@ -1694,7 +1728,7 @@ export function ConflictReviewDialog(props: {
   const { workspaceId } = props;
   const [state, setState] = useState<
     | { status: "loading" }
-    | { status: "error"; message: string }
+    | { status: "error" }
     | {
         status: "ready";
         conflicts: WorkspaceVersionConflict[];
@@ -1703,6 +1737,8 @@ export function ConflictReviewDialog(props: {
       }
   >({ status: "loading" });
   const [versionNames, setVersionNames] = useState<Map<string, string>>(new Map());
+  // Bumped by Try again after a failed read.
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const liveToken = useRequestSequence();
   // Same rule as the merge dialog: a "Show more" answer may only append to
   // the window that asked, and every window replacement (the initial load,
@@ -1734,15 +1770,12 @@ export function ConflictReviewDialog(props: {
           nextAfterConflictId: result.nextAfterConflictId,
           resolvedAny: false,
         });
-      } catch (error) {
+      } catch {
         if (!liveToken.isCurrent(token)) return;
-        setState({
-          status: "error",
-          message: ipcErrorMessage(error, "Couldn't load the conflicting files."),
-        });
+        setState({ status: "error" });
       }
     })();
-  }, [workspaceId]);
+  }, [workspaceId, loadAttempt]);
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
@@ -1800,39 +1833,41 @@ export function ConflictReviewDialog(props: {
         aria-labelledby="conflict-review-title"
         className="dohc-elevated flex max-h-[calc(100vh-120px)] w-[min(720px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel"
       >
-        <header className="border-b border-line px-4 py-3">
-          <h3 id="conflict-review-title" className="m-0 text-sm font-semibold text-ink">
+        <header className="border-b border-line px-6 py-4">
+          <h3 id="conflict-review-title" className="m-0 text-base font-semibold text-ink">
             Decide what to keep
           </h3>
           {state.status === "ready" && conflicts.length > 0 ? (
-            <p className="mb-0 mt-1 text-xs leading-5 text-muted">
-              {conflictCountCopy(conflicts.length, hasMoreConflicts)}{" "}
-              Choose what stays — nothing is lost either way, and History keeps
-              both.
+            <p className="m-0 mt-1 text-[13px] leading-5 text-muted">
+              {conflictCountCopy(conflicts.length, hasMoreConflicts)}
             </p>
           ) : null}
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">
           {state.status === "loading" ? (
-            <p className="m-0 text-xs leading-5 text-muted" role="status">
-              Looking for conflicting files…
+            <p className="m-0 text-[13px] leading-5 text-muted" role="status">
+              Looking for files with two copies…
             </p>
           ) : null}
           {state.status === "error" ? (
-            <p className="m-0 text-xs leading-5 text-danger" role="alert">
-              {state.message}
-            </p>
+            <RetryRow
+              testId="conflict-review-retry"
+              onRetry={() => {
+                setState({ status: "loading" });
+                setLoadAttempt((attempt) => attempt + 1);
+              }}
+            />
           ) : null}
           {state.status === "ready" && !anyOpen ? (
             <p
               data-testid="conflict-review-empty"
-              className="m-0 text-xs leading-5 text-success"
+              className="m-0 text-[13px] leading-5 text-muted"
               role="status"
             >
               {state.resolvedAny
-                ? "All set — every conflict is resolved."
-                : "Nothing needs your attention here."}
+                ? "You chose a copy for every file."
+                : "No files have two copies."}
             </p>
           ) : null}
           {state.status === "ready" && conflicts.length > 0 ? (
@@ -1852,15 +1887,10 @@ export function ConflictReviewDialog(props: {
           ) : null}
         </div>
 
-        <footer className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button
-            type="button"
-            data-testid="conflict-review-done"
-            onClick={props.onClose}
-            className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
-          >
+        <footer className="flex justify-end gap-2 border-t border-line px-6 py-4">
+          <SecondaryButton data-testid="conflict-review-done" onClick={props.onClose}>
             {anyOpen ? "Finish later" : "Done"}
-          </button>
+          </SecondaryButton>
         </footer>
       </div>
     </Overlay>

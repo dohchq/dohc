@@ -2621,6 +2621,7 @@ describe("history page", () => {
         mergedFileCount: 1,
         unchangedFileCount: 0,
         conflictCount: 0,
+        replacedProtectedPaths: [],
         conflicts: [],
         nextAfterConflictId: null,
       })),

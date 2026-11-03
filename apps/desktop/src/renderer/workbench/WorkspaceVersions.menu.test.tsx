@@ -185,8 +185,8 @@ describe("VersionMenu", () => {
   });
 
   it.each([
-    ["main", "Main", "Starts as a copy of Main"],
-    ["draft", "Draft", "Starts as a copy of Draft. It can't merge into Main."],
+    ["main", "Main", "Starts from Main"],
+    ["draft", "Draft", "Starts from Draft, so it can't merge into Main."],
   ] as const)("says what a new version starts from on %s, then that it is being created", async (activeVersionId, active, hint) => {
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT], activeVersionId });
     bridgeMock.createWorkspaceVersion.mockReturnValue(new Promise(() => {}));
@@ -201,7 +201,7 @@ describe("VersionMenu", () => {
   });
 
   it.each([
-    ["an empty name", "  ", null, "Give the new version a name."],
+    ["an empty name", "  ", null, "Enter a name for the version."],
     ["a taken name", "Draft", "VersionedTextStoreError [version-name-conflict]: version-name-conflict", "Another version is called Draft. Choose another name."],
     ["a name the engine refuses", "Ideas", "VersionedTextStoreError [invalid-version-name]: invalid-version-name", "dohc can't use that name. Choose another name."],
   ] as const)("keeps %s in the field and says why there until the name changes", async (_case, name, refusal, words) => {
@@ -215,12 +215,14 @@ describe("VersionMenu", () => {
     await waitFor(() => expect(screen.getByTestId("version-menu-error").textContent).toBe(words));
     expect(screen.getByTestId("version-menu-error").getAttribute("role")).toBe("alert");
     expect(descriptionOf(field)).toBe(words);
+    expect(field.getAttribute("aria-invalid")).toBe("true");
     expect(field.value).toBe(name);
     expect(props.onError).not.toHaveBeenCalled();
 
     await user.type(field, "2");
     expect(screen.queryByTestId("version-menu-error")).toBeNull();
-    expect(descriptionOf(field)).toBe("Starts as a copy of Draft. It can't merge into Main.");
+    expect(field.getAttribute("aria-invalid")).toBeNull();
+    expect(descriptionOf(field)).toBe("Starts from Draft, so it can't merge into Main.");
   });
 
   it("reports any other create failure with a Try again that creates the same name", async () => {
@@ -277,10 +279,10 @@ describe("VersionMenu", () => {
     expect(props.clearError).not.toHaveBeenCalled();
 
     bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce({
-      mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null,
+      mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null,
     });
     act(() => props.onError.mock.calls[0]![2]!());
-    await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main."));
+    await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main"));
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(2);
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenLastCalledWith({ workspaceId: "ws-1", versionId: "draft" });
     expect(props.clearError).toHaveBeenCalledWith("version-merge:ws-1:draft");
@@ -297,7 +299,7 @@ describe("VersionMenu", () => {
 
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     act(() => props.onError.mock.calls[0]![2]!());
-    await waitFor(() => expect(props.onError).toHaveBeenLastCalledWith("Draft no longer exists, so it can't merge into Main.", null, undefined, "version-merge:ws-1:draft"));
+    await waitFor(() => expect(props.onError).toHaveBeenLastCalledWith("The version Draft no longer exists, so it can't merge into Main.", null, undefined, "version-merge:ws-1:draft"));
     expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(1);
   });
@@ -318,10 +320,10 @@ describe("VersionMenu", () => {
     expect(props.onError).toHaveBeenLastCalledWith(expect.any(String), unreadable, expect.any(Function), "version-merge:ws-1:draft");
 
     bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce({
-      mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null,
+      mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null,
     });
     act(() => props.onError.mock.calls[1]![2]!());
-    await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main."));
+    await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main"));
   });
 
   it("reports nothing when Try again's read fails after the menu is gone", async () => {

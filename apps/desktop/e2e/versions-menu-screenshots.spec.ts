@@ -15,7 +15,8 @@ import {
 // Screenshot harness (@ui-audit) for the versions menu and what it opens: the
 // menu on Main, on a version, and on a version made from another version; its
 // name field with its hint, Creating…, and a refused name; a failed create and
-// a failed merge as notices with Try again; each merge stage; the save-first
+// a failed merge as notices with Try again; each merge stage, with and
+// without the protected files a merge replaced; the save-first
 // confirm; and keyboard focus on the disabled Merge row. Light and dark. Not a
 // regression test; it runs only when a shot directory is set, the way
 // ui-audit-screenshots.spec.ts does.
@@ -156,6 +157,35 @@ async function writeCaptured(page: Page, rootPath: string, version: string, path
   await expect(page.getByTestId("version-menu-button")).toBeEnabled();
 }
 
+// A protected file's contents are encrypted at rest, so its stored size tells
+// a captured write apart. Each write in this spec changes the size.
+function protectedByteLength(rootPath: string, versionName: string, path: string): number | null {
+  let db: InstanceType<typeof DatabaseSync>;
+  try {
+    db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"), { readOnly: true });
+  } catch {
+    return null;
+  }
+  try {
+    const row = db
+      .prepare(
+        `SELECT f.byte_length AS length FROM secret_files f
+         JOIN versions v ON v.version_id = f.version_id
+         WHERE v.name = ? AND f.path = ?`,
+      )
+      .get(versionName, path);
+    return row ? Number(row.length) : null;
+  } finally {
+    db.close();
+  }
+}
+
+async function writeProtected(page: Page, rootPath: string, version: string, path: string, contents: string): Promise<void> {
+  await writeWorkspaceFiles({ rootPath }, [{ path, contents }]);
+  await expect.poll(() => protectedByteLength(rootPath, version, path), { timeout: 30_000 }).toBe(Buffer.byteLength(contents));
+  await expect(page.getByTestId("version-menu-button")).toBeEnabled();
+}
+
 function errorToast(page: Page, text: string): Locator {
   return page.getByTestId("workspace-shell-error").filter({ hasText: text });
 }
@@ -242,13 +272,13 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await shootWindow(page, "merge-failure-toast");
     await interceptNext(desktop, "desktop:merge-workspace-version", "hold");
     await mergeFailed.getByRole("button", { name: "Try again" }).click();
-    await expect(page.getByTestId("version-merge-status")).toContainText("Merging Draft into Main…");
+    await expect(page.getByTestId("version-merge-confirm")).toHaveText("Merging…");
     await shootWindow(page, "merge-retry-running");
     await releaseHeld(desktop);
     await expect(page.locator('[data-testid="version-conflict"][data-conflict-path="notes.md"]')).toBeVisible({ timeout: 30_000 });
     await shootWindow(page, "merge-conflicts");
     await page.getByTestId("version-conflict-keep-incoming").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText(/All conflicts are resolved/, { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged Draft into Main", { timeout: 30_000 });
     await shootWindow(page, "merge-resolved");
     await page.getByTestId("version-merge-done").click();
 
@@ -259,6 +289,64 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.getByTestId("version-merge-confirm").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, { timeout: 30_000 });
     await shootWindow(page, "merge-success");
+    await page.getByTestId("version-merge-done").click();
+
+    // Nothing new to merge.
+    await openMenu(page);
+    await page.getByTestId("version-merge").click();
+    await page.getByTestId("version-merge-confirm").click();
+    await expect(page.getByTestId("version-merge-status")).toHaveText("Main already has everything in Draft", { timeout: 30_000 });
+    await shootWindow(page, "merge-nothing-new");
+    await page.getByTestId("version-merge-done").click();
+
+    // Protected files never become conflicts, so the result names the ones
+    // that took Draft's copy: one, then seven to show the box scrolling and a
+    // long path giving up its folders first.
+    await writeProtected(page, temp.rootPath, "Draft", ".env", "API_KEY=one\n");
+    await openMenu(page);
+    await page.getByTestId("version-merge").click();
+    await page.getByTestId("version-merge-confirm").click();
+    await expect(page.getByTestId("version-merge-protected")).toBeVisible({ timeout: 30_000 });
+    await shootWindow(page, "merge-protected-one");
+    await page.getByTestId("version-merge-done").click();
+    await writeProtected(page, temp.rootPath, "Draft", ".env", "API_KEY=second\n");
+    for (const path of [
+      ".env.local",
+      "apps/api/.env",
+      "apps/web/.env.production",
+      "deploy/.env.preview",
+      "services/billing/config/environments/staging/.env.staging",
+      "tools/seed/.env.test",
+    ]) {
+      await writeProtected(page, temp.rootPath, "Draft", path, "API_KEY=one\n");
+    }
+    await openMenu(page);
+    await page.getByTestId("version-merge").click();
+    await page.getByTestId("version-merge-confirm").click();
+    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged 7 files into Main", { timeout: 30_000 });
+    await shootWindow(page, "merge-protected-seven");
+    await page.getByTestId("version-merge-done").click();
+
+    // A conflict and a protected file in one merge: the files wait behind
+    // Show files while the conflict is the task, then show open at the end.
+    await writeProtected(page, temp.rootPath, "Draft", ".env", "API_KEY=the third\n");
+    await writeCaptured(page, temp.rootPath, "Draft", "notes.md", "# Notes\n\nDraft's second notes.\n");
+    await switchTo(page, "Main");
+    await writeCaptured(page, temp.rootPath, "Main", "notes.md", "# Notes\n\nMain's second notes.\n");
+    await switchTo(page, "Draft");
+    await openMenu(page);
+    await page.getByTestId("version-merge").click();
+    await page.getByTestId("version-merge-confirm").click();
+    await expect(page.getByTestId("version-merge-protected-toggle")).toHaveAttribute("aria-expanded", "false", { timeout: 30_000 });
+    await shootWindow(page, "merge-conflicts-protected-closed");
+    await page.getByTestId("version-merge-protected-toggle").click();
+    await expect(page.getByTestId("version-merge-protected-toggle")).toHaveAttribute("aria-expanded", "true");
+    await page.mouse.move(4, 400);
+    await shootWindow(page, "merge-conflicts-protected-open");
+    await page.getByTestId("version-conflict-keep-incoming").click();
+    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged Draft into Main", { timeout: 30_000 });
+    await expect(page.getByRole("list", { name: "Protected files" })).toBeVisible();
+    await shootWindow(page, "merge-resolved-protected");
     await page.getByTestId("version-merge-done").click();
 
     // A version made from Draft cannot merge into Main, and says why.
