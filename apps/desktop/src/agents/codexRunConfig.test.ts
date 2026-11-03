@@ -364,10 +364,10 @@ describe("a dohc Codex run", () => {
         // in the workspace, and the person can make one anywhere.
         hidden: {
           [`${WORKSPACE}\\out`]: other, "C:\\opt\\c\\self": "C:\\opt\\c",
-          "C:\\alias": `${WORKSPACE}\\sub`, "C:\\keys": `${WORKSPACE}\\keys`,
+          "C:\\alias": `${WORKSPACE}\\sub`, "C:\\keys": `${WORKSPACE}\\keys`, "C:\\Users\\Sam\\keys": `${WORKSPACE}\\keys`,
         },
       })));
-    expect(run(["C:\\proj", "C:\\opt\\c\\self", "C:\\alias\\out", "C:\\keys"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
+    expect(run(["C:\\proj", "C:\\opt\\c\\self", "C:\\alias\\out", "C:\\keys", "C:\\Users\\Sam\\keys"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
     expect(run(["C:\\opt\\c\\self", "C:\\opt\\c", "C:\\outside"])).toEqual({
       ":workspace_roots": { ".dohc": "read" }, "C:\\opt\\c": "write", "C:\\outside": "write",
     });

@@ -177,9 +177,9 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     }
   };
   // The folder a path names, found one link at a time, and every folder looked
-  // in on the way, where a link could be. Throws on a loop, and on a link that
-  // readlink doesn't report, such as a junction to a volume path, because the
-  // folders it passes through would go unchecked.
+  // in on the way, where a link could be. Throws on a loop, and on a Windows
+  // link that readlink can't read, such as a junction to a volume path,
+  // because the folders it passes through would go unchecked.
   const follow = (at: string, hops = { left: 40 }): { path: string; through: string[] } => {
     const parent = path.dirname(at);
     if (parent === at) return { path: at, through: [] };
@@ -188,7 +188,10 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const through = [...up.through, up.path];
     const target = input.readLink(here);
     if (target === null) {
-      if (input.fileId(path.dirname(input.realPath(here))) !== input.fileId(up.path)) throw new Error("Unreported link");
+      // A name that isn't a link is the folder of that name in the folder above.
+      const real = input.platform === "win32" ? input.realPath(here) : null;
+      if (real !== null && (input.fileId(path.dirname(real)) !== input.fileId(up.path)
+        || path.basename(real).toLowerCase() !== path.basename(here).toLowerCase())) throw new Error("Unreported link");
       return { path: here, through };
     }
     if (--hops.left < 0) throw new Error("Too many links");
