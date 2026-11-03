@@ -1816,7 +1816,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       // The parent may be absent: a device that never had the folder still
       // receives the delete. The resolver refuses a missing root or a broken
       // ancestor link. With no parent there is nothing to remove, so the
-      // delete stops before it touches the disk.
+      // delete stops before it changes the disk.
       const { resolvedAbsolute: target, parentPresent } = await assertResolvedArea(absolutePath, "Engine delete path");
       if (!parentPresent) return;
       // rm on a symlink removes the link itself, never the target, so a
