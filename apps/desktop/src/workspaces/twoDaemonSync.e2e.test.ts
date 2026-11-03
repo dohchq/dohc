@@ -3422,7 +3422,8 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     localStates.set(rootA, opened.sessions);
     try {
       const relay = opened.relay.bind({ ...opened.workspace, relay: connection });
-      const adapter = await opened.sessions.run(opened.workspace, async ({ client, workspace }) => new VersionedLiveAdapter(client, workspace, { workspaceId }));
+      // A fresh adapter per use: setup replaces the workspace handle after the open.
+      const adapter = () => opened.sessions.run(opened.workspace, async ({ client, workspace }) => new VersionedLiveAdapter(client, workspace, { workspaceId }));
       const pages = createWorkspaceEngineCapture({ ...opened.workspace, rustEngineSessions: opened.sessions, settleDebounceMs: 60_000 });
       return { opened, relay, adapter, pages, refusals: new OwnerKnownRefusals() };
     } catch (error) { await opened.close(); throw error; }
@@ -3595,7 +3596,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
   };
   const writePage = async (path: string, text: string) => {
     const o = owner();
-    await o.adapter.writeTextFile({ workspaceId, versionId: "main", path, text, publish: true, metadata: { origin: "api" },
+    await (await o.adapter()).writeTextFile({ workspaceId, versionId: "main", path, text, publish: true, metadata: { origin: "api" },
       author: { kind: "human", humanId: "local-person" } });
     const session = await o.pages.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
     try { await session.settleNow(); } finally { await session.close(); }
@@ -3643,12 +3644,18 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     }, relayShareOperations, ownerHandlers);
     return Promise.resolve(handlers.get(relayShareOperations.stopOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, ...input}));
   };
-  // The server's Live documents row for A, which the dialog labels Stopped once its status is retired.
+  // The server's Live documents row for A, from the current list and then the
+  // stopped one, as the desktop's list reads both (relaySharesIpc.ts:398-401).
+  // The dialog labels a retired row Stopped.
   const serverRowOfA = async () => {
-    const response = await call(`/sync/${workspaceId}/live-host`);
-    if (response.status !== 200) return { error: `${response.status}` };
-    const payload = await response.json() as { documents?: Array<{ objectId?: string; path?: string; status?: string; reason?: string }> };
-    return payload.documents?.find(row => row.objectId === objectIdA) ?? null;
+    for (const query of ["", "?retired=1"]) {
+      const response = await call(`/sync/${workspaceId}/live-host${query}`);
+      if (response.status !== 200) return { error: `${response.status}` };
+      const payload = await response.json() as { documents?: Array<{ objectId?: string; path?: string; status?: string; reason?: string }> };
+      const row = payload.documents?.find(row => row.objectId === objectIdA);
+      if (row) return row;
+    }
+    return null;
   };
   // This computer's Stops for A that still owe the server a retirement.
   const owedStopsOfA = async () => {
@@ -3682,7 +3689,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     await current.relay.claim();
     await current.opened.chats.ensureGeneralChannel({ workspaceId });
     await pushUntilDrained(current.relay);
-    await current.adapter.ensureMainVersion({ workspaceId });
+    await (await current.adapter()).ensureMainVersion({ workspaceId });
 
     // Step 1: A and C exist and reach the owner's second device. The owner
     // then edits A live; with a session host, native owner delivery binds it.
@@ -3691,7 +3698,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     await writePage(existing, "# C\n");
     await pushUntilDrained(current.relay);
     peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
-    const fileA = (await current.adapter.resolveFiles({ workspaceId, versionId: "main", targets: [{ path: oldPath }] })).results[0];
+    const fileA = (await (await current.adapter()).resolveFiles({ workspaceId, versionId: "main", targets: [{ path: oldPath }] })).results[0];
     if (fileA?.status !== "found") throw new Error(`${oldPath} has no object.`);
     objectIdA = fileA.objectId;
     await settle(3, relay => relay.aOld);
@@ -3750,10 +3757,11 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     let route = "app";
     if (!renamed.ok) {
       route = "disk-under-hold";
-      const { holdId } = await o.adapter.holdCapture();
-      try { observe({ renamed, moved: await o.adapter.moveFileUnderHold({ holdId, fromPath: oldPath, toPath: newPath }) }); }
-      finally { await o.adapter.releaseCapture(holdId); }
-      await o.adapter.reconcileCapture();
+      const files = await o.adapter();
+      const { holdId } = await files.holdCapture();
+      try { observe({ renamed, moved: await files.moveFileUnderHold({ holdId, fromPath: oldPath, toPath: newPath }) }); }
+      finally { await files.releaseCapture(holdId); }
+      await files.reconcileCapture();
     }
     const onDisk = (path: string) => stat(join(rootA, path)).then(() => true, () => false);
     observe({ renamed, route, onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) } });
@@ -3810,7 +3818,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     expectOwnerIntact(`after recovery ${kind}`, recovered);
     expectPublished(`after recovery ${kind}`, recovered);
   } catch (error) {
-    observe({ failed: reproErrorText(error), diagnostics: diagnostics() });
+    observe({ failed: reproErrorText(error), stack: error instanceof Error ? error.stack : undefined, diagnostics: diagnostics() });
     throw error;
   } finally {
     await peer?.close().catch(() => undefined);
