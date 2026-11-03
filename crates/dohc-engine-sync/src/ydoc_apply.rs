@@ -3562,8 +3562,8 @@ pub(crate) fn retired_lineage_in_tx(
     // The log may hold an update before one it builds on, so only the end
     // state must be complete.
     let entries: Vec<_> = updates.iter().map(|(_, _, bytes)| bytes.clone()).collect();
-    let replay = dohc_engine_collab::apply_replay_validated_batch(&base, &entries)
-        .map_err(|_| refused())?;
+    let replay =
+        dohc_engine_collab::apply_replay_validated_batch(&base, &entries).map_err(|_| refused())?;
     if replay.outcomes.iter().any(Result::is_err) || replay.doc.has_pending_dependencies() {
         return Err(refused());
     }
