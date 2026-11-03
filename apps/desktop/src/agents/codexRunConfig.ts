@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import { parse } from "smol-toml";
@@ -157,6 +157,7 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
   realPath: (path: string) => string;
   readLink: (path: string) => string | null;
   fileId: (path: string) => string;
+  listFolder: (path: string) => readonly string[];
 }): string[] {
   let setting: { file: string; roots: string[] } | undefined;
   for (const { file, table } of tables) {
@@ -188,10 +189,15 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const through = [...up.through, up.path];
     const target = input.readLink(here);
     if (target === null) {
-      // A name that isn't a link is the folder of that name in the folder above.
-      const real = input.platform === "win32" ? input.realPath(here) : null;
-      if (real !== null && (input.fileId(path.dirname(real)) !== input.fileId(up.path)
-        || path.basename(real).toLowerCase() !== path.basename(here).toLowerCase())) throw new Error("Unreported link");
+      if (input.platform === "win32") {
+        // A name that isn't a link is the folder of that name in the folder
+        // above. Another letter case of it must not be an entry of its own, as
+        // it can be in a folder that tells case apart.
+        const real = input.realPath(here);
+        const [name, stored] = [path.basename(here), path.basename(real)];
+        const same = stored === name || (stored.toLowerCase() === name.toLowerCase() && !input.listFolder(up.path).includes(name));
+        if (!same || input.fileId(path.dirname(real)) !== input.fileId(up.path)) throw new Error("Unreported link");
+      }
       return { path: here, through };
     }
     if (--hops.left < 0) throw new Error("Too many links");
@@ -250,6 +256,7 @@ export function codexRunConfig(input: {
   realPath?: (path: string) => string;
   readLink?: (path: string) => string | null;
   fileId?: (path: string) => string;
+  listFolder?: (path: string) => readonly string[];
   env?: NodeJS.ProcessEnv;
   home?: string;
 }): string[] {
@@ -265,6 +272,7 @@ export function codexRunConfig(input: {
       const { dev, ino } = statSync(path, { bigint: true });
       return `${dev}:${ino}`;
     }),
+    listFolder: input.listFolder ?? ((path: string) => readdirSync(path)),
   };
   const tables = input.files && readConfigTables(input.files.config, read);
   const requirements = input.platform === "win32" && input.files && tables ? readConfigTables(input.files.requirements, read) : null;

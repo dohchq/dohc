@@ -57,7 +57,9 @@ function disk(platform: NodeJS.Platform, folders: readonly string[], { aliases =
     return known.has(local) ? local : missing(value);
   };
   const readLink = (value: string): string | null => links[value] ?? null;
-  return { realPath, readLink, fileId, env: {}, home: platform === "win32" ? "C:\\Users\\Sam" : "/home/sam" };
+  const listFolder = (value: string): string[] => [...known, ...Object.keys(links), ...Object.keys(hidden)]
+    .filter((each) => each !== value && path.dirname(each) === value).map((each) => path.basename(each));
+  return { realPath, readLink, fileId, listFolder, env: {}, home: platform === "win32" ? "C:\\Users\\Sam" : "/home/sam" };
 }
 
 // The run's entries on Windows, with the person's config files as given.
@@ -361,16 +363,21 @@ describe("a dohc Codex run", () => {
       disk("win32", [WORKSPACE, `${WORKSPACE}\\sub`, other, "C:\\opt\\c", "C:\\outside", "C:\\Users\\Sam\\.ssh"], {
         links: { "C:\\proj": `${WORKSPACE}\\out`, [`${WORKSPACE}\\sub\\out`]: "C:\\outside", [`${WORKSPACE}\\keys`]: "C:\\Users\\Sam\\.ssh" },
         // Junctions to volume paths, which readlink refuses. A run can make one
-        // in the workspace, and the person can make one anywhere.
+        // in the workspace, and the person can make one anywhere, including
+        // `.SSH` beside `.ssh` in a folder that tells case apart.
         hidden: {
           [`${WORKSPACE}\\out`]: other, "C:\\opt\\c\\self": "C:\\opt\\c",
           "C:\\alias": `${WORKSPACE}\\sub`, "C:\\keys": `${WORKSPACE}\\keys`, "C:\\Users\\Sam\\keys": `${WORKSPACE}\\keys`,
+          "C:\\Users\\Sam\\.SSH": `${WORKSPACE}\\keys`,
         },
+        aliases: { "C:\\OUTSIDE": "C:\\outside" },
       })));
-    expect(run(["C:\\proj", "C:\\opt\\c\\self", "C:\\alias\\out", "C:\\keys", "C:\\Users\\Sam\\keys"])).toEqual({ ":workspace_roots": { ".dohc": "read" } });
+    expect(run(["C:\\proj", "C:\\opt\\c\\self", "C:\\alias\\out", "C:\\keys", "C:\\Users\\Sam\\keys", "C:\\Users\\Sam\\.SSH"]))
+      .toEqual({ ":workspace_roots": { ".dohc": "read" } });
     expect(run(["C:\\opt\\c\\self", "C:\\opt\\c", "C:\\outside"])).toEqual({
       ":workspace_roots": { ".dohc": "read" }, "C:\\opt\\c": "write", "C:\\outside": "write",
     });
+    expect(run(["C:\\OUTSIDE"])).toEqual({ ":workspace_roots": { ".dohc": "read" }, "C:\\outside": "write" });
   });
 
   it("drops writable folders that reach .dohc through macOS aliases and letter case", () => {
