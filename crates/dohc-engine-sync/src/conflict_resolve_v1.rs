@@ -2540,6 +2540,17 @@ fn commit_imported_lineage(
     let key = key.ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve lineage transition has no current object",
     })?;
+    // The lineage this resolution replaces closes its observed-owner binding
+    // first, keeping its edits. A replay finds its successor already active.
+    let successor_claim = transition
+        .successor
+        .as_ref()
+        .map(|successor| successor.lineage_claim_id.as_str());
+    let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?;
+    if marker.is_some_and(|marker| marker.lineage_claim_id.as_deref() != successor_claim) {
+        dohc_engine_collab::owner_outbox::retirement::close_retired_in_tx(tx, key, now_ms)
+            .map_err(crate::ydoc_apply::map_owner_retirement_error)?;
+    }
     if let Some(successor) = transition.successor.as_ref() {
         let successor_base = imported_successor(tx, transition, successor)?;
         let result = payload.result.present().ok_or(SyncError::InvalidInput {
@@ -4476,6 +4487,13 @@ mod tests {
     fn receiver_fixture_with_role(
         passive: bool,
     ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
+        receiver_fixture_of(passive, ContentKind::Plaintext)
+    }
+
+    fn receiver_fixture_of(
+        passive: bool,
+        kind: ContentKind,
+    ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
         let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = if passive {
@@ -4508,11 +4526,17 @@ mod tests {
             .expect("current head");
         let key = DocKey::new("ws", "main", "object-a").expect("key");
         let predecessor = dohc_engine_collab::Ydoc::wire();
-        predecessor.plaintext_insert(0, "current text");
+        if kind == ContentKind::Richdoc {
+            predecessor
+                .rewrite_content_to_markdown(kind, "current text")
+                .expect("richdoc predecessor");
+        } else {
+            predecessor.plaintext_insert(0, "current text");
+        }
         dohc_engine_collab::claim_base(
             &mut store,
             &key,
-            ContentKind::Plaintext,
+            kind,
             &predecessor.encode_full_state(),
             &NoFaults,
             11,
@@ -4533,7 +4557,7 @@ mod tests {
             artifact_op_kind: "conflict.resolve",
             artifact_id: "conflict-1",
             artifact_preimage_sha256: &current_sha,
-            content_kind: ContentKind::Plaintext,
+            content_kind: kind,
             result_sha256: &result_sha,
         });
         let successor = fresh_successor_base(&identity, "resolved text").expect("successor");
@@ -4609,7 +4633,11 @@ mod tests {
                 successor: Some(SuccessorV1 {
                     lineage_claim_id: successor.lineage_claim_id.clone(),
                     epoch_tag: successor.epoch_tag.clone(),
-                    content_kind: SuccessorContentKindV1::Plaintext,
+                    content_kind: if kind == ContentKind::Richdoc {
+                        SuccessorContentKindV1::Richdoc
+                    } else {
+                        SuccessorContentKindV1::Plaintext
+                    },
                     result_sha256: result_sha,
                     update_blob_sha256,
                     state_vector_blob_sha256,
@@ -5384,7 +5412,13 @@ mod tests {
     }
 
     fn path_change_receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
-        let (scratch, store, key, built) = receiver_fixture();
+        path_changed(receiver_fixture())
+    }
+
+    /// The receiver's resolution, moved to `moved.md`.
+    fn path_changed(
+        (scratch, store, key, built): (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1),
+    ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let mut payload = built.validated.payload;
         payload.paths.push("moved.md".to_owned());
         let mut result = payload.result.clone();
@@ -5438,7 +5472,13 @@ mod tests {
 
     fn absent_result_receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1)
     {
-        let (scratch, store, key, built) = receiver_fixture();
+        absent_result(receiver_fixture())
+    }
+
+    /// The receiver's resolution, with the page deleted.
+    fn absent_result(
+        (scratch, store, key, built): (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1),
+    ) -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let mut payload = built.validated.payload;
         payload.incoming = HeadV1::Absent { path_ref: 0 };
         payload.result = HeadV1::Absent { path_ref: 0 };
@@ -8566,5 +8606,137 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "open");
+    }
+
+    /// Binds `object-a`'s lineage to this computer as its live owner, with no
+    /// editor open, and queues one unsent edit. Returns that queue.
+    fn bind_owner(store: &mut EngineStore, key: &DocKey) -> String {
+        use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+        use dohc_engine_collab::owner_outbox::{
+            OwnerOutboxLimits,
+            draft::{ObservedOwnerBinding, append_draft_in_tx, install_observed_binding_in_tx},
+        };
+        crate::adopt_join_identity(store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
+        store
+            .read_with(|conn| {
+                conn.execute("UPDATE ydoc_docs SET path='doc.md',regime='replicated'", [])
+            })
+            .unwrap();
+        let marker = dohc_engine_collab::read_marker(store, key)
+            .unwrap()
+            .unwrap();
+        let checkpoint = store
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))
+            .unwrap()
+            .encode_full_state();
+        let observed = ObservedOwnerBinding {
+            binding: LiveObjectBinding {
+                workspace_id: "ws".into(),
+                main_version_id: "main".into(),
+                object_id: "object-a".into(),
+                lineage_claim_id: marker.lineage_claim_id.unwrap(),
+                current_path: "doc.md".into(),
+                selector_paths: vec!["doc.md".into()],
+                restore_fence_generation: 0,
+            },
+            relay_database_namespace: "relay".into(),
+            revision: 1,
+            accepted_cursor: 0,
+            native_head_sequence: marker.head_update_seq,
+            checkpoint_digest: dohc_engine_storage::hex_sha256(&checkpoint),
+            limits: OwnerOutboxLimits {
+                max_pending_bytes: 1_000_000,
+                max_pending_age_ms: 60_000,
+            },
+        };
+        let edit = dohc_engine_collab::Ydoc::wire();
+        edit.apply(&checkpoint).unwrap();
+        let update = edit.richdoc_append_paragraph("unsent edit");
+        let dohc_engine_storage::TxnOutcome::Committed(appended) = store
+            .write_with(&NoFaults, |tx| {
+                install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)?;
+                append_draft_in_tx(tx, "ws", &observed.binding, 1, "unsent".into(), update, 12)
+            })
+            .unwrap()
+        else {
+            panic!("the owner binding must commit")
+        };
+        appended.outbox_id
+    }
+
+    fn import_resolution(store: &mut EngineStore, built: &BuiltConflictResolveV1) {
+        let outcome = crate::apply_replication_envelope(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &imported_envelope(0, "conflict.resolve", built.value.clone()),
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("import the resolution");
+        assert!(
+            matches!(outcome.primary, crate::ApplyDisposition::Applied(_)),
+            "{outcome:?}"
+        );
+    }
+
+    /// No binding is left, so none lacks its text head, and the unsent edit's
+    /// queue is closed and listed for a recovery copy.
+    fn assert_owner_closed(store: &EngineStore, outbox_id: &str) {
+        let (bindings, retired): (i64, i64) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM ydoc_owner_bindings), \
+                     (SELECT COUNT(*) FROM owner_ydoc_outboxes WHERE outbox_id=?1 \
+                       AND state='quarantined' AND quarantine_reason='retired')",
+                    [outbox_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!((bindings, retired), (0, 1));
+        let listed = store
+            .read_with(|conn| {
+                dohc_engine_collab::owner_outbox::list_restore_fenced_in(conn, "ws", None, 64)
+            })
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|queue| queue.outbox_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![outbox_id]
+        );
+    }
+
+    #[test]
+    fn an_imported_archive_closes_the_owner_binding_of_its_lineage() {
+        let (_scratch, mut store, key, built) =
+            absent_result(receiver_fixture_of(false, ContentKind::Richdoc));
+        let outbox = bind_owner(&mut store, &key);
+        import_resolution(&mut store, &built);
+        assert!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .unwrap()
+                .is_none()
+        );
+        assert_owner_closed(&store, &outbox);
+    }
+
+    #[test]
+    fn an_imported_moved_successor_closes_the_owner_binding_of_its_predecessor() {
+        let (_scratch, mut store, key, built) =
+            path_changed(receiver_fixture_of(false, ContentKind::Richdoc));
+        let outbox = bind_owner(&mut store, &key);
+        let predecessor = dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id;
+        import_resolution(&mut store, &built);
+        let successor = dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap();
+        assert_ne!(successor.lineage_claim_id, predecessor);
+        assert_eq!(successor.path.as_deref(), Some("moved.md"));
+        assert_owner_closed(&store, &outbox);
     }
 }

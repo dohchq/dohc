@@ -68,6 +68,18 @@ describe("edits the server refused", () => {
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId,
       path: "notes/plan.md", incident: index === 0 ? "old-2:delivery:0" : "old-1:delivery:0"});
   });
+  it("says a retired queue's live editing session ended", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, reason: "retired", saveOnly: true as const}));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-shell-error");
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText("Edits not written to notes/plan.md").closest("li")!;
+    expect(row.textContent).toContain("dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back.");
+    expect(row.textContent).not.toContain("could not write them to your file");
+  });
   const RECOVERED = "Live editing stopped for notes/plan.md. dohc wrote your kept edits into the file.";
   const liveRows = (): OwnerLiveDocumentsResult => ({nextCursor: null, documents: [
     {path: "other.md", objectId: "object-other", status: "ready", canResume: false},
@@ -4564,13 +4576,59 @@ describe("Undo on an Explorer notice", () => {
     await act(async () => undone.resolve({ ok: false, reason: "Cannot undo the delete.", refusal: { code: "unexplained" } }));
     expect(screen.queryByText("Cannot restore a.md.")).toBeNull();
   });
+
+  const RENAMED = "dohc-operation:33333333-3333-4333-8333-333333333333";
+  async function renameTo(user: ReturnType<typeof userEvent.setup>, path: string, name: string) {
+    await user.click((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, `${name}{Enter}`);
+  }
+
+  it("says to stop live editing when that refused the Undo, and opens Live documents at the page", async () => {
+    const reason = "dohc can't undo renaming \"b.md\" while it has live editing on\nIn Live documents, stop live editing for this page, then try again.";
+    const bridge = Object.assign(undoBridge(), {
+      moveWorkspacePath: vi.fn(async () => ({ path: "b.md", operationId: RENAMED, undo: { available: true as const } })),
+    });
+    bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal: { code: "live-page-owned", path: "b.md" } });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "b.md", objectId: "object-b", status: "ready" as const, canResume: false }] }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await renameTo(user, "a.md", "b");
+    await screen.findAllByText("Renamed a.md to b.md");
+    await undoFromNotices(user);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("Cannot undo the rename. Stop live editing for b.md first.")).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(toast).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-b.md").getAttribute("aria-current")).toBe("true"));
+  });
+
+  it("never shows workspace A's live-page refusal in workspace B", async () => {
+    const title = `dohc can't rename "a.md" while it has live editing on`;
+    const refused = deferred<never>();
+    const bridge = Object.assign(undoBridge(), { moveWorkspacePath: vi.fn().mockReturnValueOnce(refused.promise) });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(bridge, WORKSPACE));
+    await renameTo(user, "a.md", "b");
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledOnce());
+    view.rerender(shell(bridge, OTHER_WORKSPACE));
+    await act(async () => refused.reject(new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc can't move "a.md" while it has live editing on
+In Live documents, stop live editing for this page, then move it again.`)));
+    expect(screen.queryByText(title)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Live documents" })).toBeNull();
+  });
 });
 
 describe("a refused folder move", () => {
   const TITLE = `dohc can't move "box" while a page in it has live editing on`;
   const BODY = "In Live documents, stop live editing for every page in this folder, then move the folder again.";
   it("goes away when the same move later succeeds by hand", async () => {
-    const refusal = new Error(`Error invoking remote method 'desktop:move-workspace-path': LiveFolderMoveError: ${TITLE}\n${BODY}`);
+    const refusal = new Error(`Error invoking remote method 'desktop:move-workspace-path': LiveFolderError: ${TITLE}\n${BODY}`);
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       moveWorkspacePath: vi.fn().mockRejectedValueOnce(refusal).mockResolvedValueOnce({ path: "moved", undo: { available: false, reason: "", paths: [] } }),
     });
@@ -4594,6 +4652,7 @@ describe("a refused folder move", () => {
     const notices = await screen.findByTestId("notice-center");
     const row = (await within(notices).findByText(TITLE)).closest("li")!;
     expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
     // The person stops live editing, then renames the folder again.
     await rename();
@@ -4603,5 +4662,194 @@ describe("a refused folder move", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     const reopened = await screen.findByTestId("notice-center");
     expect(within(reopened).queryByText(TITLE)).toBeNull();
+  });
+});
+
+describe("a refused rename of a page this computer owns live", () => {
+  const TITLE = `dohc can't rename "a.md" while it has live editing on`;
+  const BODY = "In Live documents, stop live editing for this page, then rename it again.";
+  const refusal = new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: dohc can't move "a.md" while it has live editing on
+In Live documents, stop live editing for this page, then move it again.`);
+  const treePaths = async () => (await screen.findAllByTestId("tree-row")).map(row => row.dataset.path);
+
+  it("puts the old name back at once, says rename, and offers Try again and Live documents", async () => {
+    const refused = deferred<never>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn().mockReturnValueOnce(refused.promise)
+        .mockResolvedValueOnce({ path: "renamed.md", undo: { available: false, reason: "", paths: [] } }),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }], folders: [] });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "a.md", objectId: "object-a", status: "ready" as const, canResume: false }] }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const row = (await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!;
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed{Enter}");
+    await waitFor(async () => expect(await treePaths()).toContain("renamed.md"));
+    // No refresh answers from here, so only the refusal itself can put the old name back.
+    bridge.listWorkspaceFiles.mockImplementation(() => new Promise(() => undefined));
+    refused.reject(refusal);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(await treePaths()).toContain("a.md");
+    expect(await treePaths()).not.toContain("renamed.md");
+    expect(within(toast).getByText(TITLE)).toBeTruthy();
+    expect(within(toast).getByText(BODY)).toBeTruthy();
+    expect(within(toast).queryByRole("button", { name: /Stop/u })).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(notice).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-a.md").getAttribute("aria-current")).toBe("true"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    // Live editing stopped: Try again renames to the name the person typed.
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+    expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, fromPath: "a.md", toPath: "renamed.md" });
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  });
+
+  it("names the page it would replace when that page has live editing on", async () => {
+    const REPLACE_TITLE = `dohc can't replace "b.md" while it has live editing on`;
+    const REPLACE_BODY = "In Live documents, stop live editing for this page, then try again.";
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn().mockRejectedValueOnce(new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: ${REPLACE_TITLE}\n${REPLACE_BODY}`)),
+    });
+    // b.md's file is gone, but this computer still has live editing on for it.
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }], folders: [] });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "b.md", objectId: "object-b", status: "ready" as const, canResume: false }] }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "b{Enter}");
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(REPLACE_TITLE)).toBeTruthy();
+    expect(within(toast).getByText(REPLACE_BODY)).toBeTruthy();
+    expect(within(toast).queryByText(TITLE)).toBeNull();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(toast).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-b.md").getAttribute("aria-current")).toBe("true"));
+  });
+});
+
+describe("a refused delete of a page this computer owns live", () => {
+  const TITLE = `dohc can't delete "a.md" while it has live editing on`;
+  const BODY = "In Live documents, stop live editing for this page, then delete it again.";
+  const treePaths = async () => (await screen.findAllByTestId("tree-row")).map(row => row.dataset.path);
+
+  it("keeps the page in the tree the whole time, says delete, and offers Try again and Live documents", async () => {
+    const refused = deferred<never>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn().mockReturnValueOnce(refused.promise).mockResolvedValueOnce(undefined),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }], folders: [] });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "a.md", objectId: "object-a", status: "ready" as const, canResume: false }] }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!);
+    await user.keyboard("{Delete}");
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(1));
+    // While the delete runs, the page stays.
+    expect(await treePaths()).toContain("a.md");
+    bridge.listWorkspaceFiles.mockImplementation(() => new Promise(() => undefined));
+    refused.reject(new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: ${TITLE}\n${BODY}`));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(await treePaths()).toContain("a.md");
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe(TITLE);
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe(BODY);
+    expect(within(toast).queryByRole("button", { name: /Stop|Undo/u })).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    expect(within(notice).getByText(BODY)).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(notice).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-a.md").getAttribute("aria-current")).toBe("true"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    // Live editing stopped: Try again deletes the same page.
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(2));
+    expect(bridge.deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "a.md" }));
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  });
+});
+
+describe("a refused drag of a page this computer owns live", () => {
+  const TITLE = `dohc can't move "a.md" while it has live editing on`;
+  const BODY = "In Live documents, stop live editing for this page, then move it again.";
+
+  it("says move, keeps the page where it was, keeps the folder for Try again, and opens its Live documents row", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn()
+        .mockRejectedValueOnce(new Error(`Error invoking remote method 'desktop:move-workspace-path': LivePageOwnedError: ${TITLE}\n${BODY}`))
+        .mockResolvedValueOnce({ path: "docs/a.md", undo: { available: false, reason: "", paths: [] } }),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }, { path: "docs/b.md", kind: "file" as const }], folders: ["docs"] });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: "a.md", objectId: "object-a", status: "ready" as const, canResume: false }] }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const rows = await screen.findAllByTestId("tree-row");
+    const dataTransfer = { effectAllowed: "move", dropEffect: "move", files: [], types: [], setData: vi.fn() };
+    fireEvent.dragStart(rows.find(row => row.dataset.path === "a.md")!, { dataTransfer });
+    fireEvent.dragOver(rows.find(row => row.dataset.path === "docs")!, { dataTransfer });
+    fireEvent.drop(rows.find(row => row.dataset.path === "docs")!, { dataTransfer });
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe(TITLE);
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe(BODY);
+    const paths = (await screen.findAllByTestId("tree-row")).map(row => row.dataset.path);
+    expect(paths).toContain("a.md");
+    expect(paths).not.toContain("docs/a.md");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    await user.click(within(notice).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId("live-document-row-a.md").getAttribute("aria-current")).toBe("true"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+    expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, fromPath: "a.md", toPath: "docs/a.md" });
+  });
+});
+
+describe("a page delete refused while History is off", () => {
+  const TITLE = `dohc can't delete "a.md" while History is off`;
+  const BODY = "Without History, dohc can't check whether this page has live editing on. Restart dohc to try again.";
+
+  it("keeps the page, shows the words, and offers neither Try again nor Live documents", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn().mockRejectedValueOnce(new Error(`Error invoking remote method 'desktop:delete-workspace-path': HistoryOffError: ${TITLE}\n${BODY}`)),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }], folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByTestId("tree-row")).find(candidate => candidate.dataset.path === "a.md")!);
+    await user.keyboard("{Delete}");
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe(TITLE);
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe(BODY);
+    expect((await screen.findAllByTestId("tree-row")).map(row => row.dataset.path)).toContain("a.md");
+    expect(within(toast).queryByRole("button", { name: /Try again|Open Live documents|Undo/u })).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    expect(within(notice).queryByRole("button", { name: /Try again|Open Live documents/u })).toBeNull();
   });
 });

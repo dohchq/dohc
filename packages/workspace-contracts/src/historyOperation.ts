@@ -16,9 +16,11 @@ export const HistoryOperationReadResult = z.union([
     withoutHistory: z.array(z.string()).optional(), links: HistoryOperationLinks.optional(), nextCursor: z.string().nullable() }),
 ]);
 // Why main refused an Undo, so a caller words it in its own voice while
-// `reason` keeps main's text. "unexplained" is any refusal main cannot name.
+// `reason` keeps main's text. "live-page-owned" names the page this computer
+// owns live. "unexplained" is any refusal main cannot name.
 export const UndoRefusal = z.union([
   z.object({ code: z.literal("old-path-occupied"), path: z.string() }),
+  z.object({ code: z.literal("live-page-owned"), path: z.string() }),
   z.object({ code: z.literal("unexplained") }),
 ]);
 export const HistoryOperationUndoResult = z.union([

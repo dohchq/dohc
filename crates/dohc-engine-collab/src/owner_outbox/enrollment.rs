@@ -98,8 +98,14 @@ fn capture(
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum OwnerEnrollmentPreparation {
-    Observed { draft: Box<OwnerDraftDescriptor> },
-    Capture { captured: OwnerEnrollmentCapture },
+    Observed {
+        draft: Box<OwnerDraftDescriptor>,
+    },
+    Capture {
+        captured: OwnerEnrollmentCapture,
+    },
+    /// This generation closed when its document was retired. Delivery skips it.
+    Retired,
 }
 
 pub fn prepare_in(
@@ -138,6 +144,9 @@ pub fn prepare_in(
         return Ok(OwnerEnrollmentPreparation::Observed {
             draft: Box::new(draft),
         });
+    }
+    if super::retirement::retired_in(conn, binding)? {
+        return Ok(OwnerEnrollmentPreparation::Retired);
     }
     Ok(OwnerEnrollmentPreparation::Capture {
         captured: capture_in(conn, binding)?,

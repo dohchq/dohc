@@ -3402,6 +3402,25 @@ pub fn live_page_under_folder(
     Ok(owned.then_some(LivePageUnderFolder::Owned))
 }
 
+/// Whether this computer owns the page at `path`: its head's object has an
+/// owner binding. A rename would leave the binding's path behind.
+pub fn live_page_owned(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings b
+           JOIN snapshots s ON s.workspace_id=b.workspace_id
+             AND s.version_id=b.main_version_id AND s.object_id=b.object_id
+         WHERE b.workspace_id=?1 AND b.main_version_id=?2 AND s.path=?3)",
+        params![workspace_id, version_id, path],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 fn ensure_adopted_owner_binding_unchanged(
     conn: &Connection,
     key: &DocKey,
@@ -3448,6 +3467,17 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     dohc_engine_collab::author_coverage::reset_in(tx, key, false).map_err(map_collab_hard_error)?;
     ensure_adopted_owner_binding_unchanged(tx, key, None)?;
     require_unfenced_lineage(tx, key)?;
+    let changed_at_ms: i64 = tx
+        .query_row(
+            "SELECT updated_at_ms FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .unwrap_or(0);
+    dohc_engine_collab::owner_outbox::retirement::close_retired_in_tx(tx, key, changed_at_ms)
+        .map_err(map_owner_retirement_error)?;
     for statement in [
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -3464,6 +3494,17 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
         .map_err(SyncError::persist)?;
     }
     Ok(())
+}
+
+pub(crate) fn map_owner_retirement_error(
+    error: dohc_engine_collab::owner_outbox::OwnerOutboxError,
+) -> SyncError {
+    match error {
+        dohc_engine_collab::owner_outbox::OwnerOutboxError::Storage(storage) => {
+            SyncError::Storage(storage)
+        }
+        error => SyncError::corrupt(error),
+    }
 }
 
 /// Drop the local bases still waiting to learn their relay position.

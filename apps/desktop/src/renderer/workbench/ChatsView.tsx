@@ -120,7 +120,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
-import { withErrorWords } from "../../ipc/errorWords";
+import { isLivePageOwnedRefusal, withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import type {
   PresenceTransport,
@@ -505,8 +505,11 @@ export function ChatsView(props: {
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
-  // A retry, when given, is the failure's Try again.
-  onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  // A retry, when given, is the failure's Try again. An archive refused for
+  // live editing also names the bookmark's page.
+  onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string) => void;
+  // A bookmark's page was archived, so an earlier refusal to archive it is over.
+  onBookmarkArchived?: (path: string) => void;
   // Removing a member is undoable for a while. The shell shows that notice
   // and holds the Undo, so it outlives this panel; a refused removal goes to
   // the same shell with Try again.
@@ -1301,7 +1304,9 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      setBookmarks(result.bookmarks.filter((bookmark) => bookmark.state === "active"));
+      // An archive whose page did not move stays saved, so archiving it again can move the page.
+      setBookmarks(result.bookmarks.filter((bookmark) => bookmark.state === "active"
+        || (bookmark.state === "archived" && bookmark.projectionState === "failed")));
     } catch {
       // A projection problem must not make the core chat surface unavailable.
     }
@@ -1496,6 +1501,7 @@ export function ChatsView(props: {
               (bookmark) => bookmark.bookmarkId !== existing.bookmarkId,
             ),
           );
+          props.onBookmarkArchived?.(existing.destinationPath);
         } else {
           const result = await bridge().saveChatBookmark({
             workspaceId,
@@ -1512,9 +1518,13 @@ export function ChatsView(props: {
         }
       } catch (error) {
         if (mutationIsCurrent()) {
+          // An archive refused for live editing can run again after Stop.
+          const refusedPage = existing && isLivePageOwnedRefusal(error) ? existing.destinationPath : undefined;
           props.onError(
             ipcErrorMessage(error, "Could not update this bookmark."),
             error,
+            refusedPage !== undefined ? () => void toggleBookmark(input) : undefined,
+            refusedPage,
           );
         }
       } finally {
@@ -1528,7 +1538,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [bookmarkBusy, bookmarkFor, props.onError, workspaceId],
+    [bookmarkBusy, bookmarkFor, props.onBookmarkArchived, props.onError, workspaceId],
   );
 
   // Gentle DM poll while the view is open: the other side's messages arrive

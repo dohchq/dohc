@@ -3400,7 +3400,7 @@ fn enroll_restore(
         .unwrap()
     {
         OwnerEnrollmentPreparation::Capture { captured } => captured,
-        OwnerEnrollmentPreparation::Observed { .. } => panic!("a restore generation captures"),
+        other => panic!("a restore generation captures, not {other:?}"),
     };
     let input = OwnerEnrollmentInput {
         binding: binding.clone(),
@@ -8837,3 +8837,6 @@ fn ended_recovery_restore_fence_waits_without_notice_or_fingerprint() {
     let result:(i64,Option<String>,i64)=store.read_with(|conn| conn.query_row("SELECT (SELECT COUNT(*) FROM replication_pending_refusals),last_attempt_state,(SELECT COUNT(*) FROM ydoc_deferred_updates) FROM ydoc_pending_artifacts",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))).unwrap();
     assert_eq!(result, (0, None, 1));
 }
+
+#[path = "moment_apply_tests/owner_retirement.rs"]
+mod owner_retirement;

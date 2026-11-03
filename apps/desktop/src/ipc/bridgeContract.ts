@@ -477,6 +477,8 @@ export const OwnerLiveDocument = z.object({
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
   earlier: OwnerLiveQuarantine.shape.earlier,
   saveOnly: OwnerLiveQuarantine.shape.saveOnly,
+  // Save-only edits whose live editing session ended with their page's live lineage.
+  sessionEnded: z.literal(true).optional(),
   storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
   // Those kept edits' incident, which Save recovery copy names to save them.
   incident: OwnerLiveQuarantine.shape.incident.optional(),

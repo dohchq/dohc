@@ -597,6 +597,7 @@ fn map_domain(error: &DomainError) -> WireError {
         DomainError::ObjectIdentityMismatch => (InvalidParams, "object-identity-mismatch"),
         DomainError::TargetPathExists => (InvalidParams, "target-path-exists"),
         DomainError::LiveDocumentBindingActive => (InvalidParams, "live-document-binding-active"),
+        DomainError::LivePageOwned => (InvalidParams, "live-page-owned"),
         DomainError::VersionNotFound => (InvalidParams, "version-not-found"),
         DomainError::InvalidVersion => (InvalidParams, "invalid-version"),
         DomainError::VersionNameConflict => (InvalidParams, "version-name-conflict"),

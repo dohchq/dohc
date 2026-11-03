@@ -1,7 +1,7 @@
 import * as filesystem from "node:fs/promises";
 import { mkdir, rm, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
 import { deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
@@ -434,4 +434,38 @@ it("checks readiness before a retried delete Undo asks History to finish restori
   expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restored" } });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
   expect(await readDeleteRecovery(f.rootPath, id)).toMatchObject({ result: { tracked: { state: "restored" } } });
+});
+
+// The engine refuses an Undo that would move back, or delete, a page this
+// computer owns live. An agent reads the words as plain text, and the
+// Explorer reads the page from the refusal.
+describe("an Undo of a page this computer owns live", () => {
+  const body = "In Live documents, stop live editing for this page, then try again.";
+
+  it("names the rename it would undo, and changes nothing on disk", async () => {
+    const f = await fixture([]); await f.write("before.txt", "kept edits");
+    const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "before.txt", toPath: "after.txt" }, person,
+      { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() });
+    // History recorded the rename, so its Undo asks the engine.
+    const trash = join(f.rootPath, ".dohc/local/trash");
+    const sidecar = join(trash, (await readdir(trash)).find(name => name.startsWith("move-") && name.endsWith(".json"))!);
+    await writeFile(sidecar, JSON.stringify({ ...JSON.parse(await readFile(sidecar, "utf8")), tracked: true }));
+    f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "rename", path: "after.txt", beforePath: "before.txt" }], nextCursor: null } as never);
+    f.history.undoHistoryOperation.mockRejectedValue(new Error("live-page-owned"));
+    expect(await f.undo(moved.operationId!, true)).toEqual({ ok: false,
+      reason: `dohc can't undo renaming "after.txt" while it has live editing on\n${body}`,
+      refusal: { code: "live-page-owned", path: "after.txt" } });
+    expect(await readFile(join(f.rootPath, "after.txt"), "utf8")).toBe("kept edits");
+    await expect(stat(join(f.rootPath, "before.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("names the copy it would delete", async () => {
+    const f = await fixture();
+    f.history.readHistoryOperation.mockResolvedValue({operationId: otherId, versionId: "main", momentCount: 1, kind: "file-duplicate"} as never);
+    f.history.readHistoryPage.mockResolvedValue({moments: [{momentId: "copy", operation: "write", path: "folder/tracked.txt"}], nextCursor: null} as never);
+    f.history.undoHistoryOperation.mockRejectedValue(new Error("live-page-owned"));
+    expect(await f.undo(otherId, true)).toEqual({ ok: false,
+      reason: `dohc can't undo creating "folder/tracked.txt" while it has live editing on\n${body}`,
+      refusal: { code: "live-page-owned", path: "folder/tracked.txt" } });
+  });
 });

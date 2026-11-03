@@ -891,6 +891,20 @@ export class ChatsLiveAdapter {
     });
   }
 
+  async retryFailedBookmark(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+  }): Promise<ChatBookmarkTransition> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.bookmarkRetryFailed, {
+      ownerUserId: input.ownerUserId,
+      bookmarkId: input.bookmarkId,
+      generation: input.generation,
+    });
+  }
+
   async markBookmarkStale(input: {
     workspaceId: string;
     ownerUserId: string;

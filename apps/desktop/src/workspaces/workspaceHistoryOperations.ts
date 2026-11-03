@@ -1,5 +1,6 @@
 import { caseOnlyMoveReason, linkUndoRefusal, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
 import { placeBack } from "./workspaceFileMoves";
+import { LIVE_PAGE_TRY_AGAIN_BODY, livePageUndoTitle, type LivePageUndone } from "../ipc/errorWords";
 import { lstat, readdir } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { posix, join } from "node:path";
@@ -47,6 +48,16 @@ const occupiedOldPath = /^domain error: Undo refused: old path occupied(?: on di
 function engineRefusal(error: DaemonRefusalError): z.infer<typeof UndoRefusal> {
   const occupied = occupiedOldPath.exec(error.message);
   return occupied ? { code: "old-path-occupied", path: occupied[1]! } : { code: "unexplained" };
+}
+// The engine refused an Undo because this computer owns `path` live.
+class LivePageUndoError extends Error {
+  constructor(message: string, readonly path: string, cause: unknown) {
+    super(message, { cause });
+  }
+}
+function undoRefusal(error: unknown): z.infer<typeof UndoRefusal> {
+  if (error instanceof LivePageUndoError) return { code: "live-page-owned", path: error.path };
+  return error instanceof DaemonRefusalError ? engineRefusal(error) : { code: "unexplained" };
 }
 async function agentFloor(rootPath: string, walkLiveDirectories = true): Promise<Floor> {
   const policy = await readWorkspaceEnginePolicy(rootPath);
@@ -222,10 +233,17 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         }
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
+      // The page an Undo would move back or delete, and the change it reverses.
+      let undone: { path: string; change: LivePageUndone } | undefined = move
+        ? { path: move.to, change: moveWord(move.from, move.to) === "rename" ? "renaming" : "moving" } : undefined;
       const history: OperationHistory = { ...options.history, undoHistoryOperation: async input => {
         let result;
         try { result = await options.history.undoHistoryOperation(input); }
         catch (error) {
+          // The engine refuses while this computer owns the page live.
+          if (undone && error instanceof Error && error.message === "live-page-owned") {
+            throw new LivePageUndoError(`${livePageUndoTitle(undone.path, undone.change)}\n${LIVE_PAGE_TRY_AGAIN_BODY}`, undone.path, error);
+          }
           const refusal = linkUndoRefusal(error);
           // These reasons name the operation; the other Undo refusals name workspace paths.
           const path = refusal && !["Operation already undone", "Undo in progress", "operation unavailable", "active version changed"].includes(refusal[1]!) ? refusal[2] : undefined;
@@ -243,6 +261,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         const member = members[0];
         if (!member) throw new Error("This Duplicate is not in the active workspace version. Open its version to undo it.");
         await duplicateFloor(member.path);
+        undone = { path: member.path, change: "creating" };
         const result = await history.undoHistoryOperation({workspaceId, operationId: input.operationId, requestId: `duplicate-undo:${input.operationId}`, author: {...author}});
         markChanged();
         return {ok: true as const, tracked: {state: result.materialized ? "restored" as const : "restoring" as const, momentCount: result.momentCount}, restored: [],
@@ -258,7 +277,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
   } catch (error) {
     // Refuse through the authority wrapper before its final currentness check.
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
-    return { ...failure(error, "undo"), refusal: error instanceof DaemonRefusalError ? engineRefusal(error) : { code: "unexplained" as const } };
+    return { ...failure(error, "undo"), refusal: undoRefusal(error) };
   } finally {
     release?.();
     if (release && !operation.signal.aborted && options.history.rewriteHistoryLinks) {

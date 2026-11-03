@@ -292,6 +292,8 @@ export function createLiveLinkedChatStore(
       await invoke(
         async (adapter) => await adapter.markBookmarkFailed(input),
       ),
+    retryFailedBookmark: async (input) =>
+      await invoke(async (adapter) => await adapter.retryFailedBookmark(input)),
     markBookmarkStale: async (input) =>
       await invoke(async (adapter) => await adapter.markBookmarkStale(input)),
     getThreadProjection: async (input) =>

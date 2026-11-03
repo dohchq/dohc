@@ -47,6 +47,14 @@ describe("what a finished tree change says", () => {
       .toBe("Cannot restore packing.md. Move the new packing.md first.");
   });
 
+  it("names the page to stop live editing for, at its current path", () => {
+    const live = (path: string) => ({ code: "live-page-owned", path }) as const;
+    expect(undoRefusedNotice(moved("docs/budget.md", "docs/costs.md").change, live("docs/costs.md")))
+      .toBe("Cannot undo the rename. Stop live editing for costs.md first.");
+    expect(undoRefusedNotice(moved("Trips/notes.md", "archive/notes.md").change, live("archive/notes.md")))
+      .toBe("Cannot move notes.md back. Stop live editing for notes.md first.");
+  });
+
   it("says only what cannot happen when main did not name the refusal", () => {
     const unexplained = { code: "unexplained" } as const;
     expect(undoRefusedNotice(moved("docs/budget.md", "docs/costs.md").change, unexplained)).toBe("Cannot undo the rename.");

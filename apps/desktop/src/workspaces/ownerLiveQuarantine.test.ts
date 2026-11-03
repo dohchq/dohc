@@ -58,6 +58,17 @@ it("lists each old restore queue after the binding advances and reads the select
   expect(await readOwnerLiveQueue(client, "handle", selected)).toMatchObject({binding: old});
 });
 
+it("lists a retired page's queue as save-only under its own reason", async () => {
+  const queue = {outboxId: "retired-1", binding: binding("deleted", 0), pendingBytes: 10};
+  outboxes.list.mockResolvedValueOnce({queues: [queue], next: null});
+  outboxes.heads.set(queue.outboxId, {state: "quarantined", quarantineReason: "retired",
+    binding: queue.binding, entry: {deliveryId: "retired-1-delivery"}, retryDeliveryId: null});
+  const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [], next: null}))} as unknown as EngineClient;
+  expect(await readOwnerLiveQuarantines(client, "handle")).toEqual([{objectId: "deleted", path: "deleted.md", reason: "retired",
+    outboxId: queue.outboxId, binding: queue.binding, headDeliveryId: "retired-1-delivery", recovery: "paused", saveOnly: true}]);
+});
+
 it("stops restore discovery at 128 queues even when more remain", async () => {
   const queues = Array.from({length: 128}, (_, index) => ({outboxId: `retained-${index}`, binding: binding("restored", 1), pendingBytes: 10}));
   for (const queue of queues) outboxes.heads.set(queue.outboxId, {state: "quarantined", quarantineReason: "restore-fenced",

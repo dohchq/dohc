@@ -47,7 +47,8 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
-  folderMoveIdentity,
+  deleteRefusalIdentity,
+  moveRefusalIdentity,
   pendingTreeChangeSettled,
   type AnsweredTreeChange,
   type PendingTreeChange,
@@ -73,8 +74,9 @@ import { ExplorerHome } from "./ExplorerHome";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { isFolderMoveRefusal, isLiveFolderMoveRefusal, KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -86,6 +88,9 @@ export type TreeChangeOperation = {
   settle: DraftFlush;
   release: () => void;
 };
+
+// An "undo" refusal brings its own words.
+export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" | "replace" | "undo" };
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -195,8 +200,9 @@ export interface ExplorerProps {
   onRefresh: () => number;
   // Failed tree operations go to the shell's error toast and Notices row,
   // with Try again when asking again can succeed. A failed move names
-  // itself, so a later success of the same move clears it.
-  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string) => void;
+  // itself, so a later success of the same move clears it. `livePage` names
+  // a page whose change was refused because it has live editing on.
+  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => void;
   onChangeSucceeded?: (identity: string) => void;
   // A finished rename, move or delete: a toast and a Notices row, with Undo
   // while main can still reverse it.
@@ -566,7 +572,8 @@ function fromMenuKey(keyboardMenu: { current: boolean }): boolean {
 // An Undo main refused, or finished only in part. A person reads `words`.
 // The message is main's own text, which Copy keeps when the words differ.
 class UndoRefusedError extends Error {
-  constructor(reason: string, readonly retry: boolean, readonly words = reason) {
+  // `livePage` is the page this computer owns live, when that refused it.
+  constructor(reason: string, readonly retry: boolean, readonly words = reason, readonly livePage?: string) {
     super(reason);
     this.name = "UndoRefusedError";
   }
@@ -998,9 +1005,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         afterBegin?: () => void;
         failed?: (change: PendingTreeChange, cause: unknown) => void;
         answered?: (succeeded: { change: PendingTreeChange; result: Result }[]) => void;
+        // What a refused file change did, for its live-page words.
+        action?: "move" | "rename";
       } = {},
     ): Promise<{ change: PendingTreeChange; result: Result }[]> {
       if (changes.length === 0) return [];
+      const action = options.action ?? "move";
       // Land the stable active draft and drain queued collection writes
       // before paths move underneath them. The operation cannot preserve
       // text or values this begin rejected.
@@ -1014,12 +1024,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         options.afterBegin?.();
       }
       const succeeded: { change: PendingTreeChange; result: Result }[] = [];
+      // A page live editing can refuse to delete leaves the tree only once
+      // its delete succeeds, so a refusal never takes it out and back.
+      const afterRun = (change: PendingTreeChange) =>
+        change.kind === "delete-file" && liveDocumentKindForPath(change.path) !== null;
       try {
-        setPending((current) => [...current, ...changes]);
+        setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         for (const change of changes) {
           const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
-            succeeded.push({ change, result: await run(change) });
+            const result = await run(change);
+            if (afterRun(change)) setPending((current) => [...current, change]);
+            succeeded.push({ change, result });
             if (identity) onChangeSucceeded?.(identity);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
@@ -1027,16 +1043,25 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               options.failed(change, cause);
               continue;
             }
-            // A refused folder move keeps the folder-move identity, with Try again
-            // only when live editing refused it. Any other failed move names its
-            // source, and Try again runs it as it was asked.
-            const folderIdentity = change.kind === "folder" && isFolderMoveRefusal(cause)
-              ? folderMoveIdentity(workspaceId, change)
+            // A move onto a page this computer owns live is refused for that page.
+            const replaced = change.kind === "file" && readError(cause).title === livePageTitle(change.toPath, "replace");
+            const livePage: LivePageRefused | undefined = !isLivePageOwnedRefusal(cause) ? undefined
+              : change.kind === "file" ? (replaced ? { path: change.toPath, action: "replace" } : { path: change.fromPath, action })
+              : change.kind === "delete-file" ? { path: change.path, action: "delete" }
               : undefined;
+            // A change refused for live editing or History off keeps its refusal's
+            // identity, and Try again reruns it only when live editing refused it.
+            // Any other failed move names its source, and Try again runs it as it was asked.
+            const refused = isLiveEditingRefusal(cause);
+            const refusalIdentity = (change.kind === "folder" && refused) || (change.kind === "file" && livePage)
+              ? moveRefusalIdentity(workspaceId, change)
+              : (change.kind === "delete-file" || change.kind === "delete-folder") && refused
+                ? deleteRefusalIdentity(workspaceId, change.path)
+                : undefined;
             const rerun = () =>
-              void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered });
-            const again = folderIdentity ? (isLiveFolderMoveRefusal(cause) ? rerun : undefined) : identity ? rerun : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, folderIdentity ?? identity);
+              void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered, action });
+            const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && identity ? rerun : undefined;
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, refused ? refusalIdentity : identity, livePage);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -1091,7 +1116,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             operationId: entry.operationId,
           });
           if (!result.ok) {
-            throw new UndoRefusedError(result.reason, true, undoRefusedNotice(entry.change, result.refusal));
+            throw new UndoRefusedError(result.reason, true, undoRefusedNotice(entry.change, result.refusal),
+              result.refusal.code === "live-page-owned" ? result.refusal.path : undefined);
           }
           if (result.remaining.length > 0) {
             throw new UndoRefusedError(
@@ -1107,11 +1133,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           failed: (change, cause) => {
             const entry = byChange.get(change.id)!;
             const refused = cause instanceof UndoRefusedError;
-            onError(
+            const report = [
               refused ? cause.words : ipcErrorMessage(cause, `dohc could not undo the ${operationWord(entry.change)}.`),
               refused && cause.words === cause.message ? undefined : cause,
               !refused || cause.retry ? () => undoChanges([entry]) : undefined,
-            );
+            ] as const;
+            // A page this computer owns live also offers Live documents.
+            if (refused && cause.livePage !== undefined) onError(...report, undefined, { path: cause.livePage, action: "undo" });
+            else onError(...report);
           },
         },
       ).then((succeeded) => {
@@ -1195,7 +1224,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }
         },
         // Remove this input in the same commit that stages the renamed row.
-        { afterBegin: () => setEditing(current => current === edit ? null : current), answered: announce },
+        { afterBegin: () => setEditing(current => current === edit ? null : current), answered: announce, action: "rename" },
       );
     },
     [announce, rowFor, runChanges, workspaceId],

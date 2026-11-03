@@ -392,6 +392,19 @@ describe("Undo after a rename, a move or a delete", () => {
       words, expect.objectContaining({ message: reason }), expect.any(Function)));
   });
 
+  it("names the live page a refused Undo waits on, so the shell offers Live documents", async () => {
+    const reason = "dohc can't undo renaming \"ideas.md\" while it has live editing on\nIn Live documents, stop live editing for this page, then try again.";
+    bridge.undoHistoryOperation.mockResolvedValueOnce({ ok: false, reason, refusal: { code: "live-page-owned", path: "ideas.md" } });
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    await renameTo("notes.md", "ideas");
+    const undo = await noticeWithUndo(props, "Renamed notes.md to ideas.md");
+    act(() => undo());
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(
+      "Cannot undo the rename. Stop live editing for ideas.md first.", expect.objectContaining({ message: reason }),
+      expect.any(Function), undefined, { path: "ideas.md", action: "undo" }));
+  });
+
   it("offers no Undo main cannot run, and says why in main's words", async () => {
     bridge.moveWorkspacePath.mockResolvedValueOnce({
       path: "archive", operationId: RENAMED,

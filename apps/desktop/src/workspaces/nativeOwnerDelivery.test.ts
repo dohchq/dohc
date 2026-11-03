@@ -160,3 +160,38 @@ it.each([
   expect(await observedPass(client)).toBe(expected);
   expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
 });
+
+it("answers empty at once for a retired generation, so a move's pull is not held", async () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "retired"})), ownerYDocEnroll: vi.fn()};
+  expect(await observedPass(client)).toBe("empty");
+  expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(1);
+  expect(mock.authority).not.toHaveBeenCalled();
+  expect(mock.drain).not.toHaveBeenCalled();
+  expect(client.ownerYDocEnroll).not.toHaveBeenCalled();
+});
+
+it("skips a retired generation without authority or a drain, and the next page delivers", async () => {
+  vi.useFakeTimers();
+  const second = {...config.documents[0]!, binding: {...binding, objectId: "second", currentPath: "b.md", selectorPaths: ["b.md"]}};
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async (_request: unknown, target: {binding: {objectId: string}}) =>
+    target.binding.objectId === "object" ? {status: "retired"} : {status: "observed", draft: {outboxId: "outbox"}})};
+  mock.drain.mockResolvedValue("acknowledged");
+  const outcomes: string[] = [];
+  const runPass = vi.fn(async (_workspace: string, index: number, signal: AbortSignal) => {
+    const documents = [config.documents[0]!, second];
+    const outcome = await runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config, refusals: new OwnerKnownRefusals(),
+      document: documents[index % documents.length]!, signal, bearer: "credential", accountId: "owner", assertCurrent() {}});
+    outcomes.push(outcome);
+    return {documentCount: documents.length, acknowledged: outcome === "acknowledged"};
+  });
+  const onError = vi.fn(), owner = startServerOwnerDelivery({workspaceIds: () => ["workspace"],
+    attemptTimeoutMs: config.attemptTimeoutMs, retryDelayMs: config.retryDelayMs, runPass, onError});
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(outcomes).toEqual(["empty", "acknowledged"]));
+    expect(runPass.mock.calls.map(call => call[1])).toEqual([0, 1]);
+    expect(mock.authority).not.toHaveBeenCalled();
+    expect(mock.drain).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  } finally {await owner.stop();}
+});

@@ -186,7 +186,7 @@ const VERSIONED_PARAM_SHAPES = {
     optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
-  [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"], optionalJson: ["author", "folder"] },
+  [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"], optionalJson: ["author", "change"] },
   [VERSIONED_METHOD.textReadBlob]: {
     requiredStrings: ["workspaceId", "sha256"],
   },

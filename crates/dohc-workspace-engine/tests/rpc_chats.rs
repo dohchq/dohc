@@ -2740,6 +2740,19 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         failed["bookmark"]["failureReason"],
         json!("disk unavailable")
     );
+    // A person's retry queues the failed archive again at its own generation.
+    let retried = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.retryFailed",
+        json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id, "generation": 3 }),
+    )
+    .await;
+    assert_eq!(retried["applied"], json!(true));
+    assert_eq!(retried["bookmark"]["generation"], json!(3));
+    assert_eq!(retried["bookmark"]["projectionState"], json!("pending"));
+    assert_eq!(retried["bookmark"]["failureReason"], Value::Null);
 
     let reactivated = call(
         &transport,

@@ -12,10 +12,16 @@ export type PendingTreeMove = {
   toPath: string
 }
 
-// One refused folder move in the shell's Notices: a later success of the same
-// move removes it.
-export function folderMoveIdentity(workspaceId: string, move: Pick<PendingTreeMove, 'fromPath' | 'toPath'>): string {
-  return `folder-move:${JSON.stringify([workspaceId, move.fromPath, move.toPath])}`
+// One refused move in the shell's Notices: a later success of the same move
+// removes it.
+export function moveRefusalIdentity(workspaceId: string, move: Pick<PendingTreeMove, 'fromPath' | 'toPath'>): string {
+  return `move:${JSON.stringify([workspaceId, move.fromPath, move.toPath])}`
+}
+
+// One refused delete in the shell's Notices: a later delete of the same path
+// removes it.
+export function deleteRefusalIdentity(workspaceId: string, path: string): string {
+  return `delete:${JSON.stringify([workspaceId, path])}`
 }
 
 export type PendingTreeChange =

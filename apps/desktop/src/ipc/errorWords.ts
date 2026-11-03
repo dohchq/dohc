@@ -345,7 +345,7 @@ export function readError(error: unknown): ReadError {
   }
   const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
   if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
-  if (name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError") {
+  if (name === "LiveFolderError" || name === "HistoryOffError" || name === "LivePageOwnedError") {
     const [title = "", ...body] = message.split("\n");
     return { title, words: body.join("\n"), mapped: false, cause: null };
   }
@@ -556,16 +556,51 @@ export function isRestorePolicyRefusal(error: unknown): boolean {
   return parse(error).name === "RestorePolicyRefusalError";
 }
 
-/** A folder move refused while a page in it has live editing on. Try again reruns the move. */
-export function isLiveFolderMoveRefusal(error: unknown): boolean {
-  return parse(error).name === "LiveFolderMoveError";
+/** A folder move or delete refused while a page in it has live editing on. Try again reruns it. */
+export function isLiveFolderRefusal(error: unknown): boolean {
+  return parse(error).name === "LiveFolderError";
 }
 
-/** Any refused folder move, live or with History off. Both carry a title and a body. */
-export function isFolderMoveRefusal(error: unknown): boolean {
+/** A change refused for live editing, or because History is off to check it. Each carries a title and a body. */
+export function isLiveEditingRefusal(error: unknown): boolean {
   const { name } = parse(error);
-  return name === "LiveFolderMoveError" || name === "FolderMoveHistoryOffError";
+  return name === "LiveFolderError" || name === "HistoryOffError" || name === "LivePageOwnedError";
 }
+
+/** A page this computer owns live can't be moved, deleted or restored, or have such a change undone. */
+export function isLivePageOwnedRefusal(error: unknown): boolean {
+  return parse(error).name === "LivePageOwnedError";
+}
+
+/** "replace" is a move or rename onto a page that the move would replace. */
+export type LivePageAction = "move" | "rename" | "delete" | "restore" | "replace" | "archive";
+
+export function livePageTitle(path: string, action: LivePageAction): string {
+  return `dohc can't ${action} "${path}" while it has live editing on`;
+}
+
+/** The body for an Undo, and for a move that would replace the page. */
+export const LIVE_PAGE_TRY_AGAIN_BODY = "In Live documents, stop live editing for this page, then try again.";
+
+export function livePageBody(action: LivePageAction): string {
+  if (action === "replace") return LIVE_PAGE_TRY_AGAIN_BODY;
+  return `In Live documents, stop live editing for this page, then ${action} it again.`;
+}
+
+/** The change an Undo would reverse: a rename, a move, or a copy's creation. */
+export type LivePageUndone = "renaming" | "moving" | "creating";
+
+export function livePageUndoTitle(path: string, undone: LivePageUndone): string {
+  return `dohc can't undo ${undone} "${path}" while it has live editing on`;
+}
+
+// Without capture, dohc can't check a page or folder for live editing.
+export function historyOffTitle(path: string, action: "move" | "rename" | "delete"): string {
+  return `dohc can't ${action} "${path}" while History is off`;
+}
+
+export const HISTORY_OFF_PAGE_BODY = "Without History, dohc can't check whether this page has live editing on. Restart dohc to try again.";
+export const HISTORY_OFF_FOLDER_BODY = "Without History, dohc can't check whether a page in it has live editing on. Restart dohc to try again.";
 
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {

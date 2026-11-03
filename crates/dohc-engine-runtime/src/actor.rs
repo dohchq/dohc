@@ -1126,6 +1126,32 @@ fn debug_assert_sync_context() {
     );
 }
 
+/// Closes observed-owner bindings whose document is gone, one document per
+/// transaction. A document it cannot close keeps its rows, the others still
+/// close, and the workspace still opens. If finding the stranded documents
+/// fails, for example on an invalid stored key, nothing closes on that open.
+fn close_stranded_owner_bindings(store: &mut EngineStore, now_ms: i64) {
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxError,
+        retirement::{close_retired_in_tx, stranded_in},
+    };
+    use dohc_engine_storage::NoFaults;
+    let keys = match store.read_with(stranded_in) {
+        Ok(keys) => keys,
+        Err(error) => {
+            eprintln!("engine: stranded owner bindings kept: {error}");
+            return;
+        }
+    };
+    for key in keys {
+        if let Err(error) = store.write_with::<_, OwnerOutboxError>(&NoFaults, |tx| {
+            close_retired_in_tx(tx, &key, now_ms)
+        }) {
+            eprintln!("engine: stranded owner binding kept: {error}");
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
@@ -1191,6 +1217,9 @@ fn worker_main(
     let mut work_count = work_count.map(|work| Arc::downgrade(&work));
     if let Some(work) = &work_count {
         let _ = store.count_work(Some(work.clone()));
+    }
+    if matches!(mode, ActorOpenMode::ReadWrite) {
+        close_stranded_owner_bindings(&mut store, now_ms);
     }
     // Publish Ready *before* acking the open, so a caller that observes the
     // successful open also observes Ready. The same handshake carries the
@@ -1515,6 +1544,10 @@ fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeE
 #[cfg(test)]
 #[path = "actor/reader_tests.rs"]
 mod reader_tests;
+
+#[cfg(test)]
+#[path = "actor/owner_retirement_tests.rs"]
+mod owner_retirement_tests;
 
 #[cfg(test)]
 mod held_reader_tests {

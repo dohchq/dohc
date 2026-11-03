@@ -194,6 +194,45 @@ fn bookmark_failed_generation_cas_rejects_stale_worker() {
 }
 
 #[test]
+fn bookmark_retry_queues_a_failed_projection_at_its_own_generation() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let id = bookmark_fixture(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    let pending = chats
+        .retry_failed_bookmark(WS, "owner", &id, 1, 30, &NO_FAULTS)
+        .expect("pending");
+    assert!(!pending.applied, "a pending projection is not failed.");
+    chats
+        .mark_bookmark_failed(WS, "owner", &id, 1, "disk unavailable", 31, &NO_FAULTS)
+        .expect("failed");
+    let stale = chats
+        .retry_failed_bookmark(WS, "owner", &id, 2, 32, &NO_FAULTS)
+        .expect("stale");
+    assert!(
+        !stale.applied,
+        "drop the generation fence -> another generation is retried."
+    );
+    let retried = chats
+        .retry_failed_bookmark(WS, "owner", &id, 1, 33, &NO_FAULTS)
+        .expect("retried");
+    assert!(retried.applied);
+    assert_eq!(
+        (
+            retried.bookmark.generation,
+            retried.bookmark.projection_state.as_str(),
+            retried.bookmark.failure_reason.as_deref()
+        ),
+        (1, "pending", None),
+        "queue the generation again -> the archive path moves."
+    );
+    let replay = chats
+        .retry_failed_bookmark(WS, "owner", &id, 1, 34, &NO_FAULTS)
+        .expect("replay");
+    assert_eq!((replay.applied, replay.bookmark.generation), (false, 1));
+}
+
+#[test]
 fn bookmark_stale_generation_cas_rejects_stale_worker() {
     let (_scratch, mut store) = open_store();
     base_chat(&mut store);

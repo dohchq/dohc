@@ -56,8 +56,9 @@ export function undoRefusedNotice(change: RecordedTreeChange["change"], refusal:
   const failed = word === "delete"
     ? `Cannot restore ${basenameOf(pathOf(change))}.`
     : word === "rename" ? "Cannot undo the rename." : `Cannot move ${basenameOf(pathOf(change))} back.`;
-  if (refusal.code !== "old-path-occupied") return failed;
+  if (refusal.code === "unexplained") return failed;
   const name = basenameOf(refusal.path);
+  if (refusal.code === "live-page-owned") return `${failed} Stop live editing for ${name} first.`;
   return word === "move"
     ? `${failed} Move the ${name} in ${folderOf(refusal.path)} first.`
     : `${failed} Move the new ${name} first.`;

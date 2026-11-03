@@ -7,6 +7,7 @@ import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryS
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
+import { livePageBody, livePageTitle, type LivePageAction } from "../ipc/errorWords";
 import { findRestoreReceipt } from "./restoreWriteIdentity";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
@@ -150,9 +151,10 @@ function liveDocumentMutationRefusal(
   path: string,
   action: "move" | "delete" | "restore" | "duplicate",
 ): Error | null {
-  if (!(error instanceof DaemonRefusalError) || error.message !== "live-document-binding-active") {
-    return null;
-  }
+  if (!(error instanceof DaemonRefusalError)) return null;
+  if (action !== "duplicate" && error.message === "live-page-owned") return livePageRefusal(error, path, action);
+  if (action === "delete" && error.message === "live-folder-page-owned") return liveFolderRefusal(error, path, "delete");
+  if (error.message !== "live-document-binding-active") return null;
   return new LiveDocumentMutationError(
     `dohc could not ${action} ${path}. This action is unavailable for shared live files. Continue editing at the current location.`,
     { cause: error },
@@ -165,23 +167,50 @@ export class LiveDocumentMutationError extends Error {
   override name = "LiveDocumentMutationError";
 }
 
-export const LIVE_FOLDER_MOVE_BODY = "In Live documents, stop live editing for every page in this folder, then move the folder again.";
+type LiveFolderAction = "move" | "delete" | "replace";
 
-export function liveFolderMoveTitle(folder: string): string {
-  return `dohc can't move "${folder}" while a page in it has live editing on`;
+export function liveFolderBody(action: LiveFolderAction): string {
+  if (action === "replace") return "In Live documents, stop live editing for every page in this folder, then try again.";
+  return `In Live documents, stop live editing for every page in this folder, then ${action} the folder again.`;
 }
 
-// A folder move the engine refuses because a page under the folder is live on
-// this computer. The message is the title, a line break, then the body.
-export class LiveFolderMoveError extends LiveDocumentMutationError {
-  override name = "LiveFolderMoveError";
+export function liveFolderTitle(folder: string, action: LiveFolderAction): string {
+  return `dohc can't ${action} "${folder}" while a page in it has live editing on`;
 }
 
-function liveFolderMoveRefusal(error: unknown, folder: string): Error | null {
+// A folder move or delete the engine refuses because a page under the folder
+// is live on this computer. The message is the title, a line break, then the body.
+export class LiveFolderError extends LiveDocumentMutationError {
+  override name = "LiveFolderError";
+}
+
+function liveFolderRefusal(error: DaemonRefusalError, folder: string, action: LiveFolderAction): Error {
+  return new LiveFolderError(`${liveFolderTitle(folder, action)}\n${liveFolderBody(action)}`, { cause: error });
+}
+
+// A change the engine refuses because this computer owns the page live. The
+// message is the title, a line break, then the body.
+export class LivePageOwnedError extends LiveDocumentMutationError {
+  override name = "LivePageOwnedError";
+}
+
+function livePageRefusal(error: DaemonRefusalError, path: string, action: LivePageAction): Error {
+  return new LivePageOwnedError(`${livePageTitle(path, action)}\n${livePageBody(action)}`, { cause: error });
+}
+
+function replaceRefusal(error: unknown, destination: string): Error | null {
   if (!(error instanceof DaemonRefusalError)) return null;
-  // A hosted page and an owned page read the same.
-  if (error.message !== "live-document-binding-active" && error.message !== "live-folder-page-owned") return null;
-  return new LiveFolderMoveError(`${liveFolderMoveTitle(folder)}\n${LIVE_FOLDER_MOVE_BODY}`, { cause: error });
+  if (error.message === "live-page-owned") return livePageRefusal(error, destination, "replace");
+  if (error.message === "live-folder-page-owned") return liveFolderRefusal(error, destination, "replace");
+  return liveDocumentMutationRefusal(error, destination, "move");
+}
+
+function moveRefusal(error: unknown, path: string, folder: boolean): Error | null {
+  // A hosted page and an owned page under a folder read the same.
+  if (folder && error instanceof DaemonRefusalError && ["live-document-binding-active", "live-folder-page-owned"].includes(error.message)) {
+    return liveFolderRefusal(error, path, "move");
+  }
+  return liveDocumentMutationRefusal(error, path, "move");
 }
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
@@ -786,6 +815,12 @@ export interface WorkspaceEngineCapture {
     recoverExistingText?: WorkspaceGeneratedTextIdentityValidator;
     metadata?: ActorNeutralWriteMetadata;
   }): Promise<WorkspaceGeneratedTextArchiveResult>;
+  // Refuses to archive a page this computer owns live, before anything
+  // changes. archiveGeneratedTextFile checks again.
+  checkGeneratedTextArchive(path: string): Promise<void>;
+  // Whether an archive already moved a generated page in the engine: nothing
+  // heads fromPath, and the page's object heads toPath.
+  generatedTextArchiveMoved(input: { fromPath: string; toPath: string; expectedObjectId?: string }): Promise<boolean>;
   // Engine-coordinated single-file rename (product rename flows call this
   // before moving the file on disk). When both sides are engine-owned text,
   // the engine records a rename moment — preserving the stable object id the
@@ -797,6 +832,8 @@ export interface WorkspaceEngineCapture {
   // Refuses as the move of `folder` would, while a page under it is live on
   // this computer. It changes nothing. A move checks this before it catches up.
   checkFolderMove(folder: string): Promise<void>;
+  // Refuses as the move of the page at `path` would, while this computer owns it live. It changes nothing.
+  checkPageMove(path: string): Promise<void>;
   // Runs an author's move or delete of `paths` while capture records nothing,
   // so the rows `work` records are the only rows the change leaves. Live
   // documents at or under the paths settle and close first. A move first
@@ -1787,15 +1824,14 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   //      works on that path. Re-walking the spelling would let an ancestor
   //      alias swapped after the check redirect the mkdir, the checks, and the
   //      write to somewhere no rule was applied.
-  async function assertResolvedArea(absolutePath: string, label: string): Promise<string> {
-    const { resolvedAbsolute } = await assertResolvedWorkspacePath({
+  async function assertResolvedArea(absolutePath: string, label: string) {
+    return await assertResolvedWorkspacePath({
       rootPath,
       absolutePath,
       spelled: absolutePath,
       label,
       access: "entry",
     });
-    return resolvedAbsolute;
   }
   // Text and bytes take the same four checks in the same order, so they take
   // one path through them. writeFile defaults a string to UTF-8 and ignores
@@ -1808,7 +1844,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
     // name: the directories are canonical and only the leaf is still spelling.
-    const target = await assertResolvedArea(absolutePath, "Engine write path");
+    const { resolvedAbsolute: target } = await assertResolvedArea(absolutePath, "Engine write path");
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
@@ -1819,8 +1855,12 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     writeTextFile: writeEngineFile,
     writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
-      await assertContainedDir(dirname(absolutePath));
-      const target = await assertResolvedArea(absolutePath, "Engine delete path");
+      // The parent may be absent: a device that never had the folder still
+      // receives the delete. The resolver refuses a missing root or a broken
+      // ancestor link. With no parent there is nothing to remove, so the
+      // delete stops before it changes the disk.
+      const { resolvedAbsolute: target, parentPresent } = await assertResolvedArea(absolutePath, "Engine delete path");
+      if (!parentPresent) return;
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
       await rm(target, { force: true });
@@ -6104,6 +6144,27 @@ export function createWorkspaceEngineCapture(
       }
   }
 
+  async function checkGeneratedTextArchive(path: string): Promise<void> {
+    const engine = await engineStore();
+    const versionId = await activeVersionIdOf(engine);
+    try {
+      await engine.checkMove({ workspaceId, versionId, path, change: "movePage" });
+    } catch (error) {
+      throw (error instanceof DaemonRefusalError && error.message === "live-page-owned" ? livePageRefusal(error, path, "archive") : null) ?? error;
+    }
+  }
+
+  async function generatedTextArchiveMoved(input: { fromPath: string; toPath: string; expectedObjectId?: string }): Promise<boolean> {
+    const engine = await engineStore();
+    const versionId = await activeVersionIdOf(engine);
+    const read = (path: string) => engine.readTextFile({ workspaceId, versionId, path: assertGeneratedMarkdownPath(path) });
+    // The page's own object at this generation's path: the move committed,
+    // whatever was saved at the old path since.
+    if (input.expectedObjectId !== undefined) return (await read(input.toPath))?.objectId === input.expectedObjectId;
+    const [source, destination] = await Promise.all([read(input.fromPath), read(input.toPath)]);
+    return !source && !!destination;
+  }
+
   async function resolveFileForPath(path: string) {
     // Drain capture work before resolving a newly saved file.
     await chain;
@@ -6337,7 +6398,7 @@ export function createWorkspaceEngineCapture(
         // because an owner handoff can finish while its session closes.
         const ensureDeleteAllowed = async (): Promise<void> => {
           try {
-            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix });
+            await engine.checkMove({ workspaceId, versionId, path: pathOrPrefix, change: "delete" });
           } catch (error) {
             throw liveDocumentMutationRefusal(error, pathOrPrefix, "delete") ?? error;
           }
@@ -6394,11 +6455,24 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const ensureAllowed = async (author?: MomentWriteAuthor) => {
           for (const [index, path] of paths.entries()) {
-            const folder = index === 0 && authored.operation === "move" && authored.folder === true;
+            const moving = index === 0 && authored.operation === "move";
+            const folder = moving && authored.folder === true;
+            // The source of a move or delete; a duplicate's source stays where it is.
+            const change = moving ? (folder ? "moveFolder" : "movePage") : index === 0 && authored.operation === "delete" ? "delete" : undefined;
             try {
-              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}), ...(folder ? { folder } : {}) });
+              await engine.checkMove({ workspaceId, versionId, path, ...(index === 0 && author ? { author } : {}), ...(change ? { change } : {}) });
             } catch (error) {
-              throw (folder ? liveFolderMoveRefusal(error, path) : null) ?? liveDocumentMutationRefusal(error, path, authored.operation) ?? error;
+              throw (moving ? moveRefusal(error, path, folder) : liveDocumentMutationRefusal(error, path, authored.operation)) ?? error;
+            }
+          }
+          // A move replaces what its destination records, even a page whose
+          // file is gone from disk, so the destination is checked as a delete.
+          const destination = authored.operation === "move" ? paths[1] : undefined;
+          if (destination !== undefined) {
+            try {
+              await engine.checkMove({ workspaceId, versionId, path: destination, change: "delete" });
+            } catch (error) {
+              throw replaceRefusal(error, destination) ?? error;
             }
           }
         };
@@ -7522,7 +7596,7 @@ export function createWorkspaceEngineCapture(
           return {status:"deleted" as const,momentId:result.moment.id};
         } catch(error) {
           const reason=error && typeof error==="object" ? ("code" in error?error.code:"message" in error?error.message:undefined):undefined;
-          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active")return {status:"conflict" as const};
+          if(reason==="object-identity-mismatch" || reason==="file-not-found" || reason==="live-document-binding-active" || reason==="live-page-owned")return {status:"conflict" as const};
           throw error;
         }
       });
@@ -7657,6 +7731,9 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    checkGeneratedTextArchive,
+    generatedTextArchiveMoved,
+
     archiveGeneratedTextFile(input) {
       return enqueueResult("archive generated text", async () => {
         const fromPath = assertGeneratedMarkdownPath(input.fromPath);
@@ -7669,6 +7746,7 @@ export function createWorkspaceEngineCapture(
             "The document archive request requires exactly one of expectedObjectId or recoverExistingText.",
           );
         }
+        await checkGeneratedTextArchive(fromPath);
         await settleAndCloseLiveYDocSessions(
           (candidate) => candidate === fromPath || candidate === toPath,
           "Saved latest edits before archiving generated content",
@@ -7895,9 +7973,19 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
       try {
-        await engine.checkMove({ workspaceId, versionId, path: folder, folder: true });
+        await engine.checkMove({ workspaceId, versionId, path: folder, change: "moveFolder" });
       } catch (error) {
-        throw liveFolderMoveRefusal(error, folder) ?? liveDocumentMutationRefusal(error, folder, "move") ?? error;
+        throw moveRefusal(error, folder, true) ?? error;
+      }
+    },
+
+    async checkPageMove(path) {
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      try {
+        await engine.checkMove({ workspaceId, versionId, path, change: "movePage" });
+      } catch (error) {
+        throw moveRefusal(error, path, false) ?? error;
       }
     },
 
@@ -7912,9 +8000,9 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const ensureMoveAllowed = async (): Promise<void> => {
           try {
-            await engine.checkMove({ workspaceId, versionId, path: fromPath, ...(folder ? { folder } : {}) });
+            await engine.checkMove({ workspaceId, versionId, path: fromPath, change: folder ? "moveFolder" : "movePage" });
           } catch (error) {
-            throw (folder ? liveFolderMoveRefusal(error, fromPath) : null) ?? liveDocumentMutationRefusal(error, fromPath, "move") ?? error;
+            throw moveRefusal(error, fromPath, folder) ?? error;
           }
         };
         await ensureMoveAllowed();
