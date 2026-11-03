@@ -1635,6 +1635,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 .map(|path| {
                     let mut review = payload.clone();
                     let path_ref = intern_path(&mut review.paths, &path);
+                    review.result = with_path_ref(review.result.clone(), path_ref);
                     imported_live_head(tx, &review, path_ref).map(|head| (review, head))
                 })
                 .transpose()?;
