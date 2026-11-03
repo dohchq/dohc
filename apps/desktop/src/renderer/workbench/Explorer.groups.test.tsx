@@ -57,6 +57,7 @@ function explorerProps(
     onRefresh: vi.fn(),
     onError: vi.fn(),
     onNewCollection: vi.fn(),
+    onChangesRefused: vi.fn(),
     ...overrides,
   };
 }

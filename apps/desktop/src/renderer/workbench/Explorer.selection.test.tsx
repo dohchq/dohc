@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
-import { Explorer, type ExplorerProps } from "./Explorer";
+import { Explorer, type ExplorerProps, type RefusedChanges } from "./Explorer";
+import { deleteRefusalIdentity } from "./file-tree-optimistic";
 
 const BLUE = "bg-[var(--dohc-selection)]";
 const deleteWorkspacePath = vi.fn();
@@ -67,6 +68,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onShare: vi.fn(),
     onRefresh: vi.fn(),
     onError: vi.fn(),
+    onChangesRefused: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
@@ -264,3 +266,85 @@ describe("the selection fill", () => {
   });
 });
 
+const refusal = (path: string) =>
+  new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "${path}" while it has live editing on\nIn Live documents, stop live editing for this page, then delete it again.`);
+const historyOff = (path: string) =>
+  new Error(`Error invoking remote method 'desktop:delete-workspace-path': HistoryOffError: dohc can't delete "${path}" without History\nWithout History, dohc can't check whether this page has live editing on. Restart dohc to try again.`);
+
+async function deleteAll(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(row("a.md"));
+  await user.keyboard("{Control>}a{/Control}{Delete}");
+  await user.click(screen.getByTestId("confirm-delete"));
+}
+
+describe("refusals in a batch", () => {
+  it("lets the rest go and raises one notice whose Try again reruns only the refused item", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps({ files: FILES.slice(0, 3) });
+    deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "b.md") throw refusal("b.md");
+    });
+    render(<Explorer {...props} />);
+    await deleteAll(user);
+
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual(["a.md", "b.md", "c.md"]);
+    expect(vi.mocked(props.onPathsChanged).mock.calls[0]![0].map((change) => "path" in change && change.path)).toEqual(["a.md", "c.md"]);
+    expect(props.onError).not.toHaveBeenCalled();
+    const notice = vi.mocked(props.onChangesRefused).mock.calls[0]![0] as RefusedChanges;
+    expect(notice).toMatchObject({
+      title: "dohc deleted 2 of 3 items",
+      message: "Live editing is on: b.md",
+      liveEditing: { path: "b.md" },
+    });
+
+    // The rerun is a batch of one, so a second refusal is that page's own notice.
+    deleteWorkspacePath.mockClear();
+    await act(async () => notice.retry!());
+    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+    expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual(["b.md"]);
+    const [, , again, identity, livePage] = vi.mocked(props.onError).mock.calls[0]!;
+    expect(again).toBeTypeOf("function");
+    expect(identity).toBe(deleteRefusalIdentity("workspace-1", "b.md"));
+    expect(livePage).toEqual({ path: "b.md", action: "delete" });
+  });
+
+  it("names each reason once, and Try again reruns only what can run again", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps();
+    deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "a.md" || relativePath === "c.md") throw refusal(relativePath);
+      if (relativePath === "d.md") throw historyOff(relativePath);
+    });
+    render(<Explorer {...props} />);
+    await deleteAll(user);
+
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    const notice = vi.mocked(props.onChangesRefused).mock.calls[0]![0] as RefusedChanges;
+    expect(notice).toMatchObject({
+      title: "dohc deleted 1 of 4 items",
+      message: "Live editing is on: a.md, c.md\nHistory is off: d.md",
+      liveEditing: { path: "a.md" },
+    });
+    deleteWorkspacePath.mockClear();
+    deleteWorkspacePath.mockResolvedValue(undefined);
+    await act(async () => notice.retry!());
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(2));
+    expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual(["a.md", "c.md"]);
+  });
+
+  it("offers no Try again when nothing refused can run again", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps({ files: FILES.slice(0, 2) });
+    deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
+      throw historyOff(relativePath);
+    });
+    render(<Explorer {...props} />);
+    await deleteAll(user);
+
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    const notice = vi.mocked(props.onChangesRefused).mock.calls[0]![0] as RefusedChanges;
+    expect(notice).toMatchObject({ title: "dohc could not delete 2 items", message: "History is off: a.md, b.md", liveEditing: null });
+    expect(notice.retry).toBeUndefined();
+  });
+});

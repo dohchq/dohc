@@ -3608,6 +3608,7 @@ const HOME_SPECIMEN: ExplorerProps = {
   onRefresh: noop,
   onError: noop,
   onNewCollection: noop,
+  onChangesRefused: noop,
 };
 
 const SYNCED_STATUS: SyncStatusResult = {

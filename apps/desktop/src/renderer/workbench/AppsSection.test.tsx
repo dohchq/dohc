@@ -108,6 +108,7 @@ function Harness(props: HarnessProps) {
     onRefresh: noop,
     onError: noop,
     onNewCollection: noop,
+    onChangesRefused: noop,
   };
   return <Explorer {...explorer} />;
 }

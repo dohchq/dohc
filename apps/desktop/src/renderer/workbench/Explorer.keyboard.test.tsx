@@ -52,6 +52,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefresh: vi.fn(),
     onError: vi.fn(),
     onNewCollection: vi.fn(),
+    onChangesRefused: vi.fn(),
     ...overrides,
   };
 }

@@ -4661,6 +4661,31 @@ describe("a refused delete of a page this computer owns live", () => {
     expect(bridge.deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "a.md" }));
     await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
+
+  it("files one notice for a selection where live editing refused one page, with Try again and Live documents", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      deleteWorkspacePath: vi.fn(async ({ relativePath }: { relativePath: string }) => {
+        if (relativePath === "a.md") throw new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: ${TITLE}\n${BODY}`);
+      }),
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
+      files: ["a.md", "b.md", "c.md"].map((path) => ({ path, kind: "file" as const })), folders: [] });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const rows = await screen.findAllByTestId("tree-row");
+    await user.click(rows.find(candidate => candidate.dataset.path === "a.md")!);
+    await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
+    await user.click(await screen.findByTestId("confirm-delete"));
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(3));
+    const toasts = await screen.findAllByTestId("workspace-shell-error");
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]!.querySelector("[id$='-title']")?.textContent).toBe("dohc deleted 2 of 3 items");
+    expect(toasts[0]!.querySelector("[id$='-body']")?.textContent).toBe("Live editing is on: a.md");
+    expect(within(toasts[0]!).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
+    await user.click(within(toasts[0]!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(4));
+    expect(bridge.deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ relativePath: "a.md" }));
+  });
 });
 
 describe("a refused drag of a page this computer owns live", () => {

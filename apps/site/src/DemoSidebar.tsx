@@ -231,6 +231,7 @@ export function DemoSidebar(props: {
           onShare={() => undefined}
           onRefresh={() => undefined}
           onError={props.onError}
+          onChangesRefused={(notice) => props.onError(notice.title)}
         />
       ) : props.activePanel === "search" ? (
         <div className="flex min-h-0 flex-1 flex-col">

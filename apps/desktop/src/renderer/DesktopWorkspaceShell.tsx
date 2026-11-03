@@ -209,7 +209,7 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
-import { Explorer, type LivePageRefused } from "./workbench/Explorer";
+import { Explorer, type LivePageRefused, type RefusedChanges } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
 import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
@@ -979,6 +979,17 @@ export function DesktopWorkspaceShell(props: {
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
+  );
+  // Several Explorer changes refused in one batch: one notice. It opens Live
+  // documents when live editing refused one.
+  const reportExplorerRefusals = useCallback(
+    (notice: RefusedChanges) => {
+      const id = workspaceId, reveal = notice.liveEditing?.path ?? null;
+      reportShellFailure({ title: notice.title, message: notice.message, identity: notice.identity,
+        ...(notice.retry ? { retry: notice.retry } : {}),
+        ...(notice.liveEditing ? { action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } } : {}) });
+    },
+    [reportShellFailure, openLiveDocuments, workspaceId],
   );
   // Chats' failures. An archive refused for live editing opens Live documents
   // at the page's row, and the page's archive takes the refusal back.
@@ -5373,6 +5384,7 @@ export function DesktopWorkspaceShell(props: {
         onRefresh={onExplorerRefresh}
         onError={reportExplorerError}
         onChangeSucceeded={clearIdentity}
+        onChangesRefused={reportExplorerRefusals}
         onNewCollection={setNewCollectionFolder}
       />
     </>

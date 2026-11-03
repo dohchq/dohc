@@ -77,6 +77,16 @@ export type TreeChangeOperation = {
 
 export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" | "replace" };
 
+// Some changes in a batch of several were refused, and the rest went. One
+// notice names the refused ones by reason. `liveEditing` is set when live
+// editing refused one, with the page Live documents opens at, if any.
+export type RefusedChanges = {
+  title: string;
+  message: string;
+  retry?: () => void;
+  identity: string;
+  liveEditing: { path: string | null } | null;
+};
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -186,6 +196,8 @@ export interface ExplorerProps {
   // was refused because it has live editing on.
   onError: (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => void;
   onChangeSucceeded?: (identity: string) => void;
+  // A batch of several changes reports its refusals here, in one notice.
+  onChangesRefused: (notice: RefusedChanges) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
@@ -460,6 +472,51 @@ export const TreeRow = memo(function TreeRow(props: {
   );
 });
 
+type Refusal = { change: PendingTreeChange; cause: unknown; retryable: boolean };
+
+function changedPath(change: PendingTreeChange): string {
+  return "path" in change ? change.path : change.fromPath;
+}
+
+// Why a change was refused, as one line's label, and whether live editing
+// refused it.
+function refusalReason(cause: unknown): { label: string; live: boolean } {
+  if (isLivePageOwnedRefusal(cause) || isLiveFolderRefusal(cause)) return { label: "Live editing is on", live: true };
+  if (isLiveEditingRefusal(cause)) return { label: "History is off", live: false };
+  return { label: ipcErrorMessage(cause, "dohc could not change these files.").replace(/\.$/, ""), live: false };
+}
+
+// One notice for a batch's refusals: what went, then one line per reason
+// naming the refused paths.
+function refusedChangesNotice(
+  workspaceId: string,
+  total: number,
+  refusals: readonly Refusal[],
+  retry: (() => void) | undefined,
+): RefusedChanges {
+  const deleting = refusals.every((refusal) => refusal.change.kind === "delete-file" || refusal.change.kind === "delete-folder");
+  const went = total - refusals.length;
+  const title = went === 0
+    ? `dohc could not ${deleting ? "delete" : "move"} ${total} items`
+    : `dohc ${deleting ? "deleted" : "moved"} ${went} of ${total} items`;
+  const byReason = new Map<string, string[]>();
+  let livePath: string | null | undefined;
+  for (const { change, cause } of refusals) {
+    const { label, live } = refusalReason(cause);
+    byReason.set(label, [...(byReason.get(label) ?? []), changedPath(change)]);
+    if (live && livePath === undefined) livePath = isLivePageOwnedRefusal(cause) ? changedPath(change) : null;
+  }
+  const message = [...byReason].map(([label, paths]) => `${label}: ${paths.join(", ")}`).join("\n");
+  const paths = refusals.map(({ change }) => changedPath(change)).sort();
+  return {
+    title,
+    message,
+    ...(retry ? { retry } : {}),
+    identity: `refused:${JSON.stringify([workspaceId, deleting ? "delete" : "move", ...paths])}`,
+    liveEditing: livePath === undefined ? null : { path: livePath },
+  };
+}
+
 let editIdCounter = 0;
 const EMPTY_TREE: TreeNode = { segment: "", fullPath: "", file: null, children: [] };
 
@@ -477,6 +534,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onRefresh,
     onError,
     onChangeSucceeded,
+    onChangesRefused,
     onBeginChanges,
     onPathsChanged,
     onSetFolderExpanded,
@@ -900,6 +958,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         const succeeded: PendingTreeChange[] = [];
+        // A batch of several reports its refusals in one notice, after the rest go.
+        const refusals: Refusal[] = [];
         for (const change of changes) {
           const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
@@ -924,10 +984,21 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               : (change.kind === "delete-file" || change.kind === "delete-folder") && refused
                 ? deleteRefusalIdentity(workspaceId, change.path)
                 : undefined;
+            const retryable = isLiveFolderRefusal(cause) || livePage !== undefined || (!refused && identity !== undefined);
+            if (changes.length > 1) {
+              refusals.push({ change, cause, retryable });
+              continue;
+            }
             const rerun = () => void runChangesOnce([{ ...change, id: nextChangeId() }], run, undefined, action);
-            const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && identity ? rerun : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, refused ? refusalIdentity : identity, livePage);
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, retryable ? rerun : undefined, refused ? refusalIdentity : identity, livePage);
           }
+        }
+        if (refusals.length > 0) {
+          // Try again reruns the refused changes a single refusal would rerun,
+          // so each keeps its own identity and Try again if it is refused again.
+          const again = refusals.filter((refusal) => refusal.retryable).map((refusal) => ({ ...refusal.change, id: nextChangeId() }));
+          onChangesRefused(refusedChangesNotice(workspaceId, changes.length, refusals,
+            again.length > 0 ? () => void runChangesOnce(again, run, undefined, action) : undefined));
         }
         const changedExistingPath = succeeded.some(
           (change) => change.kind !== "create-folder",
@@ -949,7 +1020,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         operation?.release();
       }
     },
-    [onBeginChanges, onChangeSucceeded, onError, onPathsChanged, onRefresh, workspaceId],
+    [onBeginChanges, onChangeSucceeded, onChangesRefused, onError, onPathsChanged, onRefresh, workspaceId],
   );
 
   const performMoves = useCallback(
