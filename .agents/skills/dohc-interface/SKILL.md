@@ -224,8 +224,8 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
 - Put a copy control beside text a person might need to report. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
-- If the copy text is the message and the facts that place it, such as the workspace, dohc version, platform, time and ids, use a Copy icon on the toast and the row.
-- If it holds text the person hasn't read, such as a crash report, give the message a **Details** action instead of the icon.
+- If the copy text is exactly what the message shows, such as a command, use a Copy icon beside it.
+- If it holds anything more, even the dohc version or the time, give the message a **Details** action instead of the icon, so a person always sees what they copy. On a toast, Details sits under the text, where Show more would. On a row, it comes last on the actions line.
 - **Details** opens the copy text under the message, selectable, scrolling past 240px. A Copy icon at its top right copies exactly that text.
 - While open, the action reads **Hide details** and holds the toast. It also lifts the clamp, so a message never offers both **Details** and **Show more**.
 - **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's Copy.
