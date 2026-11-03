@@ -764,7 +764,9 @@ export function VersionMergeDialog(props: {
         </div>
         <div className="flex justify-end gap-2">
           {result ? (
-            <SecondaryButton data-testid="version-merge-done" autoFocus onClick={finish}>
+            // Keyed so React makes a new button that takes focus, rather than
+            // reusing Cancel's, which autoFocus never reaches.
+            <SecondaryButton key="done" data-testid="version-merge-done" autoFocus onClick={finish}>
               Done
             </SecondaryButton>
           ) : (
