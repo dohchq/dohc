@@ -831,6 +831,36 @@ describe("ChatLane", () => {
     expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
   });
 
+  it("puts the cursor in the reply box once a reply still sending ends, when Answer is pressed meanwhile", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Write the summary" }),
+      message({ id: "question", body: "Which file?", parentMessageId: "ask", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
+    const sent = deferred<{ message: ReturnType<typeof message> }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(sent.promise);
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    const reply = await screen.findByTestId("chats-lane-thread-composer") as HTMLTextAreaElement;
+    fireEvent.change(reply, { target: { value: "One moment" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(reply.disabled).toBe(true));
+    // Pressing Answer moves focus to it, as a click does in a browser.
+    const answer = screen.getByRole("button", { name: "Answer" });
+    answer.focus();
+    fireEvent.click(answer);
+    expect(document.activeElement).not.toBe(reply);
+    sent.resolve({ message: message({ id: "plain", body: "One moment", parentMessageId: "ask" }) });
+    await waitFor(() => expect(document.activeElement).toBe(reply));
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "answer", body: "notes.md", parentMessageId: "ask" }) });
+    fireEvent.change(reply, { target: { value: "notes.md" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "notes.md", parentMessageId: "ask",
+      resolves: { messageId: "question" },
+    }));
+  });
+
   it("answers an open question asked in a thread from that thread", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [
       message({ id: "ask", body: "Write the summary" }),

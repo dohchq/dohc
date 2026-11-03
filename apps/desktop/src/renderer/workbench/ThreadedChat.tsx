@@ -157,10 +157,14 @@ export function ThreadedChat(props: {
   const answer = useCallback((messageId: string) => {
     const rootId = rootOfReply.get(messageId) ?? messageId;
     setAnswering({ rootId, messageId });
-    // A thread that opens focuses its reply box itself.
-    if (rootId !== openRootId) setOpenRootId(rootId);
-    else rootRef.current?.querySelector<HTMLTextAreaElement>("[data-thread-composer] textarea")?.focus();
-  }, [openRootId, rootOfReply]);
+    setOpenRootId(rootId);
+  }, [rootOfReply]);
+  // Answer puts the cursor in its thread's reply box. A reply still sending
+  // locks the box, so the cursor goes there once the send ends.
+  useEffect(() => {
+    if (answering === null || answering.rootId !== openRootId || replying) return;
+    rootRef.current?.querySelector<HTMLTextAreaElement>("[data-thread-composer] textarea")?.focus();
+  }, [answering, openRootId, replying]);
   const replyDraft = openRootId ? replyDrafts.get(openRootId) ?? "" : "";
   const setReplyDraft = useCallback((value: string) => {
     if (!openRootId) return;
