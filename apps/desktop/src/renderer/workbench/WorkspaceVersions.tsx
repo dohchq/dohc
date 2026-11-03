@@ -118,9 +118,11 @@ function protectedCopyWords(paths: readonly string[], sourceName: string): strin
   return `${paths.length === 1 ? "One protected file" : `${paths.length} protected files`} took ${sourceName}'s copy.`;
 }
 
+const AFTER_STORE_FIX = "Fix the data store problem in Notices, then merge again.";
+
 // The notice for a merge that answered after its dialog closed. A null
-// retry means the menu went with capture, so nothing can merge again until
-// History is back.
+// retry means the menu went with capture. That happens when the data store
+// was refused, and its own notice says how to fix it.
 function mergeNotice(
   identity: string,
   source: WorkspaceVersionRecord,
@@ -131,11 +133,11 @@ function mergeNotice(
     if (isMergeStoppedPartway(answer.error)) {
       const title = `dohc could not finish merging ${source.name} into Main`;
       return retry === null
-        ? { identity, title, message: `Some of ${source.name}'s changes are in Main. Merge again once History is back.`, cause: answer.error }
+        ? { identity, title, message: `Some of ${source.name}'s changes are in Main. ${AFTER_STORE_FIX}`, cause: answer.error }
         : { identity, title, message: `Some of ${source.name}'s changes are in Main, and History shows which.`, cause: answer.error, retry, offersHistory: true };
     }
     const title = `dohc could not merge ${source.name} into Main`;
-    if (retry === null) return { identity, title, message: "Merge again once History is back.", cause: answer.error };
+    if (retry === null) return { identity, title, message: AFTER_STORE_FIX, cause: answer.error };
     const { words } = readError(answer.error);
     return { identity, ...(words ? { title, message: words } : { message: `${title}.` }), cause: answer.error, retry };
   }

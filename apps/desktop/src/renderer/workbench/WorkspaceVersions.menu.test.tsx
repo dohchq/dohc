@@ -360,9 +360,9 @@ describe("VersionMenu", () => {
   });
 
   it.each([
-    ["fails", new Error("The engine stopped."), { title: "dohc could not merge Draft into Main", message: "Merge again once History is back." }],
+    ["fails", new Error("The engine stopped."), { title: "dohc could not merge Draft into Main", message: "Fix the data store problem in Notices, then merge again." }],
     ["stops partway", stoppedPartway(), {
-      title: "dohc could not finish merging Draft into Main", message: "Some of Draft's changes are in Main. Merge again once History is back.",
+      title: "dohc could not finish merging Draft into Main", message: "Some of Draft's changes are in Main. Fix the data store problem in Notices, then merge again.",
     }],
   ])("reports a merge that %s after the menu is gone as a notice with no Try again", async (_name, failure, words) => {
     const answer = deferredMerge();
