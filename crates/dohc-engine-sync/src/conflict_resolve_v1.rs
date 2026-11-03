@@ -8446,7 +8446,13 @@ mod tests {
     /// "Keep your other machine's copy" of conflict-1 through the runtime's
     /// resolve hooks. A refusal returns the sync code that refused it.
     fn keep_other_copy(store: &mut EngineStore) -> Result<(), &'static str> {
-        let input = text_keep_input(ResolveConflictKind::ApplyIncoming, "kept-other-copy");
+        apply_incoming_of(store, "conflict-1")
+    }
+
+    /// "Keep your other machine's copy" of `conflict_id`, as above.
+    fn apply_incoming_of(store: &mut EngineStore, conflict_id: &str) -> Result<(), &'static str> {
+        let mut input = text_keep_input(ResolveConflictKind::ApplyIncoming, "kept-other-copy");
+        input.conflict_id = conflict_id.to_owned();
         let refusal = std::cell::Cell::new(None);
         let refuse = |error: SyncError| {
             refusal.set(Some(error.code()));
@@ -8608,21 +8614,34 @@ mod tests {
         )
         .unwrap();
 
-        let sql = "SELECT path FROM path_aliases \
-                   WHERE workspace_id='ws' AND version_id='main' AND object_id='object-a'";
-        let paths: Vec<String> = store
-            .read_with(|conn| {
-                conn.prepare(sql)?
-                    .query_map([], |row| row.get(0))?
-                    .collect::<Result<_, _>>()
-            })
+        let paths = |store: &EngineStore| -> Vec<String> {
+            let sql = "SELECT path FROM path_aliases \
+                       WHERE workspace_id='ws' AND version_id='main' AND object_id='object-a'";
+            store
+                .read_with(|conn| {
+                    conn.prepare(sql)?
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<_, _>>()
+                })
+                .unwrap()
+        };
+        assert_eq!(paths(&store), ["moved.md"]);
+        assert_eq!(text_keep_open_rows(&store), 1);
+        let sql = "SELECT conflict_id, path FROM conflicts WHERE status='open'";
+        let (review, review_path): (String, String) = store
+            .read_with(|conn| conn.query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?))))
             .unwrap();
-        assert_eq!(paths, ["moved.md"]);
-        let sql = "SELECT COUNT(*) FROM conflicts WHERE status='open'";
-        let open: i64 = store
-            .read_with(|conn| conn.query_row(sql, [], |row| row.get(0)))
+        assert_eq!(review_path, "moved.md");
+
+        // Keeping the other machine's copy puts its text where the note is now.
+        apply_incoming_of(&mut store, &review).unwrap();
+        let moved = VersionedTextStore::new(&mut store)
+            .read_text("ws", "main", "moved.md")
+            .unwrap()
             .unwrap();
-        assert_eq!(open, 1);
+        assert_eq!((moved.object_id.as_str(), moved.text.as_str()), ("object-a", edited));
+        assert_eq!(paths(&store), ["moved.md"]);
+        assert_eq!(text_keep_open_rows(&store), 0);
     }
 
     /// The note's history came from an earlier resolution, so its base
