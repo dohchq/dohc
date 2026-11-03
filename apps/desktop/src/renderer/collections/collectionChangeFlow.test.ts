@@ -3,7 +3,7 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { describeCollectionChangeRow } from "../../workspaces/collectionChange";
 import { applyCollectionChange, collectionChangeDigest, loadCollectionChange, readCollectionChangeProposal } from "./collectionChangeFlow";
-import { ask, asked, base, claude, fixtureSources, ice, id, proposalPath, world, type World } from "./collectionChangeFlow.testHarness";
+import { ask, asked, base, claude, countsOf, fixtureSources, ice, id, proposalPath, world, type World } from "./collectionChangeFlow.testHarness";
 
 const { schemaSql, operationSource, migrationSql } = fixtureSources;
 const load = async (place: World) => {
@@ -101,9 +101,29 @@ it("applies nothing when records changed after it loaded so that it deletes more
   const place = world(); ask(place);
   const change = (await load(place))!;
   place.recount(13);
-  await expect(applyCollectionChange(place.api, "w", change)).resolves.toEqual({ kind: "deletes-more" });
+  await expect(applyCollectionChange(place.api, "w", change)).resolves
+    .toEqual({ kind: "deletes-more", was: { records: 0, values: 12 }, now: { records: 0, values: 13 } });
   expect(place.actions().slice(-2)).toEqual(["prepareMigration", "discardMigration"]);
   expect(place.head().revisionSha256).toBe(base.revisionSha256);
+});
+
+it("applies nothing when the migration now deletes records it deleted none of when the card loaded", async () => {
+  const place = world(); ask(place);
+  const change = (await load(place))!;
+  expect(change.rows.some(row => row.kind === "records-deleted")).toBe(false);
+  place.recount(12, 12, 2);
+  await expect(applyCollectionChange(place.api, "w", change)).resolves
+    .toEqual({ kind: "deletes-more", was: { records: 0, values: 12 }, now: { records: 2, values: 12 } });
+  expect(place.head().revisionSha256).toBe(base.revisionSha256);
+});
+
+it("applies the change when the records its migration deleted are gone, and returns it with no deletion", async () => {
+  const place = world(); ask(place, countsOf(12, 12, 2));
+  const change = (await load(place))!;
+  expect(change.rows.some(row => row.kind === "records-deleted")).toBe(true);
+  const result = await applyCollectionChange(place.api, "w", change);
+  expect(result.kind === "applied" && result.proposal.rows.some(row => row.kind === "records-deleted")).toBe(false);
+  expect(result.kind).toBe("applied");
 });
 
 it("is no change card for a file that isn't one", async () => {

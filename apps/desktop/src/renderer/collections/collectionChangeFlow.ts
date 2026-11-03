@@ -8,6 +8,7 @@ import { engineMomentAuthorName } from "../workbench/EngineHistory";
 
 export type CollectionChangeApi = Pick<DohcDesktopBridge, "dataset" | "readWorkspaceText" | "listFileChats" | "listEngineMoments" | "readEngineMoment" | "createWorkspaceFile">;
 type Api = CollectionChangeApi;
+type Deletes = ReturnType<typeof collectionChangeDeletes>;
 
 /** A file `dohc dataset askToApply` writes beside a Collection's dataset.json. */
 export const COLLECTION_CHANGE_FILE = /(?:^|\/)changes\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/u;
@@ -147,7 +148,7 @@ async function changeState(api: Api, input: {
  * shown. It returns the change it applied, counted as it applied it.
  */
 export async function applyCollectionChange(api: Pick<Api, "dataset">, workspaceId: string,
-  shown: { proposal: CollectionChangeProposal; rows: readonly CollectionChangeRow[] }): Promise<{ kind: "applied"; proposal: CollectionChangeProposal } | { kind: "edited" | "deletes-more" }> {
+  shown: { proposal: CollectionChangeProposal; rows: readonly CollectionChangeRow[] }): Promise<{ kind: "applied"; proposal: CollectionChangeProposal } | { kind: "edited" } | { kind: "deletes-more"; was: Deletes; now: Deletes }> {
   const { proposal } = shown;
   const prepared = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "prepareMigration", migrationPath: proposal.migrationPath });
   if (prepared.kind !== "migration-prepared") throw new Error("dohc couldn't prepare this change. Try again.");
@@ -158,7 +159,7 @@ export async function applyCollectionChange(api: Pick<Api, "dataset">, workspace
     catch { fresh = null; }
     if (!fresh || fresh.changeSha256 !== proposal.changeSha256 || !sameCollectionChange(shown.rows, fresh.rows, { counts: false })) return { kind: "edited" };
     const was = collectionChangeDeletes(shown.rows), now = collectionChangeDeletes(fresh.rows);
-    if (now.records > was.records || now.values > was.values) return { kind: "deletes-more" };
+    if (now.records > was.records || now.values > was.values) return { kind: "deletes-more", was, now };
     approving = true;
     const result = await api.dataset({ workspaceId, action: "approveMigration", preparationId: prepared.preparationId,
       revisionSha256: prepared.revision.revisionSha256, approvalDigest: prepared.approvalDigest, changeSha256: proposal.changeSha256 });

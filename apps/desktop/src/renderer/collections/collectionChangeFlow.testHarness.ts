@@ -23,9 +23,9 @@ const schemaSql = "CREATE TABLE volunteers (id TEXT PRIMARY KEY);", operationSou
 const migrationPath = "volunteers/migrations/004-due-date.sql", migrationSql = "ALTER TABLE volunteers ADD COLUMN due TEXT; ALTER TABLE volunteers DROP COLUMN notes;";
 export const proposalPath = `volunteers/changes/${id(50)}.json`;
 export const base = describeDatasetRevision({ definition: volunteers, revision: 3, schemaSql, operationSource });
-/** What the migration does to the Collection's records, when it holds `records` of them and `notes` have Notes. */
-const countsOf = (records: number, notes = records): DatasetMigrationCandidate["preview"]["tables"] => [{ table: "volunteers", beforeRows: records, afterRows: records,
-  changedRows: records, deletedRows: 0, beforeValues: { id: records, email: records, notes }, afterValues: { id: records, email: records, due: 0 }, clearedValues: { id: 0, email: 0, notes } }];
+/** What the migration does to the Collection's records, when it holds `records` of them, `notes` have Notes, and it deletes `deleted`. */
+export const countsOf = (records: number, notes = records, deleted = 0): DatasetMigrationCandidate["preview"]["tables"] => [{ table: "volunteers", beforeRows: records, afterRows: records - deleted,
+  changedRows: records, deletedRows: deleted, beforeValues: { id: records, email: records, notes }, afterValues: { id: records, email: records, due: 0 }, clearedValues: { id: 0, email: 0, notes } }];
 const counts = countsOf(12);
 export const ice = { name: "Ice", agent: false }, claude = { name: "Claude Code", agent: true };
 
@@ -101,15 +101,15 @@ export function world() {
       throw new Error(`Unexpected ${request.action}`);
     }),
   } as unknown as CollectionChangeApi;
-  const recount = (total: number, notes = total) => { records = countsOf(total, notes); };
+  const recount = (total: number, notes = total, deleted = 0) => { records = countsOf(total, notes, deleted); };
   return { api, files, moments, calls, reads, moment, control, recount, head: () => head, actions: () => calls.map(call => call.action) };
 }
 export type World = ReturnType<typeof world>;
 
-/** Claude Code's message asks for the change the files make now. */
-export const ask = (place: World): CollectionChangeProposal => {
+/** Claude Code's message asks for the change the files make now, counted on `tables`. */
+export const ask = (place: World, tables = counts): CollectionChangeProposal => {
   const next = describeDatasetRevision({ definition: asked, revision: 4, schemaSql, operationSource });
-  const candidate = { changeSha256: datasetChangeDigest({ revisionSha256: next.revisionSha256, migrationSql }), preview: { tables: counts } } as unknown as DatasetMigrationCandidate;
+  const candidate = { changeSha256: datasetChangeDigest({ revisionSha256: next.revisionSha256, migrationSql }), preview: { tables } } as unknown as DatasetMigrationCandidate;
   const proposal = collectionChangeProposal({ previousRevision: base, revision: next, operationSource, migrationSql, candidate },
     { datasetPath: "volunteers/dataset.json", migrationPath, note: null });
   place.files[proposalPath] = JSON.stringify(proposal, null, 2);

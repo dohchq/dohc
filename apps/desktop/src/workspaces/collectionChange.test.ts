@@ -5,7 +5,7 @@ import type { DatasetMigrationCandidate } from "@dohc/cli/dataset";
 import { generateDatasetSources } from "./datasetGenerator";
 import { generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import {
-  attributeCollectionChangeRows, collectionApplyLabel, collectionChangeDeletes, collectionChangeRows, CollectionChangeRow,
+  attributeCollectionChangeRows, collectionApplyLabel, collectionChangeDeletes, collectionDeletesMore, collectionChangeRows, CollectionChangeRow,
   describeCollectionChangeRow, historyCanUndoCollectionChange, sameCollectionChange, type CollectionChangeAuthor,
 } from "./collectionChange";
 
@@ -57,6 +57,8 @@ it("lists every part of the change and what it does to the existing records", ()
     ["Made Email unique", "All 12 Email values were already different"], ["Ran a migration on the 12 existing records", "004-due-date.sql"],
   ]);
   expect(collectionApplyLabel(collectionChangeDeletes(rows))).toBe("Apply and delete 12 values");
+  expect(collectionDeletesMore({ records: 0, values: 12 }, { records: 0, values: 14 })).toBe("14 values, not 12");
+  expect(collectionDeletesMore({ records: 0, values: 12 }, { records: 1, values: 13 })).toBe("1 record, not 0, and 13 values, not 12");
   expect(historyCanUndoCollectionChange(rows)).toBe(false);
   expect(rows.map(row => CollectionChangeRow.parse(row))).toEqual(rows);
 });

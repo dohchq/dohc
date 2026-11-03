@@ -4,7 +4,7 @@ import { ChevronRight, CircleAlert, LoaderCircle } from "lucide-react";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { isDatasetServerNotFound } from "../../ipc/errorWords";
 import {
-  collectionApplyLabel, collectionChangeDeletes, collectionChangeNoteRow, describeCollectionChangeRow, historyCanUndoCollectionChange, sameCollectionChange,
+  collectionApplyLabel, collectionChangeDeletes, collectionChangeNoteRow, collectionDeletesMore, describeCollectionChangeRow, historyCanUndoCollectionChange, sameCollectionChange,
   type CollectionChangeProposal, type CollectionChangeRow,
 } from "../../workspaces/collectionChange";
 import { bridge } from "../bridge";
@@ -26,6 +26,9 @@ const by = (name: string, atMs: number | null) => atMs === null ? name : `${name
 export const collectionApplyFailure = (name: string) => (error: unknown) => isDatasetServerNotFound(error)
   ? { words: `The server that keeps ${name} refused this change. Nothing changed. Ask its owner to apply it.`, retry: false }
   : { words: ipcErrorMessage(error, "dohc couldn't apply this change."), retry: true };
+/** What Apply says when it holds a change that records made delete more than the card shows. */
+export const collectionDeletesMoreFailure = (was: { records: number; values: number }, now: { records: number; values: number }) => ({
+  words: `Records changed after it was sent, and it would now delete ${collectionDeletesMore(was, now)}. Review the source change to apply it.`, retry: false });
 
 export type CollectionChangeCardPhase = { kind: "idle" } | { kind: "applying"; words: "Applying…" | "Undoing…" } | { kind: "failed"; words: string; retry: boolean };
 
@@ -122,7 +125,7 @@ export function CollectionChangeCard(props: {
     setPhase({ kind: "applying", words: "Applying…" });
     try {
       const result = await applyCollectionChange(bridge(), workspaceId, shown);
-      if (result.kind === "deletes-more") return fail({ words: "Records changed after it was sent, and it now deletes more. Review the change to apply it.", retry: false }, null);
+      if (result.kind === "deletes-more") return fail(collectionDeletesMoreFailure(result.was, result.now), null);
       if (result.kind === "applied") {
         await posted(`Applied the change to ${shown.proposal.name}.`, true, "dohc applied the change but couldn't post that it did.", await recorded(shown.proposal, result.proposal));
       } else if (mounted.current) setStale(true);

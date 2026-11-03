@@ -108,7 +108,7 @@ it("applies nothing when records changed so that the change deletes more, and po
   place.recount(13);
   fireEvent.click(apply);
   const failed = await screen.findByTestId("lane-change-failed");
-  expect(failed.textContent).toBe("Records changed after it was sent, and it now deletes more. Review the change to apply it.");
+  expect(failed.textContent).toBe("Records changed after it was sent, and it would now delete 13 values, not 12. Review the source change to apply it.");
   expect(screen.queryByTestId("lane-change-apply")).toBeNull();
   expect(screen.getByTestId("lane-change-review")).toBeTruthy();
   expect(place.head().revisionSha256).not.toBe(proposal.revisionSha256);

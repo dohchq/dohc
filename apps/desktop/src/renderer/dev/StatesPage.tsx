@@ -25,9 +25,9 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { collectionsElsewhereWords, markDatasetServerNotFound, readError } from "../../ipc/errorWords";
-import type { CollectionChangeProposal, CollectionChangeRow } from "../../workspaces/collectionChange";
+import { collectionChangeDeletes, type CollectionChangeProposal, type CollectionChangeRow } from "../../workspaces/collectionChange";
 import type { CollectionChangeReview, CollectionChangeState } from "../collections/collectionChangeFlow";
-import { CollectionChangeCardView, collectionApplyFailure } from "../workbench/CollectionChangeCard";
+import { CollectionChangeCardView, collectionApplyFailure, collectionDeletesMoreFailure } from "../workbench/CollectionChangeCard";
 import { CollectionChangeReviewCard } from "../workbench/CollectionChangeReviewDialog";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
@@ -971,6 +971,9 @@ const changeCard = (state: CollectionChangeState | null, proposal = CHANGE_PROPO
 });
 const WAITING = { kind: "waiting" } as const;
 const applyFailure = collectionApplyFailure("Volunteers");
+// Two volunteers with notes signed up after the change was sent.
+const shownDeletes = collectionChangeDeletes(CHANGE_ROWS);
+const deletesMore = collectionDeletesMoreFailure(shownDeletes, { ...shownDeletes, values: shownDeletes.values + 2 });
 
 // Ada added Phone after the agent asked, then applied the change from the
 // review, so her reply attaches the change it applied. Neither message
@@ -2671,6 +2674,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="Ada changed its files after it was sent">
           <div className="w-[740px]"><CollectionChangeCardView {...changeCard({ kind: "edited", by: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 45) })} /></div>
+        </Specimen>
+        <Specimen label="records changed after it was sent, so it would now delete more: no Apply">
+          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...deletesMore }} /></div>
         </Specimen>
         <Specimen label="in a DM, applied from the review after Ada added Phone: the card credits her part, and her reply has no chip">
           <ChangeAppliedFromReviewSpecimen />

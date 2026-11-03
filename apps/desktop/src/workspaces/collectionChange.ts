@@ -203,16 +203,18 @@ export function attributeCollectionChangeRows(rows: readonly Draft[], input: {
   return rows.map(row => {
     if (row.kind === "code-changed") return { ...row, source: file(input.operationsPath) };
     if (row.kind === "schema-changed" || row.kind === "migration") return { ...row, source: file(row.file) };
-    if (row.kind === "records-deleted" || row.key.endsWith(":values")) return { ...row, source: file(migrated) };
+    if (deletesRecords(row)) return { ...row, source: file(migrated) };
     return { ...row, source: made.get(row.key) ?? file(input.definitionPath) };
   });
 }
 
+/** A row that's there only while existing records hold what the migration deletes. */
+const deletesRecords = (row: { kind: string; key: string }) => row.kind === "records-deleted" || row.key.endsWith(":values");
 const COUNTS = new Set(["records", "empty", "values", "lost"]);
 
 /** Whether two lists apply the same change, whoever made each part. With `counts: false`, however many records each part touches. */
 export function sameCollectionChange(a: readonly CollectionChangeRow[], b: readonly CollectionChangeRow[], options: { counts?: boolean } = {}): boolean {
-  const plain = (rows: readonly CollectionChangeRow[]) => json(rows.map(({ source: _source, ...row }) =>
+  const plain = (rows: readonly CollectionChangeRow[]) => json(rows.filter(row => options.counts !== false || !deletesRecords(row)).map(({ source: _source, ...row }) =>
     options.counts === false ? Object.fromEntries(Object.entries(row).filter(([key]) => !COUNTS.has(key))) : row));
   return plain(a) === plain(b);
 }
@@ -233,6 +235,12 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 export function collectionApplyLabel(deletes: { records: number; values: number }): string {
   const parts = [deletes.records ? plural(deletes.records, "record") : "", deletes.values ? plural(deletes.values, "value") : ""].filter(Boolean);
   return parts.length ? `Apply and delete ${parts.join(" and ")}` : "Apply";
+}
+
+/** What a change now deletes beyond what was shown, in the Apply label's words: "14 values, not 9". */
+export function collectionDeletesMore(was: { records: number; values: number }, now: { records: number; values: number }): string {
+  return [now.records > was.records ? `${plural(now.records, "record")}, not ${was.records}` : "",
+    now.values > was.values ? `${plural(now.values, "value")}, not ${was.values}` : ""].filter(Boolean).join(", and ");
 }
 
 /** History can reverse renames and buttons, which change no stored values. */
