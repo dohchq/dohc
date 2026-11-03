@@ -14,8 +14,9 @@ import {
 
 // Screenshot harness (@ui-audit) for the versions menu and what it opens: the
 // menu on Main, on a version, and on a version made from another version; its
-// name field with its hint, Creating…, and a refused name; a failed create and
-// a failed merge as notices with Try again; each merge stage, with and
+// name field with its hint, Creating…, and a refused name; a failed create as
+// a notice with Try again, and a failed merge in its dialog, with Details; each
+// merge stage, with and
 // without the protected files a merge replaced; the save-first
 // confirm; and keyboard focus on the disabled Merge row. Light and dark. Not a
 // regression test; it runs only when a shot directory is set, the way
@@ -258,20 +259,24 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await writeCaptured(page, temp.rootPath, "Main", "notes.md", "# Notes\n\nMain's notes.\n");
     await switchTo(page, "Draft");
 
-    // The merge: confirm, a failure as a notice, Try again reopening the
-    // dialog already merging, the conflicts, and the end.
+    // The merge: confirm, a failure in the dialog, Merge into Main merging
+    // again, the conflicts, and the end.
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await expect(page.getByTestId("version-merge-dialog")).toBeVisible();
     await shootWindow(page, "merge-confirm");
     await interceptNext(desktop, "desktop:merge-workspace-version", "fail");
     await page.getByTestId("version-merge-confirm").click();
-    const mergeFailed = errorToast(page, "merge");
-    await expect(mergeFailed).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
-    await shootWindow(page, "merge-failure-toast");
+    await expect(page.getByTestId("version-merge-failure")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId("version-merge-confirm")).toBeFocused();
+    await shootWindow(page, "merge-failure");
+    const mergeDetails = page.getByTestId("version-merge-failure-details");
+    if (await mergeDetails.count()) {
+      await mergeDetails.click();
+      await shootWindow(page, "merge-failure-details");
+    }
     await interceptNext(desktop, "desktop:merge-workspace-version", "hold");
-    await mergeFailed.getByRole("button", { name: "Try again" }).click();
+    await page.getByTestId("version-merge-confirm").click();
     await expect(page.getByTestId("version-merge-confirm")).toHaveText("Merging…");
     await shootWindow(page, "merge-retry-running");
     await releaseHeld(desktop);

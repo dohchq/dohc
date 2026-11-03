@@ -3,11 +3,12 @@ import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isWorkspaceUpdatingError, isConflictStaleTarget, readError, versionNameRefusal } from "../../ipc/errorWords";
 import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
-import { ChevronDown, ChevronsUpDown, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,8 @@ import {
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { CopyButton } from "../ui/CopyButton";
+import { errorDetails } from "../shell/copyDetails";
 import { SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
@@ -108,8 +111,8 @@ export function VersionMenu(props: {
   const [busy, setBusy] = useState<"switch" | "create" | null>(null);
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
-  // A Try again opens the dialog already merging.
-  const [mergeSource, setMergeSource] = useState<{ version: WorkspaceVersionRecord; runOnOpen: boolean } | null>(null);
+  // The version the merge dialog is open for.
+  const [mergeSource, setMergeSource] = useState<WorkspaceVersionRecord | null>(null);
   // Two questions, and they are not the same one.
   //
   // May this read still write the snapshot? A newer read answers no — from a
@@ -338,33 +341,14 @@ export function VersionMenu(props: {
     [beginOperation, setMenu, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
   );
 
-  // A failed merge is a notice. Its Try again reopens the dialog for the same
-  // version and merges there, unless the version is gone by then. A failed
-  // read of the versions is a notice with the same Try again.
+  // The dialog shows a failed merge while it is open, and can't close while
+  // one runs. It goes before the answer only when this menu goes too, and
+  // then the failure is a notice. It has no Try again, because the dialog
+  // that would merge again is gone. The menu's Merge row merges again.
   const failMerge = useCallback(
-    (version: WorkspaceVersionRecord, error: unknown) => {
-      setMergeSource(null);
-      void refresh().catch(() => undefined);
-      const fallback = `dohc could not merge ${version.name} into Main.`;
-      const identity = mergeIdentity(workspaceId, version.id);
-      const retry = () => {
-        const token = snapshotToken.current;
-        void refresh().then(
-          (current) => {
-            if (current === null) return;
-            const found = current.versions.find((candidate) => candidate.id === version.id);
-            if (found) setMergeSource({ version: found, runOnOpen: true });
-            else props.onError(`The version ${version.name} no longer exists, so it can't merge into Main.`, null, undefined, identity);
-          },
-          (readError: unknown) => {
-            if (token !== snapshotToken.current) return;
-            props.onError(ipcErrorMessage(readError, fallback), readError, retry, identity);
-          },
-        );
-      };
-      props.onError(ipcErrorMessage(error, fallback), error, retry, identity);
-    },
-    [props.onError, refresh, workspaceId],
+    (version: WorkspaceVersionRecord, error: unknown) =>
+      props.onError(ipcErrorMessage(error, `dohc could not merge ${version.name} into Main.`), error, undefined, mergeIdentity(workspaceId, version.id)),
+    [props.onError, workspaceId],
   );
 
   if (!snapshot) return null;
@@ -439,7 +423,7 @@ export function VersionMenu(props: {
         description: active.canMergeIntoMain ? undefined : "Only versions made from Main can merge into Main.",
         onSelect: () => {
           setMenu(false);
-          setMergeSource({ version: active, runOnOpen: false });
+          setMergeSource(active);
         },
       },
     );
@@ -514,12 +498,11 @@ export function VersionMenu(props: {
       {mergeSource ? (
         <VersionMergeDialog
           workspaceId={workspaceId}
-          source={mergeSource.version}
-          runOnOpen={mergeSource.runOnOpen}
+          source={mergeSource}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
-          onMerged={() => props.clearError(mergeIdentity(workspaceId, mergeSource.version.id))}
-          onFailed={(error) => failMerge(mergeSource.version, error)}
+          onMerged={() => props.clearError(mergeIdentity(workspaceId, mergeSource.id))}
+          onFailed={(error) => failMerge(mergeSource, error)}
           onConflictError={props.onConflictError}
           onClose={() => {
             setMergeSource(null);
@@ -533,7 +516,8 @@ export function VersionMenu(props: {
 }
 
 type MergeStage =
-  | { stage: "confirm" }
+  // A failure stays in the dialog, above the button that merges again.
+  | { stage: "confirm"; failure?: { error: unknown } }
   | { stage: "running" }
   | { stage: "clean"; mergedFileCount: number }
   // One loaded window of the open-conflict listing: the rows shown so
@@ -549,8 +533,6 @@ type MergeStage =
 export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
-  // Merge as soon as the dialog opens, for a Try again.
-  runOnOpen?: boolean;
   // VersionMenu's contract: drain writes, hold the release across the IPC.
   beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active now when this operation set it. The
@@ -561,7 +543,7 @@ export function VersionMergeDialog(props: {
   onWorkspaceStateChanged: (activeVersionId?: string) => void;
   // The merge ran. The owner takes back an earlier failure's notice.
   onMerged: () => void;
-  // The merge failed. The owner closes the dialog and reports it.
+  // The merge failed after the dialog closed. The owner reports it.
   onFailed: (error: unknown) => void;
   // The merge lists every open conflict, sync ones included, so their
   // refusals need the shell's toast and Notices row.
@@ -569,11 +551,19 @@ export function VersionMergeDialog(props: {
   onClose: () => void;
 }) {
   const { workspaceId, source } = props;
-  const [stage, setStage] = useState<MergeStage>({ stage: props.runOnOpen ? "running" : "confirm" });
+  const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
   // Protected files this merge gave the version's copy. They never become
   // conflicts, so whichever stage the merge ends in lists them once.
   const [replacedProtectedPaths, setReplacedProtectedPaths] = useState<string[]>([]);
   const liveToken = useRequestSequence();
+  // Whether the dialog is still open when a merge answers.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   // Which loaded conflict window a "Show more" answer belongs to. Every
   // replacement of the window (the merge result, each resolution's remaining
   // page) advances it: a stale page for a replaced window would append rows
@@ -619,16 +609,22 @@ export function VersionMergeDialog(props: {
         setStage({ stage: "clean", mergedFileCount: result.mergedFileCount });
       }
     } catch (error) {
-      if (!liveToken.isCurrent(token)) return;
-      props.onFailed(error);
+      // Open, the dialog shows the failure. Gone before the answer, it leaves
+      // the failure to the owner's notice.
+      if (!mounted.current) props.onFailed(error);
+      else if (liveToken.isCurrent(token)) setStage({ stage: "confirm", failure: { error } });
     } finally {
       releaseOperation?.();
     }
   }, [props.beginLineageOperation, props.onFailed, props.onMerged, props.onWorkspaceStateChanged, source.id, workspaceId]);
 
+  // A failure takes focus to Merge into Main, which merges again. The alert
+  // above it has already said what failed.
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const failure = stage.stage === "confirm" ? stage.failure : undefined;
   useEffect(() => {
-    if (props.runOnOpen) void runMerge();
-  }, []);
+    if (failure !== undefined) confirmButton.current?.focus();
+  }, [failure]);
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
@@ -762,6 +758,7 @@ export function VersionMergeDialog(props: {
             </p>
           )}
         </div>
+        {failure !== undefined ? <MergeFailure error={failure.error} sourceName={source.name} /> : null}
         <div className="flex justify-end gap-2">
           {result ? (
             // Keyed so React makes a new button that takes focus, rather than
@@ -774,7 +771,7 @@ export function VersionMergeDialog(props: {
               <SecondaryButton data-testid="version-merge-cancel" disabled={stage.stage === "running"} onClick={finish}>
                 Cancel
               </SecondaryButton>
-              <PrimaryButton data-testid="version-merge-confirm" disabled={stage.stage === "running"} onClick={() => void runMerge()}>
+              <PrimaryButton ref={confirmButton} data-testid="version-merge-confirm" disabled={stage.stage === "running"} onClick={() => void runMerge()}>
                 {stage.stage === "running" ? "Merging…" : "Merge into Main"}
               </PrimaryButton>
             </>
@@ -782,6 +779,44 @@ export function VersionMergeDialog(props: {
         </div>
       </div>
     </Overlay>
+  );
+}
+
+// A merge's failure, in the dialog that ran it: what failed, then Details
+// when the copy text holds more than the words show.
+function MergeFailure(props: { error: unknown; sourceName: string }) {
+  const [open, setOpen] = useState(false);
+  const detailsId = useId();
+  const words = ipcErrorMessage(props.error, `dohc could not merge ${props.sourceName} into Main.`);
+  const { cause } = readError(props.error);
+  const details = errorDetails([["Error", words], ["Cause", cause]]);
+  return (
+    <div data-testid="version-merge-failure">
+      <p role="alert" className="m-0 flex items-start gap-2 text-[13px] leading-5 text-ink">
+        <CircleAlert size={14} aria-hidden className="mt-[3px] shrink-0 text-danger" />
+        <span className="min-w-0 flex-1 break-words">{words}</span>
+      </p>
+      {cause ? (
+        // The button's words line up with the failure's.
+        <div className="mt-1 pl-[14px]">
+          <GhostButton
+            data-testid="version-merge-failure-details"
+            aria-expanded={open}
+            aria-controls={detailsId}
+            onClick={() => setOpen((current) => !current)}
+          >
+            Details
+            <ChevronDown size={12} aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`} />
+          </GhostButton>
+          {open ? (
+            <div id={detailsId} className="ml-2 mt-1 flex items-start gap-2">
+              <p className="m-0 min-w-0 flex-1 select-text whitespace-pre-wrap break-words text-[12px] leading-4 text-muted">{details}</p>
+              <CopyButton iconOnly label="Copy error details" getText={() => details} />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

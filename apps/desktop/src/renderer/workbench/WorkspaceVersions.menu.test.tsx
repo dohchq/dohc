@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -266,83 +266,67 @@ describe("VersionMenu", () => {
     await waitFor(() => expect(props.clearError).toHaveBeenCalledWith(props.onError.mock.calls[0]![3]));
   });
 
-  it("reports a failed merge with a Try again that reopens the dialog and merges", async () => {
-    const failure = acrossIpc("desktop:merge-workspace-version", "Error: The engine stopped.");
-    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(failure);
-    const user = userEvent.setup();
-    const props = renderMenu();
+  const merged = {
+    mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null,
+  };
+
+  async function confirmMerge(user: ReturnType<typeof userEvent.setup>) {
     await openOn(user, "Draft");
     await user.click(screen.getByTestId("version-merge"));
     await user.click(screen.getByTestId("version-merge-confirm"));
-    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(expect.any(String), failure, expect.any(Function), "version-merge:ws-1:draft"));
-    expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
-    expect(props.clearError).not.toHaveBeenCalled();
+  }
 
-    bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce({
-      mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null,
-    });
-    act(() => props.onError.mock.calls[0]![2]!());
+  it("shows a failed merge in the dialog, where Merge into Main merges again", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(acrossIpc("desktop:merge-workspace-version", "Error: The engine stopped."));
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await confirmMerge(user);
+    const dialog = screen.getByTestId("version-merge-dialog");
+    await waitFor(() => expect(within(dialog).getByRole("alert").textContent).toBe("The engine stopped."));
+    // The words say it all, so there is nothing more to copy.
+    expect(within(dialog).queryByRole("button", { name: "Details" })).toBeNull();
+    const confirm = screen.getByTestId<HTMLButtonElement>("version-merge-confirm");
+    expect(confirm.textContent).toBe("Merge into Main");
+    expect(confirm.disabled).toBe(false);
+    expect(document.activeElement).toBe(confirm);
+    expect(props.onError).not.toHaveBeenCalled();
+
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce(merged);
+    await user.click(confirm);
     await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main"));
+    expect(screen.queryByTestId("version-merge-failure")).toBeNull();
     expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(2);
-    expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenLastCalledWith({ workspaceId: "ws-1", versionId: "draft" });
-    expect(props.clearError).toHaveBeenCalledWith("version-merge:ws-1:draft");
+    expect(props.onError).not.toHaveBeenCalled();
   });
 
-  it("says so when Try again finds the version is gone", async () => {
-    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(new Error("The engine stopped."));
+  it("puts Details under a failure whose copy text holds more than it shows", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(new TypeError("result.conflicts is undefined"));
     const user = userEvent.setup();
-    const props = renderMenu();
-    await openOn(user, "Draft");
-    await user.click(screen.getByTestId("version-merge"));
-    await user.click(screen.getByTestId("version-merge-confirm"));
-    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
-
-    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
-    act(() => props.onError.mock.calls[0]![2]!());
-    await waitFor(() => expect(props.onError).toHaveBeenLastCalledWith("The version Draft no longer exists, so it can't merge into Main.", null, undefined, "version-merge:ws-1:draft"));
-    expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
-    expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(1);
+    renderMenu();
+    await confirmMerge(user);
+    const dialog = screen.getByTestId("version-merge-dialog");
+    await waitFor(() => expect(within(dialog).getByRole("alert").textContent).toBe("dohc could not merge Draft into Main."));
+    const toggle = within(dialog).getByRole("button", { name: "Details" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await user.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(document.getElementById(toggle.getAttribute("aria-controls") ?? "")?.textContent)
+      .toContain("Error: dohc could not merge Draft into Main.\nCause: TypeError: result.conflicts is undefined");
   });
 
-  it("keeps Try again when Try again cannot read the versions", async () => {
-    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(new Error("The engine stopped."));
+  it("reports a merge that fails after the menu is gone as a notice with no Try again", async () => {
+    let failMerge!: (error: Error) => void;
+    bridgeMock.mergeWorkspaceVersion.mockReturnValueOnce(new Promise((_resolve, reject) => { failMerge = reject; }));
     const user = userEvent.setup();
     const props = renderMenu();
-    await openOn(user, "Draft");
-    await user.click(screen.getByTestId("version-merge"));
-    await user.click(screen.getByTestId("version-merge-confirm"));
-    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
-
-    const unreadable = new Error("The engine stopped.");
-    bridgeMock.listWorkspaceVersions.mockRejectedValueOnce(unreadable);
-    act(() => props.onError.mock.calls[0]![2]!());
-    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(2));
-    expect(props.onError).toHaveBeenLastCalledWith(expect.any(String), unreadable, expect.any(Function), "version-merge:ws-1:draft");
-
-    bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce({
-      mergedFileCount: 1, unchangedFileCount: 0, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null,
-    });
-    act(() => props.onError.mock.calls[1]![2]!());
-    await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main"));
-  });
-
-  it("reports nothing when Try again's read fails after the menu is gone", async () => {
-    bridgeMock.mergeWorkspaceVersion.mockRejectedValueOnce(new Error("The engine stopped."));
-    const user = userEvent.setup();
-    const props = renderMenu();
-    await openOn(user, "Draft");
-    await user.click(screen.getByTestId("version-merge"));
-    await user.click(screen.getByTestId("version-merge-confirm"));
-    await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
-
-    let failRead!: (error: Error) => void;
-    bridgeMock.listWorkspaceVersions.mockReturnValueOnce(new Promise((_resolve, reject) => { failRead = reject; }));
-    act(() => props.onError.mock.calls[0]![2]!());
+    await confirmMerge(user);
+    await waitFor(() => expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledOnce());
     cleanup();
+    const failure = new Error("The engine stopped.");
     await act(async () => {
-      failRead(new Error("The engine stopped."));
+      failMerge(failure);
       await Promise.resolve();
     });
-    expect(props.onError).toHaveBeenCalledTimes(1);
+    expect(props.onError).toHaveBeenCalledExactlyOnceWith("The engine stopped.", failure, undefined, "version-merge:ws-1:draft");
   });
 });
