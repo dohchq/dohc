@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -318,5 +318,44 @@ describe("chat runner process", () => {
     expect(JSON.parse(readFileSync(join(root, "args.json"), "utf8"))).toContain(
       `mcp_servers.dohc.cwd='''${join(root, "node_modules", ".bin")}'''`,
     );
+  });
+
+  it.runIf(process.platform === "win32")("starts an npm-installed Codex without a writable folder whose path has an apostrophe", async () => {
+    const scratch = realpathSync.native(await createTestScratch("dohc-chat-runner-"));
+    const [workspace, apostrophe, plain] = ["ws", "o'brien", "plain"].map((name) => join(scratch, name));
+    for (const folder of [workspace!, apostrophe!, plain!]) mkdirSync(folder);
+    const config = join(scratch, "config.toml");
+    writeFileSync(config, `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([apostrophe, plain])}\n`);
+    for (const [name, content] of [["codex.cmd", "@echo off\r\n"], ["codex.exe", ""]] as const) writeFileSync(join(scratch, name), content);
+    // A run gets no writable folder inside a temp folder, and the scratch folder is in one.
+    for (const name of ["TEMP", "TMP", "TMPDIR"]) vi.stubEnv(name, undefined);
+    const started: string[] = [];
+    const runner = createChatRunnerProcess({
+      stateDir: () => join(scratch, "state"),
+      appRoot: () => scratch,
+      isPackaged: () => false,
+      platform: "win32",
+      codexConfigFiles: () => ({ requirements: [], config: [config] }),
+      spawnRunner: (_command, args) => {
+        started.push(args.join(" "));
+        return { pid: 4_100, writeStdin: () => undefined, hasExited: () => false, onExit: () => undefined, onError: () => undefined };
+      },
+    }, () => undefined);
+    for (const executable of ["codex.cmd", "codex.exe"]) {
+      runner.spawnConfiguredRunner({
+        rootPath: workspace!,
+        runId: "run-1",
+        logPath: join(scratch, "run.log"),
+        command: "",
+        profile: { tool: "codex", executable: join(scratch, executable) },
+        prompt: "",
+        assertMayStart: () => undefined,
+      });
+    }
+    const [shim, direct] = started;
+    expect(shim).toContain(`'${plain}'='write'`);
+    expect(shim).not.toContain("o'brien");
+    expect(direct).toContain(`'${plain}'='write'`);
+    expect(direct).toContain(`${JSON.stringify(apostrophe)}='write'`);
   });
 });

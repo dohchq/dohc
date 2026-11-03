@@ -123,10 +123,15 @@ export function codexTrustKeys(rootPath: string, platform: NodeJS.Platform, real
 }
 
 // Only a basic string holds an apostrophe or a control character, and JSON
-// leaves DEL unescaped. cmd.exe can't carry the double quotes, so dohc doesn't
-// start an npm-installed Codex in such a folder.
+// leaves DEL unescaped. cmd.exe can't carry the double quotes, so an
+// npm-installed Codex doesn't start in such a workspace or get such a writable
+// folder.
+function needsBasicString(value: string): boolean {
+  return /\p{Cc}|'/u.test(value);
+}
+
 function tomlKey(value: string): string {
-  return /\p{Cc}|'/u.test(value) ? JSON.stringify(value).replace(/\u007f/gu, "\\u007f") : `'${value}'`;
+  return needsBasicString(value) ? JSON.stringify(value).replace(/\u007f/gu, "\\u007f") : `'${value}'`;
 }
 
 function attempt<T>(read: () => T): T | null {
@@ -158,6 +163,7 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
   readLink: (path: string) => string | null;
   fileId: (path: string) => string;
   listFolder: (path: string) => readonly string[];
+  behindCmd: boolean;
 }): string[] {
   let setting: { file: string; roots: string[] } | undefined;
   for (const { file, table } of tables) {
@@ -221,6 +227,7 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const ids = reached === null ? [] : [reached.path, ...reached.through].map((folder) => attempt(() => input.fileId(folder)));
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
     if (real === null || id === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
+    if (input.behindCmd && needsBasicString(real)) continue;
     // A `..` after a link can take Codex somewhere follow didn't go, and a
     // link inside the folder itself lets the run point it elsewhere.
     if (ids[0] !== id || ids.includes(id, 1)) continue;
@@ -259,11 +266,14 @@ export function codexRunConfig(input: {
   listFolder?: (path: string) => readonly string[];
   env?: NodeJS.ProcessEnv;
   home?: string;
+  // The run starts behind cmd.exe, as an npm-installed Codex does on Windows.
+  behindCmd?: boolean;
 }): string[] {
   const read = input.readConfig ?? ((path: string) => readFileSync(path, "utf8"));
   const roots = {
     rootPath: input.rootPath,
     platform: input.platform,
+    behindCmd: input.behindCmd ?? false,
     env: input.env ?? process.env,
     home: input.home ?? homedir(),
     realPath: input.realPath ?? realpathSync.native,
