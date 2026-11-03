@@ -55,6 +55,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import type { ExplorerApps } from "./AppsSection";
 import { ExplorerHome } from "./ExplorerHome";
+import type { DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
@@ -139,7 +140,7 @@ export interface ExplorerProps {
   // The workspace's apps, for Home's Apps section. Without it Home has no
   // Apps section.
   apps?: ExplorerApps;
-  dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
+  dataCollections?: readonly DataCollection[];
   includeArchivedCollections?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;

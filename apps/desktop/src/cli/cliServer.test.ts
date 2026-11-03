@@ -2655,6 +2655,10 @@ describe("CLI socket server", () => {
     await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: "../export.zip" } })).resolves.toMatchObject({ kind: "refused", message: expect.stringContaining("../export.zip") });
     await invoke("dataset", { cwd, actor: "agent", request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: "backup.dohc-recovery" } });
     expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ sourcePath: join(cwd, "backup.dohc-recovery") }), { depth: 0 });
+    const unreadable = { datasetId: "00000000-0000-4000-8000-000000000001", name: "Equipment", revision: 1, revisionSha256: "a".repeat(64), tables: [], operations: [],
+      datasetPath: null, datasetAddressStatus: "unreadable" as const, datasetPaths: ["app/data/dataset.json"] };
+    context.dataset = vi.fn(async () => ({ kind: "list" as const, datasets: [unreadable], nextCursor: null }));
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "list", workspaceId: WORKSPACE_ID } })).resolves.toMatchObject({ kind: "list", datasets: [{ datasetAddressStatus: "unreadable", datasetPaths: ["data/dataset.json"] }] });
     context.dataset = vi.fn(async () => ({ kind: "form-created" as const, appRoot: "app/form", paths: ["app/form/index.html", "app/form/app.json"] }));
     await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "createForm", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", revision: 1, revisionSha256: "a".repeat(64), tableId: "00000000-0000-4000-8000-000000000001", createOperationId: "00000000-0000-4000-8000-000000000002", appRoot: "form", fieldIds: ["00000000-0000-4000-8000-000000000003"] } })).resolves.toEqual({ kind: "form-created", appRoot: "form", paths: ["form/index.html", "form/app.json"] });
     expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ appRoot: "app/form" }), { depth: 0 });

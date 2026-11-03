@@ -3092,7 +3092,7 @@ export function DesktopWorkspaceShell(props: {
   });
   const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
-  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
+  const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, datasetAddressStatus: dataset.datasetAddressStatus, datasetPaths: dataset.datasetPaths, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
   // The Collections History can name, with their operations' labels, each
   // opening its History on its first table.
   const historyCollections = useMemo<HistoryCollections>(() => new Map(datasets.map(dataset => {

@@ -41,10 +41,19 @@ export type HomeRowModel = {
 export type DataCollection = {
   datasetId: string;
   datasetPath: string | null;
+  /** Why a Collection with no `datasetPath` can't open, and the dataset.json files to fix. */
+  datasetAddressStatus?: "available" | "missing" | "ambiguous" | "unreadable";
+  datasetPaths?: readonly string[];
   tableId: string;
   name: string;
   archived?: boolean;
 };
+
+const UNAVAILABLE_WORDS = {
+  ambiguous: "Several dataset.json files name this Collection. Keep one and remove the others.",
+  unreadable: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
+  missing: "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
+} as const;
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -253,17 +262,22 @@ export function recentRows(recent: readonly string[], lookup: HomeLookup): HomeR
 // them, then folder Collections by name.
 export function collectionRows(data: readonly DataCollection[], collectionFolders: ReadonlySet<string>): HomeRowModel[] {
   const base = { section: "collections" as const, parentKey: "collections", depth: 1, folder: false, expanded: false };
-  const rows: HomeRowModel[] = data.map((entry) => ({
-    ...base,
-    key: `collections:${entry.datasetId}:${entry.tableId}`,
-    label: entry.name,
-    glyph: { glyph: "collection", icon: undefined },
-    open: entry.datasetPath === null ? null : transactionalCollectionTabPath(entry.datasetPath, entry.tableId),
-    menu: entry.datasetPath === null ? null : datasetMenu(entry.datasetPath),
-    ...(entry.datasetPath === null
-      ? { detail: "Source unavailable", unavailable: "Collection source unavailable. Restore dataset.json from History or remove duplicate copies." }
-      : entry.archived ? { detail: "Archived" } : {}),
-  }));
+  const rows: HomeRowModel[] = data.map((entry) => {
+    // A Collection that can't open still offers the folder of the file to fix.
+    const source = entry.datasetPath ?? entry.datasetPaths?.[0] ?? null;
+    const status = entry.datasetAddressStatus === "ambiguous" || entry.datasetAddressStatus === "unreadable" ? entry.datasetAddressStatus : "missing";
+    return {
+      ...base,
+      key: `collections:${entry.datasetId}:${entry.tableId}`,
+      label: entry.name,
+      glyph: { glyph: "collection", icon: undefined },
+      open: entry.datasetPath === null ? null : transactionalCollectionTabPath(entry.datasetPath, entry.tableId),
+      menu: source === null ? null : datasetMenu(source),
+      ...(entry.datasetPath === null
+        ? { detail: "Source unavailable", unavailable: UNAVAILABLE_WORDS[status] }
+        : entry.archived ? { detail: "Archived" } : {}),
+    };
+  });
   const folders = [...collectionFolders].sort((a, b) => collator.compare(basenameOf(a), basenameOf(b)));
   for (const folder of folders) rows.push(collectionRow({ ...base, key: `collections:${folder}/` }, folder));
   return rows;
