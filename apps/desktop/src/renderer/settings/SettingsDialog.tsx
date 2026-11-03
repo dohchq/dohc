@@ -114,10 +114,11 @@ function StatusPill(props: { state: SettingsSaveState }) {
 // A user settings write that closing Settings cut off. User settings belong to
 // every workspace, so its failure goes to the notices of the workspace open
 // when it fails, and its Try again sends the same write. A save sends only its
-// change, which main writes onto the file as it is then.
-function reportCutOffWrite(send: () => Promise<DesktopUserSettingsResult>, words: (cause: unknown) => string, cause: unknown): void {
+// change, which main writes onto the file as it is then. Main's broadcast of
+// the file brings the look, so an answer that arrives late can't undo a newer one.
+function reportCutOffWrite(send: () => Promise<unknown>, words: (cause: unknown) => string, cause: unknown): void {
   reportInstallationFailure({ message: words(cause), cause, serverUrl: null, retry: () => {
-    void send().then((result) => applyLookSettings(result.settings), (next: unknown) => reportCutOffWrite(send, words, next));
+    void send().catch((next: unknown) => reportCutOffWrite(send, words, next));
     return true;
   } });
 }

@@ -449,6 +449,11 @@ describe("SettingsDialog", () => {
       expect(bridge.setUserSettings).not.toHaveBeenCalled();
     });
 
+    // Applies a look with this accent, and answers the accent the window shows.
+    const look = (accentColor: string) => {
+      applyLookSettings({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor } });
+      return document.documentElement.style.getPropertyValue("--dohc-accent");
+    };
     // Settings that unmounts once it closes, as the shell's does, beside the
     // installation notices a write it cut off reports to.
     const renderClosable = (initialSection: "general" | "appearance" | "advanced" | "agents") => {
@@ -491,8 +496,15 @@ describe("SettingsDialog", () => {
       const [{ cause: reported, retry }] = report.mock.lastCall!;
       expect(reported).toBe(cause);
       bridge.setUserSettings.mockClear();
+      const resent = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+      bridge.setUserSettings.mockImplementationOnce(() => resent.promise);
       await act(async () => expect(retry?.()).toBe(true));
       expect(bridge.setUserSettings).toHaveBeenCalledExactlyOnceWith(change);
+      // A look applied while Try again waits stays. Main's broadcast brings the file's.
+      const newer = look("#884422");
+      await act(async () => resent.resolve({ settings: DEFAULT_USER_SETTINGS, source: "stored" }));
+      expect(document.documentElement.style.getPropertyValue("--dohc-accent")).toBe(newer);
+      applyLookSettings(DEFAULT_USER_SETTINGS);
     });
 
     it.each([
@@ -500,10 +512,6 @@ describe("SettingsDialog", () => {
       ["leaves a newer look in place", true],
     ] as const)("%s when a save that closing Settings cut off fails", async (_, newerLook) => {
       const user = userEvent.setup();
-      const look = (accentColor: string) => {
-        applyLookSettings({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor } });
-        return document.documentElement.style.getPropertyValue("--dohc-accent");
-      };
       const fileAccent = look("#224488");
       applyLookSettings(DEFAULT_USER_SETTINGS);
       renderClosable("general");
