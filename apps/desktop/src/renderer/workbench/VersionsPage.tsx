@@ -376,7 +376,9 @@ function VersionRow(props: {
         type="button"
         data-testid="versions-page-clashes"
         // Named by its words, so voice control finds it by what it shows. The
-        // review it opens lists every open conflict, not only this version's.
+        // title is its tooltip and its description. The review it opens lists
+        // every open clash, not only this version's.
+        title="Open the clashes"
         onClick={props.onReviewConflicts}
         className="cursor-pointer text-warning hover:underline"
       >

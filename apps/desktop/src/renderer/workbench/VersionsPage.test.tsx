@@ -153,7 +153,7 @@ describe("VersionsPage", () => {
     render(<Page onReviewConflicts={onReviewConflicts} />);
     const button = await waitFor(() => within(row("draft")).getByTestId("versions-page-clashes"));
     expect(button.textContent).toBe("2 to decide");
-    expect(within(row("draft")).getByRole("button", { name: "2 to decide" })).toBe(button);
+    expect(within(row("draft")).getByRole("button", { name: "2 to decide", description: "Open the clashes" })).toBe(button);
     expect(within(row("fresh")).getByTestId("versions-page-clashes").textContent).toBe("1 to decide");
     expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-1", afterConflictId: "c2" });
     await user.click(button);
