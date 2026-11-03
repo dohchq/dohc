@@ -1000,13 +1000,16 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       // A claim from before a lost response can name an agent turned off since.
       if (!agent) throw new Error("this agent is off or no longer set up");
+      const profile = launchProfile(agent.launch);
+      // dohc can't hold a person's own command to the reply tool, so an
+      // automation starts only Claude Code or Codex.
+      if (!profile && claim.chainDepth > 0) throw new Error("an automation can start only an agent that uses Claude Code or Codex");
       await options.setRunAttribution(workspace, {
         agentId: agent.id,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
         dispatch: "run",
       });
-      const profile = launchProfile(agent.launch);
       // Only people's own messages, which only the owner's send records,
       // start a run at depth 0. A run an automation started gets the reply
       // tool and can't write.
