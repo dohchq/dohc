@@ -9,13 +9,13 @@ import { collectionTabPath, parseTab, siteTabPath, transactionalCollectionTabPat
 // a page's name is its file name, which dohc takes from the title a person
 // gave it when the page was made.
 
-export type HomeSectionId = "pinned" | "recent" | "pages" | "collections" | "apps" | "other";
+export type HomeSectionId = "pinned" | "pages" | "collections" | "apps" | "other";
 
 // What a row draws before its name: a tab's mark, or a folder.
 export type HomeGlyph = TabMark | { glyph: "folder"; open: boolean };
 
 export type HomeRowModel = {
-  // Unique across Home. The same page can be pinned, recent and in Pages.
+  // Unique across Home. The same page can be pinned and in Pages.
   key: string;
   section: HomeSectionId;
   // The parent row's key: the section's, or the folder's in Pages.
@@ -169,7 +169,7 @@ export function otherRows(others: readonly WorkspaceFileEntry[], files: Readonly
   }));
 }
 
-// What Home knows about each thing a pin or a recent open can name.
+// What Home knows about each thing a pin can name.
 export type HomeLookup = {
   files: ReadonlyMap<string, WorkspaceFileEntry>;
   folders: ReadonlySet<string>;
@@ -179,10 +179,10 @@ export type HomeLookup = {
   dataCollections: readonly DataCollection[];
 };
 
-// The row a workspace path or tab path stands for in Pinned or Recent, or
-// null when the workspace no longer has it.
-function namedRow(section: "pinned" | "recent", path: string, lookup: HomeLookup): HomeRowModel | null {
-  const base = { key: `${section}:${path}`, section, parentKey: section, depth: 1, folder: false, expanded: false };
+// The row a workspace path or tab path stands for in Pinned, or null when the
+// workspace no longer has it.
+function pinnedRow(path: string, lookup: HomeLookup): HomeRowModel | null {
+  const base = { key: `pinned:${path}`, section: "pinned" as const, parentKey: "pinned", depth: 1, folder: false, expanded: false };
   const tab = parseTab(path);
   if (tab.kind === "site") {
     const root = tab.siteRoot;
@@ -237,20 +237,8 @@ export function pinnedRows(pinnedApps: readonly string[], pinned: readonly strin
   for (const path of [...pinnedApps, ...pinned]) {
     if (seen.has(path)) continue;
     seen.add(path);
-    const row = namedRow("pinned", path, lookup);
+    const row = pinnedRow(path, lookup);
     if (row) out.push(row);
-  }
-  return out;
-}
-
-export const RECENT_SHOWN = 5;
-
-export function recentRows(recent: readonly string[], lookup: HomeLookup): HomeRowModel[] {
-  const out: HomeRowModel[] = [];
-  for (const path of recent) {
-    const row = namedRow("recent", path, lookup);
-    if (row) out.push(row);
-    if (out.length === RECENT_SHOWN) break;
   }
   return out;
 }

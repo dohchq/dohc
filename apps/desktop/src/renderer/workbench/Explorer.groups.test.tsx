@@ -14,7 +14,6 @@ function explorerProps(
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       { path: "one.md", kind: "file" },
       { path: "two.md", kind: "file" },
