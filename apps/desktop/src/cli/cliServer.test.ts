@@ -1713,7 +1713,7 @@ describe("CLI socket server", () => {
     expect(opening.messages).toMatchObject([{
       threadId: startedThread.id,
       authorKind: "agent",
-      authorDisplayName: "Nova",
+      authorDisplayName: "Agent",
       authorOwnerDisplayName: "Sam",
       body: "Opening through the engine channel id",
     }]);
@@ -3312,7 +3312,7 @@ describe("CLI socket server", () => {
     expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
     // An agent that gave no name carries the agent name from the person's settings.
     await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
-      .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Nova" } }]);
+      .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Agent" } }]);
 
     for (const [path, reason] of [
       ["untracked.md", "dohc does not track untracked.md yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file."],
@@ -4091,7 +4091,7 @@ describe("CLI socket server", () => {
       {
         id: replied.messageId,
         kind: "agent",
-        displayName: "Nova",
+        displayName: "Agent",
         body: "Agent response from the terminal",
         parentMessageId: opened.messageId,
         decisionState: undefined,
