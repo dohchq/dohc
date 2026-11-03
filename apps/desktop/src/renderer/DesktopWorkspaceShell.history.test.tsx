@@ -503,12 +503,13 @@ describe("history page", () => {
       state.queued.push("updating", "updating", "updating", "updating", "updating");
       act(() => bridge.emitWorkspaceActivity());
       await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
-      const toast = await screen.findByTestId("workspace-shell-error");
-      expect(toast.textContent).toContain("dohc could not check whether open files changed.");
-      expect(toast.textContent).toContain("Recent changes are still being added to History.");
+      // The paused capture's toast can be the newest, so the failed read is
+      // checked in Notices.
+      await screen.findByTestId("workspace-shell-error");
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       const notices = screen.getByRole("dialog", { name: "Notices" });
       expect(notices.textContent).toContain("dohc could not check whether open files changed.");
+      expect(notices.textContent).toContain("Recent changes are still being added to History.");
       // The paused capture files its own row with its own Try again.
       const paused = within(notices).getByTestId("notice-history-capture-failed");
       const retry = within(notices).getAllByRole("button", { name: "Try again" }).find(button => !paused.contains(button));
