@@ -170,7 +170,6 @@ export function DemoSidebar(props: {
           mode={explorerMode}
           onModeChange={setExplorerMode}
           listed
-          recentFiles={props.openTabs}
           shareView={null}
           files={files}
           folders={folders}
