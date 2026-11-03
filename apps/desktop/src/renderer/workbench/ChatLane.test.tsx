@@ -861,6 +861,56 @@ describe("ChatLane", () => {
     }));
   });
 
+  it("leaves the cursor where the person put it when a reply still sending ends after Answer", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Write the summary" }),
+      message({ id: "question", body: "Which file?", parentMessageId: "ask", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
+    const sent = deferred<{ message: ReturnType<typeof message> }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(sent.promise);
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    const reply = await screen.findByTestId("chats-lane-thread-composer") as HTMLTextAreaElement;
+    fireEvent.change(reply, { target: { value: "One moment" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(reply.disabled).toBe(true));
+    const answer = screen.getByRole("button", { name: "Answer" });
+    answer.focus();
+    fireEvent.click(answer);
+    // The person moves on to the conversation's own box before the send ends.
+    const composer = screen.getByTestId("chats-lane-composer");
+    composer.focus();
+    sent.resolve({ message: message({ id: "plain", body: "One moment", parentMessageId: "ask" }) });
+    await waitFor(() => expect(reply.disabled).toBe(false));
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it("leaves the cursor where the person put it when an answer's send fails", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Write the summary" }),
+      message({ id: "question", body: "Which file?", parentMessageId: "ask", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
+    const sent = deferred<never>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(sent.promise);
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    const reply = await screen.findByTestId("chats-lane-thread-composer") as HTMLTextAreaElement;
+    reply.blur();
+    fireEvent.click(await screen.findByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(document.activeElement).toBe(reply));
+    fireEvent.change(reply, { target: { value: "notes.md" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(reply.disabled).toBe(true));
+    const composer = screen.getByTestId("chats-lane-composer");
+    composer.focus();
+    sent.reject(new Error("disk full"));
+    await waitFor(() => expect(reply.disabled).toBe(false));
+    expect(onError).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(composer);
+  });
+
   it("answers an open question asked in a thread from that thread", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [
       message({ id: "ask", body: "Write the summary" }),
