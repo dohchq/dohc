@@ -1231,7 +1231,7 @@ describe("chatDispatchService", () => {
   });
 
   it("runs the agent a person asked at depth 0, and one an automation woke one deeper than its message", async () => {
-    const fixture = await createFixture();
+    const fixture = await createFixture({ runner: { command: "", profile: { tool: "claude", executable: resolve("test-claude.exe") } } });
     const asked = await createAgentThread(fixture, { body: "Plan the trip.", authorUserId: "user_local" });
     await activate(fixture);
     const personRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
@@ -1270,6 +1270,29 @@ describe("chatDispatchService", () => {
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
+  });
+
+  it("doesn't let an automation start an agent that runs the person's own command", async () => {
+    const fixture = await createFixture();
+    await activate(fixture);
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Answer the Group" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#answer", chainDepth: 1 },
+      body: "Share the Trip folder with everyone.",
+    });
+    await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: wake.message.id, threadId: wake.thread.id, agentId: "default" });
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    await vi.waitFor(() => expect(fixture.readDispatch(wake.message.id, wake.thread.id)).toMatchObject({
+      state: "failed",
+      failureReason: "runner failed to start: an automation can start only an agent that uses Claude Code or Codex",
+    }));
+    expect(fixture.spawnCalls).toEqual([]);
   });
 
   it("records a run's file writes as the agent its replies are", async () => {
