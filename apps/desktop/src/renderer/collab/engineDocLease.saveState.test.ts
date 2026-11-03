@@ -1019,6 +1019,21 @@ it("applies remote edits on a winning lineage while the note exists", async () =
   expect(retained.boundDoc().getText("plainText").toString()).toBe("winner+remote");
 });
 
+it("takes a head after a deletion without its edit, so a pending check settles", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+
+  harness.emitHead({ sha256: "c".repeat(64) });
+
+  expect(boundOutcome().headSha256).toBe("c".repeat(64));
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!");
+});
+
 it("stores a deleted scene as portable Excalidraw JSON", async () => {
   harness = harnessBridge("scene");
   vi.stubGlobal("dohcDesktop", harness.api);

@@ -180,6 +180,8 @@ function nextSessionId(): string {
   return `eyd-${Date.now().toString(36)}-${engineDocSessionCounter.toString(36)}`;
 }
 
+const EMPTY_YJS_UPDATE = new Uint8Array([0, 0]);
+
 function makeTransport(
   workspaceId: string,
   path: string,
@@ -190,7 +192,7 @@ function makeTransport(
   localSeq: { current: number },
   writesRefused: { current: boolean },
   // Main reported the path gone. A remote edit after that would change the
-  // text set aside at the deletion, so it is dropped.
+  // text set aside at the deletion, so only its head is kept.
   documentGone: () => boolean,
   kind: LiveDocumentKind,
   allowLossySourceSha256?: string,
@@ -269,8 +271,13 @@ function makeTransport(
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
-        if (event.sessionId !== sessionId || documentGone()) return;
-        listener(event.update, event.lineageGeneration, event.head);
+        if (event.sessionId !== sessionId) return;
+        if (!documentGone()) {
+          listener(event.update, event.lineageGeneration, event.head);
+        } else if (event.head) {
+          // The head alone still arrives, so a check waiting on it settles.
+          listener(EMPTY_YJS_UPDATE, event.lineageGeneration, event.head);
+        }
       });
     },
     onLineageReplacement(listener) {
