@@ -231,7 +231,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's Copy.
 - The block opens without animating its height. Only the chevron turns.
 - A full-height state uses the same **Details**, in place of **Technical details**.
-- A crash notice keeps **Send report** before **Details** when the build has a report server. Both show the same report text.
+- A crash notice keeps **Send report** when the build has a report server. On a row it comes before **Details**. On a toast it stays with the other actions, and Details sits under the text. Both show the same report text.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
