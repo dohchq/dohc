@@ -1,5 +1,5 @@
 import type { ChatDispatchFailedRun, ChatDispatchNotice, RunnerSelfTestResult } from "../ipc/bridgeContract";
-import { AGENTS_RESTRICTED_MESSAGE, launchCommand, launchProfile, type AgentLaunchProfile } from "./agentToolCatalog";
+import { AGENTS_RESTRICTED_MESSAGE, CLAUDE_MIN_VERSION, launchCommand, launchProfile, supportsAgentProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { cutText } from "@dohc/automation-executor/automation-chat";
 import type { PostNoticeInput } from "../notices/noticeStore";
@@ -187,6 +187,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // WorkspaceRestrictedError in Restricted Mode; the answer is a synchronous
   // check that trust still holds, for the spawn itself.
   assertMayStartAgent(workspace: ChatDispatchWorkspace): Promise<() => void>;
+  // The version an agent's tool reports to --version, or null.
+  agentToolVersion(executable: string): Promise<string | null>;
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
@@ -1004,6 +1006,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       // dohc can't hold a person's own command to the reply tool, so an
       // automation starts only Claude Code or Codex.
       if (!profile && claim.chainDepth > 0) throw new Error("an automation can start only an agent that uses Claude Code or Codex");
+      if (profile?.tool === "claude" && !supportsAgentProfile("claude", await options.agentToolVersion(profile.executable))) {
+        throw new Error(`update Claude Code to ${CLAUDE_MIN_VERSION} or later to use this agent`);
+      }
       await options.setRunAttribution(workspace, {
         agentId: agent.id,
         agentRunId: claim.run.runId,

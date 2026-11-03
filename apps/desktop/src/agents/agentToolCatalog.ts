@@ -32,13 +32,19 @@ export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 // notice and the band in Chats.
 export const AGENTS_RESTRICTED_MESSAGE = "In Restricted Mode, dohc does not start agents in this workspace.";
 
+// From this version Claude Code holds every built-in tool to --tools, which
+// keeps a reply-only run from writing. dohc checks it in Settings and again
+// before each run.
+export const CLAUDE_MIN_VERSION = "2.1.295";
+
 export function supportsAgentProfile(tool: AgentToolId, version: string | null): boolean {
   if (tool === "codex") return version !== null;
   if (tool !== "claude" || !version) return false;
   const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(version);
   if (!match) return false;
-  const [, major, minor, patch] = match.map(Number);
-  return major! > 2 || (major === 2 && (minor! > 1 || (minor === 1 && patch! >= 259)));
+  const [major, minor, patch] = match.slice(1).map(Number) as [number, number, number];
+  const [minMajor, minMinor, minPatch] = CLAUDE_MIN_VERSION.split(".").map(Number) as [number, number, number];
+  return major !== minMajor ? major > minMajor : minor !== minMinor ? minor > minMinor : patch >= minPatch;
 }
 
 export const AGENT_TOOLS = [

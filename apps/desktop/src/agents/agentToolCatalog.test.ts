@@ -3,11 +3,11 @@ import { AgentLaunch, AgentLaunchProfile, agentProfileArguments, launchCommand, 
 import { tokenizeRunnerCommand } from "./chatRunnerProcess";
 
 describe("agent launch profiles", () => {
-  it("requires Claude's noninteractive permission flag version", () => {
-    for (const version of [null, "2.1.258", "2.0.999", "1.9.999", "2.1.259-beta", "unknown"]) {
+  it("requires the Claude Code that holds every built-in tool to --tools", () => {
+    for (const version of [null, "2.1.294", "2.1.259", "2.0.999", "1.9.999", "2.1.295-beta", "unknown"]) {
       expect(supportsAgentProfile("claude", version)).toBe(false);
     }
-    for (const version of ["2.1.259", "2.1.278", "2.2.0", "3.0.0"]) {
+    for (const version of ["2.1.295", "2.1.317", "2.2.0", "3.0.0"]) {
       expect(supportsAgentProfile("claude", version)).toBe(true);
     }
     expect(supportsAgentProfile("codex", "0.155.1")).toBe(true);

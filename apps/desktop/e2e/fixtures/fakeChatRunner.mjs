@@ -13,7 +13,7 @@ const mode = process.argv[2];
 const profileTool = mode?.startsWith("profile-") ? mode.slice("profile-".length) : null;
 // What each fake tool answers to detection's version and sign-in checks.
 const PROBE_ANSWERS = {
-  claude: { version: "2.1.278 (Claude Code)", auth: '{"loggedIn":true}' },
+  claude: { version: "2.1.317 (Claude Code)", auth: '{"loggedIn":true}' },
   codex: { version: "codex-cli 0.155.1", auth: "Logged in using ChatGPT" },
   opencode: { version: "1.18.31", auth: "0 credentials" },
   cursor: { version: "2026.10.01-a1b2c3d", auth: '{"isAuthenticated":false}' },
