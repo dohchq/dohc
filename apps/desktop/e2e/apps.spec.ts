@@ -203,7 +203,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
       await expect(publication.getByTestId("app-publication-source-paths")).toContainText(`${root}/main.ts`);
       await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
       await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
-      await publication.getByRole("button", { name: "Close publication", exact: true }).click();
+      await publication.getByRole("button", { name: "Close", exact: true }).click();
       const guest = await shared!.browser.newPage();
       guest.on("pageerror", error => shared!.failures.push(error.message));
       await guest.goto(linkUrl);
@@ -321,7 +321,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     await page.screenshot({ path: info.outputPath("static-app-review.png") });
     await publication.getByRole("button", { name: "Publish this revision", exact: true }).click();
     await expect(publication.getByRole("status").filter({ hasText: "App published on the selected link." })).toBeVisible();
-    await publication.getByRole("button", { name: "Close publication", exact: true }).click();
+    await publication.getByRole("button", { name: "Close", exact: true }).click();
 
     const guest = await shared.browser.newPage();
     guest.on("pageerror", error => shared!.failures.push(error.message));

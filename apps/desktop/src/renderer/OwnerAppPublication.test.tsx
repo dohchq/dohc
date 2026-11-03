@@ -224,7 +224,7 @@ describe("owner app publication", () => {
     const view=render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);await open();
     fireEvent.click(screen.getByRole("button",{name:`Revoke collection access ${published.publicationId}`}));
     fireEvent.click(screen.getByRole("button",{name:"Revoke access"}));
-    expect((screen.getByRole("button",{name:"Close publication"}) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button",{name:"Close"}) as HTMLButtonElement).disabled).toBe(true);
     view.rerender(<OwnerAppPublication workspaceId="ws-other" appRoot="other" />);await open();
     await act(async()=>pending.resolve({kind:"collectionRevoked",publicationId:published.publicationId,authorityRevision:8}));
     expect(screen.queryByText("App collection access revoked. Prepare the app again to review and restore access.")).toBeNull();
@@ -466,14 +466,14 @@ describe("owner app publication", () => {
       fireEvent.click(button); fireEvent.click(screen.getByRole("button", {name: "Remove responses"}));
     }
     const blocked = () => {
-      for (const name of ["Close publication", "Reload publications", "Prepare app", "Share app folder", "Cancel"]) expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
+      for (const name of ["Close", "Reload publications", "Prepare app", "Share app folder", "Cancel"]) expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
       fireEvent.keyDown(document, {key:"Escape"}); expect(screen.getByRole("dialog")).toBeTruthy();
     };
     blocked();
     await act(async () => first.resolve({action:"undo",items:[{acceptanceId:"grant-1",status:"deleted",momentId:"delete"}],nextCursor:null}));
     blocked();
     await act(async () => second.resolve({action:"undo",items:[{acceptanceId:"grant-2",status:"conflict"}],nextCursor:null}));
-    expect((screen.getByRole("button", {name:"Close publication"}) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", {name:"Close"}) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed.")).toBeTruthy();
     expect(screen.getByText("0 removed. 0 already absent. 1 conflicts kept. 0 failed.")).toBeTruthy();
   });
@@ -484,7 +484,7 @@ describe("owner app publication", () => {
     api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listed", publications: [{ publicationId: "c".repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, datasetCapability: null, collectionCapability: approvedCollection, linkCurrent: true, manifestUnavailable: false }], nextCursor: null } : answer(request));
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
     fireEvent.click(screen.getByRole("button", { name: "Load responses" }));
-    expect((screen.getByRole("button", { name: "Close publication" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Close" }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     await act(async () => pending.resolve({ action: "list", acceptances: [], nextAcceptanceId: null }));
@@ -543,7 +543,7 @@ describe("owner app publication", () => {
     await act(async () => { (reportError.mock.calls[0]![2] as () => void)(); });
     await waitFor(() => expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "prepare")).toHaveLength(2));
     // Once the dialog is closed, Try again opens it again instead of doing nothing.
-    await userEvent.setup().click(screen.getByRole("button", { name: "Close publication" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Close" }));
     expect(screen.queryByTestId("app-publication-dialog")).toBeNull();
     await act(async () => { (reportError.mock.calls[1]![2] as () => void)(); });
     expect(await screen.findByTestId("app-publication-dialog")).toBeTruthy();
@@ -944,7 +944,7 @@ describe("owner app publication", () => {
       const user = userEvent.setup();
       expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2, name: "Trip planner" }));
       await user.tab();
-      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close publication" }));
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
       await user.tab();
       expect(document.activeElement).toBe(screen.getByRole("button", { name: "2 files" }));
       await user.tab();

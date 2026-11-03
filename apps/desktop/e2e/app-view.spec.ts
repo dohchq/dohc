@@ -264,7 +264,7 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
       await shown(review);
       await overlayAboveApp(page, review);
       await page.screenshot({ path: testInfo.outputPath(`app-review-${theme}.png`) });
-      await review.getByRole("button", { name: "Close publication" }).click();
+      await review.getByRole("button", { name: "Close", exact: true }).click();
       await hidden(review);
       await ready(page);
       await clickApp(electronApp, guestId, "#counter");
