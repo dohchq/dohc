@@ -62,6 +62,8 @@ export function CollectionChangeCard(props: {
 }) {
   const { workspaceId, message, path } = props;
   const shownKey = `${workspaceId}\n${message.id}\n${path}`;
+  // A change file the applying reply attached names who made each part up to that reply.
+  const since = props.appliedBy?.attachments?.some(attachment => attachment.pathHint === path) ? props.appliedBy.createdAtMs : message.createdAtMs;
   // The attached file names the Collection, so the card's frame and heading draw once it answers.
   const [proposal, setProposal] = useState<CollectionChangeProposal | null>(() => shownChanges.get(shownKey)?.proposal ?? null);
   const [change, setChange] = useState<CollectionChange | null>(() => shownChanges.get(shownKey) ?? null);
@@ -87,14 +89,14 @@ export function CollectionChangeCard(props: {
       setProposal(read);
       if (read === null) { remember(shownKey, null); setChange(null); return; }
       try {
-        const loaded = await loadCollectionChange(api, { workspaceId, proposal: read, postedAtMs: message.createdAtMs });
+        const loaded = await loadCollectionChange(api, { workspaceId, proposal: read, postedAtMs: since });
         if (!current) return;
         remember(shownKey, loaded);
         setChange(loaded);
       } catch (error) { if (current) setLoadFailure(ipcErrorMessage(error, "dohc couldn't read this change.")); }
     })();
     return () => { current = false; };
-  }, [workspaceId, path, shownKey, message.createdAtMs, reload, props.appliedBy?.id, props.undoneBy?.id]);
+  }, [workspaceId, path, shownKey, since, reload, props.appliedBy?.id, props.undoneBy?.id]);
 
   // A failure stays on the card while it shows, and goes to the shell's toasts once the chat closed.
   const fail = (failure: { words: string; retry: boolean }, error: unknown) => {

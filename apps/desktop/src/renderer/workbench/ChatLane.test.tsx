@@ -9,7 +9,7 @@ import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
-import { ask, proposalPath, volunteers, world } from "../collections/collectionChangeFlow.testHarness";
+import { ask, asked, id, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
 
 vi.mock("./chatFileMentions", { spy: true });
 
@@ -705,8 +705,11 @@ describe("ChatLane", () => {
   it("attaches the change a review applied to its reply, and the asking message shows that change applied", async () => {
     const place = world();
     ask(place);
-    // Ada edits the schema after the message, so the review applies another change than the one asked.
-    place.files[volunteers.schemaPath] = "CREATE TABLE volunteers (id TEXT PRIMARY KEY, due TEXT);";
+    // Ada adds a field after the message, so the review applies another change than the one asked.
+    const phone = structuredClone(asked);
+    phone.tables[0]!.fields.push({ fieldId: id(10), name: "Phone", sqlColumn: "phone", type: "text", required: false, unique: false });
+    place.files["volunteers/dataset.json"] = JSON.stringify(phone, null, 2);
+    place.moments.push(place.moment(5, "volunteers/dataset.json", 3_500, { personAuthorName: "Ada" }, JSON.stringify(phone)));
     vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, ...place.api });
     const attachment = (messageId: string, pathHint: string, createdAtMs: number) =>
       ({ attachmentId: `attachment-${messageId}`, threadId: "thread-1", messageId, targetKind: "file" as const, pathHint, createdAtMs });
@@ -734,6 +737,8 @@ describe("ChatLane", () => {
     expect(recorded).not.toBe(proposalPath);
     expect(JSON.parse(place.files[recorded]!).revisionSha256).toBe(place.head().revisionSha256);
     expect(await screen.findByText("Applied")).toBeTruthy();
+    // Ada's part of the applied change names her.
+    expect(within(screen.getByText("Added the field Phone").closest("li")!).getByText(/^Ada · /u)).toBeTruthy();
     expect(screen.queryByTestId("chats-lane-change-edited")).toBeNull();
     expect(screen.queryByText("Undone")).toBeNull();
     expect(onError).not.toHaveBeenCalled();
