@@ -36,9 +36,19 @@ export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platfo
       ...(platform === "win32" ? [] : [path.join(system, "managed_config.toml")]),
     ],
     managedPreferences: platform === "darwin"
-      ? ["", user ?? userInfo().username].map((folder) => path.join("/Library/Managed Preferences", folder, "com.openai.codex.plist"))
+      ? ["", user ?? shortName()].flatMap((folder) => folder === undefined ? [] : [path.join("/Library/Managed Preferences", folder, "com.openai.codex.plist")])
       : [],
   };
+}
+
+// Every Codex run reads these files, so an account dohc can't look up skips
+// only the person's managed preferences.
+function shortName(): string | undefined {
+  try {
+    return userInfo().username;
+  } catch {
+    return undefined;
+  }
 }
 
 // Null when a file exists that dohc can't read or parse. Then dohc adds
