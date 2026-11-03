@@ -3,13 +3,14 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VersionMenu } from "./WorkspaceVersions";
+import { VersionMenu, mergeFilesWait } from "./WorkspaceVersions";
 
 const bridgeMock = {
   listWorkspaceVersions: vi.fn(),
   switchWorkspaceVersion: vi.fn(),
   createWorkspaceVersion: vi.fn(),
   mergeWorkspaceVersion: vi.fn(),
+  listWorkspaceVersionConflicts: vi.fn(),
 };
 
 const MAIN = { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false };
@@ -44,6 +45,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onWorkspaceStateChanged={onWorkspaceStateChanged}
         onError={onError}
         clearError={() => {}}
+        onMergeNotice={() => {}}
         onConflictError={() => {}}
       />,
     );
@@ -82,6 +84,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         onWorkspaceStateChanged={() => {}}
         onError={onError}
         clearError={() => {}}
+        onMergeNotice={() => {}}
         onConflictError={() => {}}
       />,
     );
@@ -106,6 +109,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
           onWorkspaceStateChanged={() => {}}
           onError={() => {}}
           clearError={() => {}}
+          onMergeNotice={() => {}}
           onConflictError={() => {}}
           refreshKey={refreshKey}
         />
@@ -128,6 +132,7 @@ function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVers
     onWorkspaceStateChanged: vi.fn(),
     onError: vi.fn<ComponentProps<typeof VersionMenu>["onError"]>(),
     clearError: vi.fn<ComponentProps<typeof VersionMenu>["clearError"]>(),
+    onMergeNotice: vi.fn<ComponentProps<typeof VersionMenu>["onMergeNotice"]>(),
   };
   render(
     <VersionMenu
@@ -318,8 +323,7 @@ describe("VersionMenu", () => {
   });
 
   it("reports a merge that fails after the menu is gone as a notice with no Try again", async () => {
-    let failMerge!: (error: Error) => void;
-    bridgeMock.mergeWorkspaceVersion.mockReturnValueOnce(new Promise((_resolve, reject) => { failMerge = reject; }));
+    const answer = deferredMerge();
     const user = userEvent.setup();
     const props = renderMenu();
     await confirmMerge(user);
@@ -327,9 +331,139 @@ describe("VersionMenu", () => {
     cleanup();
     const failure = new Error("The engine stopped.");
     await act(async () => {
-      failMerge(failure);
+      answer.reject(failure);
       await Promise.resolve();
     });
-    expect(props.onError).toHaveBeenCalledExactlyOnceWith("The engine stopped.", failure, undefined, "version-merge:ws-1:draft");
+    expect(props.onMergeNotice).toHaveBeenCalledExactlyOnceWith({
+      identity: "version-merge:ws-1:draft",
+      title: "dohc could not merge Draft into Main",
+      message: "Merge again once History is back.",
+      cause: failure,
+    });
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
+  function deferredMerge() {
+    let resolve!: (result: unknown) => void;
+    let reject!: (error: unknown) => void;
+    bridgeMock.mergeWorkspaceVersion.mockReturnValueOnce(new Promise((ok, fail) => { resolve = ok; reject = fail; }));
+    return { resolve, reject };
+  }
+
+  // Starts a merge, then closes its dialog the way `close` says, while the merge runs.
+  async function closeWhileMerging(user: ReturnType<typeof userEvent.setup>, close: "button" | "escape") {
+    await confirmMerge(user);
+    const button = screen.getByTestId<HTMLButtonElement>("version-merge-cancel");
+    expect(button.textContent).toBe("Close");
+    expect(document.activeElement).toBe(button);
+    if (close === "button") await user.click(button);
+    else await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("version-merge-dialog")).toBeNull();
+  }
+
+  const conflict = {
+    conflictId: "c-1", path: "notes.md", sourceVersionId: "draft", targetVersionId: "main", origin: "merge" as const,
+    contentKind: "text" as const, currentText: "a", incomingText: "b", baseText: "",
+  };
+
+  it.each([
+    ["merged files", { ...merged, mergedFileCount: 4 }, { tone: "success", message: "Merged 4 files from Draft into Main" }],
+    ["nothing to merge", { ...merged, mergedFileCount: 0 }, { tone: "success", message: "Main already has everything in Draft" }],
+    ["files all decided elsewhere", { ...merged, conflictCount: 2 }, { tone: "success", message: "Merged Draft into Main" }],
+    ["protected files", { ...merged, replacedProtectedPaths: [".env"] }, {
+      tone: "success", title: "Merged 1 file from Draft into Main", message: "One protected file took Draft's copy.",
+      details: [["Protected file", ".env", 4]],
+    }],
+    ["files to decide", { ...merged, conflictCount: 2, conflicts: [conflict], nextAfterConflictId: "c-1" }, {
+      tone: "warning", title: "Merged Draft into Main", message: "2 files have two copies.", decideFrom: "draft",
+    }],
+  ])("keeps merging when the dialog closes, then reports %s as a notice", async (_name, result, notice) => {
+    const answer = deferredMerge();
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await closeWhileMerging(user, "button");
+    await act(async () => {
+      answer.resolve(result);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(props.onMergeNotice).toHaveBeenCalledExactlyOnceWith({ identity: "version-merge:ws-1:draft", ...notice }));
+    expect(props.onWorkspaceStateChanged).toHaveBeenCalled();
+    expect(props.clearError).toHaveBeenCalledWith("version-merge:ws-1:draft");
+  });
+
+  it("keeps merging when Escape closes the dialog, and its failure's Try again opens the dialog merging again", async () => {
+    const answer = deferredMerge();
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await closeWhileMerging(user, "escape");
+    const failure = acrossIpc("desktop:merge-workspace-version", "Error: The engine stopped.");
+    await act(async () => {
+      answer.reject(failure);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(props.onMergeNotice).toHaveBeenCalledOnce());
+    const notice = props.onMergeNotice.mock.calls[0]![0];
+    expect(notice).toEqual({
+      identity: "version-merge:ws-1:draft",
+      title: "dohc could not merge Draft into Main",
+      message: "The engine stopped.",
+      cause: failure,
+      retry: expect.any(Function),
+    });
+
+    const again = deferredMerge();
+    act(() => void notice.retry!());
+    expect(screen.getByTestId("version-merge-confirm").textContent).toBe("Merging…");
+    await waitFor(() => expect(bridgeMock.mergeWorkspaceVersion).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      again.resolve(merged);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 1 file into Main"));
+    // A Try again while a dialog is open can't merge, so its row stays.
+    expect(notice.retry!()).toBe(false);
+  });
+
+  it("names a closed merge's failure in its title alone when the error has no words", async () => {
+    const answer = deferredMerge();
+    const user = userEvent.setup();
+    const props = renderMenu();
+    await closeWhileMerging(user, "button");
+    const failure = new TypeError("result.conflicts is undefined");
+    await act(async () => {
+      answer.reject(failure);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(props.onMergeNotice).toHaveBeenCalledExactlyOnceWith({
+      identity: "version-merge:ws-1:draft",
+      message: "dohc could not merge Draft into Main.",
+      cause: failure,
+      retry: expect.any(Function),
+    }));
+  });
+});
+
+describe("mergeFilesWait", () => {
+  const row = (conflictId: string, origin: "merge" | "sync", sourceVersionId: string) => ({
+    conflictId, path: `${conflictId}.md`, sourceVersionId, targetVersionId: "main", origin,
+    contentKind: "text" as const, currentText: "a", incomingText: "b", baseText: "",
+  });
+
+  it("reads page by page until it finds a file this merge left to decide", async () => {
+    bridgeMock.listWorkspaceVersionConflicts
+      .mockResolvedValueOnce({ conflicts: [row("c-1", "sync", "draft"), row("c-2", "merge", "other")], nextAfterConflictId: "c-2" })
+      .mockResolvedValueOnce({ conflicts: [row("c-3", "merge", "draft")], nextAfterConflictId: "c-3" });
+    await expect(mergeFilesWait("ws-1", "draft")).resolves.toBe(true);
+    expect(bridgeMock.listWorkspaceVersionConflicts.mock.calls).toEqual([
+      [{ workspaceId: "ws-1" }],
+      [{ workspaceId: "ws-1", afterConflictId: "c-2" }],
+    ]);
+  });
+
+  it("answers false once the last page holds none of them", async () => {
+    bridgeMock.listWorkspaceVersionConflicts
+      .mockResolvedValueOnce({ conflicts: [row("c-1", "sync", "draft")], nextAfterConflictId: "c-1" })
+      .mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
+    await expect(mergeFilesWait("ws-1", "draft")).resolves.toBe(false);
   });
 });

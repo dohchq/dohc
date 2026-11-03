@@ -390,6 +390,7 @@ export function useShellError(workspaceId: string) {
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
+      noDismiss?: boolean;
       kind?: ShellErrorKind;
       identity?: string;
     }) => {
@@ -411,6 +412,7 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(action ? { action } : {}),
+        ...(failure.noDismiss ? { noDismiss: true } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);

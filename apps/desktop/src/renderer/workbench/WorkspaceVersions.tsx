@@ -27,7 +27,7 @@ import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
-import { errorDetails } from "../shell/copyDetails";
+import { type ErrorDetailField, errorDetails } from "../shell/copyDetails";
 import { SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
@@ -68,6 +68,90 @@ function mergeIdentity(workspaceId: string, versionId: string): string {
   return `version-merge:${workspaceId}:${versionId}`;
 }
 
+// How a merge answered after its dialog closed.
+type MergeAnswer =
+  // A null count: the merge left files to decide, and they were all decided
+  // before the answer came.
+  | { kind: "merged"; mergedFileCount: number | null; replacedProtectedPaths: string[] }
+  | { kind: "decide"; conflictCount: number; replacedProtectedPaths: string[] }
+  | { kind: "failed"; error: unknown };
+
+// A merge that answered after its dialog closed, as a toast and a Notices
+// row. A merge that left files to decide names its version, so the shell can
+// offer the review and take the row back once none of them wait.
+export interface VersionMergeNotice {
+  identity: string;
+  tone?: "success" | "warning";
+  title?: string;
+  message: string;
+  cause?: unknown;
+  details?: ReadonlyArray<ErrorDetailField>;
+  // Answers false when it could not merge again, so the row stays.
+  retry?: (() => void | false) | null;
+  decideFrom?: string;
+}
+
+// Whether a merge from this version still has files to decide. It reads the
+// open conflicts page by page and stops at the first one.
+export async function mergeFilesWait(workspaceId: string, sourceVersionId: string): Promise<boolean> {
+  let afterConflictId: string | undefined;
+  do {
+    const page = await bridge().listWorkspaceVersionConflicts({
+      workspaceId,
+      ...(afterConflictId === undefined ? {} : { afterConflictId }),
+    });
+    if (page.conflicts.some((conflict) => conflict.origin === "merge" && conflict.sourceVersionId === sourceVersionId)) return true;
+    afterConflictId = page.nextAfterConflictId ?? undefined;
+  } while (afterConflictId !== undefined);
+  return false;
+}
+
+function protectedCopyWords(paths: readonly string[], sourceName: string): string {
+  return `${paths.length === 1 ? "One protected file" : `${paths.length} protected files`} took ${sourceName}'s copy.`;
+}
+
+// The notice for a merge that answered after its dialog closed. A null
+// retry means the menu went with capture, so nothing can merge again until
+// History is back.
+function mergeNotice(
+  identity: string,
+  source: WorkspaceVersionRecord,
+  answer: MergeAnswer,
+  retry: (() => void | false) | null,
+): VersionMergeNotice {
+  if (answer.kind === "failed") {
+    const title = `dohc could not merge ${source.name} into Main`;
+    if (retry === null) return { identity, title, message: "Merge again once History is back.", cause: answer.error };
+    const { words } = readError(answer.error);
+    return { identity, ...(words ? { title, message: words } : { message: `${title}.` }), cause: answer.error, retry };
+  }
+  const protectedPaths = answer.replacedProtectedPaths;
+  const details = protectedPaths.map((path): ErrorDetailField => ["Protected file", path, path.length]);
+  const protectedLine = protectedPaths.length > 0 ? protectedCopyWords(protectedPaths, source.name) : null;
+  if (answer.kind === "decide") {
+    return {
+      identity,
+      tone: "warning",
+      title: `Merged ${source.name} into Main`,
+      message: [conflictCountCopy(answer.conflictCount, false), protectedLine].filter(Boolean).join(" "),
+      ...(details.length > 0 ? { details } : {}),
+      decideFrom: source.id,
+    };
+  }
+  const { mergedFileCount } = answer;
+  const said =
+    mergedFileCount === null
+      ? `Merged ${source.name} into Main`
+      : mergedFileCount === 0
+        ? `Main already has everything in ${source.name}`
+        : `Merged ${mergedFileCount} file${mergedFileCount === 1 ? "" : "s"} from ${source.name} into Main`;
+  return {
+    identity,
+    tone: "success",
+    ...(protectedLine === null ? { message: said } : { title: said, message: protectedLine, details }),
+  };
+}
+
 export function VersionMenu(props: {
   workspaceId: string;
   // The workspace is not ready for a version change.
@@ -92,6 +176,8 @@ export function VersionMenu(props: {
   // same create or merge takes its notice back, whichever control ran it.
   onError: (message: string, cause: unknown, retry?: () => void, identity?: string) => void;
   clearError: (identity: string) => void;
+  // A merge that answered after its dialog closed.
+  onMergeNotice: (notice: VersionMergeNotice) => void;
   // A conflict choice in the merge dialog reports a fallback and the error,
   // so a refusal can show its own title and instructions.
   onConflictError: (fallback: string, error: unknown) => void;
@@ -111,8 +197,18 @@ export function VersionMenu(props: {
   const [busy, setBusy] = useState<"switch" | "create" | null>(null);
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
-  // The version the merge dialog is open for.
-  const [mergeSource, setMergeSource] = useState<WorkspaceVersionRecord | null>(null);
+  // The version the merge dialog is open for, and whether it merges as it
+  // opens, for a notice's Try again.
+  const [merge, setMerge] = useState<{ source: WorkspaceVersionRecord; runOnOpen: boolean } | null>(null);
+  const mergeOpen = useRef(false);
+  mergeOpen.current = merge !== null;
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   // Two questions, and they are not the same one.
   //
   // May this read still write the snapshot? A newer read answers no — from a
@@ -341,14 +437,19 @@ export function VersionMenu(props: {
     [beginOperation, setMenu, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
   );
 
-  // The dialog shows a failed merge while it is open, and can't close while
-  // one runs. It goes before the answer only when this menu goes too, and
-  // then the failure is a notice. It has no Try again, because the dialog
-  // that would merge again is gone. The menu's Merge row merges again.
-  const failMerge = useCallback(
-    (version: WorkspaceVersionRecord, error: unknown) =>
-      props.onError(ipcErrorMessage(error, `dohc could not merge ${version.name} into Main.`), error, undefined, mergeIdentity(workspaceId, version.id)),
-    [props.onError, workspaceId],
+  // The dialog shows a merge's answer while it is open. Closed first, by the
+  // person or because this menu went with capture, the merge keeps going and
+  // its answer is a notice. A failure's Try again opens the dialog and merges
+  // again, while this menu is here to do it.
+  const answerMergeAway = useCallback(
+    (version: WorkspaceVersionRecord, answer: MergeAnswer) => {
+      const retry = () => {
+        if (!mounted.current || mergeOpen.current) return false;
+        setMerge({ source: version, runOnOpen: true });
+      };
+      props.onMergeNotice(mergeNotice(mergeIdentity(workspaceId, version.id), version, answer, mounted.current ? retry : null));
+    },
+    [props.onMergeNotice, workspaceId],
   );
 
   if (!snapshot) return null;
@@ -423,7 +524,7 @@ export function VersionMenu(props: {
         description: active.canMergeIntoMain ? undefined : "Only versions made from Main can merge into Main.",
         onSelect: () => {
           setMenu(false);
-          setMergeSource(active);
+          setMerge({ source: active, runOnOpen: false });
         },
       },
     );
@@ -495,17 +596,18 @@ export function VersionMenu(props: {
         </ConfirmDialog>
       ) : null}
 
-      {mergeSource ? (
+      {merge ? (
         <VersionMergeDialog
           workspaceId={workspaceId}
-          source={mergeSource}
+          source={merge.source}
+          runOnOpen={merge.runOnOpen}
           beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
-          onMerged={() => props.clearError(mergeIdentity(workspaceId, mergeSource.id))}
-          onFailed={(error) => failMerge(mergeSource, error)}
+          onMerged={() => props.clearError(mergeIdentity(workspaceId, merge.source.id))}
+          onAnsweredAway={(answer) => answerMergeAway(merge.source, answer)}
           onConflictError={props.onConflictError}
           onClose={() => {
-            setMergeSource(null);
+            setMerge(null);
             void refresh().catch(() => undefined);
           }}
         />
@@ -543,15 +645,19 @@ export function VersionMergeDialog(props: {
   onWorkspaceStateChanged: (activeVersionId?: string) => void;
   // The merge ran. The owner takes back an earlier failure's notice.
   onMerged: () => void;
-  // The merge failed after the dialog closed. The owner reports it.
-  onFailed: (error: unknown) => void;
+  // The merge answered after the dialog closed. The owner reports it.
+  onAnsweredAway: (answer: MergeAnswer) => void;
+  // A notice's Try again: the dialog opens merging.
+  runOnOpen?: boolean;
   // The merge lists every open conflict, sync ones included, so their
   // refusals need the shell's toast and Notices row.
   onConflictError: (message: string, cause: unknown) => void;
   onClose: () => void;
 }) {
   const { workspaceId, source } = props;
-  const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
+  const [stage, setStage] = useState<MergeStage>({ stage: props.runOnOpen ? "running" : "confirm" });
+  // The person closed the dialog while it merged. The merge keeps going.
+  const closedWhileMerging = useRef(false);
   // Protected files this merge gave the version's copy. They never become
   // conflicts, so whichever stage the merge ends in lists them once.
   const [replacedProtectedPaths, setReplacedProtectedPaths] = useState<string[]>([]);
@@ -577,15 +683,15 @@ export function VersionMergeDialog(props: {
     let releaseOperation: (() => void) | null = null;
     try {
       releaseOperation = await props.beginLineageOperation();
-      if (!liveToken.isCurrent(token)) return;
+      // Closed by its owner before the merge started, nothing ran. Closed by
+      // the person, the merge they asked for still runs.
+      if (mounted.current ? !liveToken.isCurrent(token) : !closedWhileMerging.current) return;
       const result = await bridge().mergeWorkspaceVersion({
         workspaceId,
         versionId: source.id,
       });
-      if (!liveToken.isCurrent(token)) return;
       props.onWorkspaceStateChanged();
       props.onMerged();
-      setReplacedProtectedPaths(result.replacedProtectedPaths);
       // The merge's own count decides the stage: the rows are the first page
       // of all open conflicts, and a lingering sync conflict must not turn a
       // clean merge into a conflicted one. The rows gate it too: a count
@@ -593,10 +699,21 @@ export function VersionMergeDialog(props: {
       // resolved elsewhere between the merge and the listing — painting a
       // zero-card decide stage over that would ask for decisions that no
       // longer exist.
-      if (
+      const decide =
         result.conflictCount > 0 &&
-        (result.conflicts.length > 0 || result.nextAfterConflictId !== null)
-      ) {
+        (result.conflicts.length > 0 || result.nextAfterConflictId !== null);
+      if (!mounted.current) {
+        const { replacedProtectedPaths } = result;
+        props.onAnsweredAway(
+          decide
+            ? { kind: "decide", conflictCount: result.conflictCount, replacedProtectedPaths }
+            : { kind: "merged", mergedFileCount: result.conflictCount > 0 ? null : result.mergedFileCount, replacedProtectedPaths },
+        );
+        return;
+      }
+      if (!liveToken.isCurrent(token)) return;
+      setReplacedProtectedPaths(result.replacedProtectedPaths);
+      if (decide) {
         windowGeneration.current += 1;
         setStage({
           stage: "conflicts",
@@ -611,12 +728,18 @@ export function VersionMergeDialog(props: {
     } catch (error) {
       // Open, the dialog shows the failure. Gone before the answer, it leaves
       // the failure to the owner's notice.
-      if (!mounted.current) props.onFailed(error);
+      if (!mounted.current) props.onAnsweredAway({ kind: "failed", error });
       else if (liveToken.isCurrent(token)) setStage({ stage: "confirm", failure: { error } });
     } finally {
       releaseOperation?.();
     }
-  }, [props.beginLineageOperation, props.onFailed, props.onMerged, props.onWorkspaceStateChanged, source.id, workspaceId]);
+  }, [props.beginLineageOperation, props.onAnsweredAway, props.onMerged, props.onWorkspaceStateChanged, source.id, workspaceId]);
+
+  // A notice's Try again merges once, as the dialog opens.
+  useEffect(() => {
+    if (props.runOnOpen) void runMerge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // A failure takes focus to Merge into Main, which merges again. The button
   // is described by the failure, so a screen reader reads both once.
@@ -666,13 +789,22 @@ export function VersionMergeDialog(props: {
     );
   }, [stage, workspaceId]);
 
-  // Closing while merging is never allowed. While conflicts are open, closing
-  // is explicit only ("Finish later"): Escape must not unmount
-  // ConflictResolver and discard a hand-written combined copy.
-  const canCloseByEscape =
-    stage.stage !== "running" && stage.stage !== "conflicts";
+  // Closing while merging leaves the merge running, and its answer comes as a
+  // notice. While conflicts are open, closing is explicit only ("Finish
+  // later"): Escape must not unmount ConflictResolver and discard a
+  // hand-written combined copy.
+  const canCloseByEscape = stage.stage !== "conflicts";
 
-  const finish = props.onClose;
+  const finish = useCallback(() => {
+    if (stage.stage === "running") closedWhileMerging.current = true;
+    props.onClose();
+  }, [stage.stage, props.onClose]);
+  // The merge disables the button that started it, so focus goes to Close,
+  // the one control left.
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (stage.stage === "running") closeButton.current?.focus();
+  }, [stage.stage]);
   const hasProtected = replacedProtectedPaths.length > 0;
 
   if (stage.stage === "conflicts") {
@@ -769,8 +901,9 @@ export function VersionMergeDialog(props: {
             </SecondaryButton>
           ) : (
             <>
-              <SecondaryButton data-testid="version-merge-cancel" disabled={stage.stage === "running"} onClick={finish}>
-                Cancel
+              {/* Closing doesn't stop a merge, so it isn't Cancel while one runs. */}
+              <SecondaryButton ref={closeButton} data-testid="version-merge-cancel" onClick={finish}>
+                {stage.stage === "running" ? "Close" : "Cancel"}
               </SecondaryButton>
               <PrimaryButton
                 ref={confirmButton}

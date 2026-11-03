@@ -98,7 +98,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
       <VersionMergeDialog workspaceId="ws-1"
         source={{ id: "v-1", name: "Feature", kind: "named", createdAtMs: 1, canMergeIntoMain: true }}
         beginLineageOperation={mergeBegin}
-        onWorkspaceStateChanged={mergeChanged} onMerged={() => {}} onFailed={() => {}} onConflictError={onError}
+        onWorkspaceStateChanged={mergeChanged} onMerged={() => {}} onAnsweredAway={() => {}} onConflictError={onError}
         onClose={() => {}} />
     ));
     if (surface === "merge") fireEvent.click(screen.getByTestId("version-merge-confirm"));
@@ -436,7 +436,7 @@ describe("VersionMergeDialog conflict paging", () => {
         beginLineageOperation={async () => () => {}}
         onWorkspaceStateChanged={() => {}}
         onMerged={() => {}}
-        onFailed={() => {}}
+        onAnsweredAway={() => {}}
         onConflictError={() => {}}
         onClose={() => {}}
       />,
@@ -786,7 +786,7 @@ describe("VersionMergeDialog result", () => {
   function renderMerge() {
     render(
       <VersionMergeDialog workspaceId="ws-1" source={source} beginLineageOperation={async () => () => {}}
-        onWorkspaceStateChanged={() => {}} onMerged={() => {}} onFailed={() => {}} onConflictError={() => {}}
+        onWorkspaceStateChanged={() => {}} onMerged={() => {}} onAnsweredAway={() => {}} onConflictError={() => {}}
         onClose={() => {}} />,
     );
   }
@@ -802,7 +802,11 @@ describe("VersionMergeDialog result", () => {
     const confirm = screen.getByTestId<HTMLButtonElement>("version-merge-confirm");
     expect(confirm.textContent).toBe("Merging…");
     expect(confirm.disabled).toBe(true);
-    expect(screen.getByTestId<HTMLButtonElement>("version-merge-cancel").disabled).toBe(true);
+    // Closing doesn't stop the merge, so the button says Close and keeps the focus.
+    const close = screen.getByTestId<HTMLButtonElement>("version-merge-cancel");
+    expect(close.textContent).toBe("Close");
+    expect(close.disabled).toBe(false);
+    expect(document.activeElement).toBe(close);
     expect(screen.queryByTestId("version-merge-status")).toBeNull();
 
     finishMerge!();

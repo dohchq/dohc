@@ -244,6 +244,8 @@ import {
   ConflictReviewDialog,
   VersionComparePage,
   VersionMenu,
+  type VersionMergeNotice,
+  mergeFilesWait,
 } from "./workbench/WorkspaceVersions";
 import {
   ProposalReviewDialog,
@@ -2398,6 +2400,31 @@ export function DesktopWorkspaceShell(props: {
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
+  // A merge that answered after its dialog closed. One that left files to
+  // decide offers the review, and its row has no Dismiss: it leaves when the
+  // review closes with none of that merge's files waiting.
+  const mergesToDecide = useRef(new Map<string, string>());
+  const reportVersionMerge = useCallback(({ decideFrom, ...notice }: VersionMergeNotice) => {
+    if (decideFrom === undefined) mergesToDecide.current.delete(notice.identity);
+    else mergesToDecide.current.set(notice.identity, decideFrom);
+    reportShellFailure({
+      ...notice,
+      ...(decideFrom === undefined
+        ? {}
+        : { noDismiss: true, action: { label: "Decide what to keep", run: () => setConflictReviewOpen(true), reads: true } }),
+    });
+  }, [reportShellFailure]);
+  const closeConflictReview = useCallback(() => {
+    setConflictReviewOpen(false);
+    for (const [identity, sourceVersionId] of mergesToDecide.current) {
+      // A read that fails keeps the row, and the next close asks again.
+      void mergeFilesWait(workspaceId, sourceVersionId).then((waiting) => {
+        if (waiting || mergesToDecide.current.get(identity) !== sourceVersionId) return;
+        mergesToDecide.current.delete(identity);
+        clearIdentity(identity);
+      }, () => undefined);
+    }
+  }, [clearIdentity, workspaceId]);
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string, lineageChanged = true) => {
       if (lineageChanged) {
@@ -5863,6 +5890,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
             clearError={clearIdentity}
+            onMergeNotice={reportVersionMerge}
             onConflictError={reportShellError}
             {...(shareView
               ? {}
@@ -7088,7 +7116,7 @@ export function DesktopWorkspaceShell(props: {
           onError={reportShellError}
           beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-          onClose={() => setConflictReviewOpen(false)}
+          onClose={closeConflictReview}
         />
       ) : null}
       {sharedRestore.dialog}

@@ -16,8 +16,9 @@ import {
 // menu on Main, on a version, and on a version made from another version; its
 // name field with its hint, Creating…, and a refused name; a failed create as
 // a notice with Try again, and a failed merge in its dialog, with Details; each
-// merge stage, with and
-// without the protected files a merge replaced; the save-first
+// merge stage, with and without the protected files a merge replaced; a merge
+// whose dialog closed while it ran, answering as a toast and a Notices row; the
+// save-first
 // confirm; and keyboard focus on the disabled Merge row. Light and dark. Not a
 // regression test; it runs only when a shot directory is set, the way
 // ui-audit-screenshots.spec.ts does.
@@ -66,7 +67,7 @@ type ShotGate = { release(): void };
 // up in ipcMain._invokeHandlers on each invoke, so the swap catches that call
 // and puts the original back for every call after it. A failure is the
 // engine going away, which the renderer words after what failed.
-async function interceptNext(desktop: Desktop, channel: string, mode: "hold" | "fail"): Promise<void> {
+async function interceptNext(desktop: Desktop, channel: string, mode: "hold" | "fail" | "hold-then-fail"): Promise<void> {
   await desktop.app.evaluate(({ ipcMain }, input) => {
     const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, InvokeHandler> })._invokeHandlers;
     const original = handlers.get(input.channel);
@@ -75,8 +76,10 @@ async function interceptNext(desktop: Desktop, channel: string, mode: "hold" | "
     const gate = new Promise<void>((resolve) => { open = resolve; });
     handlers.set(input.channel, async (...args: unknown[]) => {
       handlers.set(input.channel, original);
-      if (input.mode === "fail") throw Object.assign(new Error("Rust engine daemon exited."), { name: "EngineDaemonUnavailableError" });
+      const fail = () => { throw Object.assign(new Error("Rust engine daemon exited."), { name: "EngineDaemonUnavailableError" }); };
+      if (input.mode === "fail") fail();
       await gate;
+      if (input.mode === "hold-then-fail") fail();
       return await original(...args);
     });
     (globalThis as { __dohcShotGate?: ShotGate }).__dohcShotGate = { release: open };
@@ -295,6 +298,62 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, { timeout: 30_000 });
     await shootWindow(page, "merge-success");
     await page.getByTestId("version-merge-done").click();
+
+    // A merge whose dialog closed while it ran keeps going, and its answer
+    // is a toast and a Notices row: a success, a failure, and files to decide.
+    const closeWhileMerging = async (mode: "hold" | "hold-then-fail", shot?: string) => {
+      await openMenu(page);
+      await page.getByTestId("version-merge").click();
+      await interceptNext(desktop, "desktop:merge-workspace-version", mode);
+      await page.getByTestId("version-merge-confirm").click();
+      await expect(page.getByTestId("version-merge-cancel")).toHaveText("Close");
+      await expect(page.getByTestId("version-merge-cancel")).toBeFocused();
+      if (shot) await shootWindow(page, shot);
+      await page.getByTestId("version-merge-cancel").click();
+      await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
+      await releaseHeld(desktop);
+    };
+    await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nThird draft.\n");
+    await closeWhileMerging("hold", "merge-running-close");
+    const mergedAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merged 1 file from Draft into Main" });
+    await expect(mergedAway).toBeVisible({ timeout: 30_000 });
+    // A success fades, but not under the pointer.
+    await mergedAway.hover();
+    await shootWindow(page, "merge-closed-success");
+    await page.mouse.move(0, 0);
+    await expect(mergedAway).toHaveCount(0, { timeout: 30_000 });
+
+    await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nFourth draft.\n");
+    await closeWhileMerging("hold-then-fail");
+    const failedAway = errorToast(page, "dohc could not merge Draft into Main");
+    await expect(failedAway).toBeVisible({ timeout: 30_000 });
+    await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeVisible();
+    await shootWindow(page, "merge-closed-failure");
+    // Try again opens the dialog merging again, and the answer shows there.
+    await failedAway.getByTestId("workspace-shell-error-retry").click();
+    await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, { timeout: 30_000 });
+    await page.getByTestId("version-merge-done").click();
+
+    await writeCaptured(page, temp.rootPath, "Draft", "notes.md", "# Notes\n\nDraft's notes, again.\n");
+    await switchTo(page, "Main");
+    await writeCaptured(page, temp.rootPath, "Main", "notes.md", "# Notes\n\nMain's notes, again.\n");
+    await switchTo(page, "Draft");
+    await closeWhileMerging("hold");
+    const decideAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merged Draft into Main" });
+    await expect(decideAway).toBeVisible({ timeout: 30_000 });
+    await expect(decideAway).toContainText("One file has two copies.");
+    await shootWindow(page, "merge-closed-decide");
+    await page.getByTestId("notice-center-toggle").click();
+    const decideRow = page.locator("[data-notice-row]").filter({ hasText: "Merged Draft into Main" });
+    await expect(decideRow).toBeVisible();
+    await shootWindow(page, "merge-closed-decide-notices");
+    await page.getByTestId("notice-center-toggle").click();
+    await decideAway.getByTestId("workspace-shell-error-action").click();
+    await page.getByTestId("version-conflict-keep-incoming").click();
+    await page.getByTestId("conflict-review-done").click();
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(decideRow).toHaveCount(0, { timeout: 30_000 });
+    await page.getByTestId("notice-center-toggle").click();
 
     // Nothing new to merge.
     await openMenu(page);
