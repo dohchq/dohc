@@ -924,7 +924,9 @@ describe("chatDispatchService", () => {
     expect(fixture.notices).toHaveLength(1);
     expect(fixture.notices[0]!.body).toBe(!nodePresent && !replied
       ? "Agent replies need Node.js. Install Node.js, restart dohc, then try again."
-      : exitCode !== 0 ? "Its run ended with an error." : replied ? "" : "Its run ended without a reply.");
+      : exitCode !== 0
+        ? `Its run ended with an error.${replied ? " Mention Nova in a new message to ask again." : ""}`
+        : replied ? "" : "Its run ended without a reply.");
   });
 
   it.each([0, 7])("recovers the saved Node.js notice after restart, exit %s", async (exitCode) => {
