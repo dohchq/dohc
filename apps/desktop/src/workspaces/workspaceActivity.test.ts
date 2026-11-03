@@ -667,7 +667,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       },
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -709,7 +709,7 @@ describe("workspaceActivity cloud sync nudge", () => {
   describe("the Collections wait across signing in and out", () => {
     // Signing in attaches this engine; it knows nothing about the wait.
     const syncEngine = () => ({
-      start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, pushRecorded: async () => undefined, stop: async () => {},
+      start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined, stop: async () => {},
       snapshot: () => ({
         syncFailure: null, retrying: false, syncing: true, lastSyncedAtMs: null, pendingChangeCount: 0,
         conflictCount: 0, authExpired: false, sharingDeclined: [],
@@ -913,7 +913,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => { passes += 1; }, pushRecorded: async () => undefined,
+      retryNow: async () => { passes += 1; }, pushRecorded: async () => undefined, catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: failure, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
         // A conflict shows first in the status, and must not hide a failed pass.
@@ -939,7 +939,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -975,7 +975,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
         retrying,
@@ -1010,7 +1010,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined,
+      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -1064,7 +1064,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
           queuePull: () => undefined,
-          retryNow: async () => undefined, pushRecorded: async () => undefined,
+          retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
             retrying: false,
@@ -1124,7 +1124,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
           queuePull: () => undefined,
-          retryNow: async () => undefined, pushRecorded: async () => undefined,
+          retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
             retrying: false,
@@ -1295,7 +1295,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         queueSync: () => undefined,
         queueWatchedUpload: () => {},
         queuePull: () => undefined,
-        retryNow: async () => undefined, pushRecorded: async () => undefined,
+        retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
         snapshot: () => ({
           syncFailure: null,
           retrying: false,

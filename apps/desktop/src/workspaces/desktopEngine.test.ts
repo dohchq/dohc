@@ -15,6 +15,7 @@ import {
 import { createDesktopEngine, type ServerOwnerDelivery } from "./desktopEngine";
 import type { JsonValue, OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import { EngineRelayClient } from "./engineRelayClient";
+import { createMoveAcceptedEditsGuard } from "./moveAcceptedEditsGuard";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import type { RegistryEntry } from "./registryStore";
 import { deferred } from "../testing/deferred";
@@ -1143,6 +1144,78 @@ describe("server owner peer lifecycle", () => {
       expect(changed).toHaveBeenCalledTimes(3);
       credentials.abort(); expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
     } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // #3089: the move guard's list of live pages, and the owner sync it asks for.
+  describe("a move's owner catch-up", () => {
+    const bindingOf = (path: string, objectId: string) => ({workspaceId: "owner", mainVersionId: "main", objectId, lineageClaimId: "a".repeat(64),
+      currentPath: path, selectorPaths: [path], restoreFenceGeneration: 1});
+    const ready = (path: string, objectId: string) =>
+      ({path, objectId, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace", shareId: "share"}});
+    const observed = () => ownerDeliveryMock.pass.mock.calls.filter(([options]) => options.observedOnly === true)
+      .map(([options]) => options.document.binding.objectId as string);
+    async function owner(rows: () => unknown[]) {
+      const f = fixture(), credentials = new AbortController();
+      Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+      const rootPath = await createTestScratch("dohc-owner-catch-up-");
+      f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+      const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+        frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+          maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+        attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+      f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+        connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+          retire: async () => 0, refusals: async () => {}, keptEdits: unexpectedKeptEdits, keptEditsPage: unexpectedKeptEdits,
+          documents: async () => ({ok: true, documents: rows()})})};
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.liveDocumentPaths("owner")).toBeDefined());
+      return {f, credentials};
+    }
+
+    it("lists pages that aren't ready, syncs each ready target once, and answers false for one that isn't ready", async () => {
+      let draft: unknown = {path: "Notes/Draft.md", objectId: "draft", status: "preparing"};
+      ownerDeliveryMock.pass.mockResolvedValue("empty");
+      const {f} = await owner(() => [ready("Notes/Page.md", "page"), ready("Notes/Other.md", "other"), draft,
+        {path: "Plans/Trip.md", objectId: "trip", status: "unavailable", reason: "document-unavailable"}]);
+      try {
+        expect(f.engine.liveDocumentPaths("owner")).toEqual([{path: "Notes/Page.md", objectId: "page"}, {path: "Notes/Other.md", objectId: "other"},
+          {path: "Notes/Draft.md", objectId: "draft"}, {path: "Plans/Trip.md", objectId: "trip"}]);
+        expect(await f.engine.ownerCatchUp("owner", ["page", "other"], new AbortController().signal)).toBe(true);
+        expect(observed()).toEqual(["page", "other"]);
+        const ownerCatchUp = vi.fn((id: string, objectIds: readonly string[], signal: AbortSignal) => f.engine.ownerCatchUp(id, objectIds, signal));
+        const relayCatchUp = vi.fn(async () => undefined);
+        const guard = createMoveAcceptedEditsGuard({liveDocuments: id => f.engine.liveDocumentPaths(id), offline: () => false, ownerCatchUp, relayCatchUp});
+        // A move of the folder that holds a preparing page: no answer, but the pull still runs.
+        await guard.beforeMove("owner", async () => "Notes");
+        expect(ownerCatchUp).toHaveBeenLastCalledWith("owner", ["page", "other", "draft"], expect.any(AbortSignal));
+        await expect(ownerCatchUp.mock.results[0]!.value).resolves.toBe(false);
+        expect(observed()).toEqual(["page", "other", "page", "other"]);
+        expect(relayCatchUp).toHaveBeenCalledOnce();
+        // The server makes it ready before this device lists it again.
+        draft = ready("Notes/Draft.md", "draft");
+        await guard.beforeMove("owner", async () => "Notes");
+        await expect(ownerCatchUp.mock.results[1]!.value).resolves.toBe(true);
+        expect(observed().slice(4)).toEqual(["page", "other", "draft"]);
+        expect(relayCatchUp).toHaveBeenCalledTimes(2);
+      } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
+    });
+
+    it.each(["session", "quitting", "restart"])("answers false when the %s ends during the owner sync", async ending => {
+      const held = deferred<string>();
+      ownerDeliveryMock.pass.mockImplementation(async options => options.observedOnly ? held.promise : "empty");
+      const {f, credentials} = await owner(() => [ready("a.md", "a"), ready("b.md", "b")]);
+      try {
+        const answer = f.engine.ownerCatchUp("owner", ["a", "b"], new AbortController().signal);
+        await vi.waitFor(() => expect(observed()).toEqual(["a"]));
+        if (ending === "session") credentials.abort();
+        if (ending === "quitting") f.setQuitting(true);
+        const restarting = ending === "restart" ? f.engine.closeAllRelayTransportWorkspaces() : undefined;
+        held.resolve("acknowledged");
+        await restarting;
+        expect(await answer).toBe(false);
+        expect(observed()).toEqual(["a"]);
+      } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
+    });
   });
 
   // A document whose edits the server refused for good names itself, with

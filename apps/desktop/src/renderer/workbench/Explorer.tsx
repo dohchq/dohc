@@ -173,8 +173,11 @@ export interface ExplorerProps {
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
   onRefresh: () => void;
-  // Failed tree operations go to the shell's error toast and Notices row.
+  // Failed tree operations go to the shell's error toast and Notices row. A
+  // failed move names itself, so its Try again runs it again and a later
+  // success of the same move clears it.
   onError: (message: string, cause?: unknown, retry?: () => void, identity?: string) => void;
+  onChangeSucceeded?: (identity: string) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
   // ("" = root).
@@ -469,6 +472,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     workspaceId,
     onRefresh,
     onError,
+    onChangeSucceeded,
     onBeginChanges,
     onPathsChanged,
     onSetFolderExpanded,
@@ -859,11 +863,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // failures (with a visible error), re-project shell paths for successes,
   // and refresh — the watcher refresh then confirms and prunes.
   const runChanges = useCallback(
-    async (
+    async function runChangesOnce(
       changes: PendingTreeChange[],
       run: (change: PendingTreeChange) => Promise<unknown>,
       afterBegin?: () => void,
-    ) => {
+    ): Promise<void> {
       if (changes.length === 0) return;
       // Land the stable active draft and drain queued collection writes
       // before paths move underneath them. The operation cannot preserve
@@ -881,19 +885,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         setPending((current) => [...current, ...changes]);
         const succeeded: PendingTreeChange[] = [];
         for (const change of changes) {
+          const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
             await run(change);
             succeeded.push(change);
+            if (identity) onChangeSucceeded?.(identity);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
-            // Try again reruns a refused folder move as it was asked.
-            const again = isLiveFolderMoveRefusal(cause)
-              ? () => void runChanges([{ ...change, id: nextChangeId() }], run)
-              : undefined;
-            const identity = change.kind === "folder" && isFolderMoveRefusal(cause)
+            // A refused folder move keeps the folder-move identity, with Try again
+            // only when live editing refused it. Any other failed move names its
+            // source, and Try again runs it as it was asked.
+            const folderIdentity = change.kind === "folder" && isFolderMoveRefusal(cause)
               ? folderMoveIdentity(workspaceId, change)
               : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, identity);
+            const rerun = () => void runChangesOnce([{ ...change, id: nextChangeId() }], run);
+            const again = folderIdentity ? (isLiveFolderMoveRefusal(cause) ? rerun : undefined) : identity ? rerun : undefined;
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, folderIdentity ?? identity);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -916,7 +923,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         operation?.release();
       }
     },
-    [onBeginChanges, onError, onPathsChanged, onRefresh, workspaceId],
+    [onBeginChanges, onChangeSucceeded, onError, onPathsChanged, onRefresh, workspaceId],
   );
 
   const performMoves = useCallback(

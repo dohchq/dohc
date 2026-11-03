@@ -1,6 +1,7 @@
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import type {DesktopOwnerDeliveryDocument} from "./desktopOwnerDelivery";
+import type {LiveDocumentPath} from "./moveAcceptedEditsGuard";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
@@ -30,20 +31,73 @@ export function readyOwnerDeliveryDocuments(value: unknown, workspaceId: string)
   return documents;
 }
 
+/**
+ * Every page a complete list names, ready or not, for the move guard. Call it
+ * after readyOwnerDeliveryDocuments has accepted the same response.
+ */
+export function listedOwnerDeliveryPaths(value: unknown, ready: readonly DesktopOwnerDeliveryDocument[]): LiveDocumentPath[] {
+  const listed = ready.map(({binding}) => ({path: binding.currentPath, objectId: binding.objectId}));
+  for (const row of (value as {documents: {path: string; status: string; objectId?: unknown}[]}).documents) {
+    if (row.status !== "ready" && typeof row.objectId === "string" && row.objectId) listed.push({path: row.path, objectId: row.objectId});
+  }
+  return listed;
+}
+
+/**
+ * A move's catch-up: one observing owner sync for each listed page, in turn.
+ * True only when each one answered. A page that isn't ready answers false.
+ */
+export async function catchUpOwnerDocuments(documents: readonly DesktopOwnerDeliveryDocument[], objectIds: readonly string[],
+  sync: (document: DesktopOwnerDeliveryDocument) => Promise<string>, check: () => void = () => undefined): Promise<boolean> {
+  for (const objectId of objectIds) {
+    const document = documents.find(row => row.binding.objectId === objectId);
+    if (!document) return false;
+    const outcome = await sync(document);
+    check();
+    if (outcome !== "acknowledged" && outcome !== "empty" && outcome !== "unbound") return false;
+  }
+  return true;
+}
+
 /** One workspace and one document per pass, with no unbounded concurrent work. */
 export function startServerOwnerDelivery(options: {
   workspaceIds(): string[];
   attemptTimeoutMs: number;
   retryDelayMs: number;
   runPass(workspaceId: string, documentIndex: number, signal: AbortSignal): Promise<{documentCount: number; acknowledged: boolean}>;
+  /** One owner sync for each listed document, for a move waiting on them. True only when every one answered. */
+  runTargetedPass?(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<boolean>;
   onError(error: unknown): void;
 }) {
   const lifetime = new AbortController(), nextDocument = new Map<string, number>();
   const retries = Effect.runSync(Queue.sliding<void>(1));
   let nextWorkspace = 0;
   let retryWorkspace: string | undefined;
+  // One request per workspace. The move guard's coverage rule keeps a slot to one attempt.
+  const targeted = new Map<string, {objectIds: readonly string[]; signal: AbortSignal; answer(answered: boolean): void}>();
+  let lastTurnTargeted = false;
+  const targetedTurn = async () => {
+    for (const [id, request] of targeted) if (request.signal.aborted) {targeted.delete(id); request.answer(false);}
+    const next = targeted.entries().next();
+    if (next.done) return false;
+    const [workspaceId, request] = next.value;
+    targeted.delete(workspaceId);
+    let answered = false;
+    try {
+      answered = await options.runTargetedPass!(workspaceId, request.objectIds,
+        AbortSignal.any([lifetime.signal, request.signal, AbortSignal.timeout(options.attemptTimeoutMs)]));
+    } catch { /* The waiting move goes ahead; ordinary passes report their own failures. */ }
+    request.answer(answered && !lifetime.signal.aborted);
+    return true;
+  };
   const pass = Effect.tryPromise({
     try: async () => {
+      // With more than one workspace open, each targeted turn is followed by an ordinary one.
+      if (targeted.size && !(lastTurnTargeted && options.workspaceIds().length > 1) && await targetedTurn()) {
+        lastTurnTargeted = true;
+        return {documentCount: 1, acknowledged: false, targeted: true};
+      }
+      lastTurnTargeted = false;
       const requested = retryWorkspace; retryWorkspace = undefined;
       const workspaces = options.workspaceIds();
       for (const id of nextDocument.keys()) if (!workspaces.includes(id)) nextDocument.delete(id);
@@ -64,7 +118,7 @@ export function startServerOwnerDelivery(options: {
   }));
   const finished = Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
     yield* Effect.acquireRelease(Effect.succeed(retries), Queue.shutdown);
-    let delayMs = 0;
+    let delayMs = 0, ordinaryDelayMs = 0;
     while (!lifetime.signal.aborted) {
       if (delayMs === 0) yield* ownerDeliveryWait(0);
       else {
@@ -77,8 +131,11 @@ export function startServerOwnerDelivery(options: {
       yield* Queue.clear(retries);
       // A retry wakes the idle wait, but never releases an unfinished pass.
       const result = yield* Effect.uninterruptible(pass);
-      delayMs = retryWorkspace ? 0 : result.acknowledged ? Math.min(options.retryDelayMs, 200)
+      // A targeted turn keeps the ordinary schedule, and an explicit retry whose wake-up it took.
+      if ("targeted" in result) {delayMs = targeted.size || retryWorkspace ? 0 : ordinaryDelayMs; continue;}
+      ordinaryDelayMs = retryWorkspace ? 0 : result.acknowledged ? Math.min(options.retryDelayMs, 200)
         : result.documentCount === 0 ? Math.min(options.retryDelayMs * 5, 60_000) : options.retryDelayMs;
+      delayMs = targeted.size ? 0 : ordinaryDelayMs;
     }
   })), {signal: lifetime.signal});
   return {
@@ -87,8 +144,19 @@ export function startServerOwnerDelivery(options: {
       retryWorkspace = workspaceId;
       Queue.offerUnsafe(retries, undefined);
     },
+    /** Resolves true once one owner sync answered for every listed document. Never rejects. */
+    catchUp(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<boolean> {
+      if (lifetime.signal.aborted || signal.aborted || !options.runTargetedPass) return Promise.resolve(false);
+      return new Promise<boolean>(answer => {
+        targeted.get(workspaceId)?.answer(false);
+        targeted.set(workspaceId, {objectIds: [...objectIds], signal, answer});
+        Queue.offerUnsafe(retries, undefined);
+      });
+    },
     async stop() {
       lifetime.abort();
+      for (const request of targeted.values()) request.answer(false);
+      targeted.clear();
       const exit = await finished;
       if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
     },

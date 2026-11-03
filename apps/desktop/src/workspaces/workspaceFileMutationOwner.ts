@@ -141,6 +141,8 @@ export function createWorkspaceFileMutationOwner<
   /** This computer's person, read when a request arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   notifyRenderer(workspaceId: string): void;
+  /** Catches a live page, or a folder holding one, up with the server before it moves. */
+  beforeMove?(workspaceId: string, storedSpelling: () => Promise<string>): Promise<void>;
   // A file in a share view was created or saved, and its change is in the
   // share view's journal. The shell answers with a direct push.
   shareViewEdited(workspaceId: string): void;
@@ -326,6 +328,7 @@ export function createWorkspaceFileMutationOwner<
           const history = dependencies.historyFor(workspace);
           return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
             capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+            ...(dependencies.beforeMove ? { beforeMove: (storedSpelling: () => Promise<string>) => dependencies.beforeMove!(workspace.workspaceId, storedSpelling) } : {}),
             linkRewrites: history.rewriteHistoryLinks ? {
               workspaceId: workspace.workspaceId, signal,
               history: {rewriteHistoryLinks: history.rewriteHistoryLinks.bind(history)},

@@ -32,7 +32,8 @@ import type {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOw
 import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desktopOwnerDelivery";
 import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
-import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
+import {catchUpOwnerDocuments, listedOwnerDeliveryPaths, readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
+import type {LiveDocumentPath} from "./moveAcceptedEditsGuard";
 import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, readServerKeptEditsQueue, retryOwnerLiveQuarantine, sameGeneration, ServerKeptEditsConflict,
   type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
 import type {JsonValue} from "@dohc/workspace-engine-client";
@@ -164,7 +165,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerHostModule: typeof import("./desktopOwnerHost") | undefined;
   let ownerHostGeneration = 0;
   let ownerWorkspaceCloses = 0;
-  let ownerDelivery: (ReturnType<typeof startDesktopOwnerDelivery> & {retry?(workspaceId: string): void}) | undefined;
+  let ownerDelivery: (ReturnType<typeof startDesktopOwnerDelivery> & {retry?(workspaceId: string): void;
+    catchUp?(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<boolean>}) | undefined;
   let ownerDeliveryConfig: DesktopOwnerDeliveryConfig | undefined;
   let ownerDeliveryModule: typeof import("./desktopOwnerDelivery") | undefined;
   let nativeOwnerDeliveryModule: typeof import("./nativeOwnerDelivery") | undefined;
@@ -180,6 +182,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
   const ownerStopFailures = new Map<string, Map<string,{objectId:string;path:string;detail:string}>>();
+  // The ready documents from each workspace's last complete live-host list, for the move guard.
+  const liveDocumentPaths = new Map<string, LiveDocumentPath[]>();
   // Documents whose edits the server refused for good, read from the engine's
   // durable queues, so a restart shows them again. Each Try again the owner
   // asked for counts by queue, so a refusal after it is a new incident.
@@ -316,6 +320,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     failedOwnerDocuments.clear();
     frozenOwnerDocuments.clear();
     ownerStopFailures.clear();
+    liveDocumentPaths.clear();
     const previous = ownerDelivery;
     ownerDelivery = undefined;
     if (previous) ownerDeliverySettled = Promise.all([ownerDeliverySettled, previous.stop()]).then(() => undefined);
@@ -376,6 +381,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               } catch (error) {check(); console.error("[desktop] server kept edits list failed:", error);}
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
+              liveDocumentPaths.set(workspaceId, listedOwnerDeliveryPaths(response, documents));
               const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
               // The server reports a diverged copy even after its owner stopped every document.
@@ -440,6 +446,36 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 }
                 throw error;
               }
+            });} finally {activeOwnerWorkspace = undefined;}
+          },
+          runTargetedPass: async (workspaceId, objectIds, lifetime) => {
+            if (!workspaceAuthorities.withOperation) return false;
+            activeOwnerWorkspace = workspaceId;
+            try {return await workspaceAuthorities.withOperation(workspaceId, async operation => {
+              const session = await server.connect(operation.workspace, AbortSignal.any([lifetime, operation.signal]));
+              if (!session) return false;
+              const signal = AbortSignal.any([lifetime, operation.signal, session.signal]);
+              const check = () => {
+                signal.throwIfAborted(); operation.assertCurrent(); session.assertCurrent();
+                if (generation !== ownerDeliveryGeneration || isQuitting()) throw new Error("This live editing session ended.");
+              };
+              const documents = readyOwnerDeliveryDocuments(await session.documents(signal), workspaceId);
+              check();
+              const native = nativeOwnerDeliveryModule ??= await import("./nativeOwnerDelivery");
+              return await catchUpOwnerDocuments(documents, objectIds, document => sessions.run(operation.workspace, async binding => {
+                const client = daemon.currentClient();
+                if (!(client instanceof EngineClient)) return "retry";
+                const assertCurrent = () => {
+                  check(); sessions.assertCurrentBinding(operation.workspace, binding);
+                  if (daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("This live editing session ended.");
+                };
+                assertCurrent();
+                const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
+                  document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent, observedOnly: true});
+                if (quarantinesMayChange(workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                return result;
+              }), check);
             });} finally {activeOwnerWorkspace = undefined;}
           },
         });
@@ -808,6 +844,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   }
 
   return {
+    /** The move guard's view of which pages are live. Undefined until a complete list arrives. */
+    liveDocumentPaths(workspaceId: string): readonly LiveDocumentPath[] | undefined {
+      return liveDocumentPaths.get(workspaceId);
+    },
+    /** True only when an owner sync answered for every listed page, or this device is not bound to it. */
+    ownerCatchUp(workspaceId: string, objectIds: readonly string[], signal: AbortSignal): Promise<boolean> {
+      return ownerDelivery?.catchUp?.(workspaceId, objectIds, signal) ?? Promise.resolve(false);
+    },
     retryOwnerDelivery(workspaceId: string): void {
       if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) ownerDelivery?.retry?.(workspaceId);
     },
