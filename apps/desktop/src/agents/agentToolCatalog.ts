@@ -32,10 +32,9 @@ export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";
 // notice and the band in Chats.
 export const AGENTS_RESTRICTED_MESSAGE = "In Restricted Mode, dohc does not start agents in this workspace.";
 
-// From this version Claude Code holds every built-in tool to --tools, which
-// keeps a reply-only run from writing. dohc checks it in Settings and again
+// The oldest Claude Code dohc starts. dohc checks it in Settings and again
 // before each run.
-export const CLAUDE_MIN_VERSION = "2.1.295";
+export const CLAUDE_MIN_VERSION = "2.1.316";
 
 export function supportsAgentProfile(tool: AgentToolId, version: string | null): boolean {
   if (tool === "codex") return version !== null;
@@ -61,17 +60,21 @@ export const AGENT_TOOLS = [
 // runArguments holds what one run adds: the dohc MCP server it replies
 // through and, for Codex, its sandbox and trust (codexRunConfig.ts).
 // A read-only Claude Code run has only the built-in tools that read and only
-// the run's dohc server; a read-only Codex run gets that from codexRunConfig.
+// the run's dohc server; a read-only Codex run gets that from codexRunConfig,
+// and loads none of the person's saved command rules. `codex mcp list`
+// takes no --ignore-rules, so it stays out of runArguments.
 export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = [], readOnly = false): string[] {
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   // mcp__dohc allows every tool the run's dohc server offers.
+  // --restricted drops the person's settings files too, and with them their
+  // hooks and plugins; --disable-slash-commands drops their skills.
   const claudeTools = readOnly
-    ? ["--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
+    ? ["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
     : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
   return profile.tool === "claude"
     ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, ...claudeTools]
-    : ["exec", "--config", "approval_policy=never", ...runArguments, "--skip-git-repo-check", "--ephemeral", "-"];
+    : ["exec", "--config", "approval_policy=never", ...runArguments, ...(readOnly ? ["--ignore-rules"] : []), "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 function quoteRunnerToken(value: string): string {

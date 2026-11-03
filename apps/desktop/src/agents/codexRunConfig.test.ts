@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, posix, win32 } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parse } from "smol-toml";
-import { type CodexConfigFiles, codexConfigFiles, codexMayRunWithoutLogin, codexRunConfig, codexTrustKeys } from "./codexRunConfig";
+import { type CodexConfigFiles, codexConfigFiles, codexMayRunWithoutLogin, codexRunConfig, codexTrustKeys, READ_ONLY_DISABLED_FEATURES } from "./codexRunConfig";
 import { createTestScratch } from "../workspaces/testTemp";
 
 const SYSTEM = "C:\\ProgramData\\OpenAI\\Codex\\config.toml";
@@ -102,13 +102,49 @@ describe("a dohc Codex run", () => {
     expect(entry(other, "default_permissions=")).not.toBe(`default_permissions=${profile}`);
   });
 
-  it("can't write anywhere when read-only, and still doesn't trust the workspace", () => {
-    const entries = codexRunConfig({ rootPath: "C:\\Users\\Sam\\dohc\\personal", runId: "run_1", platform: "win32", files: NONE, readOnly: true, realPath: (path) => path });
+  it("can't write anywhere when read-only, starts none of the person's own tools, and still doesn't trust the workspace", () => {
+    const entries = codexRunConfig({
+      rootPath: "C:\\Users\\Sam\\dohc\\personal", runId: "run_1", platform: "win32", files: { requirements: [], config: [SYSTEM, USER] }, readOnly: true, replyOnly: true, realPath: (path) => path,
+      readConfig: (path) => ({
+        [SYSTEM]: "[mcp_servers.org-docs]\ncommand = 'docs'\n",
+        [USER]: "notify = ['notifier']\n[mcp_servers.github]\ncommand = 'gh'\n[mcp_servers.org-docs]\nenabled = true\n[mcp_servers.dohc]\ncommand = 'old'\n",
+      })[path] ?? missing(path),
+    });
     expect(entries).toEqual([
       "--config", "default_permissions=':read-only'",
+      "--config", "mcp_servers.org-docs.enabled=false",
+      "--config", "mcp_servers.github.enabled=false",
+      "--config", "web_search='disabled'",
+      "--config", "notify=[]",
       "--config", "projects={'c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'},'\\\\?\\c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'}}",
       "--config", "windows.sandbox='unelevated'",
+      ...["plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
+        "multi_agent", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
+        "shell_tool", "unified_exec", "view_image"].flatMap((feature) => ["--disable", feature]),
     ]);
+  });
+
+  it("turns off the shell and view_image only when reply-only", () => {
+    const disabled = (readOnly: boolean, replyOnly: boolean) => {
+      const entries = codexRunConfig({ rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: null, readOnly, replyOnly, realPath: (path) => path });
+      return entries.filter((_, index) => entries[index - 1] === "--disable");
+    };
+    expect(disabled(true, true).slice(-3)).toEqual(["shell_tool", "unified_exec", "view_image"]);
+    expect(disabled(true, false)).toEqual([...READ_ONLY_DISABLED_FEATURES]);
+    expect(disabled(false, false)).toEqual([]);
+  });
+
+  it("names no server to turn off when it can't read the person's config, and leaves the check to refuse", () => {
+    const entries = codexRunConfig({
+      rootPath: "/home/sam/ws", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/home/sam/.codex/config.toml"] }, readOnly: true, realPath: (path) => path,
+      readConfig: () => "[mcp_servers.github\n",
+    });
+    expect(entries.filter((value) => value.startsWith("mcp_servers."))).toEqual([]);
+    expect(entries).toContain("notify=[]");
+  });
+
+  it("turns off the person's after-turn command only when read-only", () => {
+    expect(windowsRun({ [USER]: "notify = ['notifier']\n" }).some((value) => value.startsWith("notify="))).toBe(false);
   });
 
   it("names the workspace the way each of Codex's trust lookups spells it", () => {
@@ -236,6 +272,34 @@ describe("a dohc Codex run", () => {
       ...disk("win32", [WORKSPACE, ...OUTSIDE]),
     });
     expect(filesystem(denied)).toEqual(baseline);
+  });
+
+  it("gives a read-only run none of the person's writable folders, and doesn't look for them", () => {
+    const run = (mode: { readOnly?: boolean; replyOnly?: boolean }) => {
+      const folders = disk("win32", [WORKSPACE, ...OUTSIDE], { aliases: { "c:\\OTHER": "C:\\other" } });
+      const spies = { realPath: vi.fn(folders.realPath), readLink: vi.fn(folders.readLink), fileId: vi.fn(folders.fileId), listFolder: vi.fn(folders.listFolder) };
+      const entries = codexRunConfig({
+        rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [REQUIREMENTS], config: [SYSTEM, USER] },
+        readConfig: (path) => path === USER ? "[sandbox_workspace_write]\nwritable_roots = ['C:\\other', 'c:\\OTHER']\n" : missing(path),
+        ...folders, ...spies, ...mode,
+      });
+      return { entries, ...spies };
+    };
+    const normal = run({});
+    expect(filesystem(normal.entries)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "C:\\other": "write" });
+    expect(normal.fileId).toHaveBeenCalled();
+    expect(normal.listFolder).toHaveBeenCalled();
+    for (const replyOnly of [true, false]) {
+      const { entries, realPath, readLink, fileId, listFolder } = run({ readOnly: true, replyOnly });
+      expect(entries.filter((arg) => arg.toLowerCase().includes("c:\\other") || arg.includes("'write'"))).toEqual([]);
+      expect(entries.filter((arg) => arg.startsWith("permissions."))).toEqual([]);
+      expect(entries.filter((arg) => arg.startsWith("default_permissions="))).toEqual(["default_permissions=':read-only'"]);
+      expect(fileId).not.toHaveBeenCalled();
+      expect(listFolder).not.toHaveBeenCalled();
+      expect(readLink).not.toHaveBeenCalled();
+      // Only to name the workspace for Codex's trust lookups.
+      expect(realPath.mock.calls).toEqual([[WORKSPACE]]);
+    }
   });
 
   it("drops writable folders that reach the workspace or .dohc by any name", () => {

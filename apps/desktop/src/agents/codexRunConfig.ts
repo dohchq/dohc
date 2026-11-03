@@ -245,11 +245,15 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
 }
 
 // The --config entries a dohc Codex run adds over the person's config, which
-// it leaves unchanged.
+// it leaves unchanged, and the features a read-only run turns off.
+// - A read-only run turns off each MCP server the person's config names, web
+//   search, and the command the person's config runs after each turn, so it
+//   changes things only through dohc's tools.
 // - A permissions profile keeps the workspace's .dohc folder read-only. Its
 //   name is new for each run, because Codex merges a profile of the same name
 //   from the person's config into it. A read-only run uses Codex's built-in
-//   read-only profile instead; Codex refuses an unknown built-in name.
+//   read-only profile instead, and takes none of the person's writable_roots;
+//   Codex refuses an unknown built-in name.
 // - Mark the folder untrusted so Codex doesn't trust it on its own or load
 //   its .codex config.
 // - Codex runs Windows commands only in a sandbox the person or their
@@ -261,6 +265,7 @@ export function codexRunConfig(input: {
   platform: NodeJS.Platform;
   files: CodexConfigFiles | null;
   readOnly?: boolean;
+  replyOnly?: boolean;
   readConfig?: (path: string) => string;
   realPath?: (path: string) => string;
   readLink?: (path: string) => string | null;
@@ -292,17 +297,40 @@ export function codexRunConfig(input: {
     "':workspace_roots'={'.dohc'='read'}",
     ...(tables && workspaceWrite(tables, "exclude_tmpdir_env_var") ? ["':tmpdir'='read'"] : []),
     ...(tables && workspaceWrite(tables, "exclude_slash_tmp") ? ["':slash_tmp'='read'"] : []),
-    ...(tables ? writableRootEntries(tables, roots) : []),
+    ...(tables && !input.readOnly ? writableRootEntries(tables, roots) : []),
   ];
   const network = tables && workspaceWrite(tables, "network_access") ? ",network={enabled=true}" : "";
   const profile = `dohc_run_${createHash("sha256").update(input.runId).digest("hex").slice(0, 16)}`;
   const projects = codexTrustKeys(input.rootPath, input.platform, input.realPath)
     .map((key) => `${tomlKey(key)}={trust_level='untrusted'}`);
   return [
-    ...(input.readOnly
-      ? ["default_permissions=':read-only'"]
-      : [`permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`, `default_permissions='${profile}'`]),
-    `projects={${projects.join(",")}}`,
-    ...(tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
-  ].flatMap((entry) => ["--config", entry]);
+    ...[
+      ...(input.readOnly
+        ? ["default_permissions=':read-only'", ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`), "web_search='disabled'", "notify=[]"]
+        : [`permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`, `default_permissions='${profile}'`]),
+      `projects={${projects.join(",")}}`,
+      ...(tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
+    ].flatMap((entry) => ["--config", entry]),
+    ...(input.readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(input.replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : [])
+      .flatMap((feature) => ["--disable", feature]),
+  ];
+}
+
+// The features a read-only run turns off, because they act outside the
+// sandbox, bring in the person's own tools, or aren't needed to read and
+// reply. Codex refuses a name it doesn't know.
+export const READ_ONLY_DISABLED_FEATURES = [
+  "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
+  "multi_agent", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host",
+] as const;
+
+// A reply-only run also turns off the shell and view_image.
+export const REPLY_ONLY_DISABLED_FEATURES = ["shell_tool", "unified_exec", "view_image"] as const;
+
+// The MCP servers the person's config names, other than dohc's. A --config
+// key splits at each dot, so a name with other characters stays on, and the
+// check before a read-only run refuses it (chatRunnerProcess.ts).
+function ownerServers(tables: readonly ConfigTable[]): string[] {
+  const names = tables.flatMap(({ table }) => isTable(table.mcp_servers) ? Object.keys(table.mcp_servers) : []);
+  return [...new Set(names)].filter((name) => name !== "dohc" && /^[A-Za-z0-9_-]+$/u.test(name));
 }
