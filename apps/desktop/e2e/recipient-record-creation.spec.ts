@@ -44,8 +44,8 @@ async function records(page: Page) {
     return (await api.queryCollectionRecords({ workspaceId, collectionPath, limit: 100 })).records;
   }, COLLECTION);
 }
-// The engine reports a creation's status only while the snapshot is the recipient's own write. A refresh that swaps in
-// the relay's copy clears it, so a sent record shows as accepted or with no status, and has no draft row.
+// A creation keeps its status until its receipt arrives, even after a refresh swaps in the relay's copy. A sent record
+// shows as accepted or with no status, and has no draft row.
 async function expectSent(page: Page, id: string) {
   await expect.poll(async () => (await records(page)).map(record => ({ id: record.id,
     sent: record.creationDelivery === undefined || record.creationDelivery === "accepted" })), { timeout: 120_000 }).toEqual([{ id, sent: true }]);
@@ -437,10 +437,11 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await expect(page.getByTestId("collection-record-drafts")).toContainText("Saved on this computer. Waiting to send");
     await expect(page.getByTestId("collection-record-drafts").getByRole("button", { name: "Discard draft", exact: true })).toHaveCount(0);
     let beforeRelaunch = 0;
-    page = (await fixture.restartRecipient(() => { beforeRelaunch = responses.length; })).page;
-    // The restart's refresh can swap in the relay's copy before anything reads the status. See expectSent.
+    // Only the first receipt is lost. The relaunched app's replay gets its receipt.
+    page = (await fixture.restartRecipient(() => { beforeRelaunch = responses.length; drop = false; })).page;
+    // The restart's refresh can swap in the relay's copy first. The creation keeps its status until the replay's receipt.
     await expect.poll(async () => (await records(page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
-    expect(["pending", undefined]).toContain((await records(page))[0]!.creationDelivery);
+    expect(["pending", "accepted"]).toContain((await records(page))[0]!.creationDelivery);
     const relaunched = () => responses.slice(beforeRelaunch);
     await expect.poll(() => relaunched().some(response => response.receipt.created === false), { timeout: 120_000 }).toBe(true);
     const replay = relaunched().find(response => response.receipt.created === false)!;
@@ -453,7 +454,6 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
     expect(creationOps(await log(fixture.relay))).toHaveLength(1);
     expect(responses.filter(response => response.receipt.created === true)).toHaveLength(1);
-    drop = false;
     await page.getByRole("button", { name: "Open Untitled", exact: true }).click();
     await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
     await page.getByTestId("property-add").click();
