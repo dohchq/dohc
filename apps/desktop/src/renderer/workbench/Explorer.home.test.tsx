@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
@@ -454,6 +454,24 @@ describe("selecting several rows in Home", () => {
     const dialog = screen.getByTestId("delete-confirm");
     expect(within(dialog).getByRole("heading").textContent).toBe("Delete 3 items?");
     expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["notes.md", "tasks", "trip"]);
+  });
+
+  it("deletes the selection from a heading, and the focused row alone when it is outside the selection", async () => {
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps()} />);
+    const listed = () => [...screen.getByTestId("delete-confirm").querySelectorAll("li")].map((item) => item.textContent);
+    await user.click(homeRow("pages:Plans/"));
+    await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
+    act(() => document.querySelector<HTMLElement>('[data-home-key^="section:"]')!.focus());
+    await user.keyboard("{Delete}");
+    expect(listed()).toEqual(["Plans", "notes.md"]);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
+    act(() => homeRow("other:budget.csv").focus());
+    fireEvent.keyDown(homeRow("other:budget.csv"), { key: "Delete" });
+    expect(within(screen.getByTestId("delete-confirm")).getByRole("heading").textContent).toBe("Delete budget.csv?");
   });
 
   it("drags every selected row from one selected page", () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Explorer, type ExplorerProps } from "./Explorer";
@@ -361,12 +361,56 @@ describe("selecting several rows in Files", () => {
     const [, , retry, identity, livePage] = onError.mock.calls[0]!;
     expect(livePage).toEqual({ paths: ["b.md", "d.md"], action: "delete" });
 
-    // Try again deletes the two refused pages again, and its report replaces this one.
+    // Try again deletes the two refused pages again, and reports under the same identity.
     deleteWorkspacePath.mockClear();
     retry();
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
     expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["b.md", "d.md"]);
-    expect(onChangeSucceeded).toHaveBeenCalledWith(identity);
     expect(onError.mock.calls[1]![3]).toBe(identity);
+    expect(onChangeSucceeded).not.toHaveBeenCalledWith(identity);
+
+    // Deleting one of them later, by hand, takes the notice back.
+    deleteWorkspacePath.mockResolvedValue(undefined);
+    await user.click(row("b.md"));
+    await user.keyboard("{Delete}");
+    await user.click(screen.getByTestId("confirm-delete"));
+    await waitFor(() => expect(onChangeSucceeded).toHaveBeenCalledWith(identity));
+  });
+
+  it("reports a live editing refusal apart from another failure in the same delete", async () => {
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "b.md") {
+        throw new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "b.md" while it has live editing on\nIn Live documents, stop live editing for this page, then delete it again.`);
+      }
+      if (relativePath === "c.md") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
+    });
+    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
+    const onError = vi.fn();
+    const onPathsChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<Fixture {...many({ onError, onPathsChanged })} />);
+    await user.click(row("b.md"));
+    await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
+    await user.click(screen.getByTestId("confirm-delete"));
+
+    await waitFor(() => expect(onPathsChanged).toHaveBeenCalledTimes(1));
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError.mock.calls[0]![4]).toEqual({ path: "b.md", action: "delete" });
+    expect(onError.mock.calls[1]![4]).toBeUndefined();
+  });
+
+  it("deletes the focused row alone when it is outside the selection, as its menu would", () => {
+    render(<Fixture {...many()} />);
+    const dialog = () => screen.getByTestId("delete-confirm");
+    fireEvent.click(row("b.md"));
+    fireEvent.click(row("c.md"), { ctrlKey: true });
+    act(() => row("d.md").focus());
+    fireEvent.keyDown(row("d.md"), { key: "Delete" });
+    expect(within(dialog()).getByRole("heading").textContent).toBe("Delete d.md?");
+    fireEvent.click(within(dialog()).getByRole("button", { name: "Cancel" }));
+    act(() => row("c.md").focus());
+    fireEvent.keyDown(row("c.md"), { key: "Delete" });
+    expect(within(dialog()).getByRole("heading").textContent).toBe("Delete 2 items?");
+    expect([...dialog().querySelectorAll("li")].map((item) => item.textContent)).toEqual(["b.md", "c.md"]);
   });
 });

@@ -247,6 +247,11 @@ function ancestorsOf(path: string): string[] {
   return out;
 }
 
+// The path a change starts from.
+function sourcePath(change: PendingTreeChange): string {
+  return "path" in change ? change.path : change.fromPath;
+}
+
 // The rows from one key to another, both included, in `order`'s order.
 export function rangeBetween(order: readonly string[], from: string, to: string): string[] | null {
   const a = order.indexOf(from);
@@ -584,6 +589,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
+  // Each notice that names several refused paths, by its identity.
+  const refusedBatches = useRef(new Map<string, ReadonlySet<string>>());
   // Keep the actual drag-origin element mounted while Chromium owns the
   // gesture. A virtualized source that disappears during auto-scroll does not
   // receive dragend, which can otherwise leave a stale internal move armed.
@@ -895,8 +902,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       run: (change: PendingTreeChange) => Promise<unknown>,
       afterBegin?: () => void,
       action: "move" | "rename" = "move",
-      // A Try again of several refused changes, whose notice this run replaces.
-      batch?: string,
     ): Promise<void> {
       if (changes.length === 0) return;
       // Land the stable active draft and drain queued collection writes
@@ -918,8 +923,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         const succeeded: PendingTreeChange[] = [];
-        // The rest still go when some are refused, and the refusals report once.
-        const failed: Array<{ change: PendingTreeChange; cause: unknown; livePage?: LivePageRefused; again: boolean; report: () => void }> = [];
+        // The rest still go when some fail, and the failures report once.
+        const failed: Array<{ change: PendingTreeChange; cause: unknown; livePage?: LivePageRefused; again?: () => void; identity?: string }> = [];
         for (const change of changes) {
           const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
@@ -946,30 +951,40 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 : undefined;
             const rerun = () => void runChangesOnce([{ ...change, id: nextChangeId() }], run, undefined, action);
             const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && identity ? rerun : undefined;
-            failed.push({
-              change, cause, again: again !== undefined,
-              ...(livePage ? { livePage } : {}),
-              report: () => onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, refused ? refusalIdentity : identity, livePage),
-            });
+            const reported = refused ? refusalIdentity : identity;
+            failed.push({ change, cause, ...(livePage ? { livePage } : {}), ...(again ? { again } : {}), ...(reported ? { identity: reported } : {}) });
           }
         }
-        if (batch) onChangeSucceeded?.(batch);
-        if (failed.length === 1) failed[0]!.report();
-        if (failed.length > 1) {
-          const verb = failed.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder") ? "delete" : "move";
-          const names = failed.map(({ change, livePage }) => (livePage && "path" in livePage ? livePage.path : "path" in change ? change.path : change.fromPath));
-          const retried = failed.filter((entry) => entry.again).map(({ change }) => ({ ...change, id: nextChangeId() }));
+        // A notice naming several refused paths goes once one of them changes.
+        for (const [batch, paths] of refusedBatches.current) {
+          if (!succeeded.some((change) => paths.has(sourcePath(change)))) continue;
+          refusedBatches.current.delete(batch);
+          onChangeSucceeded?.(batch);
+        }
+        // Pages live editing refused report together, with the way to Live
+        // documents, and any other failures report together apart from them.
+        const live = failed.filter(({ livePage }) => livePage?.action === "delete" || livePage?.action === "move");
+        for (const group of [live, failed.filter((entry) => !live.includes(entry))]) {
+          const [first] = group;
+          if (!first) continue;
+          if (group.length === 1) {
+            onError(ipcErrorMessage(first.cause, "dohc could not change these files."), first.cause, first.again, first.identity, first.livePage);
+            continue;
+          }
+          const verb = group.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder") ? "delete" : "move";
+          const names = group.map(({ change, livePage }) => (livePage && "path" in livePage ? livePage.path : sourcePath(change)));
+          const retried = group.filter((entry) => entry.again).map(({ change }) => ({ ...change, id: nextChangeId() }));
           const identity = `refused:${JSON.stringify([workspaceId, verb, [...names].sort()])}`;
-          const again = retried.length > 0 ? () => void runChangesOnce(retried, run, undefined, action, identity) : undefined;
-          // The reason, when every refusal gives the same one.
-          const reasons = new Set(failed.map(({ cause }) => ipcErrorMessage(cause, "")));
+          refusedBatches.current.set(identity, new Set(names));
+          // The reason, when every failure gives the same one.
+          const reasons = new Set(group.map(({ cause }) => ipcErrorMessage(cause, "")));
           const reason = reasons.size === 1 ? [...reasons][0]! : "";
           onError(
             [`dohc could not ${verb} ${namedList(names)}.`, reason].filter(Boolean).join(" "),
-            failed[0]!.cause,
-            again,
+            first.cause,
+            retried.length > 0 ? () => void runChangesOnce(retried, run, undefined, action) : undefined,
             identity,
-            failed.every((entry) => entry.livePage?.action === verb) ? { paths: names, action: verb } : undefined,
+            group === live ? { paths: names, action: verb } : undefined,
           );
         }
         const changedExistingPath = succeeded.some(
@@ -1220,12 +1235,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [pinnedApps, props.pinned],
   );
 
-  // A delete asked from a selected row deletes the whole selection.
-  const askToDelete = useCallback((path: string) => {
-    const selected = selectionRef.current;
-    setConfirmDelete(selected.has(path) ? [...selected] : [path]);
-  }, []);
-
   // A row's menu acts on the row, or on the whole selection when the row is
   // one of two or more selected rows.
   const dispatchMenu = useCallback(
@@ -1258,7 +1267,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           if (path) beginRename(path, kind === "folder");
           break;
         case "delete":
-          if (path) askToDelete(path);
+          if (path) setConfirmDelete(many ?? [path]);
           break;
         case "pin":
         case "unpin":
@@ -1288,7 +1297,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     },
     [
       workspaceId,
-      askToDelete,
       beginCreateFolder,
       beginRename,
       isPinned,
@@ -1548,7 +1556,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
       if (isDeleteKey(event)) {
         event.preventDefault();
-        const targets = selection.size > 0 ? [...selection] : focusedPath ? [focusedPath] : [];
+        // The selection, or the focused row alone when it is outside the
+        // selection, as a row's menu acts.
+        const targets = focusedPath !== null && !selection.has(focusedPath) ? [focusedPath] : [...selection];
         if (targets.length > 0) setConfirmDelete(targets);
         return;
       }
@@ -2056,7 +2066,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             onSelect={setSelection}
             onMenu={onHomeMenu}
             onRename={beginRename}
-            onDelete={askToDelete}
+            onDelete={setConfirmDelete}
             onShowInFiles={showInFiles}
             drag={homeDrag}
             dropPreviewFor={dropPreviewFor}

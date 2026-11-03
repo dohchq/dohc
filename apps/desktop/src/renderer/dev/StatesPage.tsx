@@ -411,6 +411,7 @@ function Row(props: {
         collection={false}
         app={props.app ?? false}
         selected={props.selected ?? false}
+        tinted={false}
         active={props.active ?? false}
         tabbable={false}
         dropPreview={props.drop ? { kind: "move", role: "target" } : null}
@@ -451,6 +452,7 @@ function KindRows(props: { label: string; selected: boolean }) {
           collection={false}
           app={false}
           selected={props.selected}
+          tinted={false}
           active={false}
           tabbable={false}
           dropPreview={null}

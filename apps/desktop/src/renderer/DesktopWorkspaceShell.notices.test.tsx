@@ -4690,6 +4690,9 @@ describe("a refused delete of a page this computer owns live", () => {
     const notice = within(notices).getByText(SEVERAL).closest("li")!;
     expect(within(notice).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(notice).getByRole("button", { name: "Open Live documents" })).toBeTruthy();
+    // Copy details names every refused page, however many the title shows.
+    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    expect((await navigator.clipboard.readText()).split("\n")).toEqual(expect.arrayContaining(["File: a.md", "File: c.md"]));
   });
 });
 

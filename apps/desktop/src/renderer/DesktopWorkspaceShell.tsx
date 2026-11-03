@@ -977,7 +977,8 @@ export function DesktopWorkspaceShell(props: {
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
         ...(!livePage ? { message }
           : "path" in livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) }
-          : { title: livePagesTitle(livePage.paths, livePage.action), message: livePagesBody(livePage.action) }),
+          : { title: livePagesTitle(livePage.paths, livePage.action), message: livePagesBody(livePage.action),
+            details: livePage.paths.map((path) => ["File", path, path.length] as const) }),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],

@@ -69,8 +69,7 @@ export interface ExplorerHomeProps {
   onSelect: (paths: ReadonlySet<string>) => void;
   onMenu: (kind: "file" | "folder", path: string) => void;
   onRename: (path: string, isFolder: boolean) => void;
-  // Asks to delete the path, or the whole selection when it holds the path.
-  onDelete: (path: string) => void;
+  onDelete: (paths: string[]) => void;
   // Switches to Files, with this path selected when it has one.
   onShowInFiles: (paths: readonly string[] | null) => void;
   drag: {
@@ -488,9 +487,11 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       props.onRename(menu.path, menu.kind === "folder");
       return;
     }
-    if (menu && isDeleteKey(event)) {
+    // The selection, or the focused row alone when it is outside the
+    // selection. From a heading, the selection.
+    if (isDeleteKey(event) && (menu || props.selection.size > 0)) {
       event.preventDefault();
-      props.onDelete(menu.path);
+      props.onDelete(menu && !props.selection.has(menu.path) ? [menu.path] : [...props.selection]);
       return;
     }
     const action = navigateTree(nav.rows, focusedKey, event.key);
