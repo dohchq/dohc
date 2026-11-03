@@ -31,7 +31,8 @@ const stat = (kind, { mode = kind === "dir" ? 0o700 : 0o600, uid = 0, gid = 0, d
 /**
  * An in-memory Drive host. The volume starts mounted unless `mounted` is false; a successful `mount` call mounts it.
  * `child` is the raw output of the release command. Every command the wrapper runs is recorded in `calls`.
- * `disk` is the volume's statfs result, and each ping to the disk check is recorded in `pings` and answered with `pingStatus`.
+ * `disk` is the volume's statfs result. Each ping to the disk check is recorded in `pings` and answered with `pingStatus`,
+ * or with its next entry when it is a list.
  */
 function driveHost({ settings = baseSettings(), release = {}, imageDetails = {}, mounted = true, otherMounts = [], devices = ["/dev/sda"],
   mountPoint = [], mountStatus = 0, ipv6 = [], folders = {}, stats = {}, accounts = "missing", child = "", childStatus = 0, platform = "linux", arch = "x64", uid = 0,
@@ -61,7 +62,12 @@ function driveHost({ settings = baseSettings(), release = {}, imageDetails = {},
     },
     readdir(path) { assert.equal(path, "/mnt/drive"); return mountPoint; },
     statfs(path) { assert.equal(path, "/mnt/drive"); return disk; },
-    async ping(url, body) { pings.push({ url, body }); return pingStatus; },
+    async ping(url, body) {
+      pings.push({ url, body });
+      if (!Array.isArray(pingStatus)) return pingStatus;
+      assert.ok(pings.length <= pingStatus.length, "one ping too many");
+      return pingStatus[pings.length - 1];
+    },
     loadConfig(path) { assert.equal(path, bundle); return config; },
     write: text => written.push(text),
     async run(command, args, options = {}) {
@@ -372,6 +378,17 @@ test("disk-watch tries a report three times, and refuses without the disk check'
   await assert.rejects(runDrive(watch(), down.host), error =>
     /is 22% full\. The disk check did not accept this report\./.test(error.message) && !error.message.includes(diskUrl));
   assert.deepEqual(down.pings.map(ping => ping.url), [diskUrl, diskUrl, diskUrl]);
+
+  // A failed request, then a refusal, then success: the third try is the last, and nothing follows it.
+  const recovers = driveHost({ pingStatus: [undefined, 503, 200] });
+  await runDrive(watch(), recovers.host);
+  assert.deepEqual(recovers.pings.map(ping => ping.url), [diskUrl, diskUrl, diskUrl]);
+  assert.match(recovers.output(), /Pinged the disk check\.\n$/);
+
+  // A failure report that never arrives is retried at the failure URL only.
+  const full = driveHost({ disk: { blocks: 1000, bfree: 300, bavail: 300 }, pingStatus: [503, 503, 503] });
+  await assert.rejects(runDrive(watch(), full.host), /is 70% full\. The limit is 70%\. Make room on the volume or grow it\. The disk check did not accept this report\./);
+  assert.deepEqual(full.pings.map(ping => ping.url), [`${diskUrl}/fail`, `${diskUrl}/fail`, `${diskUrl}/fail`]);
 
   const missing = driveHost({ settings: { ...baseSettings(), DOHC_DISK_HEARTBEAT_URL: undefined } });
   await assert.rejects(runDrive(watch(), missing.host), /Set DOHC_DISK_HEARTBEAT_URL/);
