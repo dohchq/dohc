@@ -2112,12 +2112,14 @@ function chatWriteArgs(input: ChatWriteInput, reported: CliReportedAgent | undef
 export async function startGroupChat(
   ctx: ToolContext,
   args: ChatWriteInput & { group: string; title?: string },
+  agent?: string,
   reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "post", {
     group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...chatWriteArgs(args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {
@@ -2145,6 +2147,7 @@ export async function replyToChat(
     resolve?: string;
     choose?: string;
   },
+  agent?: string,
   reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "reply", {
@@ -2153,6 +2156,7 @@ export async function replyToChat(
     ...(args.resolve !== undefined ? { resolve: args.resolve } : {}),
     ...(args.choose !== undefined ? { choose: args.choose } : {}),
     ...chatWriteArgs(args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {

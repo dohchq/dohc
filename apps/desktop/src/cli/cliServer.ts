@@ -3671,7 +3671,7 @@ async function dispatchWorkspace(
       }
       const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
+        writer: cliChatWriter(actor, context, options, request.args.agent, request.args.reported),
         channelId: channel.engine.id,
         // A chat-only group shows only its chat lane.
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
@@ -3730,7 +3730,7 @@ async function dispatchWorkspace(
         }
       }
       const reply = {
-        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
+        writer: cliChatWriter(actor, context, options, request.args.agent, request.args.reported),
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,

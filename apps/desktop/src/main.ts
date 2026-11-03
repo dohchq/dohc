@@ -552,7 +552,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsNamedIn, automationAgent, firstAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsNamedIn, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -4931,7 +4931,7 @@ const chatWrites = createChatWrites({
   localUserDisplayName,
   agentDisplayName: async (agentId) => {
     const { settings } = await readCachedUserSettingsFile(stateDir());
-    return (agentId ? listAgents(settings).find(({ id }) => id === agentId) : firstAgent(settings))?.name ?? "Agent";
+    return listAgents(settings).find(({ id }) => id === agentId)?.name ?? "Agent";
   },
   agentIdsNamedIn: async (body) =>
     agentIdsNamedIn((await readCachedUserSettingsFile(stateDir())).settings, body),

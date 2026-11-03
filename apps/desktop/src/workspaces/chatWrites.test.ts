@@ -245,7 +245,7 @@ describe("chat writes", () => {
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { threadId: "thread" });
   });
 
-  it("writes an agent's thread under its own name, its owner, and the CLI origin", async () => {
+  it("writes an unnamed agent's thread as Agent, with its owner and the CLI origin", async () => {
     const test = fixture();
     await test.writes.startThread(test.place, {
       writer: AGENT, channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
@@ -253,7 +253,7 @@ describe("chat writes", () => {
     });
     expect(test.store.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace", channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
-      author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Sam",
+      author: { kind: "agent", displayName: "Agent" }, authorOwnerDisplayName: "Sam",
       authorUserId: "user-1", origin: "cli", needsDecision: true, options: ["A", "B"],
     }));
     expect(test.effects.projectChatBookmarks).toHaveBeenCalledWith("workspace");
@@ -623,7 +623,7 @@ describe("chat writes", () => {
     });
     expect(test.store.setReaction).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
-      author: { authorId: "user-1", kind: "agent", displayName: "Nova" }, replicationAuthorId: "user-1",
+      author: { authorId: "user-1", kind: "agent", displayName: "Agent" }, replicationAuthorId: "user-1",
     });
   });
 
@@ -697,7 +697,7 @@ describe("ActorKey local admission", () => {
       identity: { installationId: "local-id", account: { issuer: createActorIssuer("https://cloud.test"), userId: "user-1" } },
     }, "Agent");
     expect(parseActorKey(sent.authorActorKey!)).toEqual(history.key);
-    expect(sent.author.displayName).toBe(agentName ?? "Nova");
+    expect(sent.author.displayName).toBe(agentName ?? "Agent");
   });
 
   it("keeps what an agent reported beside its name, and never on a person's message", async () => {

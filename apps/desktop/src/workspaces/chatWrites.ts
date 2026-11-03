@@ -88,8 +88,8 @@ export function createChatWrites(dependencies: {
   // Changes whenever the credential cache sets, clears, or reloads a session.
   currentCredentialGeneration(): number;
   localUserDisplayName(): string;
-  // The name of the agent with this id, or of the first agent.
-  agentDisplayName(agentId?: string): Promise<string>;
+  // The name of the person's agent with this id.
+  agentDisplayName(agentId: string): Promise<string>;
   // The person's agents a message names.
   agentIdsNamedIn(body: string): Promise<string[]>;
   // The stable per-install id a signed-out reaction is authored under.
@@ -220,7 +220,7 @@ export function createChatWrites(dependencies: {
   async function personActorFor(writer: PersonWriter) {
     return writer.via === "cli" && writer.actor === "agent"
       ? {
-          author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName(writer.agentId) },
+          author: { kind: "agent" as const, displayName: writer.agentName ?? (writer.agentId ? await agentDisplayName(writer.agentId) : "Agent") },
           authorOwnerDisplayName: localUserDisplayName(),
           ...(writer.agentId ? { authorAgentId: writer.agentId } : {}),
           ...(writer.reported ? { authorReported: writer.reported } : {}),

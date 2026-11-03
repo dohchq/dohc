@@ -626,7 +626,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         ...chatWriteInput,
       },
     },
-    async ({ model, ...args }) => text(await startGroupChat(ctx, args, reported(model))),
+    async ({ model, ...args }) => text(await startGroupChat(ctx, args, agentName(), reported(model))),
   );
 
   register(
@@ -659,7 +659,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         ...chatWriteInput,
       },
     },
-    async ({ model, ...args }) => text(await replyToChat(ctx, args, reported(model))),
+    async ({ model, ...args }) => text(await replyToChat(ctx, args, agentName(), reported(model))),
   );
 
   register(

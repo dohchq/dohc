@@ -3077,10 +3077,10 @@ describe("CLI socket server", () => {
     const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
     const threadId = `thread-${posted.threadId.slice("th_".length)}`;
     // The client announced "Codex" in its MCP handshake, and the MCP server
-    // names it on the file write. A reply names no agent.
+    // names it on the file write and the reply.
     async function writeAndReply() {
       await writeWorkspaceFile(ctx, { path: "plan.txt", content: "Day 2" }, "Codex");
-      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." });
+      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." }, "Codex");
       if (!reply.ok) throw new Error(reply.reason);
       const message = (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).find((row) => row.id === reply.messageId);
       const origin = writeFiles.mock.lastCall?.[1];
@@ -3088,6 +3088,7 @@ describe("CLI socket server", () => {
       return {
         file: deriveMomentActor(agentWriteAuthor(origin), { source: "own-store", workspaceId: WORKSPACE_ID, identity }, "Codex").key,
         reply: parseActorKey(message.authorActorKey),
+        name: message.author.displayName,
       };
     }
 
@@ -3097,7 +3098,10 @@ describe("CLI socket server", () => {
 
     // Outside a run, the client's writes keep the name it gave.
     dispatchedRun = null;
-    expect((await writeAndReply()).file).toMatchObject({ kind: "agent", claimedName: "Codex" });
+    const outside = await writeAndReply();
+    expect(outside.file).toMatchObject({ kind: "agent", claimedName: "Codex" });
+    expect(outside.reply).toEqual(outside.file);
+    expect(outside.name).toBe("Codex");
   });
 
   it("creates a Markdown document with provenance the door derives", async () => {
