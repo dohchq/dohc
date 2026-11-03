@@ -3229,13 +3229,14 @@ describe("the move guard over a real relay and live host", () => {
     const { path } = fixture.page(input.name);
     const text = marker(input.name);
     const destination = `notes/${input.name}-moved.md`;
-    const notices = await device.refusalNotices();
     if (input.pullsRefused) fixture.refuseLogPulls(true);
     let cursor: number;
     try {
       cursor = await fixture.edit(input.name, text);
       await fixture.waitPublished(input.name, cursor);
       await input.before?.();
+      // The pending case's pull can record #2789's refusal, so compare from here.
+      const notices = await device.refusalNotices();
       const accepted = fixture.ownerAccepted(input.name);
       const requested = device.targetedPasses();
       fixture.proxy.setDelayMs(input.proxyDelayMs);
