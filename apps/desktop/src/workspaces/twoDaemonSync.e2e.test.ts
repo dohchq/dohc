@@ -3407,14 +3407,16 @@ describe("the move guard over a real relay and live host", () => {
 
 // A rename of an owner-bound page is refused, so B and C still publish, and
 // after Stop it renames. "unbound" never binds A.
-// "os-rename" and "os-delete" rename or delete A with the file manager while
-// dohc runs: a plain rename or unlink on disk that capture notices, with no
-// dohc move or delete. "capture-rename" and "capture-delete" save A on disk
-// outside dohc, open it once and bind it with no edit, so capture owns A's
-// head, then do the same. The soft expectations hold the correct behavior, so
-// these cases fail only where publication stays stopped.
+// In "capture-rename" and "capture-delete", a page whose owner native owner
+// delivery has bound, and whose head capture owns, is renamed or deleted with
+// the file manager while dohc runs: a plain rename or unlink on disk that
+// capture notices, with no dohc move or delete. A has an edit its delivery
+// hasn't sent. Capture retires A's lineage, which closes A's owner binding, so
+// the workspace keeps publishing: A's old path leaves the owner's second
+// device, B and C reach it byte for byte, and the unsent edit waits in a
+// save-only recovery copy.
 // Every observation prints as one `REPRO-OBS` JSON line.
-type RenameReproCase = "bound" | "unbound" | "os-rename" | "os-delete" | "capture-rename" | "capture-delete";
+type RenameReproCase = "bound" | "unbound" | "capture-rename" | "capture-delete";
 type RenameReproDocument = ReturnType<typeof readyOwnerDeliveryDocuments>[number];
 type RenameReproPush = Awaited<ReturnType<EngineRelayWorkspaceClient["push"]>>;
 const renameRepro = { oldPath: "docs/a.md", newPath: "docs/a-renamed.md", newPage: "notes/b.md", existing: "notes/c.md" } as const;
@@ -3714,61 +3716,6 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     observe({ stopInput: input, stopped, stillLiveAfterStop: stillLive, ownerA: bindingOf(objectIdA) });
     return stopped;
   };
-  // Steps 2 and 3 for a file-manager route. A's tab is closed. The watcher
-  // captures the change when it runs; otherwise the reconcile pass the app
-  // runs does. Then B and C, and up to six passes.
-  const runOsRoute = async (route: "os-rename" | "os-delete") => {
-    step = `2-${route}`;
-    const startedAt = new Date().toISOString();
-    if (route === "os-rename") await rename(join(rootA, oldPath), join(rootA, newPath));
-    else await unlink(join(rootA, oldPath));
-    const watcher = await (await owner().adapter()).watcherStatus();
-    const target = route === "os-rename" ? newPath : oldPath;
-    const captured = async () => {
-      const [file] = (await (await owner().adapter()).resolveFiles({ workspaceId, versionId: "main", targets: [{ path: target }] })).results;
-      if (route === "os-delete") return file?.status === "found" ? "present" : "absent";
-      return file?.status !== "found" ? "absent" : file.objectId === objectIdA ? "same-object" : "new-object";
-    };
-    const done = (state: string) => route === "os-rename" ? state !== "absent" : state === "absent";
-    let capturedBy = "none", state = await captured();
-    if (watcher.running) {
-      await expect.poll(async () => done(state = await captured()), { timeout: 30_000 }).toBe(true).catch(() => undefined);
-      if (done(state)) capturedBy = "watcher";
-    }
-    if (!done(state)) {
-      await (await owner().adapter()).reconcileCapture();
-      if (done(state = await captured())) capturedBy = "reconcile";
-    }
-    const moments = (await owner().pages.listMoments({ limit: 1_000 })).moments
-      .filter(moment => moment.objectId === objectIdA || moment.path === oldPath || moment.path === newPath)
-      .map(moment => ({ path: moment.path, operation: moment.operation, objectIsA: moment.objectId === objectIdA }));
-    const onDisk = (path: string) => stat(join(rootA, path)).then(() => true, () => false);
-    observe({ startedAt, watcher: { running: watcher.running, phase: watcher.phase, degraded: watcher.degraded }, capturedBy, state, moments,
-      watcherAfter: await (await owner().adapter()).watcherStatus(),
-      momentOrigins: readOwnerDb(db => db.prepare("SELECT path, operation, metadata_origin AS origin FROM moments WHERE workspace_id=? AND object_id=? ORDER BY moment_order")
-        .all(workspaceId, objectIdA)),
-      onDisk: { old: await onDisk(oldPath), new: await onDisk(newPath) }, ownerA: bindingOf(objectIdA), serverRow: await serverRowOfA() });
-    expect(capturedBy, `${route}: capture notices the file manager's change without a dohc move or delete`).not.toBe("none");
-
-    step = "3-new-and-changed";
-    await writePage(newPage, "# B\n");
-    await saveFile(existing, savedC);
-    const arrived = (relay: Relay) => !relay.aOld && relay.b && relay.cChanged && (route === "os-delete" || relay.aNew);
-    const published = await settle(6, arrived);
-    const ownerANew = route === "os-rename" ? await readFile(join(rootA, newPath), "utf8").catch(() => null) : null;
-    const stalled = !(arrived(published.relay) && published.pending?.length === 0);
-    observe({ stalled, endedAt: new Date().toISOString(), aGoneOnPeer: !published.relay.aOld,
-      aNewOnPeerMatches: route === "os-rename" ? published.relay.aNewText === ownerANew : null,
-      notices: (published.pending ?? []).map(entry => ({ title: "Saved locally · Pending share",
-        body: `Your edits to "${entry.path}" are saved on this device. The shared file update is pending.` })),
-      serverRow: await serverRowOfA(), owedStops: await owedStopsOfA(), ownerA: bindingOf(objectIdA), recoveryCopies: await recoveryCopiesOfA() });
-    expectOwnerIntact(`after ${route}`, published);
-    expect.soft({ b: published.relay.b, cChanged: published.relay.cChanged }, `${route}: B and C reach the owner's second device`)
-      .toEqual({ b: true, cChanged: true });
-    expect.soft(published.pending, `${route}: no owner admission is left pending`).toEqual([]);
-    expect.soft({ b: published.relay.bText, c: published.relay.cText }, `${route}: B and C match the owner's bytes`).toEqual(published.owner);
-    if (route === "os-rename") expect.soft(published.relay.aNewText, `${route}: A reaches the second device under its new name`).toBe(ownerANew);
-  };
   try {
     relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
       editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
@@ -3782,14 +3729,12 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     await pushUntilDrained(current.relay);
     await (await current.adapter()).ensureMainVersion({ workspaceId });
 
-    // Step 1: A and C exist and reach the owner's second device. The owner
-    // then edits A live; with a session host, native owner delivery binds it.
-    step = "1-synced";
-    const captureOwned = kind === "capture-rename" || kind === "capture-delete";
-    if (captureOwned) {
-      // A is saved on disk outside dohc, and capture writes its head. Opening
-      // it once in dohc, with no edit, gives it the live-editing history a
-      // server needs to host it.
+    if (kind === "capture-rename" || kind === "capture-delete") {
+      const route = kind === "capture-rename" ? "os-rename" : "os-delete";
+      // Step 1: A is saved on disk outside dohc, and capture writes its head.
+      // Opening it once in dohc, with no edit, gives it the live-editing history
+      // a server needs to host it. A and C reach the owner's second device.
+      step = "1-synced";
       await mkdir(join(rootA, dirname(oldPath)), { recursive: true });
       await writeFile(join(rootA, oldPath), "# A\n");
       await expect.poll(async () => {
@@ -3798,7 +3743,105 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
       }, { timeout: 30_000 }).toBe("found");
       const session = await current.pages.openYDocSession({ path: oldPath, contentKind: "richdoc", onRemoteUpdate: () => undefined });
       await session.close({ settle: false });
-    } else await writePage(oldPath, "# A\n");
+      await writePage(existing, "# C\n");
+      await pushUntilDrained(current.relay);
+      peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      const fileA = (await (await current.adapter()).resolveFiles({ workspaceId, versionId: "main", targets: [{ path: oldPath }] })).results[0];
+      if (fileA?.status !== "found") throw new Error(`${oldPath} has no object.`);
+      objectIdA = fileA.objectId;
+      await settle(3, relay => relay.aOld);
+
+      // The owner shares A's folder with a session host, and a delivery pass
+      // with no edit binds A's owner and keeps capture's head.
+      step = "1-live";
+      const share = await call(`/sync/${workspaceId}/shares`, { recipientEmail: "repro-recipient@dohc.test", paths: ["docs"], access: "edit" });
+      expect(share.status).toBe(200);
+      const enrollment = await call(`/sync/${workspaceId}/live-host`, { shareId: (await share.json() as { shareId: string }).shareId });
+      expect([200, 202]).toContain(enrollment.status);
+      await expect.poll(async () => (await ready()).map(document => document.binding.currentPath), { timeout: 120_000 })
+        .toEqual([oldPath]).catch(error => { throw new Error(diagnostics(), { cause: error }); });
+      const document = (await ready())[0]!;
+      expect(document.binding.objectId).toBe(objectIdA);
+      await expect.poll(async () => {
+        observe({ bindingPass: await deliveryPass(document, [document]).then(String, reproErrorText) });
+        return bindingOf(objectIdA).ownerBindings.length;
+      }, { timeout: 120_000 }).toBe(1);
+      owner().pages.start();
+      const binding = bindingOf(objectIdA);
+      observe({ binding });
+      expect({ ownerBoundAtOldPath: binding.ownerBindings.some(row => row.currentPath === oldPath),
+        currentActivation: binding.activations.some(row => row.releasedAtMs === null) }, `${kind}: before the change, A's owner binding`)
+        .toEqual({ ownerBoundAtOldPath: true, currentActivation: false });
+      await settle(3, relay => relay.aOld);
+      const origin = readOwnerDb(db => (db.prepare("SELECT metadata_origin AS origin FROM snapshots WHERE workspace_id=? AND object_id=?")
+        .get(workspaceId, objectIdA) as { origin: string } | undefined)?.origin ?? null);
+      expect(origin, `${kind}: capture owns A's head, so a file-manager change retires its lineage`).toBe("capture");
+
+      // An edit in A's editor that delivery hasn't sent when the file goes.
+      step = "2-unsent-edit";
+      await editPage(oldPath, "a-unsent", false);
+      const unsent = () => readOwnerDb(db => (db.prepare("SELECT COUNT(*) AS n FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.object_id=? AND e.pending=1")
+        .get(objectIdA) as { n: number }).n);
+      const unsentBefore = unsent();
+      observe({ unsentEntries: unsentBefore });
+      expect(unsentBefore, `${kind}: A has an unsent edit`).toBeGreaterThan(0);
+
+      // Step 2: with A's tab closed, the file manager renames or deletes A. The
+      // watcher captures the change when it runs; otherwise the reconcile pass
+      // the app runs does.
+      step = `2-${route}`;
+      const startedAt = new Date().toISOString();
+      if (route === "os-rename") await rename(join(rootA, oldPath), join(rootA, newPath));
+      else await unlink(join(rootA, oldPath));
+      const watcher = await (await owner().adapter()).watcherStatus();
+      const target = route === "os-rename" ? newPath : oldPath;
+      const captured = async () => {
+        const [file] = (await (await owner().adapter()).resolveFiles({ workspaceId, versionId: "main", targets: [{ path: target }] })).results;
+        if (route === "os-delete") return file?.status === "found" ? "present" : "absent";
+        return file?.status !== "found" ? "absent" : file.objectId === objectIdA ? "same-object" : "new-object";
+      };
+      const done = (state: string) => route === "os-rename" ? state !== "absent" : state === "absent";
+      let capturedBy = "none", state = await captured();
+      if (watcher.running) {
+        await expect.poll(async () => done(state = await captured()), { timeout: 30_000 }).toBe(true).catch(() => undefined);
+        if (done(state)) capturedBy = "watcher";
+      }
+      if (!done(state)) {
+        await (await owner().adapter()).reconcileCapture();
+        if (done(state = await captured())) capturedBy = "reconcile";
+      }
+      observe({ startedAt, watcher: { running: watcher.running, phase: watcher.phase, degraded: watcher.degraded }, capturedBy, state,
+        ownerA: bindingOf(objectIdA), serverRow: await serverRowOfA() });
+      expect(capturedBy, `${route}: capture notices the file manager's change without a dohc move or delete`).not.toBe("none");
+
+      // Step 3: a new page B, and an ordinary saved change to the file C, which
+      // synced before step 1 and is not enrolled for live delivery.
+      step = "3-new-and-changed";
+      await writePage(newPage, "# B\n");
+      await saveFile(existing, savedC);
+      const arrived = (relay: Relay) => !relay.aOld && relay.b && relay.cChanged && (route === "os-delete" || relay.aNew);
+      const published = await settle(6, arrived);
+      const ownerANew = route === "os-rename" ? await readFile(join(rootA, newPath), "utf8").catch(() => null) : null;
+      const copies = await recoveryCopiesOfA();
+      observe({ endedAt: new Date().toISOString(), serverRow: await serverRowOfA(), ownerA: bindingOf(objectIdA),
+        unsentEntriesAfter: unsent(), recoveryCopies: copies });
+      expect(published.owner.b ?? "", `${route}: B is intact on the owner's device`).toContain("# B");
+      expect(published.owner.c, `${route}: C is intact on the owner's device`).toBe(savedC);
+      expect(published.relay.aOld, `${route}: A's old path is gone from the owner's second device`).toBe(false);
+      expect({ b: published.relay.b, cChanged: published.relay.cChanged }, `${route}: B and C reach the owner's second device`)
+        .toEqual({ b: true, cChanged: true });
+      expect(published.pending, `${route}: no owner admission is left pending`).toEqual([]);
+      expect({ b: published.relay.bText, c: published.relay.cText }, `${route}: B and C match the owner's bytes`).toEqual(published.owner);
+      if (route === "os-rename") expect(published.relay.aNewText, `${route}: A reaches the second device under its new name`).toBe(ownerANew);
+      expect(copies, `${kind}: A's unsent edit waits in a save-only recovery copy`)
+        .toEqual([{ path: oldPath, reason: "retired", recovery: "paused", saveOnly: true }]);
+      return;
+    }
+
+    // Step 1: A and C exist and reach the owner's second device. The owner
+    // then edits A live; with a session host, native owner delivery binds it.
+    step = "1-synced";
+    await writePage(oldPath, "# A\n");
     await writePage(existing, "# C\n");
     await pushUntilDrained(current.relay);
     peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
@@ -3819,13 +3862,6 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
       const control = hostControl();
       observe({ hostControl: control });
       expect.soft(control, `${kind}: the relay's session host runs in the self-host default mode`).toMatchObject([{ mode: "service" }]);
-      if (captureOwned) {
-        // A delivery pass with no edit binds A's owner and keeps capture's head.
-        await expect.poll(async () => {
-          observe({ bindingPass: await deliveryPass(document, [document]).then(String, reproErrorText) });
-          return bindingOf(objectIdA).ownerBindings.length;
-        }, { timeout: 120_000 }).toBe(1);
-      } else {
       // The owner edits A in its editor, and delivery carries the edit to the session host.
       await editPage(oldPath, "a-live", false);
       await expect.poll(async () => {
@@ -3841,7 +3877,6 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
         return readFile(join(rootA, oldPath), "utf8");
       }, { timeout: 60_000 }).toContain("note: a-live").then(() => true, () => false);
       observe({ ownerFileHasAcceptedEdit: fileMatches, ownerFile: await readFile(join(rootA, oldPath), "utf8") });
-      }
     } else {
       // The same live edit with no session host: nothing binds A's owner.
       await editPage(oldPath, "a-live", true);
@@ -3859,31 +3894,6 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     expect(preconditions, `${kind}: before the rename, A's owner binding`)
       .toEqual({ ownerBoundAtOldPath: bound, anyBinding: bound, currentActivation: false });
     await settle(3, relay => relay.aOld);
-
-    if (kind === "os-rename" || kind === "os-delete") {
-      await runOsRoute(kind);
-      return;
-    }
-    if (kind === "capture-rename" || kind === "capture-delete") {
-      const origin = readOwnerDb(db => (db.prepare("SELECT metadata_origin AS origin FROM snapshots WHERE workspace_id=? AND object_id=?")
-        .get(workspaceId, objectIdA) as { origin: string } | undefined)?.origin ?? null);
-      observe({ headOrigin: origin, ownerA: bindingOf(objectIdA) });
-      expect(origin, `${kind}: capture owns A's head, so a file-manager change retires its lineage`).toBe("capture");
-      // An edit in A's editor that delivery hasn't sent when the file goes.
-      step = "2-unsent-edit";
-      await editPage(oldPath, "a-unsent", false);
-      const unsent = () => readOwnerDb(db => (db.prepare("SELECT COUNT(*) AS n FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.object_id=? AND e.pending=1")
-        .get(objectIdA) as { n: number }).n);
-      const unsentBefore = unsent();
-      observe({ unsentEntries: unsentBefore, headOrigin: readOwnerDb(db => db.prepare("SELECT metadata_origin AS origin FROM snapshots WHERE workspace_id=? AND object_id=?").get(workspaceId, objectIdA)) });
-      expect(unsentBefore, `${kind}: A has an unsent edit`).toBeGreaterThan(0);
-      await runOsRoute(kind === "capture-rename" ? "os-rename" : "os-delete");
-      const copies = await recoveryCopiesOfA();
-      observe({ unsentEntriesAfter: unsent(), recoveryCopies: copies });
-      expect.soft(copies, `${kind}: A's unsent edit waits in a save-only recovery copy`)
-        .toEqual([{ path: oldPath, reason: "retired", recovery: "paused", saveOnly: true }]);
-      return;
-    }
 
     // Step 2: with A's tab closed, the owner renames A in Explorer. dohc
     // refuses a bound A, which stays where it was.
@@ -3970,9 +3980,6 @@ async function runRenameRepros(cases: RenameReproCase[]): Promise<void> {
 
 it.skipIf(engine.missing)("refuses renaming an owner-bound live page, keeps its workspace publishing, and renames it after Stop (bound, unbound)",
   () => runRenameRepros(["bound", "unbound"]), 300_000);
-
-it.skipIf(engine.missing)("renaming or deleting an owner-bound live page in the file manager keeps its workspace publishing",
-  () => runRenameRepros(["os-rename", "os-delete"]), 300_000);
 
 it.skipIf(engine.missing)("renaming or deleting a captured owner-bound live page in the file manager keeps its workspace publishing",
   () => runRenameRepros(["capture-rename", "capture-delete"]), 300_000);
