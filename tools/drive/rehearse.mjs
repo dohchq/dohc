@@ -169,7 +169,8 @@ try {
     DOHC_RELAY_APP_PUBLICATIONS: "1", DOHC_SHARE_WEB_APP_DOMAIN: appDomain, DOHC_APP_TLS_CERT_FILE: join(tls, "app.pem"), DOHC_APP_TLS_KEY_FILE: join(tls, "app.key"),
     DOHC_SNAPSHOT_S3_ENDPOINT: "https://s3.rehearsal.invalid", DOHC_SNAPSHOT_S3_REGION: "auto", DOHC_SNAPSHOT_S3_BUCKET: "rehearsal",
     DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: randomBytes(16).toString("hex"), DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: randomBytes(32).toString("base64url"),
-    DOHC_SNAPSHOT_ALERT_EMAIL: "operator@rehearsal.test", DOHC_SNAPSHOT_HEARTBEAT_URL: `https://heartbeat.rehearsal.invalid/${randomUUID()}` };
+    DOHC_SNAPSHOT_ALERT_EMAIL: "operator@rehearsal.test", DOHC_SNAPSHOT_HEARTBEAT_URL: `https://heartbeat.rehearsal.invalid/${randomUUID()}`,
+    DOHC_DISK_HEARTBEAT_URL: `https://heartbeat.rehearsal.invalid/${randomUUID()}` };
   writeEnv(envFile, settings);
   neonEnv.REHEARSAL_POSTGRES_PASSWORD = settings.POSTGRES_PASSWORD;
   redact = redactor(settings);

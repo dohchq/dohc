@@ -21,7 +21,8 @@ const baseSettings = () => ({ ...parseEnv(readFileSync(new URL("../../.env.self-
   DOHC_APP_TLS_CERT_FILE: "/etc/dohc/app-tls/cert.pem", DOHC_APP_TLS_KEY_FILE: "/etc/dohc/app-tls/key.pem",
   DOHC_SNAPSHOT_S3_ENDPOINT: "https://storage.provider.invalid", DOHC_SNAPSHOT_S3_BUCKET: "dohc-snapshots",
   DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: "storage-access-key", DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: "storage-secret-key",
-  DOHC_SNAPSHOT_ALERT_EMAIL: "ops@team.invalid", DOHC_SNAPSHOT_HEARTBEAT_URL: "https://heartbeat.provider.invalid/ping/private-check" });
+  DOHC_SNAPSHOT_ALERT_EMAIL: "ops@team.invalid", DOHC_SNAPSHOT_HEARTBEAT_URL: "https://heartbeat.provider.invalid/ping/private-check",
+  DOHC_DISK_HEARTBEAT_URL: "https://heartbeat.provider.invalid/ping/private-disk-check" });
 
 const stat = (kind, { mode = kind === "dir" ? 0o700 : 0o600, uid = 0, gid = 0, dev = 2 } = {}) => ({
   isFile: () => kind === "file", isDirectory: () => kind === "dir", isSymbolicLink: () => kind === "link",
@@ -30,10 +31,12 @@ const stat = (kind, { mode = kind === "dir" ? 0o700 : 0o600, uid = 0, gid = 0, d
 /**
  * An in-memory Drive host. The volume starts mounted unless `mounted` is false; a successful `mount` call mounts it.
  * `child` is the raw output of the release command. Every command the wrapper runs is recorded in `calls`.
+ * `disk` is the volume's statfs result, and each ping to the disk check is recorded in `pings` and answered with `pingStatus`.
  */
 function driveHost({ settings = baseSettings(), release = {}, imageDetails = {}, mounted = true, otherMounts = [], devices = ["/dev/sda"],
-  mountPoint = [], mountStatus = 0, ipv6 = [], folders = {}, stats = {}, accounts = "missing", child = "", childStatus = 0, platform = "linux", arch = "x64", uid = 0 } = {}) {
-  const calls = [], written = [];
+  mountPoint = [], mountStatus = 0, ipv6 = [], folders = {}, stats = {}, accounts = "missing", child = "", childStatus = 0, platform = "linux", arch = "x64", uid = 0,
+  disk = { blocks: 1000, bfree: 800, bavail: 750 }, pingStatus = 200 } = {}) {
+  const calls = [], written = [], pings = [];
   const state = { mounted };
   const releaseJson = { version: 1, revision, dirty: false, image, imageId, platform: "linux/amd64", files, archive: "services.tar", ...release };
   const folderStats = name => folders[name] === undefined ? stat("dir", { uid: 1000, gid: 1000 }) : folders[name];
@@ -57,6 +60,8 @@ function driveHost({ settings = baseSettings(), release = {}, imageDetails = {},
       throw new Error(`Unexpected read of ${path}`);
     },
     readdir(path) { assert.equal(path, "/mnt/drive"); return mountPoint; },
+    statfs(path) { assert.equal(path, "/mnt/drive"); return disk; },
+    async ping(url, body) { pings.push({ url, body }); return pingStatus; },
     loadConfig(path) { assert.equal(path, bundle); return config; },
     write: text => written.push(text),
     async run(command, args, options = {}) {
@@ -91,7 +96,7 @@ function driveHost({ settings = baseSettings(), release = {}, imageDetails = {},
       throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
     },
   };
-  return { host, calls, output: () => written.join(""), state };
+  return { host, calls, output: () => written.join(""), state, pings };
 }
 
 const options = (command, extra = {}) => ({ command, bundle, envFile, volumeUuid: uuid, firstStart: false, ...extra });
@@ -120,6 +125,18 @@ test("arguments need a command, the bundle, the configuration and the volume's f
   for (const command of ["check", "move"]) {
     assert.throws(() => parseDriveArguments([command, "--first-start", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid]), /only with start/);
   }
+});
+
+test("disk-watch needs the configuration and the volume's UUID, takes a limit from 1 to 99 percent, and no bundle", () => {
+  assert.deepEqual(parseDriveArguments(["disk-watch", "--env-file", envFile, "--volume-uuid", uuid]), { command: "disk-watch", envFile, volumeUuid: uuid, limit: 70 });
+  assert.equal(parseDriveArguments(["disk-watch", "--env-file", envFile, "--volume-uuid", uuid, "--limit", "1"]).limit, 1);
+  for (const args of [["disk-watch", "--env-file", envFile], ["disk-watch", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid]]) {
+    assert.throws(() => parseDriveArguments(args), /disk-watch --env-file PATH/, args.join(" "));
+  }
+  for (const value of ["0", "100", "70.5", "07", ""]) {
+    assert.throws(() => parseDriveArguments(["disk-watch", "--env-file", envFile, "--volume-uuid", uuid, "--limit", value]), /from 1 to 99/, value);
+  }
+  assert.throws(() => parseDriveArguments(["check", "--bundle", bundle, "--env-file", envFile, "--volume-uuid", uuid, "--limit", "50"]), /only with disk-watch/);
 });
 
 test("check delegates to the release check with the same configuration and mounts nothing", async () => {
@@ -248,6 +265,8 @@ test("the configuration must be private and complete for Drive, and the release'
     [{ settings: { ...baseSettings(), DOHC_BEHIND_CLOUDFLARE: "0", DOHC_APP_TLS_CERT_FILE: "", DOHC_APP_TLS_KEY_FILE: "" } }, /runs behind Cloudflare/],
     [{ settings: { ...baseSettings(), DOHC_POSTGRES_HOST: "", DOHC_POSTGRES_PORT: "", DOHC_POSTGRES_CA_FILE: "", POSTGRES_PASSWORD: "x".repeat(43) } }, /keeps accounts in Neon/],
     [{ settings: { ...baseSettings(), DOHC_SNAPSHOT_HEARTBEAT_URL: "" } }, /takes hourly snapshots/],
+    [{ settings: { ...baseSettings(), DOHC_DISK_HEARTBEAT_URL: "" } }, /watches its volume's free space/],
+    [{ settings: { ...baseSettings(), DOHC_DISK_HEARTBEAT_URL: "http://heartbeat.provider.invalid/ping/disk" } }, /watches its volume's free space/],
     [{ settings: { ...baseSettings(), DOHC_SNAPSHOT_S3_BUCKET: "<bucket>" } }, /Replace the placeholder in DOHC_SNAPSHOT_S3_BUCKET/],
     [{ settings: { ...baseSettings(), DOHC_DATA_DIRECTORY: "/dohc" } }, /directly on the volume's mount point/],
     [{ settings: { ...baseSettings(), DOHC_APP_TLS_KEY_FILE: "" } }, /Set DOHC_APP_TLS_KEY_FILE to the absolute path/],
@@ -318,4 +337,43 @@ test("a secret setting that spans lines refuses before anything runs, without it
   await assert.rejects(runDrive(options("check"), host), error =>
     /Put DOHC_SMTP_PASSWORD on one line/.test(error.message) && !/first-half|second-half/.test(error.message));
   assert.deepEqual(calls, []);
+});
+
+const watch = (extra = {}) => ({ command: "disk-watch", envFile, volumeUuid: uuid, limit: 70, ...extra });
+const diskUrl = baseSettings().DOHC_DISK_HEARTBEAT_URL;
+
+test("disk-watch pings the disk check while the volume is under the limit, without the bundle or a secret in its output", async () => {
+  // 200 blocks used and 750 available to the services: 22% full, rounded up as df rounds.
+  const { host, calls, output, pings } = driveHost();
+  await runDrive(watch(), host);
+  assert.deepEqual(pings, [{ url: diskUrl, body: `Volume ${uuid} at /mnt/drive is 22% full.` }]);
+  assert.equal(output(), `Volume ${uuid} at /mnt/drive is 22% full. Pinged the disk check.\n`);
+  assert.deepEqual(calls.map(call => call.command), ["findmnt"]);
+  assert.ok(!output().includes(diskUrl));
+});
+
+test("disk-watch reports a failure when the volume reaches the limit, or is not the mounted volume", async () => {
+  const full = driveHost({ disk: { blocks: 1000, bfree: 300, bavail: 300 } });
+  await assert.rejects(runDrive(watch(), full.host), /is 70% full\. The limit is 70%\. Make room on the volume or grow it\. Reported this to the disk check\./);
+  assert.deepEqual(full.pings.map(ping => ping.url), [`${diskUrl}/fail`]);
+  await runDrive(watch({ limit: 71 }), driveHost({ disk: { blocks: 1000, bfree: 300, bavail: 300 } }).host);
+
+  const unmounted = driveHost({ mounted: false });
+  await assert.rejects(runDrive(watch(), unmounted.host), new RegExp(`Volume ${uuid} is not mounted at /mnt/drive\. Reported this`));
+  assert.deepEqual(unmounted.pings, [{ url: `${diskUrl}/fail`, body: `Volume ${uuid} is not mounted at /mnt/drive.` }]);
+
+  const other = driveHost({ mounted: false, otherMounts: [{ target: "/mnt/drive", source: "/dev/sdb", uuid: "99999999-2222-4333-8444-555555555555", fstype: "ext4" }] });
+  await assert.rejects(runDrive(watch(), other.host), /Another filesystem is mounted at \/mnt\/drive/);
+  assert.deepEqual(other.pings.map(ping => ping.url), [`${diskUrl}/fail`]);
+});
+
+test("disk-watch tries a report three times, and refuses without the disk check's URL", async () => {
+  const down = driveHost({ pingStatus: 503 });
+  await assert.rejects(runDrive(watch(), down.host), error =>
+    /is 22% full\. The disk check did not accept this report\./.test(error.message) && !error.message.includes(diskUrl));
+  assert.deepEqual(down.pings.map(ping => ping.url), [diskUrl, diskUrl, diskUrl]);
+
+  const missing = driveHost({ settings: { ...baseSettings(), DOHC_DISK_HEARTBEAT_URL: undefined } });
+  await assert.rejects(runDrive(watch(), missing.host), /Set DOHC_DISK_HEARTBEAT_URL/);
+  assert.deepEqual([missing.pings, missing.calls], [[], []]);
 });
