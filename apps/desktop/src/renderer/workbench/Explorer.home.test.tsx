@@ -456,6 +456,15 @@ describe("selecting several rows in Home", () => {
     expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["notes.md", "tasks", "trip"]);
   });
 
+  it("drags every selected row from one selected page", () => {
+    render(<Explorer {...explorerProps()} />);
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("pages:Plans/"), { ctrlKey: true });
+    const setData = vi.fn();
+    fireEvent.dragStart(homeRow("pages:notes.md"), { dataTransfer: { effectAllowed: "none", setData } });
+    expect(setData).toHaveBeenCalledWith("text/plain", "notes.md\nPlans");
+  });
+
   it("sends a selected row's menu the selection's count, and a row outside it its own menu", () => {
     render(<Explorer {...explorerProps()} />);
     fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
