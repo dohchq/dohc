@@ -227,27 +227,28 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
+- A toast's actions sit in a row under its text, as on its Notices row, so the text keeps the toast's full width.
 - Put a copy control beside text a person might need to report. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - If the copy text is exactly what the message shows, such as a command, use a Copy icon beside it.
-- If it holds anything more, even the dohc version or the time, give the message a **Details** action instead, so a person sees what they copy. On a toast, Details sits under the text. On a row, it comes last on the actions line.
+- If it holds anything more, even the dohc version or the time, give the message a **Details** action instead, so a person sees what they copy. It comes last on the actions line, on the toast and the row.
 - **Details** is for text that reports something. A control that copies the person's own work, or something made to paste elsewhere, such as set-aside edits or an invitation, needs no Details. Its tooltip and accessible name say what it copies: `Copy edits`, `Copy invitation`.
 - **Details** opens the copy text under the message, selectable, scrolling past 240px. A Copy icon at its top right copies exactly that text.
 - While open, the action reads **Hide details** and holds the toast. It also lifts the clamp, so a message never offers both **Details** and **Show more**.
 - **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's Copy.
 - The block opens without animating its height. Only the chevron turns.
 - A full-height state uses the same **Details**, in place of **Technical details**.
-- A crash notice keeps **Send report** when the build has a report server. On a row it comes before **Details**. On a toast it stays with the other actions, and Details sits under the text. Both show the same report text.
+- A crash notice keeps **Send report** when the build has a report server. It comes before **Details**, on the toast and the row. Both show the same report text.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
-- F6 moves focus to the first worded action, such as **Try again**, on the toast that appeared last. With no worded action, it lands on **Details**, and with neither, on the toast. When **Details** is there and closed, Shift+Tab from the first worded action reaches it.
+- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
+- F6 moves focus to the first worded action, such as **Try again**, on the toast that appeared last. With no worded action, it lands on **Details**, and with neither, on the toast.
 - A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Server disconnected**, has no × and stays until it ends.
 - **Clear**, beside **Mark all read**, dismisses every row that has a ×, under **On this computer** and **Sent to you**, and shows only while such a row exists. Two kinds stay: a row that holds the only Undo for a change, and set-aside edits, whose Dismiss deletes the text for good.
 - Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared. Opening a dialog closes Notices too, which commits them. If dohc quits first, the cleared rows come back at the next start, because their Undo was still open. A dismissal that fails brings its row back.
-- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
-- A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
-- A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text. A toast keeps its worded actions in a column at its right, beside the text.
+- A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
