@@ -18,6 +18,8 @@ export type LiveDocumentRow = {
   /** The server keeps them in an earlier copy of the workspace, copied or not. */
   earlier?: true;
   saveOnly?: true;
+  /** Save-only edits whose live editing session ended with their page's live lineage. */
+  sessionEnded?: true;
   storedOn?: "this-computer" | "server";
   /** Those kept edits' incident, so Save recovery copy saves what the row shows. */
   incident?: string;
@@ -215,7 +217,7 @@ function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRo
 
 // Edits the server refused: where they are, and the one way back that always works.
 function quarantineNote(row: LiveDocumentRow): string | null {
-  if (row.saveOnly && row.quarantine !== "unreadable") return "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
+  if (row.saveOnly && row.quarantine !== "unreadable") return row.sessionEnded ? "dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back." : "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
   switch (row.quarantine) {
     case "paused":
       if (row.earlier) return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";

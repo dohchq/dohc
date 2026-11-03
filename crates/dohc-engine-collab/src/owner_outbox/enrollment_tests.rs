@@ -1979,9 +1979,7 @@ fn successor_input(
         .unwrap()
     {
         OwnerEnrollmentPreparation::Capture { captured } => captured,
-        OwnerEnrollmentPreparation::Observed { .. } => {
-            panic!("a later restore generation captures before it commits")
-        }
+        other => panic!("a later restore generation captures before it commits, not {other:?}"),
     };
     let host = Ydoc::wire();
     host.apply(&checkpoint).unwrap();

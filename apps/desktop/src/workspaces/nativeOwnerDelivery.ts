@@ -101,6 +101,8 @@ export async function runNativeOwnerDeliveryPass(options: NativeOwnerDeliveryPas
     let synchronized = false;
     preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
     if (options.observedOnly && preparation.status === "capture") return "unbound";
+    // This computer closed this generation when its page was retired; its edits wait in a recovery copy.
+    if (preparation.status === "retired") return "empty";
     if (preparation.status === "capture" || preparation.draft.outboxId === null) {
       const authority = await delivery.freshOwnerAuthority(document.binding);
       check();
@@ -109,6 +111,7 @@ export async function runNativeOwnerDeliveryPass(options: NativeOwnerDeliveryPas
       // Re-read durable discovery after uncertain commits and concurrent draft writes.
       preparation = await guarded(signal => client.ownerYDocPrepareEnrollment(request(), target, signal));
     }
+    if (preparation.status === "retired") return "empty";
     if (preparation.status !== "observed") return "retry";
     if (preparation.draft.outboxId === null) return answered("empty");
     drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, delivery, options.refusals);

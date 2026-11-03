@@ -331,6 +331,16 @@ describe("private owner delivery transport", () => {
       expect(Buffer.concat(chunks)).toEqual(Buffer.from([0,0,0]));
     } finally {transport.close();}
   });
+  it("reads a retired generation exactly and refuses extra keys", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge(); await transport.ready();
+    let answered=0;
+    peer.onEnvelope=e=>{if(e.type==="request")peer.send({type:"response",id:e.id,result:answered++===0 ? {status:"retired"} : {status:"retired",draft:null}});};
+    try {
+      expect(await transport.ownerYDocPrepareEnrollment(request,target)).toEqual({status:"retired"});
+      await expect(transport.ownerYDocPrepareEnrollment({...request,id:973},target)).rejects.toThrow("Invalid owner capture response.");
+    } finally {transport.close();}
+  });
   it("reads a bounded accepted vector without a host registration", async () => {
     const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
     peer.acknowledge();await transport.ready();

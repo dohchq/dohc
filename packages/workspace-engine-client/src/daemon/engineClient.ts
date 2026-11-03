@@ -807,7 +807,7 @@ export class EngineClient implements EngineTransport {
   }
 
   async ownerYDocPrepareEnrollment(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget & {recovery?:boolean}, signal?: AbortSignal): Promise<
-    {status:"capture";captured:{nativeHeadSequence:number;localStateDigest:string}} | {status:"observed";draft:OwnerYDocDraftDescriptor}
+    {status:"capture";captured:{nativeHeadSequence:number;localStateDigest:string}} | {status:"observed";draft:OwnerYDocDraftDescriptor} | {status:"retired"}
   > {
     const params=ownerDeliveryTarget(target);
     const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.prepareEnrollment",3*1024*1024,()=>({params:{...params,...(target.recovery ? {recovery:true} : {})},streams:[]}),signal);
@@ -817,6 +817,7 @@ export class EngineClient implements EngineTransport {
       if (JSON.stringify(draft.binding)!==JSON.stringify(params.binding) || draft.relayDatabaseNamespace!==params.relayDatabaseNamespace) throw new TypeError("Owner enrollment target changed.");
       return {status:"observed",draft};
     }
+    if (row.status==="retired" && Object.keys(row).join()==="status") return {status:"retired"};
     if (row.status!=="capture" || Object.keys(row).sort().join()!=="captured,status") throw new TypeError("Invalid owner capture response.");
     const captured=row.captured as {nativeHeadSequence:number;localStateDigest:string};
     if (!captured || Object.keys(captured).sort().join()!=="localStateDigest,nativeHeadSequence" || !Number.isSafeInteger(captured.nativeHeadSequence) || captured.nativeHeadSequence<0) throw new TypeError("Invalid owner capture.");

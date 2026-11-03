@@ -68,6 +68,18 @@ describe("edits the server refused", () => {
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId,
       path: "notes/plan.md", incident: index === 0 ? "old-2:delivery:0" : "old-1:delivery:0"});
   });
+  it("says a retired queue's live editing session ended", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, reason: "retired", saveOnly: true as const}));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-shell-error");
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText("Edits not written to notes/plan.md").closest("li")!;
+    expect(row.textContent).toContain("dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back.");
+    expect(row.textContent).not.toContain("could not write them to your file");
+  });
   const RECOVERED = "Live editing stopped for notes/plan.md. dohc wrote your kept edits into the file.";
   const liveRows = (): OwnerLiveDocumentsResult => ({nextCursor: null, documents: [
     {path: "other.md", objectId: "object-other", status: "ready", canResume: false},

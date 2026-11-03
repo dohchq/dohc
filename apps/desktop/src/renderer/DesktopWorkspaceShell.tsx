@@ -2067,7 +2067,7 @@ export function DesktopWorkspaceShell(props: {
       const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};
       if (row.saveOnly) {
         reportShellFailure({title:`Edits not written to ${row.path}`,
-          message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+          message:row.reason==="retired" ? "dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back." : "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,identity});
         continue;
       }
       // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.

@@ -231,6 +231,15 @@ describe("LiveDocumentsDialog", () => {
     expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "note.md", "old-1");
     expect(screen.getByTestId("live-document-row-note.md-old-2")).toBeTruthy();
   });
+  it("says a retired queue's live editing session ended", async () => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("note.md", {quarantine: "paused", saveOnly: true, sessionEnded: true,
+      storedOn: "this-computer", incident: "old-1"})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const retired = await screen.findByTestId("live-document-row-note.md-old-1");
+    expect(retired.textContent).toContain("dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back.");
+    expect(retired.textContent).not.toContain("could not write them to your file");
+  });
   it.each([true, false])("uses IPC Resume availability on a ready row: %s", async canResume => {
     const h = harness();
     h.load.mockResolvedValue(page([row("a.md", {canResume})]));
