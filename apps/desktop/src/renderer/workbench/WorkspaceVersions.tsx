@@ -618,9 +618,10 @@ export function VersionMergeDialog(props: {
     }
   }, [props.beginLineageOperation, props.onFailed, props.onMerged, props.onWorkspaceStateChanged, source.id, workspaceId]);
 
-  // A failure takes focus to Merge into Main, which merges again. The alert
-  // above it has already said what failed.
+  // A failure takes focus to Merge into Main, which merges again. The button
+  // is described by the failure, so a screen reader reads both once.
   const confirmButton = useRef<HTMLButtonElement>(null);
+  const failureId = useId();
   const failure = stage.stage === "confirm" ? stage.failure : undefined;
   useEffect(() => {
     if (failure !== undefined) confirmButton.current?.focus();
@@ -758,7 +759,7 @@ export function VersionMergeDialog(props: {
             </p>
           )}
         </div>
-        {failure !== undefined ? <MergeFailure error={failure.error} sourceName={source.name} /> : null}
+        {failure !== undefined ? <MergeFailure wordsId={failureId} error={failure.error} sourceName={source.name} /> : null}
         <div className="flex justify-end gap-2">
           {result ? (
             // Keyed so React makes a new button that takes focus, rather than
@@ -771,7 +772,13 @@ export function VersionMergeDialog(props: {
               <SecondaryButton data-testid="version-merge-cancel" disabled={stage.stage === "running"} onClick={finish}>
                 Cancel
               </SecondaryButton>
-              <PrimaryButton ref={confirmButton} data-testid="version-merge-confirm" disabled={stage.stage === "running"} onClick={() => void runMerge()}>
+              <PrimaryButton
+                ref={confirmButton}
+                data-testid="version-merge-confirm"
+                aria-describedby={failure !== undefined ? failureId : undefined}
+                disabled={stage.stage === "running"}
+                onClick={() => void runMerge()}
+              >
                 {stage.stage === "running" ? "Merging…" : "Merge into Main"}
               </PrimaryButton>
             </>
@@ -784,7 +791,7 @@ export function VersionMergeDialog(props: {
 
 // A merge's failure, in the dialog that ran it: what failed, then Details
 // when the copy text holds more than the words show.
-function MergeFailure(props: { error: unknown; sourceName: string }) {
+function MergeFailure(props: { wordsId: string; error: unknown; sourceName: string }) {
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const words = ipcErrorMessage(props.error, `dohc could not merge ${props.sourceName} into Main.`);
@@ -792,7 +799,7 @@ function MergeFailure(props: { error: unknown; sourceName: string }) {
   const details = errorDetails([["Error", words], ["Cause", cause]]);
   return (
     <div data-testid="version-merge-failure">
-      <p role="alert" className="m-0 flex items-start gap-2 text-[13px] leading-5 text-ink">
+      <p id={props.wordsId} data-testid="version-merge-failure-words" className="m-0 flex items-start gap-2 text-[13px] leading-5 text-ink">
         <CircleAlert size={14} aria-hidden className="mt-[3px] shrink-0 text-danger" />
         <span className="min-w-0 flex-1 break-words">{words}</span>
       </p>

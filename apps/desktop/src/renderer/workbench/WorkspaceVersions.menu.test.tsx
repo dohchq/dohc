@@ -282,13 +282,16 @@ describe("VersionMenu", () => {
     const props = renderMenu();
     await confirmMerge(user);
     const dialog = screen.getByTestId("version-merge-dialog");
-    await waitFor(() => expect(within(dialog).getByRole("alert").textContent).toBe("The engine stopped."));
+    await waitFor(() => expect(within(dialog).getByTestId("version-merge-failure-words").textContent).toBe("The engine stopped."));
     // The words say it all, so there is nothing more to copy.
     expect(within(dialog).queryByRole("button", { name: "Details" })).toBeNull();
     const confirm = screen.getByTestId<HTMLButtonElement>("version-merge-confirm");
     expect(confirm.textContent).toBe("Merge into Main");
     expect(confirm.disabled).toBe(false);
     expect(document.activeElement).toBe(confirm);
+    // Focus reads the button and then the failure, once, with no alert on top.
+    expect(confirm.getAttribute("aria-describedby")).toBe(within(dialog).getByTestId("version-merge-failure-words").id);
+    expect(within(dialog).queryByRole("alert")).toBeNull();
     expect(props.onError).not.toHaveBeenCalled();
 
     bridgeMock.mergeWorkspaceVersion.mockResolvedValueOnce(merged);
@@ -305,7 +308,7 @@ describe("VersionMenu", () => {
     renderMenu();
     await confirmMerge(user);
     const dialog = screen.getByTestId("version-merge-dialog");
-    await waitFor(() => expect(within(dialog).getByRole("alert").textContent).toBe("dohc could not merge Draft into Main."));
+    await waitFor(() => expect(within(dialog).getByTestId("version-merge-failure-words").textContent).toBe("dohc could not merge Draft into Main."));
     const toggle = within(dialog).getByRole("button", { name: "Details" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     await user.click(toggle);
