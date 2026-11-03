@@ -1035,6 +1035,10 @@ impl EngineService {
                 self.chats_bookmarks_mark_failed(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.bookmarks.retryFailed" => {
+                self.chats_bookmarks_retry_failed(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.bookmarks.markStale" => {
                 self.chats_bookmarks_mark_stale(&ctx, request.workspace, request.params)
                     .await?
@@ -1620,6 +1624,7 @@ mod tests {
             "chats.bookmarks.markPending",
             "chats.bookmarks.markReady",
             "chats.bookmarks.markStale",
+            "chats.bookmarks.retryFailed",
             "chats.bookmarks.save",
             "chats.channels.create",
             "chats.channels.ensureAgent",

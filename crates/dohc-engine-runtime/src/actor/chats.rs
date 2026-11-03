@@ -830,6 +830,35 @@ impl ActorHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn chat_bookmark_retry_failed(
+        &self,
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        generation: i64,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<ChatBookmarkTransition, RuntimeError> {
+        self.run_chats(move |chats| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                chats
+                    .retry_failed_bookmark(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn chat_bookmark_mark_failed(
         &self,
         workspace_id: String,

@@ -1413,6 +1413,13 @@ export interface LinkedChatStore {
     generation: number;
     failureReason: string;
   }): Promise<ChatBookmarkTransitionResult>;
+  // Queues a failed projection again at the same generation.
+  retryFailedBookmark(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+  }): Promise<ChatBookmarkTransitionResult>;
   markBookmarkStale(input: {
     workspaceId: WorkspaceId;
     ownerUserId: string;

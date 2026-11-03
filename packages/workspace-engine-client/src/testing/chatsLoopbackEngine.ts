@@ -786,6 +786,8 @@ function allowedKeys(method: string): readonly string[] {
       ];
     case CHATS_METHOD.bookmarkMarkFailed:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
+    case CHATS_METHOD.bookmarkRetryFailed:
+      return ["ownerUserId", "bookmarkId", "generation"];
     case CHATS_METHOD.bookmarkMarkStale:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
     case CHATS_METHOD.dispatchEnqueue:
@@ -1018,6 +1020,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
           this.bookmarkMarkPending(state, params));
       case CHATS_METHOD.bookmarkMarkFailed:
         return this.bookmarkTransition(state, params, "failed");
+      case CHATS_METHOD.bookmarkRetryFailed:
+        return this.bookmarkRetryFailed(state, params);
       case CHATS_METHOD.bookmarkMarkStale:
         return this.bookmarkTransition(state, params, "stale");
       case CHATS_METHOD.dispatchEnqueue:
@@ -2745,7 +2749,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
     );
     const applied =
       bookmark.generation === generation &&
-      bookmark.state === "active" &&
       bookmark.projectionState === "pending";
     const projectionObjectId = optionalString(
       params,
@@ -2830,6 +2833,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(bookmark);
   }
 
+  private bookmarkRetryFailed(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
+    const bookmark = this.requireBookmark(state, params);
+    const generation = requiredSafeInteger(params, "generation", "invalid-bookmark-target");
+    const applied = bookmark.generation === generation && bookmark.projectionState === "failed";
+    if (applied) {
+      bookmark.projectionState = "pending";
+      delete bookmark.failureReason;
+      bookmark.updatedAtMs = this.tick();
+    }
+    return jsonResult({ bookmark, applied });
+  }
+
   private bookmarkTransition(
     state: WorkspaceState,
     params: ChatsJsonObject,
@@ -2839,7 +2854,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const generation = requiredSafeInteger(params, "generation", "invalid-bookmark-target");
     const applied =
       bookmark.generation === generation &&
-      bookmark.state === "active" &&
       bookmark.projectionState === "pending";
     if (applied) {
       bookmark.projectionState = projectionState;

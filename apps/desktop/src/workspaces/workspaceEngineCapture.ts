@@ -818,6 +818,9 @@ export interface WorkspaceEngineCapture {
   // Refuses to archive a page this computer owns live, before anything
   // changes. archiveGeneratedTextFile checks again.
   checkGeneratedTextArchive(path: string): Promise<void>;
+  // Whether an archive already moved a generated page in the engine: nothing
+  // heads fromPath, and the page's object heads toPath.
+  generatedTextArchiveMoved(input: { fromPath: string; toPath: string; expectedObjectId?: string }): Promise<boolean>;
   // Engine-coordinated single-file rename (product rename flows call this
   // before moving the file on disk). When both sides are engine-owned text,
   // the engine records a rename moment — preserving the stable object id the
@@ -6149,6 +6152,14 @@ export function createWorkspaceEngineCapture(
     }
   }
 
+  async function generatedTextArchiveMoved(input: { fromPath: string; toPath: string; expectedObjectId?: string }): Promise<boolean> {
+    const engine = await engineStore();
+    const versionId = await activeVersionIdOf(engine);
+    const [source, destination] = await Promise.all([input.fromPath, input.toPath].map(path =>
+      engine.readTextFile({ workspaceId, versionId, path: assertGeneratedMarkdownPath(path) })));
+    return !source && !!destination && (input.expectedObjectId === undefined || destination.objectId === input.expectedObjectId);
+  }
+
   async function resolveFileForPath(path: string) {
     // Drain capture work before resolving a newly saved file.
     await chain;
@@ -7716,6 +7727,7 @@ export function createWorkspaceEngineCapture(
     },
 
     checkGeneratedTextArchive,
+    generatedTextArchiveMoved,
 
     archiveGeneratedTextFile(input) {
       return enqueueResult("archive generated text", async () => {

@@ -11,6 +11,8 @@ type ReadyInput = Parameters<DesktopLinkedChatStore["markBookmarkReady"]>[0];
 type FailedInput = Parameters<DesktopLinkedChatStore["markBookmarkFailed"]>[0];
 type WriteInput = Parameters<WorkspaceEngineCapture["writeGeneratedTextFile"]>[0];
 type ArchiveInput = Parameters<WorkspaceEngineCapture["archiveGeneratedTextFile"]>[0];
+type RetryInput = Parameters<DesktopLinkedChatStore["retryFailedBookmark"]>[0];
+type MovedInput = Parameters<WorkspaceEngineCapture["generatedTextArchiveMoved"]>[0];
 
 function fixture() {
   const workspace: Workspace = { workspaceId: "workspace", rootPath: "root" };
@@ -58,6 +60,11 @@ function fixture() {
       row = { ...row, generation: row.generation + 1, projectionState: "pending", failureReason: undefined };
       return row;
     }),
+    retryFailedBookmark: vi.fn(async (input: RetryInput) => {
+      const applied = row.generation === input.generation && row.projectionState === "failed";
+      if (applied) row = { ...row, projectionState: "pending", failureReason: undefined };
+      return { bookmark: row, applied };
+    }),
   };
   const capture = {
     writeGeneratedTextFile: vi.fn(async (input: WriteInput) => ({
@@ -67,6 +74,8 @@ function fixture() {
       fromPath: input.fromPath, path: input.toPath, objectId: "projection-object", changed: true,
     })),
     checkGeneratedTextArchive: vi.fn(async (_path: string): Promise<void> => undefined),
+    // The engine moved nothing unless a test says so.
+    generatedTextArchiveMoved: vi.fn(async (_input: MovedInput): Promise<boolean> => false),
   };
   const disposed = vi.fn();
   const authorities = createWorkspaceAuthorityOwner({
@@ -197,11 +206,17 @@ describe("desktop chat bookmarks", () => {
     expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledOnce();
     expect(test.store.markBookmarkPending).not.toHaveBeenCalled();
     expect(await test.store.findBookmark()).toMatchObject({ state: "archived", projectionState: "failed" });
-    // Try again after Stop checks the page again, then archives it.
+    // Try again after Stop finds the page unmoved, checks it again, and
+    // archives it at a new generation.
     await expect(test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark"))
-      .resolves.toMatchObject({ state: "archived", projectionState: "ready" });
+      .resolves.toMatchObject({ state: "archived", projectionState: "ready", generation: 3 });
+    expect(test.capture.generatedTextArchiveMoved).toHaveBeenCalledWith({ fromPath: test.bookmark.destinationPath,
+      toPath: "Bookmarks/Chats/Archived/Chat--thread--g2.md" });
     expect(test.capture.checkGeneratedTextArchive).toHaveBeenCalledTimes(2);
+    expect(test.store.retryFailedBookmark).not.toHaveBeenCalled();
     expect(test.store.markBookmarkPending).toHaveBeenCalledOnce();
+    expect(test.capture.archiveGeneratedTextFile).toHaveBeenLastCalledWith(expect.objectContaining({
+      toPath: "Bookmarks/Chats/Archived/Chat--thread--g3.md" }));
     expect(test.store.archiveBookmark).toHaveBeenCalledOnce();
     expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledTimes(2);
   });

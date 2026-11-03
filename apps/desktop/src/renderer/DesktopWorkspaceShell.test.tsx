@@ -2609,7 +2609,7 @@ describe("a chat page archive refused for live editing", () => {
     expect(within(await screen.findByTestId("notice-center")).queryByText(TITLE)).toBeNull();
   }
 
-  it("opens Live documents at the page's row, and Try again after Stop archives it and clears the notice", async () => {
+  it("opens Live documents at the page's row, and Try again after closing it archives the page and clears the notice", async () => {
     const user = userEvent.setup();
     const bridge = chatsBridge();
     renderShell(bridge);
