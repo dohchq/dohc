@@ -895,7 +895,7 @@ for (const [scenario, to, supported] of unaddressable) {
     const finish = vi.fn(async () => undefined), begin = vi.spyOn(f.capture, "beginFileRename").mockResolvedValue(finish);
     const authored = vi.spyOn(f.capture, "changePathsAs");
     const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "a.txt", toPath: to }, person, f.options);
-    expect(begin).toHaveBeenCalledWith("a.txt", to); expect(finish).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
+    expect(begin).toHaveBeenCalledWith("a.txt", to, false); expect(finish).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
     expect(await readFile(join(f.rootPath, to), "utf8")).toBe("a.txt");
     expect(await f.undo(moved.operationId)).toMatchObject({ ok: true, restored: ["a.txt"] });
   });
