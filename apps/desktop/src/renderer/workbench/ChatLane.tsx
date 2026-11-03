@@ -326,8 +326,8 @@ export function ChatLane(props: {
   }, [channelId, composer, load, loading, onError, poll, props.locked, props.onAgentWaitsForTrust, reactions, sending, threadId, workspaceId]);
 
   // A reply goes under the message the thread hangs from. A reply to an
-  // earlier post goes on in that post.
-  const sendReply = useCallback(async (rootId: string, body: string) => {
+  // earlier post goes on in that post. A reply after Answer answers its question.
+  const sendReply = useCallback(async (rootId: string, body: string, answers?: string) => {
     const post = messages.find((message) => message.id === rootId && message.threadId !== threadId)?.threadId;
     const target = post ?? threadId;
     if (!target || props.locked) return false;
@@ -340,12 +340,16 @@ export function ChatLane(props: {
         body,
         ...(post ? {} : { parentMessageId: rootId }),
         ...(references.length > 0 ? { fileReferences: references } : {}),
+        ...(answers ? { resolves: { messageId: answers } } : {}),
       });
       if (current !== token.current) return false;
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       loadSequence.current += 1;
       const reply = post ? { ...result.message, parentMessageId: rootId } : result.message;
       setMessages((existing) => existing.some(message => message.id === reply.id) ? existing : [...existing, reply]);
+      const resolved = result.resolved;
+      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
+      if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "Could not answer that question."), result.resolveFailure);
       void load(true);
       return true;
     } catch (error) {
@@ -487,8 +491,9 @@ export function ChatLane(props: {
 
   const decisionsByMessage = useMemo(() => new Map(decisions.map(decision => [decision.messageId, decision])), [decisions]);
   const failedEnd = useMemo(() => failedRun ? failedRunEnd(failedRun, runs, messages) : null, [failedRun, messages, runs]);
-  // Under a message: its poll, and why the agent didn't answer it.
-  const renderFooter = useCallback((message: ChatMessageRecord) => {
+  // Under a message: its question, and why the agent didn't answer it. A
+  // choice answers at once. Answer starts a reply in the question's thread.
+  const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void) => {
     const decision = decisionsByMessage.get(message.id);
     const asked = decision ? changeFileOf(message) : undefined;
     const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
@@ -496,6 +501,10 @@ export function ChatLane(props: {
     const changeFile = asked === undefined ? undefined : (appliedBy && changeFileOf(appliedBy)) ?? asked;
     const undoneBy = changeFile === undefined ? undefined : messages.filter((reply) => reply.id !== appliedBy?.id &&
       reply.createdAtMs > message.createdAtMs && reply.authorKind === "human" && changeFileOf(reply) === changeFile).at(-1);
+    const resolve = props.locked ? undefined
+      : !decision?.options?.length ? answer
+        : sending ? undefined
+          : (option?: string) => { if (option) void chooseOption(decision, option); };
     return <>
       {changeFile !== undefined ? <CollectionChangeCard
         key={`${workspaceId}:${message.id}:${asked}`}
@@ -512,9 +521,7 @@ export function ChatLane(props: {
       /> : decision ? <DecisionStatus
         decision={decision}
         testIdPrefix="chats-lane"
-        {...(!props.locked && !sending && decision.options?.length ? {
-          onResolve: (option?: string) => { if (option) void chooseOption(decision, option); },
-        } : {})}
+        {...(resolve ? { onResolve: resolve } : {})}
       /> : null}
       {failedRun && message.id === failedEnd ? <FailedRunLine
         testIdPrefix="chats-lane"

@@ -176,13 +176,20 @@ if (mode !== "report" && mode !== "ask") {
 
 // In ask mode the prompt decides: a taken choice renders as "- [x] <choice>"
 // in the thread markdown, so the second run reports it; the first run asks.
+// Asked to name the file, it asks an open question with no choices, and the
+// run after the answer says the name it was given.
 const taken = mode === "ask" ? /^- \[x\] (.+)$/mu.exec(prompt)?.[1] : undefined;
+const named = mode === "ask" ? /Call it (\S+)/u.exec(prompt)?.[1] : undefined;
 const replyArgs =
   mode === "report"
     ? ["done: checked the exports"]
     : taken
       ? [`going with ${taken}`]
-      : ["--needs-decision", "--option", "Friday", "--option", "Monday", "Which day do we ship?"];
+      : named
+        ? [`calling it ${named}`]
+        : prompt.includes("name the file")
+          ? ["--needs-decision", "What should I call the file?"]
+          : ["--needs-decision", "--option", "Friday", "--option", "Monday", "Which day do we ship?"];
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(fixtureDir, "../../../..");

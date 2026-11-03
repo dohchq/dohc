@@ -389,6 +389,7 @@ describe("ChatLane", () => {
     });
     render(lane());
     fireEvent.click(await screen.findByRole("button", { name: "Monday" }));
+    expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
     await screen.findByTestId("chats-lane-decision-resolved");
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce();
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
@@ -742,6 +743,101 @@ describe("ChatLane", () => {
     expect(screen.queryByTestId("chats-lane-change-edited")).toBeNull();
     expect(screen.queryByText("Undone")).toBeNull();
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an agent's DM", "agent"],
+    ["a group", "channel"],
+  ] as const)("answers an open question with no options in %s by a reply in its thread", async (_, kind) => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "question", body: "What should I call the file?", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    const decision = { threadId: "thread-1", messageId: "question", state: "open", atMs: 1 };
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
+    const resolved = { ...decision, state: "resolved", resolvedByMessageId: "answer" };
+    const reload = deferred<{ decisions: (typeof resolved)[] }>();
+    bridgeMock.sendChatMessage.mockImplementation(async () => {
+      bridgeMock.listChatThreadDecisions.mockReturnValue(reload.promise);
+      return { message: message({ id: "answer", body: "Call it notes.md", parentMessageId: "question" }), resolved };
+    });
+    render(lane(kind === "agent" ? "agent-dm" : "channel-1", "workspace-a", kind));
+    expect((await screen.findByTestId("chats-lane-decision-open")).textContent).toBe("Unanswered");
+    fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    const reply = await screen.findByTestId("chats-lane-thread-composer");
+    await waitFor(() => expect(document.activeElement).toBe(reply));
+    fireEvent.change(reply, { target: { value: "Call it notes.md" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Call it notes.md", parentMessageId: "question",
+      resolves: { messageId: "question" },
+    }));
+    await waitFor(() => expect(screen.getAllByTestId("chats-lane-decision-resolved")[0]!.textContent).toBe("Answered"));
+    expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
+    await act(async () => reload.resolve({ decisions: [resolved] }));
+  });
+
+  it("says why a question stayed open after its answer was sent", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "question", body: "What should I call the file?", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "answer", body: "notes.md", parentMessageId: "question" }),
+      resolveFailure: "Error: This question changed. Try again.",
+    });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByRole("button", { name: "Answer" }));
+    const reply = await screen.findByTestId("chats-lane-thread-composer");
+    fireEvent.change(reply, { target: { value: "notes.md" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("This question changed. Try again.", "Error: This question changed. Try again."));
+    expect(screen.queryByTestId("chats-lane-decision-resolved")).toBeNull();
+  });
+
+  it("answers an open question asked in a thread from that thread", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "ask", body: "Write the summary" }),
+      message({ id: "question", body: "Which file?", parentMessageId: "ask", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "answer", body: "notes.md", parentMessageId: "ask" }) });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    const reply = await screen.findByTestId("chats-lane-thread-composer");
+    reply.blur();
+    fireEvent.click(await screen.findByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(document.activeElement).toBe(reply));
+    fireEvent.change(reply, { target: { value: "notes.md" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "notes.md", parentMessageId: "ask",
+      resolves: { messageId: "question" },
+    }));
+    // Answer covers one reply. The next is a plain reply.
+    await waitFor(() => expect((reply as HTMLTextAreaElement).value).toBe(""));
+    fireEvent.change(reply, { target: { value: "Thanks" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Thanks", parentMessageId: "ask",
+    }));
+  });
+
+  it("sends a reply without Answer, or after its thread closed, as a plain reply", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "question", body: "What should I call the file?", authorKind: "agent", authorDisplayName: "Nova" }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "question", state: "open", atMs: 1 }] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "reply", body: "Thinking", parentMessageId: "question" }) });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByRole("button", { name: "Answer" }));
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-close"));
+    fireEvent.click(screen.getByTestId("chats-lane-reply-in-thread"));
+    const reply = await screen.findByTestId("chats-lane-thread-composer");
+    fireEvent.change(reply, { target: { value: "Thinking" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Thinking", parentMessageId: "question",
+    }));
   });
 
   it("drops the poll with the draft when the group changes", async () => {
