@@ -172,6 +172,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     })),
     readMoment: vi.fn<WorkspaceEngineCapture["readMoment"]>(async () => null),
     retryHistoryCapture: vi.fn<WorkspaceEngineCapture["retryHistoryCapture"]>(async () => undefined),
+    listVersions: vi.fn<WorkspaceEngineCapture["listVersions"]>(async () => ({ versions: [], activeVersionId: "main" })),
     restoreFileToBeforeMoment: vi.fn<WorkspaceEngineCapture["restoreFileToBeforeMoment"]>(async () => {
       events.push("restore");
       return { restored: "text", restoredMomentId: "restored", path: "notes/a.md" };
@@ -298,7 +299,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
-  CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, historyOperations.listVersionLastChanges.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
   captureRecoveryOperations.retryHistoryCapture.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
@@ -828,6 +829,31 @@ describe("workspace engine IPC registrations", () => {
     const result = await h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "m-both" });
     expect(h.prepareNamed).toHaveBeenCalledWith([...authors]);
     expect(result).toMatchObject({ moment: { authorLabels: ["Someone you shared with", "Someone you shared with"] } });
+  });
+
+  it("gives each version its newest shown change of its own and the person who made it", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const version = (id: string, kind: "main" | "named") => ({ id, workspaceId: "workspace", kind, name: id, createdAtMs: 1,
+      ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+    h.capture.listVersions.mockResolvedValue({ versions: [version("main", "main"), version("draft", "named"), version("fresh", "named")], activeVersionId: "main" });
+    const named = { kind: "named" as const, userId: "u-ana", grantId: "g-1", grantGeneration: 1 };
+    type Authors = NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>;
+    const change = (versionId: string, path: string, recordedAtMs: number, authors?: Authors) => ({
+      ...historyDetail(path).moment, versionId, recordedAtMs, protected: false, momentOrder: recordedAtMs, ...(authors ? { authors } : {}) });
+    const pages: Record<string, ReturnType<typeof change>[]> = {
+      main: [change("main", "notes/a.md", 30, [{ kind: "human", humanId: "person-local" }])],
+      draft: [change("draft", "private/a.md", 50), change("draft", "notes/a.md", 40, [named]), change("main", "notes/a.md", 30)],
+      fresh: [change("main", "notes/a.md", 30)],
+    };
+    h.capture.listMoments.mockImplementation(async (input) => ({ ...historyPage(), nextCursor: null, moments: pages[input?.versionId ?? ""] ?? [] }));
+    await expect(h.invoke(historyOperations.listVersionLastChanges.channel)).resolves.toEqual({ versions: [
+      { versionId: "main", lastChange: { atMs: 30, personName: "Ice" } },
+      { versionId: "draft", lastChange: { atMs: 40, personName: "Someone you shared with" } },
+      { versionId: "fresh", lastChange: null },
+    ] });
+    expect(h.capture.listMoments).toHaveBeenCalledWith({ versionId: "draft", limit: 10 });
+    expect(h.prepareNamed).toHaveBeenCalledWith([{ kind: "human", humanId: "person-local" }, named]);
   });
 
   it("reads a shared view's imported history from its registered share mount without a capture", async () => {

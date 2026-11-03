@@ -83,6 +83,17 @@ function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): stri
   }
 }
 
+// The person who made a moment, when one person did: a snapshot's account holder, this
+// computer's person, or a named member. Agents, links and automations give no name.
+export function momentPersonName(
+  moment: Pick<WorkspaceEngineMomentSummary, "authors">,
+  names: Pick<EngineMomentAuthorNames, "person" | "named">,
+): string | undefined {
+  const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
+  if (author?.kind === "human") return author.humanName ?? names.person(author);
+  return author?.kind === "named" ? names.named(author) : undefined;
+}
+
 export async function listEngineMomentsForIpc(
   read: () => ReturnType<WorkspaceEngineCapture["listMoments"]>,
   names: EngineMomentAuthorNames,

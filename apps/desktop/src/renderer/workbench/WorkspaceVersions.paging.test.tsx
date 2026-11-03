@@ -11,12 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 import { readError } from "../../ipc/errorWords";
 import {
-  VersionMenu,
   ConflictReviewDialog,
   VersionComparePage,
   VersionMergeDialog,
   conflictCountCopy,
 } from "./WorkspaceVersions";
+import { VersionMenuHarness } from "./WorkspaceVersions.testHarness";
 import { beginCollectionLineageOperation } from "../collections/collectionLineageGate";
 import {
   beginCollectionWriteOperation,
@@ -739,7 +739,7 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
   const onError = vi.fn();
   const onConflictError = vi.fn();
   const user = userEvent.setup();
-  render(<VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
+  render(<VersionMenuHarness workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
     onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={onError} clearError={() => {}}
     onMergeNotice={() => {}} onConflictError={onConflictError} />);
   await settle();
@@ -760,7 +760,7 @@ it("returns focus after a press on blank space closes the Versions menu", async 
     const root = useRef<HTMLDivElement>(null);
     useFocusSurface(root, () => root.current?.querySelector<HTMLElement>('[data-testid="version-menu-button"]'));
     return <div ref={root} data-focus-surface="workspace" data-testid="workspace">
-      <VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
+      <VersionMenuHarness workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
         onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} clearError={() => {}}
         onMergeNotice={() => {}} onConflictError={() => {}} />
     </div>;

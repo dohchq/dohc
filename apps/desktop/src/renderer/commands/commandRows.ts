@@ -56,6 +56,7 @@ export const COMMAND_ROWS = {
   "show-search": { label: "View: Search", availability: "always" },
   "show-graph": { label: "View: Graph", availability: "always" },
   "show-history": { label: "View: History", availability: "always" },
+  "open-versions": { label: "Show all versions", availability: "localWorkspace" },
   "connect-cloud": { label: "Connect server", availability: "always" },
   "settings": { label: "Settings", availability: "always" },
   "settings-appearance": { label: "Settings: Open Appearance", availability: "always" },

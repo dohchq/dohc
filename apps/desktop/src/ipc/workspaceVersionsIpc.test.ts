@@ -35,6 +35,7 @@ const requests = [
   [ops.createWorkspaceVersion.channel, { workspaceId, name: "Draft" }],
   [ops.switchWorkspaceVersion.channel, { workspaceId, versionId }],
   [ops.compareWorkspaceVersions.channel, { workspaceId, versionId }],
+  [ops.countWorkspaceVersionChanges.channel, { workspaceId, versionId }],
   [ops.mergeWorkspaceVersion.channel, { workspaceId, versionId }],
   [ops.listWorkspaceVersionConflicts.channel, { workspaceId }],
   [ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } }],
@@ -51,6 +52,7 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     createVersion: vi.fn<Operations["createVersion"]>(async () => { steps.push("create"); return snapshot; }),
     switchVersion: vi.fn<Operations["switchVersion"]>(async () => { steps.push("switch"); return { activeVersionId: versionId, changedFileCount: 2 }; }),
     compareVersions: vi.fn<Operations["compareVersions"]>().mockResolvedValue({ files: [], nextAfterPath: null }),
+    compareVersionsChangedCount: vi.fn<Operations["compareVersionsChangedCount"]>().mockResolvedValue(3),
     mergeVersionIntoMain: vi.fn<Operations["mergeVersionIntoMain"]>(async () => { steps.push("merge"); return { mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1, replacedProtectedPaths: [".env"] }; }),
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => { steps.push("conflicts"); return conflictPage; }),
     resolveConflict: vi.fn<Operations["resolveConflict"]>(async () => { steps.push("resolve"); return { conflict, remaining: conflictPage }; }),
@@ -108,15 +110,22 @@ describe("registered workspace version handlers", () => {
     for (const operation of Object.values(h.operations)) expect(operation).not.toHaveBeenCalled();
   });
 
-  it("maps merge eligibility from the named version's Main fork", async () => {
+  it("maps merge eligibility and the version each was made from", async () => {
     const h = harness();
     await expect(h.invoke(ops.listWorkspaceVersions.channel, { workspaceId })).resolves.toEqual({
       activeVersionId: versionId,
-      versions: snapshot.versions.map(({ id, name, kind, createdAtMs }) => ({
+      versions: snapshot.versions.map(({ id, name, kind, createdAtMs, forkPoint }) => ({
         id, name, kind, createdAtMs, canMergeIntoMain: id === versionId,
+        ...(forkPoint ? { madeFromVersionId: forkPoint.versionId } : {}),
       })),
     });
     expect(h.notifyRenderer).not.toHaveBeenCalled();
+  });
+
+  it("counts the files a version changes from Main", async () => {
+    const h = harness();
+    await expect(h.invoke(ops.countWorkspaceVersionChanges.channel, { workspaceId, versionId })).resolves.toEqual({ count: 3 });
+    expect(h.operations.compareVersionsChangedCount).toHaveBeenCalledExactlyOnceWith(versionId);
   });
 
   it("waits for the capture gate and version creation before notifying", async () => {

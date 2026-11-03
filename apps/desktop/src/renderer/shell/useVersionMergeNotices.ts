@@ -1,10 +1,10 @@
 import { useCallback, useRef, useState } from "react";
-import { mergeFilesWait, type MergeRetry, type VersionMergeNotice } from "../workbench/WorkspaceVersions";
+import { mergeFilesWait, type VersionMergeNotice } from "../workbench/WorkspaceVersions";
 import type { useShellError } from "./useShellError";
 
 type Shell = ReturnType<typeof useShellError>;
 
-// The menu goes only when the data store was refused, and that notice says how to fix it.
+// Capture stops only when the data store was refused, and that notice says how to fix it.
 export const MERGE_RETRY_AFTER_STORE = "Fix the data store problem in Notices first.";
 export const MERGE_RETRY_AFTER_CLOSE = "Close the open merge first.";
 
@@ -15,17 +15,15 @@ export const MERGE_RETRY_AFTER_CLOSE = "Close the open merge first.";
 // in Main.
 export function useVersionMergeNotices(options: {
   workspaceId: string;
-  // The versions menu is mounted, so Try again can open its merge dialog.
-  menuShown: boolean;
+  // Capture is on, so Try again can open the merge dialog.
+  captureOn: boolean;
   reportShellFailure: Shell["reportShellFailure"];
   clearIdentity: Shell["clearIdentity"];
   openHistory: () => void;
   openConflictReview: () => void;
 }) {
-  const { workspaceId, menuShown, reportShellFailure, clearIdentity, openHistory, openConflictReview } = options;
+  const { workspaceId, captureOn, reportShellFailure, clearIdentity, openHistory, openConflictReview } = options;
   const [mergeOpen, setMergeOpen] = useState(false);
-  // The mounted menu's way to merge again, for a notice's Try again.
-  const retry = useRef<MergeRetry | null>(null);
   const toDecide = useRef(new Map<string, string>());
 
   const report = useCallback(({ decideFrom, offersHistory, ...notice }: VersionMergeNotice) => {
@@ -67,8 +65,7 @@ export function useVersionMergeNotices(options: {
     clear,
     settle,
     onMergeOpenChange,
-    retry,
     // Why a merge row's Try again can't run now.
-    retryBlocked: !menuShown ? MERGE_RETRY_AFTER_STORE : mergeOpen ? MERGE_RETRY_AFTER_CLOSE : undefined,
+    retryBlocked: !captureOn ? MERGE_RETRY_AFTER_STORE : mergeOpen ? MERGE_RETRY_AFTER_CLOSE : undefined,
   };
 }

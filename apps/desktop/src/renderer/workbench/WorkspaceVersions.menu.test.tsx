@@ -3,7 +3,8 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type MergeRetry, VersionMenu, mergeFilesWait } from "./WorkspaceVersions";
+import { mergeFilesWait } from "./WorkspaceVersions";
+import { VersionMenuHarness } from "./WorkspaceVersions.testHarness";
 
 const bridgeMock = {
   listWorkspaceVersions: vi.fn(),
@@ -37,7 +38,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
     const onError = vi.fn();
     const user = userEvent.setup();
     render(
-      <VersionMenu
+      <VersionMenuHarness
         workspaceId="ws-1"
         activeTabDirty={false}
         beginLineageOperation={async () => { throw new Error("Retained collection input"); }}
@@ -76,7 +77,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
     });
     const onError = vi.fn();
     render(
-      <VersionMenu
+      <VersionMenuHarness
         workspaceId="ws-importing"
         activeTabDirty={false}
         beginLineageOperation={async () => () => {}}
@@ -101,7 +102,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
   it("re-reads the active version when the shell bumps refreshKey", async () => {
     function menu(refreshKey: number) {
       return (
-        <VersionMenu
+        <VersionMenuHarness
           workspaceId="ws-1"
           activeTabDirty={false}
           beginLineageOperation={async () => () => {}}
@@ -127,15 +128,17 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
   });
 });
 
-function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVersion" | "onOpenHistory" | "onMergeOpenChange" | "mergeRetry"> = {}) {
+type MenuExtra = Pick<ComponentProps<typeof VersionMenuHarness>, "onShareVersion" | "onOpenAllVersions" | "onOpenHistory" | "onMergeOpenChange" | "enabled">;
+
+function renderMenu(extra: MenuExtra = {}) {
   const props = {
     onWorkspaceStateChanged: vi.fn(),
-    onError: vi.fn<ComponentProps<typeof VersionMenu>["onError"]>(),
-    clearError: vi.fn<ComponentProps<typeof VersionMenu>["clearError"]>(),
-    onMergeNotice: vi.fn<ComponentProps<typeof VersionMenu>["onMergeNotice"]>(),
+    onError: vi.fn<ComponentProps<typeof VersionMenuHarness>["onError"]>(),
+    clearError: vi.fn<ComponentProps<typeof VersionMenuHarness>["clearError"]>(),
+    onMergeNotice: vi.fn<ComponentProps<typeof VersionMenuHarness>["onMergeNotice"]>(),
   };
-  render(
-    <VersionMenu
+  const menu = (more: MenuExtra) => (
+    <VersionMenuHarness
       workspaceId="ws-1"
       activeTabDirty={false}
       beginLineageOperation={async () => () => {}}
@@ -143,9 +146,11 @@ function renderMenu(extra: Pick<ComponentProps<typeof VersionMenu>, "onShareVers
       onOpenCompare={() => {}}
       {...props}
       {...extra}
-    />,
+      {...more}
+    />
   );
-  return props;
+  const view = render(menu({}));
+  return { ...props, rerender: (more: MenuExtra) => view.rerender(menu(more)) };
 }
 
 async function openOn(user: ReturnType<typeof userEvent.setup>, active: string) {
@@ -182,6 +187,29 @@ describe("VersionMenu", () => {
     renderMenu(sharing ? { onShareVersion: () => {} } : {});
     await openOn(userEvent.setup(), activeVersionId === "main" ? "Main" : "Draft");
     expect(rows()).toEqual(expected);
+  });
+
+  it("ends with All versions, which closes the menu and opens the Versions page", async () => {
+    const onOpenAllVersions = vi.fn();
+    const user = userEvent.setup();
+    renderMenu({ onOpenAllVersions });
+    await openOn(user, "Draft");
+    expect(rows().at(-1)).toBe("version-all");
+    await user.click(screen.getByTestId("version-all"));
+    expect(onOpenAllVersions).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("version-menu")).toBeNull();
+  });
+
+  it("shows the chip's dot beside each version's name, and keeps its space on Main", async () => {
+    renderMenu();
+    await openOn(userEvent.setup(), "Draft");
+    const chipDot = screen.getByTestId("version-menu-dot").className.split(" ").find((name) => name.startsWith("bg-hue-"));
+    const [mainDot, draftDot] = screen.getAllByTestId("version-item-dot");
+    expect(mainDot?.className).not.toContain("bg-hue-");
+    expect(chipDot).toBeDefined();
+    expect(draftDot?.className.split(" ")).toContain(chipDot);
+    // The dot adds nothing to the row's name.
+    expect(screen.getByRole("menuitemradio", { name: "Draft" })).toBeTruthy();
   });
 
   it("says on the Merge row why a version made from another version cannot merge", async () => {
@@ -461,11 +489,10 @@ describe("VersionMenu", () => {
     expect(notice.retry!()).toBe(false);
   });
 
-  it("merges again from a notice made before the menu went and came back", async () => {
+  it("merges again from a notice made before capture stopped and came back", async () => {
     const answer = deferredMerge();
     const user = userEvent.setup();
-    const mergeRetry: { current: MergeRetry | null } = { current: null };
-    const props = renderMenu({ mergeRetry });
+    const props = renderMenu();
     await closeWhileMerging(user, "button");
     await act(async () => {
       answer.reject(acrossIpc("desktop:merge-workspace-version", "Error: The engine stopped."));
@@ -473,10 +500,10 @@ describe("VersionMenu", () => {
     });
     await waitFor(() => expect(props.onMergeNotice).toHaveBeenCalledOnce());
     const notice = props.onMergeNotice.mock.calls[0]![0];
-    cleanup();
-    // With no menu, Try again can't merge, so its row stays.
+    props.rerender({ enabled: false });
+    // With capture off, Try again can't merge, so its row stays.
     expect(notice.retry!()).toBe(false);
-    renderMenu({ mergeRetry });
+    props.rerender({ enabled: true });
     await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft"));
     deferredMerge();
     act(() => void notice.retry!());

@@ -19,7 +19,7 @@ import {
 } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { CHANNELS } from "./channels";
-import { engineMomentDetailForIpc, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
+import { engineMomentDetailForIpc, listEngineMomentsForIpc, momentPersonName, type EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { createRunLocator, recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
@@ -67,7 +67,7 @@ export function createWorkspaceEngineIpc<
     work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord" | "clearCaptureRecovery" | "retryHeldCapture">) => Promise<Result>,
   ): Promise<Result | null>;
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
-    capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment" | "retryHistoryCapture">;
+    capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment" | "retryHistoryCapture" | "listVersions">;
   }>;
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
@@ -403,6 +403,37 @@ export function createWorkspaceEngineIpc<
             remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };
         return timeline(input, { ...collections, get scope() { return collections.scope; }, engine, signal: operation.signal, assertCurrent,
           names: authorNames(workspace.workspaceId, event.sender, presentations), ...(policy ? { admitted: historyPathAdmission(policy) } : {}) });
+      },
+      // Each version's newest change of its own, for the Versions page. A version's history
+      // also holds what it was made from, so its own changes are the moments it recorded.
+      // A received share keeps no versions.
+      listVersionLastChanges: async (input, { event, operation }) => {
+        const { entry: workspace, shared, assertCurrent } = historyIdentity(operation);
+        if (shared) return { versions: [] };
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        assertCurrent();
+        if (policy.errors.length) throw new Error("History can't read this folder's settings.");
+        const admitted = historyPathAdmission(policy);
+        const { capture } = await requireEngineCapture(input.workspaceId, "Engine history");
+        assertCurrent();
+        const { versions } = await capture.listVersions();
+        assertCurrent();
+        const latest = await Promise.all(versions.map(async (version) => {
+          const page = await capture.listMoments({ versionId: version.id, limit: 10 });
+          return page.moments.find(moment => moment.versionId === version.id && (moment.protected || admitted(moment.path)));
+        }));
+        assertCurrent();
+        // Only person names are read here, so no presentations are drawn.
+        const names = authorNames(input.workspaceId, event.sender, () => []);
+        names.prepare?.(latest.flatMap(moment => moment?.authors ?? []));
+        return {
+          versions: versions.map((version, index) => {
+            const moment = latest[index];
+            if (moment === undefined) return { versionId: version.id, lastChange: null };
+            const personName = momentPersonName(moment, names);
+            return { versionId: version.id, lastChange: { atMs: moment.recordedAtMs, ...(personName !== undefined ? { personName } : {}) } };
+          }),
+        };
       },
     });
 

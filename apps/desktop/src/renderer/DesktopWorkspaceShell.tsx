@@ -246,7 +246,9 @@ import {
   VersionComparePage,
   VersionMenu,
   isVersionMergeIdentity,
+  useWorkspaceVersions,
 } from "./workbench/WorkspaceVersions";
+import { VersionsPage } from "./workbench/VersionsPage";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -275,6 +277,7 @@ import {
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  VERSIONS_TAB_PATH,
   isViewId,
   MAX_OPEN_TABS,
   mergeSavedTabs,
@@ -3082,6 +3085,9 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     openVirtualTab(HISTORY_TAB_PATH);
   }, [openVirtualTab]);
+  const openVersionsTab = useCallback(() => {
+    openVirtualTab(VERSIONS_TAB_PATH);
+  }, [openVirtualTab]);
   const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
   const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter((path) => parseTab(path).kind === "chat"), [wb.editorGroups]);
   const settingsAgents = useMemo(() => props.userSettings ? listAgents(props.userSettings.settings) : [], [props.userSettings]);
@@ -3281,7 +3287,7 @@ export function DesktopWorkspaceShell(props: {
   const openConflictReview = useCallback(() => setConflictReviewOpen(true), []);
   const versionMerges = useVersionMergeNotices({
     workspaceId,
-    menuShown: captureAvailable,
+    captureOn: captureAvailable,
     reportShellFailure,
     clearIdentity,
     openHistory: openHistoryView,
@@ -4659,6 +4665,7 @@ export function DesktopWorkspaceShell(props: {
       "show-search": () => mutateWb((state) => showView(state, "search")),
       "show-graph": () => mutateWb((state) => showView(state, "graph")),
       "show-history": () => mutateWb((state) => showView(state, "history")),
+      "open-versions": openVersionsTab,
       "connect-cloud": openCloud,
       "settings": () => openSettings(),
       "settings-appearance": () => openSettings("appearance"),
@@ -4701,6 +4708,7 @@ export function DesktopWorkspaceShell(props: {
       openCloud,
       openEditorGroupRight,
       openSettings,
+      openVersionsTab,
       reportShellError,
       toggleSource,
       workspaceId,
@@ -5835,6 +5843,28 @@ export function DesktopWorkspaceShell(props: {
     },
     [dismissShellError, driveLimitNotice, networkShareNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
+  // One owner for switch, create and merge, so the titlebar menu and the
+  // Versions page run the same operation and show the same state.
+  const workspaceVersions = useWorkspaceVersions({
+    workspaceId,
+    enabled: captureAvailable,
+    activeTabDirty: anyTabDirty,
+    beginLineageOperation,
+    onWorkspaceStateChanged: onVersionWorkspaceStateChanged,
+    onError: reportFailureMessage,
+    clearError: versionMerges.clear,
+    onMergeNotice: versionMerges.report,
+    onMergeOpenChange: versionMerges.onMergeOpenChange,
+    onOpenHistory: openHistoryView,
+    onConflictError: reportShellError,
+    // versionEpoch bumps whenever version state changed outside these
+    // controls, so they re-read instead of going stale.
+    refreshKey: versionEpoch,
+  });
+  const shareVersion = shareView
+    ? undefined
+    : (version: { id: string; name: string }) =>
+        setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <AgentColorContext.Provider value={setAgentColor}>
@@ -5873,34 +5903,13 @@ export function DesktopWorkspaceShell(props: {
         mutateWb={mutateWb}
         version={captureAvailable ? (
           <VersionMenu
-            workspaceId={workspaceId}
+            versions={workspaceVersions}
             // Out of the workbench, so it waits for the workspace the way
             // the inert workbench does.
             disabled={!workspaceIsReady || storeUpdateRequired}
-            activeTabDirty={anyTabDirty}
-            beginLineageOperation={beginLineageOperation}
             onOpenCompare={openVersionCompareTab}
-            onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-            onError={reportFailureMessage}
-            clearError={versionMerges.clear}
-            onMergeNotice={versionMerges.report}
-            onMergeOpenChange={versionMerges.onMergeOpenChange}
-            mergeRetry={versionMerges.retry}
-            onOpenHistory={openHistoryView}
-            onConflictError={reportShellError}
-            {...(shareView
-              ? {}
-              : {
-                  onShareVersion: (version: { id: string; name: string }) =>
-                    setShareTarget({
-                      kind: "version",
-                      versionId: version.id,
-                      versionName: version.name,
-                    }),
-                })}
-            // versionEpoch bumps whenever version state changed outside
-            // this menu, so the selector re-reads instead of going stale.
-            refreshKey={versionEpoch}
+            onOpenAllVersions={openVersionsTab}
+            {...(shareVersion ? { onShareVersion: shareVersion } : {})}
           />
         ) : undefined}
       />
@@ -6390,6 +6399,39 @@ export function DesktopWorkspaceShell(props: {
                   key={`${tabPath}:${versionEpoch}`}
                   workspaceId={workspaceId}
                   versionId={groupTab.versionId ?? "main"}
+                />
+              )
+            );
+                case "versions": return (
+              // The same capability gate and lines as a compare tab.
+              !captureAvailable ? (
+                shareView ? (
+                  <div
+                    data-testid="versions-share-view"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    A shared view has no versions. Close this tab to go back to the shared files.
+                  </div>
+                ) : !captureDecided ? (
+                  <SkeletonRows layout="panel" label="Loading versions..." />
+                ) : (
+                  <div
+                    data-testid="versions-off"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    {versionCompareOffCopy(syncStatus)}
+                  </div>
+                )
+              ) : (
+                <VersionsPage
+                  workspaceId={workspaceId}
+                  versions={workspaceVersions}
+                  disabled={!workspaceIsReady || storeUpdateRequired}
+                  historyKey={historyRefreshCounter}
+                  versionKey={versionEpoch}
+                  onOpenCompare={openVersionCompareTab}
+                  onReviewConflicts={() => setConflictReviewOpen(true)}
+                  onError={reportShellError}
                 />
               )
             );
@@ -7106,6 +7148,7 @@ export function DesktopWorkspaceShell(props: {
           />
         </Overlay>
       ) : null}
+      {workspaceVersions.dialogs}
       {conflictReviewOpen ? (
         <ConflictReviewDialog
           workspaceId={workspaceId}
