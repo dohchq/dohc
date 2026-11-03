@@ -1126,24 +1126,27 @@ fn debug_assert_sync_context() {
     );
 }
 
-/// How many stranded documents one open-time transaction closes.
-const STRANDED_OWNER_BATCH: usize = 32;
-
-/// Closes observed-owner bindings whose document is gone, in bounded batches.
-/// A failure leaves the store as it was and the workspace still opens.
+/// Closes observed-owner bindings whose document is gone, one document per
+/// transaction. A document it cannot close keeps its rows, the others still
+/// close, and the workspace still opens.
 fn close_stranded_owner_bindings(store: &mut EngineStore, now_ms: i64) {
-    use dohc_engine_collab::owner_outbox::{OwnerOutboxError, retirement::close_stranded_in_tx};
-    use dohc_engine_storage::{NoFaults, TxnOutcome};
-    loop {
-        match store.write_with::<_, OwnerOutboxError>(&NoFaults, |tx| {
-            close_stranded_in_tx(tx, now_ms, STRANDED_OWNER_BATCH)
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxError,
+        retirement::{close_retired_in_tx, stranded_in},
+    };
+    use dohc_engine_storage::NoFaults;
+    let keys = match store.read_with(stranded_in) {
+        Ok(keys) => keys,
+        Err(error) => {
+            eprintln!("engine: stranded owner bindings kept: {error}");
+            return;
+        }
+    };
+    for key in keys {
+        if let Err(error) = store.write_with::<_, OwnerOutboxError>(&NoFaults, |tx| {
+            close_retired_in_tx(tx, &key, now_ms)
         }) {
-            Ok(TxnOutcome::Committed(closed)) if closed == STRANDED_OWNER_BATCH => {}
-            Ok(TxnOutcome::Committed(_) | TxnOutcome::Crashed { .. }) => return,
-            Err(error) => {
-                eprintln!("engine: stranded owner bindings kept: {error}");
-                return;
-            }
+            eprintln!("engine: stranded owner binding kept: {error}");
         }
     }
 }

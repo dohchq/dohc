@@ -1,14 +1,14 @@
 //! A page retired while this computer owned it closes its owner generation.
 use super::*;
 use dohc_engine_collab::owner_outbox::{
-    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxRefuseInput,
+    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, OwnerOutboxRefuseInput,
     draft::append_draft_in_tx,
     enrollment::{OwnerEnrollmentPreparation, prepare_in},
     list_restore_fenced_in,
     publication::{PublicationContentKind, PublicationProof, contains_in},
-    refuse_entry_in_tx,
+    quarantine, read_pending, refuse_entry_in_tx,
     release::{release_in_tx, request_in_tx},
-    retirement::{RETIRED_REASON, close_stranded_in_tx, retired_in},
+    retirement::{RETIRED_REASON, close_retired_in_tx, retired_in, stranded_in},
 };
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint, TxnOutcome};
 
@@ -28,9 +28,22 @@ fn key() -> DocKey {
 }
 
 fn append(owner: &mut RestoreOwner, append_key: &str, paragraph: &str) -> OwnerOutboxAppendResult {
+    let update = edit(owner, paragraph);
+    append_update(owner, append_key, update)
+}
+
+/// An edit made on the owner's accepted checkpoint.
+fn edit(owner: &RestoreOwner, paragraph: &str) -> Vec<u8> {
     let edit = Ydoc::wire();
     edit.apply(&owner.checkpoint).unwrap();
-    let update = edit.richdoc_append_paragraph(paragraph);
+    edit.richdoc_append_paragraph(paragraph)
+}
+
+fn append_update(
+    owner: &mut RestoreOwner,
+    append_key: &str,
+    update: Vec<u8>,
+) -> OwnerOutboxAppendResult {
     let observed = owner.observed.clone();
     let TxnOutcome::Committed(result) = owner
         .store
@@ -75,6 +88,15 @@ fn strand(store: &mut EngineStore) {
             .map_err(SyncError::persist)
         })
         .unwrap();
+}
+
+/// Closes every stranded document, as the open sweep does, in one transaction.
+fn close_stranded(tx: &rusqlite::Transaction<'_>) -> Result<usize, OwnerOutboxError> {
+    let keys = stranded_in(tx)?;
+    for key in &keys {
+        close_retired_in_tx(tx, key, 40)?;
+    }
+    Ok(keys.len())
 }
 
 /// The state a later change enforces: every owner binding left has a text
@@ -136,6 +158,32 @@ fn count(store: &EngineStore, table: &str) -> i64 {
         .unwrap()
 }
 
+/// What a recovery copy of the queue reads: its kept checkpoint, its base and
+/// its pending edits in order, and the Markdown they make together.
+fn recovery_copy(store: &EngineStore, outbox_id: &str) -> (Vec<Vec<u8>>, String) {
+    let pending = read_pending(store, "ws", outbox_id).unwrap();
+    let kept: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT kept_checkpoint_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                [outbox_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let checkpoint = store.get_binary_blob(&kept).unwrap().unwrap();
+    let updates: Vec<Vec<u8>> = pending
+        .entries
+        .into_iter()
+        .map(|entry| entry.update)
+        .collect();
+    let doc = Ydoc::wire();
+    for part in [&checkpoint, &pending.base_update].into_iter().chain(&updates) {
+        doc.apply(part).unwrap();
+    }
+    (updates, doc.project(YdocContentKind::Richdoc).unwrap().content)
+}
+
 /// The closed generation is save-only, unbound, and skipped by delivery.
 fn assert_retired(owner: &RestoreOwner, outbox_id: &str, checkpoint_digest: &str, pending: i64) {
     assert_eq!(count(&owner.store, "ydoc_owner_bindings"), 0);
@@ -191,8 +239,10 @@ fn assert_retired(owner: &RestoreOwner, outbox_id: &str, checkpoint_digest: &str
 #[test]
 fn retiring_an_owner_bound_page_closes_its_generation_and_keeps_every_edit() {
     let mut owner = restore_owner();
-    let refused = append(&mut owner, "refused", "refused edit");
-    let unsent = append(&mut owner, "unsent", "unsent edit");
+    let refused_edit = edit(&owner, "refused edit");
+    let unsent_edit = edit(&owner, "unsent edit");
+    let refused = append_update(&mut owner, "refused", refused_edit.clone());
+    let unsent = append_update(&mut owner, "unsent", unsent_edit.clone());
     assert_eq!(refused.outbox_id, unsent.outbox_id);
     owner
         .store
@@ -224,6 +274,18 @@ fn retiring_an_owner_bound_page_closes_its_generation_and_keeps_every_edit() {
         &unsent.outbox_id,
         &owner.observed.checkpoint_digest,
         2,
+    );
+    // The page is gone, so the queue holds the only copy of both edits.
+    let expected = Ydoc::wire();
+    for part in [&owner.checkpoint, &refused_edit, &unsent_edit] {
+        expected.apply(part).unwrap();
+    }
+    let (updates, markdown) = recovery_copy(&owner.store, &unsent.outbox_id);
+    assert_eq!(updates, vec![refused_edit, unsent_edit]);
+    assert!(markdown.contains("refused edit") && markdown.contains("unsent edit"));
+    assert_eq!(
+        markdown,
+        expected.project(YdocContentKind::Richdoc).unwrap().content
     );
     assert_eq!(
         count(&owner.store, "owner_pending_settlements"),
@@ -327,7 +389,7 @@ fn the_open_sweep_closes_a_stranded_owner_binding_once_and_a_crash_keeps_it() {
     assert!(matches!(
         owner
             .store
-            .write_with(&CrashBeforePersist, |tx| close_stranded_in_tx(tx, 40, 8))
+            .write_with(&CrashBeforePersist, close_stranded)
             .unwrap(),
         TxnOutcome::Crashed { .. }
     ));
@@ -338,7 +400,7 @@ fn the_open_sweep_closes_a_stranded_owner_binding_once_and_a_crash_keeps_it() {
     for _ in 0..2 {
         let TxnOutcome::Committed(count) = owner
             .store
-            .write_with(&NoFaults, |tx| close_stranded_in_tx(tx, 40, 8))
+            .write_with(&NoFaults, close_stranded)
             .unwrap()
         else {
             panic!("the sweep must commit")
@@ -389,7 +451,7 @@ fn the_open_sweep_leaves_bound_pages_and_scene_lineages_alone() {
     let before = queues(&owner.store);
     let TxnOutcome::Committed(closed) = owner
         .store
-        .write_with(&NoFaults, |tx| close_stranded_in_tx(tx, 40, 8))
+        .write_with(&NoFaults, close_stranded)
         .unwrap()
     else {
         panic!("the sweep must commit")
@@ -399,4 +461,46 @@ fn the_open_sweep_leaves_bound_pages_and_scene_lineages_alone() {
     assert_bindings_have_text_heads(&owner.store);
     assert_eq!(count(&owner.store, "ydoc_docs"), 2);
     assert_eq!(queues(&owner.store), before);
+}
+
+/// A delivery pass that waited on the server while capture retired the page
+/// then reports its binding as changed. The queue stays retired.
+#[test]
+fn a_late_quarantine_keeps_a_retired_queue_retired() {
+    let mut owner = restore_owner();
+    let unsent = append(&mut owner, "unsent", "unsent edit");
+    retire(&mut owner.store).unwrap();
+    let observed_binding = |store: &EngineStore| -> Option<String> {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT observed_binding_json FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                    [&unsent.outbox_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    };
+    let before = observed_binding(&owner.store);
+    let mut moved = owner.observed.binding.clone();
+    moved.current_path = "moved.md".into();
+    moved.selector_paths = vec!["moved.md".into()];
+    quarantine(
+        &mut owner.store,
+        "ws",
+        OwnerOutboxQuarantineInput {
+            outbox_id: unsent.outbox_id.clone(),
+            reason: "binding-changed".into(),
+            observed_binding: Some(moved),
+        },
+        50,
+    )
+    .unwrap();
+    assert_eq!(observed_binding(&owner.store), before);
+    assert_retired(
+        &owner,
+        &unsent.outbox_id,
+        &owner.observed.checkpoint_digest,
+        1,
+    );
 }

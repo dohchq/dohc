@@ -3496,7 +3496,7 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     Ok(())
 }
 
-fn map_owner_retirement_error(
+pub(crate) fn map_owner_retirement_error(
     error: dohc_engine_collab::owner_outbox::OwnerOutboxError,
 ) -> SyncError {
     match error {

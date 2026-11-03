@@ -971,3 +971,134 @@ fn a_released_owned_page_moves() {
     assert!(!page_check(&store, "notes/owner.md"));
     assert_eq!(folder_check(&store, "notes"), None);
 }
+
+/// A 167.1 build deleted an owner-bound page and its lineage but kept its
+/// owner rows. The queued delete waited for owner admission and held back the
+/// moments after it. The writable open's sweep closes the binding, and then
+/// the delete, B and C publish.
+#[test]
+fn a_stuck_167_1_delete_and_the_moments_after_it_publish_after_the_sweep() {
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxError,
+        retirement::{close_retired_in_tx, stranded_in},
+    };
+    let (_dir, mut store, _observed, _checkpoint) = fixture();
+    let owner_text: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256 FROM snapshots WHERE object_id='owner'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let journal = |store: &mut EngineStore, payload: serde_json::Value, now_ms: i64| {
+        let TxnOutcome::Committed(seq) = journal_local_replication_op(
+            store,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "moment.append",
+            &payload,
+            now_ms,
+            &NoFaults,
+        )
+        .unwrap() else {
+            panic!("the moment must commit")
+        };
+        seq
+    };
+    let delete = journal(
+        &mut store,
+        json!({
+            "versionId": "main", "objectId": "owner", "path": "owner.md", "operation": "delete",
+            "payloadBeforePath": "owner.md", "payloadBeforeBlobSha256": owner_text,
+            "payloadAfterPath": "owner.md", "payloadAfterBlobSha256": owner_text,
+            "beforePath": "owner.md", "beforeBlobSha256": owner_text,
+        }),
+        10,
+    );
+    let mut later = Vec::new();
+    for (object, path, text) in [("b", "notes/b.md", "# B\n"), ("c", "notes/c.md", "# C\n")] {
+        let digest = seed_text_head(&mut store, object, path, text);
+        later.push((
+            digest.clone(),
+            journal(
+                &mut store,
+                json!({
+                    "versionId": "main", "objectId": object, "path": path, "operation": "write",
+                    "payloadBeforePath": null, "payloadBeforeBlobSha256": null,
+                    "payloadAfterBlobSha256": digest, "beforeBlobSha256": "",
+                }),
+                11,
+            ),
+        ));
+    }
+    // What the 167.1 delete left: the page and its lineage gone, its owner rows kept.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "DELETE FROM ydoc_updates WHERE object_id='owner';
+                 DELETE FROM ydoc_snapshots WHERE object_id='owner';
+                 DELETE FROM ydoc_deferred_updates WHERE object_id='owner';
+                 DELETE FROM ydoc_base_relay_candidates WHERE object_id='owner';
+                 DELETE FROM ydoc_docs WHERE object_id='owner';
+                 DELETE FROM snapshots WHERE object_id='owner';",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let push = |store: &mut EngineStore| {
+        let SyncPassOutcome::Complete {
+            owner_admission_pending,
+            ..
+        } = client
+            .push_workspace(store, "ws", &NoFaults, &crate::NoLiveLeases, 12, 1_000_000)
+            .unwrap()
+        else {
+            panic!("push failed")
+        };
+        owner_admission_pending
+    };
+    let stuck = push(&mut store);
+    assert_eq!(
+        stuck
+            .iter()
+            .map(|pending| (pending.object_id.as_str(), pending.origin_seq))
+            .collect::<Vec<_>>(),
+        vec![("owner", delete)]
+    );
+    assert!(read_pushed_seq(&store, "ws", "local").unwrap() < delete);
+
+    store
+        .write_with(&NoFaults, |tx| {
+            for key in stranded_in(tx)? {
+                close_retired_in_tx(tx, &key, 20)?;
+            }
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    assert!(push(&mut store).is_empty());
+    assert_eq!(
+        read_pushed_seq(&store, "ws", "local").unwrap(),
+        later.last().unwrap().1
+    );
+    let pushes = client.transport().pushes.lock().unwrap();
+    let published = |digest: &str| {
+        pushes.iter().flat_map(|push| &push.ops).any(|op| {
+            op.payload.get("payloadAfterBlobSha256").and_then(|value| value.as_str())
+                == Some(digest)
+        })
+    };
+    assert!(
+        pushes
+            .iter()
+            .flat_map(|push| &push.ops)
+            .any(|op| op.origin_seq == delete)
+    );
+    for (digest, _) in &later {
+        assert!(published(digest), "{digest} reaches the relay");
+    }
+}

@@ -2102,11 +2102,18 @@ pub(crate) fn quarantine_in_tx(
             )?;
         }
     }
-    // Another refusal uses up the owner's Try again.
+    // Another refusal uses up the owner's Try again. A retired queue keeps its
+    // reason and binding, so a pass that outlived its page cannot reopen it.
     tx.execute(
         "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
-         observed_binding_json=?3,retry_delivery_id=NULL WHERE outbox_id=?1",
-        params![input.outbox_id, input.reason, observed_binding_json],
+         observed_binding_json=?3,retry_delivery_id=NULL \
+         WHERE outbox_id=?1 AND quarantine_reason IS NOT ?4",
+        params![
+            input.outbox_id,
+            input.reason,
+            observed_binding_json,
+            retirement::RETIRED_REASON
+        ],
     )
     .map_err(write_sql)?;
     Ok(())

@@ -99,40 +99,34 @@ pub fn close_retired_in_tx(
     Ok(())
 }
 
-/// Closes up to `limit` documents whose observed-owner binding outlived their
-/// marker, as a store retired before [`close_retired_in_tx`] existed left them.
-/// Returns how many it closed; fewer than `limit` means none remain.
-pub fn close_stranded_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    now_ms: i64,
-    limit: usize,
-) -> Result<usize, OwnerOutboxError> {
-    let keys = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT DISTINCT workspace_id,main_version_id,object_id FROM ydoc_owner_bindings b \
-                 WHERE NOT EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=b.workspace_id \
-                   AND d.version_id=b.main_version_id AND d.object_id=b.object_id) \
-                 ORDER BY workspace_id,main_version_id,object_id LIMIT ?1",
-            )
-            .map_err(read_sql)?;
-        let rows = stmt
-            .query_map([limit as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(read_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
-    };
-    for (workspace_id, version_id, object_id) in &keys {
-        let key = DocKey::new(workspace_id, version_id, object_id)
-            .map_err(|_| OwnerOutboxError::Corrupt)?;
-        close_retired_in_tx(tx, &key, now_ms)?;
-    }
-    Ok(keys.len())
+/// The documents whose observed-owner binding outlived their marker, as a
+/// store retired before [`close_retired_in_tx`] existed left them. The
+/// writable open closes each in its own transaction, so one it cannot close
+/// keeps only its own page.
+pub fn stranded_in(conn: &Connection) -> Result<Vec<DocKey>, OwnerOutboxError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT workspace_id,main_version_id,object_id FROM ydoc_owner_bindings b \
+             WHERE NOT EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=b.workspace_id \
+               AND d.version_id=b.main_version_id AND d.object_id=b.object_id) \
+             ORDER BY workspace_id,main_version_id,object_id",
+        )
+        .map_err(read_sql)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(read_sql)?;
+    rows.map(|row| {
+        let (workspace_id, version_id, object_id) = row.map_err(read_sql)?;
+        DocKey::new(workspace_id, version_id, object_id)
+            .map_err(|_| OwnerOutboxError::Corrupt)
+    })
+    .collect()
 }
 
 /// Whether `key`'s generation closed through [`close_retired_in_tx`] and no
@@ -248,7 +242,11 @@ fn adds_to(
     let digests = {
         let mut stmt = conn
             .prepare(
-                "SELECT e.update_blob_digest FROM owner_ydoc_outbox_entries e                  JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id                  WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3                    AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND e.pending=1                  ORDER BY o.created_at_ms,o.outbox_id,e.sequence",
+                "SELECT e.update_blob_digest FROM owner_ydoc_outbox_entries e \
+                 JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id \
+                 WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 \
+                   AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND e.pending=1 \
+                 ORDER BY o.created_at_ms,o.outbox_id,e.sequence",
             )
             .map_err(read_sql)?;
         let rows = stmt
