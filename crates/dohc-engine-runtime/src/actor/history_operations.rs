@@ -513,6 +513,16 @@ fn check_undo_ownership(
             .ok_or(DomainError::UndoRefused {path:m.path,reason:"linking document removed"})?;
         m.before_path = None;
     }
+    // Moving a page back, or deleting a copy, would leave the page's owner
+    // binding behind and stall the workspace's publication.
+    if duplicate || (m.operation == "rename" && m.before_path.is_some()) {
+        let owned: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
+            params![ws, version, m.object_id], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+        if owned {
+            return Err(DomainError::LivePageOwned.into());
+        }
+    }
     for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
         if let Err(error) = check_path_ownership(conn, ws, version, &m.object_id, path) {
             if duplicate
@@ -864,6 +874,32 @@ mod tests {
             )
             .unwrap();
         std::fs::remove_file(root.join(path)).unwrap();
+    }
+    /// What enrollment leaves for a page this computer owns live.
+    pub(super) fn bind_owner(store: &mut EngineStore, object: &str) {
+        let claim = store.put_binary_blob(b"lineage").unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO ydoc_owner_bindings VALUES(?1,'main',?2,?3,'{}','relay',1,0,0,?3,100,100)", params![WS, object, claim])
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+    }
+    /// Moving the page back would leave its owner binding behind.
+    #[tokio::test]
+    async fn undo_of_a_rename_refuses_a_page_this_computer_owns_live() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "old.md", "mover", "Body");
+        rename(&mut store, root.path(), "old.md", "new.md", "move", OP);
+        bind_owner(&mut store, "mover");
+        let before = count(&store);
+        let error = undo(&mut store, root.path(), "undo-owned", Arc::new(NoFaults)).unwrap_err();
+        assert!(
+            matches!(error, RuntimeError::Domain(DomainError::LivePageOwned)),
+            "{error:?}"
+        );
+        assert_eq!(count(&store), before);
+        assert!(root.join("new.md").exists());
+        assert!(!root.join("old.md").exists());
     }
     fn undo(
         store: &mut EngineStore,

@@ -54,6 +54,7 @@ export const CHATS_METHOD = {
   bookmarkArchive: "chats.bookmarks.archive",
   bookmarkMarkPending: "chats.bookmarks.markPending",
   bookmarkMarkFailed: "chats.bookmarks.markFailed",
+  bookmarkRetryFailed: "chats.bookmarks.retryFailed",
   bookmarkMarkStale: "chats.bookmarks.markStale",
   dispatchEnqueue: "chats.dispatch.enqueue",
   dispatchClaimNextPending: "chats.dispatch.claimNextPending",
@@ -430,6 +431,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.bookmarkArchive]: ChatBookmarkFindParams;
   [CHATS_METHOD.bookmarkMarkPending]: ChatBookmarkFindParams;
   [CHATS_METHOD.bookmarkMarkFailed]: ChatBookmarkMarkFailedParams;
+  [CHATS_METHOD.bookmarkRetryFailed]: ChatBookmarkGenerationParams;
   [CHATS_METHOD.bookmarkMarkStale]: ChatBookmarkMarkStaleParams;
   [CHATS_METHOD.dispatchEnqueue]: ChatDispatchEnqueueParams;
   [CHATS_METHOD.dispatchClaimNextPending]: ChatDispatchClaimParams;
@@ -949,6 +951,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.bookmarkArchive]: ChatBookmarkSchema,
   [CHATS_METHOD.bookmarkMarkPending]: ChatBookmarkSchema,
   [CHATS_METHOD.bookmarkMarkFailed]: BookmarkTransitionSchema,
+  [CHATS_METHOD.bookmarkRetryFailed]: BookmarkTransitionSchema,
   [CHATS_METHOD.bookmarkMarkStale]: BookmarkTransitionSchema,
   [CHATS_METHOD.dispatchEnqueue]: mutableStruct({ enqueued: Schema.Boolean }),
   [CHATS_METHOD.dispatchClaimNextPending]: Schema.NullOr(

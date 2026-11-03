@@ -198,9 +198,19 @@ struct VersionedTextCheckMoveParams {
     path: String,
     #[serde(default)]
     author: Option<Value>,
-    /// A folder move also waits for a page under it that this computer owns.
+    /// The change that takes the path away. A duplicate leaves it out and
+    /// checks only this computer's hosted pages.
     #[serde(default)]
-    folder: bool,
+    change: Option<PathChange>,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PathChange {
+    MovePage,
+    MoveFolder,
+    /// A delete of a page or a folder: both checks run.
+    Delete,
 }
 
 #[derive(Deserialize)]
@@ -726,39 +736,54 @@ impl EngineService {
         validated_author(params.author.as_ref())?;
         let open = self.open(request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        if params.folder {
+        let refuse = |code: &'static str| Err(WireError::new(ErrorCode::InvalidParams, code));
+        if matches!(
+            params.change,
+            Some(PathChange::MoveFolder | PathChange::Delete)
+        ) {
             let live = Self::read_under_ctx(
                 &cancellation,
                 "versionedText.checkMove",
                 open.actor.live_page_under_folder(
                     open.workspace_id.clone(),
-                    params.version_id,
-                    params.path,
+                    params.version_id.clone(),
+                    params.path.clone(),
                 ),
             )
             .await?;
-            return match live {
-                None => Ok(json!({"allowed":true})),
-                Some(LivePageUnderFolder::Hosted) => Err(WireError::new(
-                    ErrorCode::InvalidParams,
-                    "live-document-binding-active",
-                )),
-                Some(LivePageUnderFolder::Owned) => Err(WireError::new(
-                    ErrorCode::InvalidParams,
-                    "live-folder-page-owned",
-                )),
-            };
+            match live {
+                None if params.change == Some(PathChange::MoveFolder) => {
+                    return Ok(json!({"allowed":true}));
+                }
+                None => {}
+                Some(LivePageUnderFolder::Hosted) => return refuse("live-document-binding-active"),
+                Some(LivePageUnderFolder::Owned) => return refuse("live-folder-page-owned"),
+            }
+        } else {
+            Self::read_under_ctx(
+                &cancellation,
+                "versionedText.checkMove",
+                open.actor.ensure_no_adopted_owner_under_path(
+                    open.workspace_id.clone(),
+                    params.version_id.clone(),
+                    params.path.clone(),
+                ),
+            )
+            .await?;
         }
-        Self::read_under_ctx(
+        if params.change.is_none() {
+            return Ok(json!({"allowed":true}));
+        }
+        let owned = Self::read_under_ctx(
             &cancellation,
             "versionedText.checkMove",
-            open.actor.ensure_no_adopted_owner_under_path(
-                open.workspace_id.clone(),
-                params.version_id,
-                params.path,
-            ),
+            open.actor
+                .live_page_owned(open.workspace_id.clone(), params.version_id, params.path),
         )
         .await?;
+        if owned {
+            return refuse("live-page-owned");
+        }
         Ok(json!({"allowed":true}))
     }
 
@@ -1180,6 +1205,164 @@ mod tests {
                 .versioned_text_write(&RequestContext::unbounded(), request)
                 .await
         }
+    }
+
+    async fn check_move(
+        service: &EngineService,
+        handle: &WorkspaceHandle,
+        path: &str,
+        change: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut params = json!({ "versionId": "main", "path": path });
+        if let Some(change) = change {
+            params["change"] = json!(change);
+        }
+        let request = Request {
+            id: 1,
+            method: "versionedText.checkMove".into(),
+            workspace: Some(handle.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        };
+        service
+            .versioned_text_check_move(&RequestContext::unbounded(), request)
+            .await
+            .map_err(|error| error.message)
+    }
+
+    /// checkMove's `change` says what the caller is about to do. A move or
+    /// delete of a page this computer owns live, or a delete of its folder, is
+    /// refused. A duplicate sends no change and passes, as does anything else.
+    #[tokio::test]
+    async fn check_move_refuses_moving_or_deleting_a_page_this_computer_owns_live() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+        for (id, path) in [(1, "notes/owned.md"), (2, "drafts/plain.md")] {
+            write_for_test(&service, &handle, id, path, "versionedText.write",
+                json!({ "versionId": "main", "path": path, "text": "page\n", "publish": true, "createOnly": true }))
+                .await
+                .unwrap();
+        }
+        service.workspace_close(Some(handle)).await.unwrap();
+        let mut store = dohc_engine_storage::EngineStore::open(
+            &scratch.path().join(".dohc/engine/engine.db"),
+            2,
+        )
+        .unwrap();
+        let claim = store.put_binary_blob(b"lineage").unwrap();
+        store
+            .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute("INSERT INTO ydoc_owner_bindings SELECT workspace_id,version_id,object_id,?1,'{}','relay',1,0,0,?1,100,100 FROM snapshots WHERE path='notes/owned.md'", [&claim])
+                    .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        drop(store);
+        let handle = open_for_test(&service, scratch.path()).await;
+        let refused = [
+            ("notes/owned.md", Some("movePage"), "live-page-owned"),
+            ("notes/owned.md", Some("delete"), "live-page-owned"),
+            ("notes", Some("delete"), "live-folder-page-owned"),
+            ("notes", Some("moveFolder"), "live-folder-page-owned"),
+        ];
+        for (path, change, code) in refused {
+            assert_eq!(
+                check_move(&service, &handle, path, change)
+                    .await
+                    .unwrap_err(),
+                code,
+                "{path} {change:?}"
+            );
+        }
+        for (path, change) in [
+            ("notes/owned.md", None),
+            ("drafts/plain.md", Some("movePage")),
+            ("drafts/plain.md", Some("delete")),
+            ("drafts", Some("delete")),
+            ("drafts", Some("moveFolder")),
+        ] {
+            assert_eq!(
+                check_move(&service, &handle, path, change).await.unwrap(),
+                json!({ "allowed": true }),
+                "{path} {change:?}"
+            );
+        }
+        assert!(
+            check_move(&service, &handle, "notes/owned.md", Some("rename"))
+                .await
+                .is_err()
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    /// History's Restore of a page this computer owns live is refused before
+    /// anything changes. Once Stop releases the binding, the page restores.
+    #[tokio::test]
+    async fn restore_refuses_a_page_this_computer_owns_live() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let handle = open_for_test(&service, scratch.path()).await;
+        write_for_test(&service, &handle, 1, "first", "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/owned.md", "text": "first\n", "publish": true, "createOnly": true }))
+            .await
+            .unwrap();
+        let second = write_for_test(&service, &handle, 2, "second", "versionedText.write",
+            json!({ "versionId": "main", "path": "notes/owned.md", "text": "second\n", "publish": true }))
+            .await
+            .unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let binding = |sql: &'static str| {
+            let mut store = dohc_engine_storage::EngineStore::open(&db, 2).unwrap();
+            let claim = store.put_binary_blob(b"lineage").unwrap();
+            store
+                .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    tx.execute(sql, [&claim])
+                        .map_err(dohc_engine_storage::StorageError::persist_public)
+                })
+                .unwrap();
+        };
+        binding(
+            "INSERT INTO ydoc_owner_bindings SELECT workspace_id,version_id,object_id,?1,'{}','relay',1,0,0,?1,100,100 FROM snapshots WHERE path='notes/owned.md'",
+        );
+        let restore = json!({ "versionId": "main", "path": "notes/owned.md", "text": "first\n", "origin": "restore",
+            "publish": true, "restoreBeforeMomentId": second["moment"]["momentId"] });
+        let handle = open_for_test(&service, scratch.path()).await;
+        let refused = write_for_test(
+            &service,
+            &handle,
+            3,
+            "restore",
+            "versionedText.write",
+            restore.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.message, "live-page-owned");
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("notes/owned.md")).unwrap(),
+            "second\n"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+        binding("DELETE FROM ydoc_owner_bindings WHERE lineage_claim_id=?1");
+        let handle = open_for_test(&service, scratch.path()).await;
+        write_for_test(
+            &service,
+            &handle,
+            4,
+            "restore-after-stop",
+            "versionedText.write",
+            restore,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("notes/owned.md")).unwrap(),
+            "first\n"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
     }
 
     #[tokio::test]

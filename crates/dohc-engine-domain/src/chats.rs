@@ -5385,6 +5385,47 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
+    /// Queue a failed projection again at the same generation, so an archive
+    /// whose page already moved finishes at that generation's path. Only a
+    /// failed row at `generation` changes.
+    pub fn retry_failed_bookmark(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+        generation: i64,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatBookmarkTransition, DomainError> {
+        let ws = workspace_id.to_owned();
+        let owner = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
+        let bid = bookmark_id.to_owned();
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
+            require_bookmark(tx, &ws, &owner, &bid)?;
+            if !(1..=9_007_199_254_740_991).contains(&generation) {
+                return Err(DomainError::chat(
+                    "invalid-bookmark-target",
+                    "Bookmark generation is invalid.",
+                ));
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE chat_bookmark_outbox \
+                     SET projection_state = 'pending', failure_reason = NULL, updated_at_ms = ?4 \
+                     WHERE workspace_id = ?1 AND bookmark_id = ?2 AND generation = ?3 \
+                       AND projection_state = 'failed'",
+                    params![ws, bid, generation, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            let bookmark = require_bookmark(tx, &ws, &owner, &bid)?;
+            Ok::<_, DomainError>(ChatBookmarkTransition {
+                bookmark,
+                applied: changed == 1,
+            })
+        })?;
+        committed(outcome)
+    }
+
     /// Fence a pending bookmark generation into the failed state.
     #[allow(clippy::too_many_arguments)]
     pub fn mark_bookmark_failed(

@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isSharedLiveFileRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -209,9 +209,9 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
-import { Explorer } from "./workbench/Explorer";
+import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { folderMoveIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -322,6 +322,11 @@ import { ipcErrorMessage } from "./ipcError";
 // refuses every write to the reserved prefix regardless — but it uses the
 // same alias-normalizing predicate as main so a case-variant path arriving
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
+// One Notices row per bookmark page an archive refused.
+function archiveRefusalIdentity(workspaceId: string, path: string): string {
+  return `chat-archive-refused:${workspaceId}:${path}`;
+}
+
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
@@ -963,6 +968,32 @@ export function DesktopWorkspaceShell(props: {
       reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
+  // Explorer's failures. A move refused for live editing opens Live
+  // documents, at the page's row for a page, whose words name the action that ran.
+  const reportExplorerError = useCallback(
+    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
+      if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
+      const id = workspaceId, reveal = livePage?.path ?? null;
+      reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
+        ...(livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
+        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
+    },
+    [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
+  );
+  // Chats' failures. An archive refused for live editing opens Live documents
+  // at the page's row, and the page's archive takes the refusal back.
+  const reportChatsError = useCallback(
+    (message: string, cause?: unknown, retry?: () => void, refusedPage?: string) => {
+      if (!isLivePageOwnedRefusal(cause)) return reportFailureMessage(message, cause, retry);
+      const id = workspaceId, { title, words } = readError(cause);
+      reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(title ? { title } : {}), message: words ?? message,
+        ...(refusedPage !== undefined ? { identity: archiveRefusalIdentity(id, refusedPage) } : {}),
+        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, refusedPage ?? null); } } });
+    },
+    [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
+  );
+  const onChatBookmarkArchived = useCallback((path: string) => clearIdentity(archiveRefusalIdentity(workspaceId, path)),
+    [clearIdentity, workspaceId]);
   // The workspace's Button runs report through this shell's toasts, so they go with it.
   useEffect(() => () => disposeAutomationButtons(workspaceId), [workspaceId]);
   const onWorkspaceSettingsRead = useSettingsFileNotices({
@@ -3287,6 +3318,13 @@ export function DesktopWorkspaceShell(props: {
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
+      // This computer owns the page live: Stop in Live documents, then Try again.
+      if (isLivePageOwnedRefusal(error)) {
+        const id = workspaceId;
+        reportShellFailure({ title: livePageTitle(path, "restore"), message: livePageBody("restore"), cause: error, retry, identity,
+          action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, path); } } });
+        return;
+      }
       if (isSharedLiveFileRefusal(error)) {
         reportShellFailure({ title: `dohc can't restore "${path}" because it has been shared live`, message: "Copy the text you want from History into the file.", identity });
         return;
@@ -3297,7 +3335,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellFailure({ title: fallback.replace(/\.$/u, ""), message: words, cause: error, retry, identity });
       } else reportShellError(fallback, error, retry, undefined, identity);
     },
-    [captureRecoveries, reportShellError, reportShellFailure],
+    [captureRecoveries, reportShellError, reportShellFailure, openLiveDocuments, workspaceId],
   );
   // Try again on a failed restore opens the change's tab, and that page
   // restores again once a fresh read allows it, with its Undo restore after.
@@ -3862,9 +3900,10 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
-      // A folder move that succeeds takes back its earlier refusal.
+      // A move that succeeds takes back its earlier refusal.
       for (const change of changes) {
-        if (change.kind === "folder") clearIdentity(folderMoveIdentity(workspaceId, change));
+        if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
+        if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
       }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the
@@ -5332,7 +5371,7 @@ export function DesktopWorkspaceShell(props: {
         onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
-        onError={reportFailureMessage}
+        onError={reportExplorerError}
         onChangeSucceeded={clearIdentity}
         onNewCollection={setNewCollectionFolder}
       />
@@ -5369,7 +5408,8 @@ export function DesktopWorkspaceShell(props: {
     onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: reportFailureMessage,
+    onError: reportChatsError,
+    onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
@@ -5405,7 +5445,8 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: reportFailureMessage,
+    onError: reportChatsError,
+    onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,

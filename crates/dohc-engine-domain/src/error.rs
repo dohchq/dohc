@@ -98,6 +98,11 @@ pub enum DomainError {
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
 
+    /// This computer owns the page live: its head's object has an owner
+    /// binding, which a move or delete would leave behind.
+    #[error("this computer owns the page live")]
+    LivePageOwned,
+
     #[error("synced deletion revival refused")]
     SyncedDeletionRevivalRefused,
 
@@ -251,6 +256,7 @@ impl DomainError {
             DomainError::UndoRefused { .. } => "undo-refused",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::LiveDocumentBindingActive => "live-document-binding-active",
+            DomainError::LivePageOwned => "live-page-owned",
             DomainError::ForkBaseNotFound => "fork-base-not-found",
             DomainError::ConflictNotFound => "conflict-not-found",
             DomainError::ConflictStaleTarget => "conflict-stale-target",

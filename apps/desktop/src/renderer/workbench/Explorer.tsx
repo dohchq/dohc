@@ -39,7 +39,8 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
-  folderMoveIdentity,
+  deleteRefusalIdentity,
+  moveRefusalIdentity,
   pendingTreeMoveSettled,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
@@ -57,8 +58,9 @@ import { ExplorerHome } from "./ExplorerHome";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { isFolderMoveRefusal, isLiveFolderMoveRefusal, KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -70,6 +72,8 @@ export type TreeChangeOperation = {
   settle: DraftFlush;
   release: () => void;
 };
+
+export type LivePageRefused = { path: string; action: "move" | "rename" | "delete" | "replace" };
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -175,8 +179,9 @@ export interface ExplorerProps {
   onRefresh: () => void;
   // Failed tree operations go to the shell's error toast and Notices row. A
   // failed move names itself, so its Try again runs it again and a later
-  // success of the same move clears it.
-  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string) => void;
+  // success of the same move clears it. `livePage` names a page whose change
+  // was refused because it has live editing on.
+  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => void;
   onChangeSucceeded?: (identity: string) => void;
   // "New Collection…" from the main-owned context menu: opens the shell's
   // new-collection dialog seeded with the folder that was right-clicked
@@ -867,6 +872,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       changes: PendingTreeChange[],
       run: (change: PendingTreeChange) => Promise<unknown>,
       afterBegin?: () => void,
+      action: "move" | "rename" = "move",
     ): Promise<void> {
       if (changes.length === 0) return;
       // Land the stable active draft and drain queued collection writes
@@ -881,26 +887,40 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       } finally {
         afterBegin?.();
       }
+      // A page live editing can refuse to delete leaves the tree only once
+      // its delete succeeds, so a refusal never takes it out and back.
+      const afterRun = (change: PendingTreeChange) =>
+        change.kind === "delete-file" && liveDocumentKindForPath(change.path) !== null;
       try {
-        setPending((current) => [...current, ...changes]);
+        setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         const succeeded: PendingTreeChange[] = [];
         for (const change of changes) {
           const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
             await run(change);
+            if (afterRun(change)) setPending((current) => [...current, change]);
             succeeded.push(change);
             if (identity) onChangeSucceeded?.(identity);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
-            // A refused folder move keeps the folder-move identity, with Try again
-            // only when live editing refused it. Any other failed move names its
-            // source, and Try again runs it as it was asked.
-            const folderIdentity = change.kind === "folder" && isFolderMoveRefusal(cause)
-              ? folderMoveIdentity(workspaceId, change)
+            // A move onto a page this computer owns live is refused for that page.
+            const replaced = change.kind === "file" && readError(cause).title === livePageTitle(change.toPath, "replace");
+            const livePage: LivePageRefused | undefined = !isLivePageOwnedRefusal(cause) ? undefined
+              : change.kind === "file" ? (replaced ? { path: change.toPath, action: "replace" } : { path: change.fromPath, action })
+              : change.kind === "delete-file" ? { path: change.path, action: "delete" }
               : undefined;
-            const rerun = () => void runChangesOnce([{ ...change, id: nextChangeId() }], run);
-            const again = folderIdentity ? (isLiveFolderMoveRefusal(cause) ? rerun : undefined) : identity ? rerun : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, folderIdentity ?? identity);
+            // A change refused for live editing or History off keeps its refusal's
+            // identity, and Try again reruns it only when live editing refused it.
+            // Any other failed move names its source, and Try again runs it as it was asked.
+            const refused = isLiveEditingRefusal(cause);
+            const refusalIdentity = (change.kind === "folder" && refused) || (change.kind === "file" && livePage)
+              ? moveRefusalIdentity(workspaceId, change)
+              : (change.kind === "delete-file" || change.kind === "delete-folder") && refused
+                ? deleteRefusalIdentity(workspaceId, change.path)
+                : undefined;
+            const rerun = () => void runChangesOnce([{ ...change, id: nextChangeId() }], run, undefined, action);
+            const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && identity ? rerun : undefined;
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, refused ? refusalIdentity : identity, livePage);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -983,6 +1003,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         },
         // Remove this input in the same commit that stages the renamed row.
         () => setEditing(current => current === edit ? null : current),
+        "rename",
       );
     },
     [rowFor, runChanges, workspaceId],

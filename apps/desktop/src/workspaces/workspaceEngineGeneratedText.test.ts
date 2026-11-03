@@ -21,6 +21,8 @@ import {
   type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
+import { createDesktopChatBookmarks } from "./desktopChatBookmarks";
+import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { formatChatBookmarkProjection } from "./chatBookmarkProjection";
 import {
   archiveChatBookmarkProjection,
@@ -573,6 +575,103 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(await readFile(join(rootPath, toPath), "utf8")).toBe("# Retry\n");
     await capture.stop();
   });
+
+  // With `conflict`, another page is saved at the old path after the move.
+  async function archiveAfterCommittedMove(conflict: boolean) {
+    const rootPath = await root();
+    const workspace = { workspaceId: "ws", rootPath };
+    const { store: chats, seed } = makeChats("ws", rootPath);
+    const disk = createDefaultDiskWriter(rootPath);
+    const deleted: string[] = [];
+    let failDelete = false;
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "generated-bookmark-moved-archive-test",
+      rootPath,
+      rustEngineSessions: mockPublishingSessions({ rootPath, workspaceId: "generated-bookmark-moved-archive-test", loopback: new VersionedLoopbackEngine() }),
+      diskWriter: {
+        writeTextFile: disk.writeTextFile,
+        writeBinaryFile: disk.writeBinaryFile,
+        async deletePath(path) {
+          deleted.push(path);
+          if (failDelete) {
+            failDelete = false;
+            throw new Error("injected delete failure");
+          }
+          await disk.deletePath(path);
+        },
+      },
+    });
+    const authorities = createWorkspaceAuthorityOwner({
+      findWorkspace: () => workspace,
+      canonicalizeRoot: (path: string) => path,
+      createState: () => ({ operationLanes: new Map<string, Promise<void>>(),
+        bookmarkProjectionPending: false, bookmarkProjectionRunning: false }),
+      disposeState: () => undefined,
+    });
+    const owner = createDesktopChatBookmarks({
+      findWorkspace: () => workspace,
+      requireWorkspaceAuthority: (id) => authorities.acquire(id),
+      canonicalWorkspaceFor: (lease) => { lease.assertCurrent(); return workspace; },
+      linkedChatStoreFor: () => chats, warmCredentialCache: async () => undefined,
+      localUserId: () => "viewer", sharedViewOf: () => false,
+      activity: { listOpenWorkspaceIds: () => ["ws"], engineCaptureFor: () => capture },
+    });
+    await seed({ method: CHATS_METHOD.channelCreate, params: { channelId: "general", name: "general", kind: "channel", nowMs: 10_001 } });
+    await seed({ method: CHATS_METHOD.threadStart, idempotencyKey: "thread-moved:message-moved",
+      params: { channelId: "general", threadId: "thread-moved", messageId: "message-moved", authorKind: "human",
+        authorDisplayName: "Sam", body: "Archive me", nowMs: 10_002 } });
+    const destinationPath = "Bookmarks/Chats/moved.md";
+    const saved = await chats.saveBookmark({ workspaceId: "ws", ownerUserId: "viewer", targetKind: "thread",
+      targetId: "thread-moved", mode: "live", destinationPath });
+    const ready = await owner.materializeChatBookmark(workspace, capture, saved);
+    expect(ready).toMatchObject({ state: "active", projectionState: "ready", generation: 1 });
+    const archivedPath = "Bookmarks/Chats/Archived/moved--g2.md";
+    const current = () => chats.findBookmark({ workspaceId: "ws", ownerUserId: "viewer", bookmarkId: saved.bookmarkId });
+
+    // The engine moves the page, then deleting the original file fails.
+    failDelete = true;
+    await expect(owner.archiveChatBookmark(workspace, capture, "viewer", saved.bookmarkId)).rejects.toThrow(/injected delete failure/u);
+    expect(await current()).toMatchObject({ state: "archived", projectionState: "failed", generation: 2 });
+    expect(await capture.fileObjectIdForPath(archivedPath)).toBe(ready.projectionObjectId);
+    expect(await readFile(join(rootPath, destinationPath), "utf8")).toContain("Archive me");
+
+    // A worker pass finds nothing to do: only a person archives it again.
+    await owner.projectPendingChatBookmarks("ws");
+    expect(deleted).toEqual([join(rootPath, destinationPath)]);
+    expect(await current()).toMatchObject({ projectionState: "failed", generation: 2 });
+
+    if (conflict) {
+      // The archive still holds the page, so archiving again keeps its
+      // generation. It refuses without touching the other page.
+      const other = await capture.writeAuthoredFile(join(rootPath, destinationPath), "# Another page\n", { kind: "human", humanId: "local-person" });
+      expect(other.objectId).not.toBe(ready.projectionObjectId);
+      expect(await capture.generatedTextArchiveMoved({ fromPath: destinationPath, toPath: archivedPath,
+        expectedObjectId: ready.projectionObjectId! })).toBe(true);
+      await expect(owner.archiveChatBookmark(workspace, capture, "viewer", saved.bookmarkId)).rejects.toThrow(/identity no longer matches/u);
+      expect(await current()).toMatchObject({ state: "archived", projectionState: "failed", generation: 2 });
+      expect(await readFile(join(rootPath, destinationPath), "utf8")).toBe("# Another page\n");
+      expect(await capture.fileObjectIdForPath(destinationPath)).toBe(other.objectId);
+      expect(await capture.fileObjectIdForPath(archivedPath)).toBe(ready.projectionObjectId);
+      expect(await capture.fileObjectIdForPath("Bookmarks/Chats/Archived/moved--g3.md")).toBeNull();
+      owner.stop();
+      await capture.stop();
+      return;
+    }
+
+    // The bookmark's own control finishes the archive where the page is.
+    await expect(owner.archiveChatBookmark(workspace, capture, "viewer", saved.bookmarkId))
+      .resolves.toMatchObject({ state: "archived", projectionState: "ready", generation: 2 });
+    await expect(readFile(join(rootPath, destinationPath), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(rootPath, archivedPath), "utf8")).toContain("Archive me");
+    expect(await capture.fileObjectIdForPath(archivedPath)).toBe(ready.projectionObjectId);
+    expect(await capture.fileObjectIdForPath("Bookmarks/Chats/Archived/moved--g3.md")).toBeNull();
+    owner.stop();
+    await capture.stop();
+  }
+
+  it("finishes an archive whose page already moved at its own path, once a person archives again", () => archiveAfterCommittedMove(false));
+
+  it("keeps an archive's generation when another page was saved at its old path", () => archiveAfterCommittedMove(true));
 
   it("fails closed when an archive retry finds edited or binary source content", async () => {
     const scenarios: Array<{ name: string; replacement: string | Buffer }> = [

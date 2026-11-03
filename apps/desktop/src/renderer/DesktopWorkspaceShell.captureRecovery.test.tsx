@@ -321,3 +321,35 @@ describe("Unfinished shared restores", () => {
     expect(await noticeRows(user)).toEqual([]);
   });
 });
+
+describe("History Restore on a page this computer owns live", () => {
+  // The owner stops live editing in Live documents, then restores again.
+  it("says to stop live editing, offers Try again and Live documents at the page's row", async () => {
+    const { bridge, clear } = recoveryBridge();
+    clear();
+    const change: EngineMomentRecord = { ...RECOVERY_MOMENT, id: "moment-owned", origin: "local-file", path: PATH };
+    bridge.listHistory = vi.fn(async ({ workspaceId }: ListHistoryPayload) => page(workspaceId, [change]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...change, beforeText: "Earlier plan.\n", afterText: "Owned plan.\n" } }));
+    const restoreEngineMomentFile = vi.fn(async (): Promise<never> => {
+      throw new Error(`Error invoking remote method 'desktop:restore-engine-moment-file': LivePageOwnedError: dohc can't restore "${PATH}" while it has live editing on\nIn Live documents, stop live editing for this page, then restore it again.`);
+    });
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null, documents: [
+      { path: PATH, objectId: "object-plan", status: "ready" as const, canResume: false }] }));
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.querySelector("[id$='-title']")?.textContent).toBe(`dohc can't restore "${PATH}" while it has live editing on`);
+    expect(toast.querySelector("[id$='-body']")?.textContent).toBe("In Live documents, stop live editing for this page, then restore it again.");
+    expect(within(toast).queryByRole("button", { name: /Stop/u })).toBeNull();
+    const rows = await noticeRows(user);
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByRole("button", { name: "Try again" })).toBeTruthy();
+    await user.click(within(rows[0]!).getByRole("button", { name: "Open Live documents" }));
+    const dialog = await screen.findByTestId("live-documents-dialog");
+    await waitFor(() => expect(within(dialog).getByTestId(`live-document-row-${PATH}`).getAttribute("aria-current")).toBe("true"));
+  });
+});

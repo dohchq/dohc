@@ -1,4 +1,4 @@
-use super::tests::{OP, WS, fixture, rename, seed};
+use super::tests::{OP, WS, bind_owner, fixture, rename, seed};
 use super::*;
 use dohc_engine_storage::{FaultAction, FaultPoint, NoFaults};
 use dohc_engine_testkit::engine_db_path;
@@ -421,5 +421,26 @@ async fn duplicate_live_bound_copy_undo_refusal_names_the_copy() {
     assert!(
         matches!(error, RuntimeError::Domain(DomainError::UndoRefused {ref path,reason:"This copy is a shared live file. Continue editing at its current location"}) if path == "copy.md"),
         "{error:?}"
+    );
+}
+
+/// Undo of a copy deletes it, which would leave its owner binding behind.
+#[tokio::test]
+async fn duplicate_undo_refuses_a_copy_this_computer_owns_live() {
+    let (root, mut store) = fixture();
+    seed(&mut store, root.path(), "source.md", "source", "Original");
+    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    place(&mut store, root.path(), &copy);
+    bind_owner(&mut store, &copy.moments[0].object_id);
+    let error = undo_copy(&mut store, root.path(), Arc::new(NoFaults)).unwrap_err();
+    assert!(
+        matches!(error, RuntimeError::Domain(DomainError::LivePageOwned)),
+        "{error:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("copy.md")).unwrap(),
+        "Original"
     );
 }

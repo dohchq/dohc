@@ -8,6 +8,7 @@ import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { workspaceDestinationError, workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
+import { HISTORY_OFF_FOLDER_BODY, HISTORY_OFF_PAGE_BODY, historyOffTitle, isLivePageOwnedRefusal } from "../ipc/errorWords";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { LiveDocumentMutationError, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -27,7 +28,7 @@ import { WORKSPACE_TRASH } from "./workspaceTrash";
 type PathChangeWorkspace = { workspaceId: string; rootPath: string; attachmentId?: symbol; readOnly?: boolean; shareView?: unknown };
 
 export interface PathChangeOptions {
-  capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">>;
+  capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove" | "checkPageMove">>;
   requestId: string;
   linkRewrites?: LinkRewriteContext;
   trashItem(absolutePath: string): Promise<void>;
@@ -253,36 +254,36 @@ export function assertMoveDocumentKind(from: string, to: string, word: "move" | 
     `A ${word} cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
 }
 
-type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "beginFileRename" | "checkFolderMove">> | null; prepared?: Awaited<ReturnType<typeof prepareWorkspaceMove>>; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
+type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs"> & Partial<Pick<WorkspaceEngineCapture, "beginFileRename" | "checkFolderMove" | "checkPageMove">> | null; prepared?: Awaited<ReturnType<typeof prepareWorkspaceMove>>; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
 
 export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
   operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean },
   author: MomentWriteAuthor, options: PathChangeOptions,
 ): Promise<() => Promise<CliResultByVerb["fileMove"]>> {
   // The source's spelling on disk, read before the lock only if the guard needs it.
-  const rootPath = operation.workspace.rootPath, folder = folderPreCheck(options.capture);
+  const rootPath = operation.workspace.rootPath, preCheck = movePreCheck(options.capture);
   return Promise.resolve(options.beforeMove?.(async () => {
     const { physical } = await admitPath(rootPath, input.fromPath);
-    if (await lstat(join(rootPath, physical)).then(entry => entry.isDirectory(), () => false)) await folder.check(physical);
+    await preCheck.check(physical, await lstat(join(rootPath, physical)).then(entry => entry.isDirectory(), () => false));
     return physical;
   })).then(() => {
     // A refusal is answered as every failed move is, not thrown.
-    const refusal = folder.refusal();
+    const refusal = preCheck.refusal();
     return refusal ? async (): Promise<MoveFailure> => ({ ok: false, path: input.fromPath, reason: refusal.message })
       : prepareMoveWorkspacePath(operation, input, author, options);
   });
 }
 
-// The guard's folder check before the lock. Only a refusal skips the guard's
-// catch-up, and it is the move's answer, so a refusal that clears before the
-// lock can't let the folder move without one. Any other error leaves the
+// The guard's check of a folder or page before the lock. Only a refusal skips
+// the guard's catch-up, and it is the move's answer, so a refusal that clears
+// before the lock can't let the move go without one. Any other error leaves the
 // guard to catch up and the check inside the lock to decide.
-function folderPreCheck(capture: Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">> | null) {
+function movePreCheck(capture: Partial<Pick<WorkspaceEngineCapture, "checkFolderMove" | "checkPageMove">> | null) {
   let refused: LiveDocumentMutationError | undefined;
   return {
-    async check(folder: string): Promise<void> {
+    async check(path: string, folder: boolean): Promise<void> {
       try {
-        await capture?.checkFolderMove?.(folder);
+        await (folder ? capture?.checkFolderMove?.(path) : capture?.checkPageMove?.(path));
       } catch (error) {
         if (!(error instanceof LiveDocumentMutationError)) return;
         refused = error;
@@ -293,30 +294,27 @@ function folderPreCheck(capture: Partial<Pick<WorkspaceEngineCapture, "checkFold
   };
 }
 
-// A folder move from the app while History is off: without capture, dohc
-// can't check the folder for live pages. The message is the title, a line
-// break, then the body.
-export const FOLDER_MOVE_HISTORY_OFF_BODY = "Without History, dohc can't check whether a page in it has live editing on. Restart dohc to try again.";
-export function folderMoveHistoryOffTitle(folder: string): string {
-  return `dohc can't move "${folder}" while History is off`;
+// A move or delete of a page or folder that can have live editing, while
+// History is off. The message is the title, a line break, then the body.
+export class HistoryOffError extends Error {
+  override name = "HistoryOffError";
 }
-export class FolderMoveHistoryOffError extends Error {
-  override name = "FolderMoveHistoryOffError";
+function historyOff(path: string, action: "move" | "rename" | "delete", folder: boolean): HistoryOffError {
+  return new HistoryOffError(`${historyOffTitle(path, action)}\n${folder ? HISTORY_OFF_FOLDER_BODY : HISTORY_OFF_PAGE_BODY}`);
 }
 
 export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string },
-  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove">> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
+  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> & Partial<Pick<WorkspaceEngineCapture, "checkFolderMove" | "checkPageMove">> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
   // The app's own source check, which accepts names admitPath refuses.
-  const rootPath = operation.workspace.rootPath, folder = folderPreCheck(options.capture);
+  const rootPath = operation.workspace.rootPath, preCheck = movePreCheck(options.capture);
   await options.beforeMove?.(async () => {
     const { physicalFromPath } = await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath);
-    if ((await stat(join(rootPath, physicalFromPath))).isDirectory()) {
-      if (!options.capture) throw new FolderMoveHistoryOffError(`${folderMoveHistoryOffTitle(physicalFromPath)}\n${FOLDER_MOVE_HISTORY_OFF_BODY}`);
-      await folder.check(physicalFromPath);
-    }
+    const folder = (await stat(join(rootPath, physicalFromPath))).isDirectory();
+    if (folder && !options.capture) throw historyOff(physicalFromPath, "move", true);
+    await preCheck.check(physicalFromPath, folder);
     return physicalFromPath;
   });
-  const refusal = folder.refusal();
+  const refusal = preCheck.refusal();
   if (refusal) throw refusal;
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
     assertWritable(operation);
@@ -326,7 +324,7 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
     if (destinationError) throw new Error(destinationError);
     if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
       if (!options.capture) {
-        throw new FolderMoveHistoryOffError(`${folderMoveHistoryOffTitle(prepared.physicalFromPath)}\n${FOLDER_MOVE_HISTORY_OFF_BODY}`);
+        throw historyOff(prepared.physicalFromPath, "move", true);
       }
       assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
       const finishRename = await options.capture.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath, true);
@@ -498,14 +496,19 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           gone = [from.relative, ...(dest ? [destBase] : [])];
           return { done: { fromPath: from.path, toPath: to.path, withoutHistory, replacedWithoutHistory, recovery, from: from.relative, to: to.relative, overwritten: dest !== undefined }, ...(change.staged !== undefined ? { trash: change.staged } : {}) };
         };
+      // A folder's pages are refused while any is live on this computer.
+      const folder = await lstat(join(rootPath, endpoints[0]!)).then(entry => entry.isDirectory(), () => false);
       const fallback = async () => {
-        const finish = options.byHand ? await options.capture?.beginFileRename?.(endpoints[0]!, endpoints[1]!) : undefined;
+        // Without capture, nothing can check a page for live editing.
+        if (!options.capture && !folder && liveDocumentKindForPath(endpoints[0]!) !== null) {
+          throw historyOff(endpoints[0]!, dirname(endpoints[0]!) === dirname(endpoints[1]!) ? "rename" : "move", false);
+        }
+        // History can't record a move to a path it can't address, but it still checks the source.
+        const finish = options.byHand || engineAddresses(endpoints[0]!) ? await options.capture?.beginFileRename?.(endpoints[0]!, endpoints[1]!, folder) : undefined;
         let ok = false;
         try { const changed = await work(null); ok = "done" in changed; return changed; }
         finally { await finish?.(ok); }
       };
-      // A folder's pages are refused while any is live on this computer.
-      const folder = await lstat(join(rootPath, endpoints[0]!)).then(entry => entry.isDirectory(), () => false);
       const changed = await (options.capture && endpoints.every(engineAddresses)
         ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId, ...(folder ? { folder } : {}) }, work, () => gone)
         : fallback());
@@ -537,6 +540,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           ...(replaced.trashed || staged === undefined ? {} : { trashPath: workspaceTrashPath(staged) }) } }) };
     };
   } catch (error) {
+    // Explorer reads these refusals by their names, to split the words and offer what each allows.
+    if (options.byHand && (isLivePageOwnedRefusal(error) || error instanceof HistoryOffError)) throw error;
     if (error instanceof StoredEntryIdentityUnavailable) error = moveIdentityUnavailable(input.fromPath, input.toPath);
     return async () => ({ ok: false, path: input.fromPath, reason: reason(error, failed) });
   }
@@ -778,6 +783,13 @@ export async function deleteWorkspacePathByHand(
       const collected = staged === undefined ? plan : await stageDeleteRecovery(operationId, staged, endpoint, recorded);
       return { ...trashed, recovery: await finishDeleteRecovery(workspace, collected, { trashed: trashed.trashed, staged }) };
     };
+    // Without capture, nothing can check a page, or a folder's pages, for live editing.
+    if (capture === null && engineAddresses(endpoint)) {
+      const entry = join(rootPath, endpoint);
+      const folder = (await lstat(entry)).isDirectory();
+      const pages = folder ? (await readdir(entry, { recursive: true })).map(sub => `${endpoint}/${sub.split(sep).join("/")}`) : [endpoint];
+      if (pages.some(page => liveDocumentKindForPath(page) !== null)) throw historyOff(endpoint, "delete", folder);
+    }
     // History holds nothing the engine cannot address, and nothing is open there.
     if (capture === null || !engineAddresses(endpoint)) {
       return { ...await trash([]), refused: undefined };

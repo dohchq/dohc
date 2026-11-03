@@ -167,7 +167,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   resolveLinks: VersionedLiveAdapter["resolveLinks"];
   listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
-  checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; folder?: boolean }): Promise<void>;
+  checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; change?: "movePage" | "moveFolder" | "delete" }): Promise<void>;
   listPendingCollectionAdoptions?(input?: {
     limit?: number;
     cursor?: CollectionPendingAdoptionCursor;
@@ -972,7 +972,7 @@ export function createCaptureLiveStores(
       return value === null ? null : snapshotFromWire(value);
     },
 
-    checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; folder?: boolean }) =>
+    checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor; change?: "movePage" | "moveFolder" | "delete" }) =>
       runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
     linkEdges: input => runRead(adapter => adapter.linkEdges(input)),
