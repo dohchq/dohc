@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import { parse } from "smol-toml";
 
 type Table = Record<string, unknown>;
 type ConfigTable = { file: string; table: Table };
-type WritableRoots = { file: string; roots: string[] };
 
 const isTable = (value: unknown): value is Table =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -74,16 +73,12 @@ function choosesWindowsSandbox(value: unknown): boolean {
 
 // Codex applies [sandbox_workspace_write] only without a named profile, so
 // the run's profile carries these over itself.
-function workspaceWrite(tables: readonly ConfigTable[], key: "writable_roots"): WritableRoots | null;
-function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp"): boolean;
-function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp" | "writable_roots"): boolean | WritableRoots | null {
-  let value: boolean | WritableRoots | null = key === "writable_roots" ? null : false;
-  for (const { file, table } of tables) {
+function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp"): boolean {
+  let value = false;
+  for (const { table } of tables) {
     const section = table.sandbox_workspace_write;
     const setting = isTable(section) ? section[key] : undefined;
-    if (key === "writable_roots") {
-      if (Array.isArray(setting) && setting.every((root: unknown): root is string => typeof root === "string")) value = { file, roots: setting };
-    } else if (typeof setting === "boolean") value = setting;
+    if (typeof setting === "boolean") value = setting;
   }
   return value;
 }
@@ -134,41 +129,71 @@ function tomlKey(value: string): string {
   return /\p{Cc}|'/u.test(value) ? JSON.stringify(value).replace(/\u007f/gu, "\\u007f") : `'${value}'`;
 }
 
-function writableRootEntries(tables: readonly ConfigTable[], rootPath: string, platform: NodeJS.Platform, realPath: (path: string) => string = realpathSync.native): string[] {
-  const setting = workspaceWrite(tables, "writable_roots");
-  if (!setting) return [];
-  const path = platform === "win32" ? win32 : posix;
-  const normalize = (value: string): string => {
-    if (platform === "win32") return value.replace(/^\\\\[?.]\\UNC\\/u, "\\\\").replace(/^\\\\[?.]\\(?=[a-z]:[\\/])/iu, "");
-    if (platform === "darwin" && path.isAbsolute(value)) {
-      const top = `/${value.split("/")[1] ?? ""}`;
-      try {
-        return path.join(realPath(top), path.relative(top, value));
-      } catch {}
-    }
-    return value;
-  };
-  const protectedPath = normalize(path.resolve(platform === "win32" ? normalize(rootPath) : rootPath, ".dohc"));
-  const protectedKey = platform === "win32" ? lowerAscii(protectedPath) : protectedPath;
-  const base = path.dirname(platform === "win32" ? normalize(setting.file) : setting.file);
-  const entries = new Set<string>();
-  for (let root of setting.roots) {
-    // Config paths are relative to their file, expand home, and keep nested symlinks.
-    if ((platform === "win32" ? /^~(?:[\\/]|$)/u : /^~(?:\/|$)/u).test(root)) root = path.join(homedir(), root.slice(1));
-    if (platform === "win32") {
-      root = normalize(root);
-      const drive = /^([a-z]:)([^\\/].*)?$/iu.exec(root);
-      if (drive) root = path.join(`${drive[1]}\\`, drive[2] ? path.relative(path.parse(base).root, base) : "", drive[2] ?? "");
-    }
-    root = path.resolve(base, root);
-    const key = platform === "win32" ? lowerAscii(root) : normalize(root);
-    // A deeper write wins over .dohc's read rule; an equal write wins the tie.
-    if (key === protectedKey || key.startsWith(`${protectedKey}${path.sep}`)) continue;
-    // Profile write keys cannot name these characters as literal folder names.
-    if (/[*?\[\]]/u.test(root)) continue;
-    entries.add(`${tomlKey(root)}='write'`);
+function attempt<T>(read: () => T): T | null {
+  try {
+    return read();
+  } catch {
+    return null;
   }
-  return [...entries];
+}
+
+// The folders in the person's last valid writable_roots list that a run may
+// write, by their real paths. Folders compare by file id, so a link, short
+// name, letter case or network path counts as the folder it reaches. dohc
+// drops a folder that
+// - doesn't exist, is a drive-relative Windows path, or reads as a pattern;
+// - is reached through the workspace, a temp folder or another listed folder,
+//   because the run can write there and swap it for a link into .dohc;
+// - contains the workspace, because the run could move the workspace away
+//   from .dohc's rule.
+function writableRootEntries(tables: readonly ConfigTable[], input: {
+  rootPath: string;
+  platform: NodeJS.Platform;
+  env: NodeJS.ProcessEnv;
+  home: string;
+  realPath: (path: string) => string;
+  fileId: (path: string) => string;
+}): string[] {
+  let setting: { file: string; roots: string[] } | undefined;
+  for (const { file, table } of tables) {
+    const roots = isTable(table.sandbox_workspace_write) ? table.sandbox_workspace_write.writable_roots : undefined;
+    if (Array.isArray(roots) && roots.every((root: unknown): root is string => typeof root === "string")) setting = { file, roots };
+  }
+  if (!setting) return [];
+  const workspace = attempt(() => input.fileId(input.rootPath));
+  if (workspace === null) return [];
+  const path = input.platform === "win32" ? win32 : posix;
+  // The ids of a folder and every folder above it, as written and as resolved.
+  const reach = (folder: string): string[] => [folder, attempt(() => input.realPath(folder)) ?? folder].flatMap((start) => {
+    const ids: string[] = [];
+    for (let at = start; ; at = path.dirname(at)) {
+      const id = attempt(() => input.fileId(at));
+      if (id !== null) ids.push(id);
+      if (path.dirname(at) === at) return ids;
+    }
+  });
+  const temp = [input.env.TMPDIR, input.env.TEMP, input.env.TMP, input.platform === "win32" ? undefined : "/tmp"]
+    .flatMap((folder) => folder && path.isAbsolute(folder) ? [attempt(() => input.fileId(folder))] : [])
+    .filter((id): id is string => id !== null);
+  const listed = new Map<string, { written: string; real: string }>();
+  for (const root of setting.roots) {
+    const expanded = (input.platform === "win32" ? /^~(?:[\\/]|$)/u : /^~(?:\/|$)/u).test(root) ? path.join(input.home, root.slice(1)) : root;
+    if (input.platform === "win32" && /^[a-z]:(?![\\/])/iu.test(expanded)) continue;
+    const written = path.resolve(path.dirname(setting.file), expanded);
+    const real = attempt(() => input.realPath(written));
+    const id = real === null ? null : attempt(() => input.fileId(real));
+    // Codex reads these characters as a pattern, and a colon past the drive as an error.
+    if (real === null || id === null || listed.has(id) || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
+    listed.set(id, { written, real });
+  }
+  const aboveWorkspace = new Set(reach(input.rootPath));
+  const writable = new Set([workspace, ...temp]);
+  const kept = [...listed].map(([id, root]) => ({ id, real: root.real, reach: reach(root.written) }))
+    .filter((root) => !aboveWorkspace.has(root.id) && !root.reach.some((each) => writable.has(each)));
+  const keptIds = new Set(kept.map((root) => root.id));
+  return kept
+    .filter((root) => !root.reach.some((each) => each !== root.id && keptIds.has(each)))
+    .map((root) => `${tomlKey(root.real)}='write'`);
 }
 
 // The --config entries a dohc Codex run adds over the person's config, which
@@ -188,15 +213,29 @@ export function codexRunConfig(input: {
   files: CodexConfigFiles | null;
   readConfig?: (path: string) => string;
   realPath?: (path: string) => string;
+  fileId?: (path: string) => string;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
 }): string[] {
   const read = input.readConfig ?? ((path: string) => readFileSync(path, "utf8"));
+  const roots = {
+    rootPath: input.rootPath,
+    platform: input.platform,
+    env: input.env ?? process.env,
+    home: input.home ?? homedir(),
+    realPath: input.realPath ?? realpathSync.native,
+    fileId: input.fileId ?? ((path: string) => {
+      const { dev, ino } = statSync(path, { bigint: true });
+      return `${dev}:${ino}`;
+    }),
+  };
   const tables = input.files && readConfigTables(input.files.config, read);
   const requirements = input.platform === "win32" && input.files && tables ? readConfigTables(input.files.requirements, read) : null;
   const filesystem = [
     "':workspace_roots'={'.dohc'='read'}",
     ...(tables && workspaceWrite(tables, "exclude_tmpdir_env_var") ? ["':tmpdir'='read'"] : []),
     ...(tables && workspaceWrite(tables, "exclude_slash_tmp") ? ["':slash_tmp'='read'"] : []),
-    ...(tables ? writableRootEntries(tables, input.rootPath, input.platform, input.realPath) : []),
+    ...(tables ? writableRootEntries(tables, roots) : []),
   ];
   const network = tables && workspaceWrite(tables, "network_access") ? ",network={enabled=true}" : "";
   const profile = `dohc_run_${createHash("sha256").update(input.runId).digest("hex").slice(0, 16)}`;
