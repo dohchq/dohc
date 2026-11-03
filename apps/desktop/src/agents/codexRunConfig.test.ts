@@ -28,7 +28,7 @@ function disk(platform: NodeJS.Platform, folders: readonly string[], links: Reco
   const realPath = (value: string): string => links[value] ?? (known.has(value) || share(value) ? value : missing(value));
   const fileId = (value: string): string => {
     const prefix = share(value);
-    const local = prefix ? `${shares[prefix]!}${value.slice(prefix.length)}` : realPath(value);
+    const local = prefix ? path.resolve(`${shares[prefix]!}${value.slice(prefix.length)}`) : realPath(value);
     return known.has(local) ? local : missing(value);
   };
   return { realPath, fileId, env: {}, home: platform === "win32" ? "C:\\Users\\Sam" : "/home/sam" };
@@ -254,16 +254,19 @@ describe("a dohc Codex run", () => {
     }
   });
 
-  it("drops writable folders on the workspace's network share by any name", () => {
+  it("drops writable folders that reach the workspace or .dohc through a network share", () => {
     const share = "\\\\server\\share";
-    const roots = [share, "\\\\SERVER\\SHARE\\ws\\.DOHC", "\\\\?\\UNC\\server\\share\\ws\\.dohc\\engine", `${share}\\other`];
+    const roots = [
+      share, "\\\\SERVER\\SHARE\\ws\\.DOHC", "\\\\?\\UNC\\server\\share\\ws\\.dohc\\engine",
+      "\\\\localhost\\d", "\\\\localhost\\d\\engine", `${share}\\other`,
+    ];
     const entries = codexRunConfig({
       rootPath: `${share}\\ws`, runId: "run_1", platform: "win32", files: { requirements: [], config: [USER] },
       readConfig: () => `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots)}\n`,
       ...disk("win32", [`${share}\\ws\\.dohc\\engine`, `${share}\\other`], {
         "\\\\SERVER\\SHARE\\ws\\.DOHC": `${share}\\ws\\.dohc`,
         "\\\\?\\UNC\\server\\share\\ws\\.dohc\\engine": `${share}\\ws\\.dohc\\engine`,
-      }),
+      }, { "\\\\localhost\\d": `${share}\\ws\\.dohc` }),
     });
     expect(filesystem(entries)).toEqual({ ":workspace_roots": { ".dohc": "read" }, [`${share}\\other`]: "write" });
   });
@@ -272,12 +275,12 @@ describe("a dohc Codex run", () => {
     const entries = codexRunConfig({
       rootPath: "/workspace", runId: "run_1", platform: "linux", files: { requirements: [], config: ["/config/config.toml"] },
       readConfig: () => "[sandbox_workspace_write]\nwritable_roots = ['/other/**', '/other/[draft]', '/other/closing]', '/other/what?', '/other/notes']\n",
-      ...disk("linux", ["/workspace", "/other/[draft]", "/other/closing]", "/other/what?", "/other/notes"]),
+      ...disk("linux", ["/workspace", "/other/**", "/other/[draft]", "/other/closing]", "/other/what?", "/other/notes"]),
     });
     expect(filesystem(entries)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/other/notes": "write" });
-    const stream = windowsRun({ [USER]: "[sandbox_workspace_write]\nwritable_roots = ['C:\\other\\a:b', 'C:\\other']\n" }, undefined,
-      disk("win32", [WORKSPACE, "C:\\other\\a:b"]));
-    expect(filesystem(stream)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "C:\\other": "write" });
+    const stream = windowsRun({ [USER]: "[sandbox_workspace_write]\nwritable_roots = ['C:\\other\\a:b', 'C:\\last']\n" }, undefined,
+      disk("win32", [WORKSPACE, "C:\\other\\a:b", "C:\\last"]));
+    expect(filesystem(stream)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "C:\\last": "write" });
   });
 
   it("drops writable folders the run could swap for a link, and gives linked ones by their real paths", () => {
@@ -295,7 +298,10 @@ describe("a dohc Codex run", () => {
       }),
       env: { TMPDIR: "/srv/tmp/me" },
     });
-    expect(filesystem(entries)).toEqual({ ":workspace_roots": { ".dohc": "read" }, "/data/notes": "write", "/opt/a": "write" });
+    // Codex gets out's real path, so swapping the link changes nothing until dohc checks it again.
+    expect(filesystem(entries)).toEqual({
+      ":workspace_roots": { ".dohc": "read" }, "/data/notes": "write", "/cache/build": "write", "/opt/a": "write",
+    });
   });
 
   it("drops writable folders that reach .dohc through macOS aliases and letter case", () => {

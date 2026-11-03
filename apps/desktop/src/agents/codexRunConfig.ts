@@ -142,7 +142,8 @@ function attempt<T>(read: () => T): T | null {
 // name, letter case or network path counts as the folder it reaches. dohc
 // drops a folder that
 // - doesn't exist, is a drive-relative Windows path, or reads as a pattern;
-// - is reached through the workspace, a temp folder or another listed folder,
+// - is .dohc under another name, such as a share;
+// - is inside the workspace, a temp folder or another folder dohc keeps,
 //   because the run can write there and swap it for a link into .dohc;
 // - contains the workspace, because the run could move the workspace away
 //   from .dohc's rule.
@@ -163,36 +164,38 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
   const workspace = attempt(() => input.fileId(input.rootPath));
   if (workspace === null) return [];
   const path = input.platform === "win32" ? win32 : posix;
-  // The ids of a folder and every folder above it, as written and as resolved.
-  const reach = (folder: string): string[] => [folder, attempt(() => input.realPath(folder)) ?? folder].flatMap((start) => {
+  // The ids of a folder and every folder above it.
+  const above = (folder: string): string[] => {
     const ids: string[] = [];
-    for (let at = start; ; at = path.dirname(at)) {
+    for (let at = folder; ; at = path.dirname(at)) {
       const id = attempt(() => input.fileId(at));
       if (id !== null) ids.push(id);
       if (path.dirname(at) === at) return ids;
     }
-  });
-  const temp = [input.env.TMPDIR, input.env.TEMP, input.env.TMP, input.platform === "win32" ? undefined : "/tmp"]
-    .flatMap((folder) => folder && path.isAbsolute(folder) ? [attempt(() => input.fileId(folder))] : [])
-    .filter((id): id is string => id !== null);
-  const listed = new Map<string, { written: string; real: string }>();
+  };
+  const writable = new Set([
+    workspace, attempt(() => input.fileId(path.join(input.rootPath, ".dohc"))),
+    ...[input.env.TMPDIR, input.env.TEMP, input.env.TMP, input.platform === "win32" ? undefined : "/tmp"]
+      .map((folder) => folder && path.isAbsolute(folder) ? attempt(() => input.fileId(folder)) : null),
+  ].filter((id): id is string => id !== null));
+  const listed = new Map<string, string>();
   for (const root of setting.roots) {
     const expanded = (input.platform === "win32" ? /^~(?:[\\/]|$)/u : /^~(?:\/|$)/u).test(root) ? path.join(input.home, root.slice(1)) : root;
     if (input.platform === "win32" && /^[a-z]:(?![\\/])/iu.test(expanded)) continue;
-    const written = path.resolve(path.dirname(setting.file), expanded);
-    const real = attempt(() => input.realPath(written));
+    const real = attempt(() => input.realPath(path.resolve(path.dirname(setting.file), expanded)));
     const id = real === null ? null : attempt(() => input.fileId(real));
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
-    if (real === null || id === null || listed.has(id) || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
-    listed.set(id, { written, real });
+    if (real === null || id === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
+    listed.set(id, real);
   }
-  const aboveWorkspace = new Set(reach(input.rootPath));
-  const writable = new Set([workspace, ...temp]);
-  const kept = [...listed].map(([id, root]) => ({ id, real: root.real, reach: reach(root.written) }))
-    .filter((root) => !aboveWorkspace.has(root.id) && !root.reach.some((each) => writable.has(each)));
+  // Codex may name the workspace by either path. A kept folder reaches Codex
+  // by its real path, so only that path's folders matter.
+  const aboveWorkspace = new Set([input.rootPath, attempt(() => input.realPath(input.rootPath)) ?? input.rootPath].flatMap(above));
+  const kept = [...listed].map(([id, real]) => ({ id, real, above: above(real) }))
+    .filter((root) => !aboveWorkspace.has(root.id) && !root.above.some((each) => writable.has(each)));
   const keptIds = new Set(kept.map((root) => root.id));
   return kept
-    .filter((root) => !root.reach.some((each) => each !== root.id && keptIds.has(each)))
+    .filter((root) => !root.above.some((each) => each !== root.id && keptIds.has(each)))
     .map((root) => `${tomlKey(root.real)}='write'`);
 }
 
