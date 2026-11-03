@@ -402,10 +402,11 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 - Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
 - `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.
 - So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape, Delete and Backspace leave the mark as it was, so closing or removing the focused thing from the keyboard still shows where focus went.
+- A confirm dialog's buttons show the ring whenever Chromium's `:focus-visible` matches, so a dialog opened from the keyboard shows where Enter acts at once. Opened with the pointer, it shows the ring after the first Tab or arrow, as everywhere else.
 - Give a row `dohc-focus-row`: the hover fill and a 1px accent line inside its edge. A selected row keeps its fill and adds the line.
 - Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
 - Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
-- To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`.
+- To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`, except a confirm dialog's buttons, above.
 - In a panel, give the parent `px-1`.
 - A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its fill.
 

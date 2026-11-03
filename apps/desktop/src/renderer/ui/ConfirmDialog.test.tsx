@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConfirmDialog, ConfirmDialogCard } from "./ConfirmDialog";
 
@@ -113,5 +113,47 @@ describe("ConfirmDialog keys", () => {
     await user.keyboard("{ArrowRight}");
     expect(document.activeElement).toBe(cancel);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("ConfirmDialog guards against an Enter nobody meant", () => {
+  afterEach(cleanup);
+
+  it("ignores a held Enter, which may be the key that opened it", () => {
+    const { onConfirm, confirm } = dialog();
+    expect(fireEvent.keyDown(confirm, { key: "Enter", repeat: true })).toBe(false);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a text field", <textarea key="field" aria-label="Note" />],
+    ["editable text", <div key="field" aria-label="Note" role="textbox" contentEditable suppressContentEditableWarning />],
+  ])("keeps focus on its panel when it opens while someone types in %s", async (_name, field) => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    const shown = (open: boolean) => (
+      <>
+        {field}
+        {open ? (
+          <ConfirmDialog title="Delete 3 kept copies?" confirmLabel="Delete" intent="danger" onCancel={vi.fn()} onConfirm={onConfirm}
+            testId="confirm" cancelTestId="confirm-cancel" confirmTestId="confirm-action">
+            <p>They can't be restored.</p>
+          </ConfirmDialog>
+        ) : null}
+      </>
+    );
+    const { rerender } = render(shown(false));
+    screen.getByRole("textbox", { name: "Note" }).focus();
+    rerender(shown(true));
+    const panel = screen.getByTestId("confirm").parentElement!;
+    expect(document.activeElement).toBe(panel);
+    await user.keyboard("{Enter}");
+    expect(onConfirm).not.toHaveBeenCalled();
+    // From the panel, an arrow reaches the first or the last button.
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByTestId("confirm-cancel"));
+    panel.focus();
+    await user.keyboard("{ArrowLeft}");
+    expect(document.activeElement).toBe(screen.getByTestId("confirm-action"));
   });
 });
