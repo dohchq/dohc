@@ -117,6 +117,32 @@ describe("Explorer collection folders", () => {
       expect(treeRow("rooms/dataset.json").getAttribute("aria-selected")).toBe("true");
     } finally { vi.unstubAllGlobals(); }
   });
+  it("gives focus back to the row when its menu closes, so the arrows and Enter still work", () => {
+    vi.stubGlobal("dohcDesktop", { showExplorerMenu: vi.fn(async (_input: unknown) => null) });
+    const tableId = "00000000-0000-4000-8000-000000000002";
+    const props = explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
+      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId, name: "Rooms" },
+    ] });
+    render(<Explorer {...props} />);
+    try {
+      const guests = screen.getByRole("button", { description: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." });
+      const rooms = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      rooms.focus();
+      fireEvent.contextMenu(rooms);
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Show in Files" }));
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(document.activeElement).toBe(rooms);
+      fireEvent.keyDown(rooms, { key: "ArrowUp" });
+      expect(document.activeElement).toBe(guests);
+      fireEvent.keyDown(guests, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(rooms);
+      fireEvent.keyDown(rooms, { key: "Enter" });
+      expect(props.onModeChange).toHaveBeenLastCalledWith("files");
+      expect(props.onSetFolderExpanded).toHaveBeenCalledWith("rooms", true);
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
     render(<Explorer {...props} />);

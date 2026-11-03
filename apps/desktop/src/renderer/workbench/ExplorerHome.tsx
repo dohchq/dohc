@@ -683,6 +683,7 @@ const HomeRow = memo(function HomeRow(props: {
   const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
   const [fixMenuOpen, setFixMenuOpen] = useState(false);
+  const rowButton = useRef<HTMLButtonElement | null>(null);
   const dragPath = drag && path ? path : null;
   return (
     <li role="none" className="px-1">
@@ -692,7 +693,10 @@ const HomeRow = memo(function HomeRow(props: {
       >
         <button
           type="button"
-          ref={(element) => props.registerRef(row.key, element)}
+          ref={(element) => {
+            rowButton.current = element;
+            props.registerRef(row.key, element);
+          }}
           data-home-key={row.key}
           data-testid={props.testId ?? "home-row"}
           data-path={path}
@@ -775,7 +779,11 @@ const HomeRow = memo(function HomeRow(props: {
                 label={`More actions for ${row.label}`}
                 items={[{ id: "show-in-files", label: "Show in Files", testId: "home-row-show-in-files", onSelect: () => props.onClick(row) }]}
                 open={fixMenuOpen}
-                onOpenChange={setFixMenuOpen}
+                // Focus goes back to the row, where Home's arrows and Enter work, not to the •••.
+                onOpenChange={(open) => {
+                  setFixMenuOpen(open);
+                  if (!open) rowButton.current?.focus();
+                }}
                 trigger={(trigger) => (
                   <button
                     {...trigger}
