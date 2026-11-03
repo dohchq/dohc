@@ -5,6 +5,8 @@ import { posix, win32 } from "node:path";
 import { parse } from "smol-toml";
 
 type Table = Record<string, unknown>;
+type ConfigTable = { file: string; table: Table };
+type WritableRoots = { file: string; roots: string[] };
 
 const isTable = (value: unknown): value is Table =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -36,8 +38,8 @@ export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platfo
 
 // Null when a file exists that dohc can't read or parse. Then dohc adds
 // nothing it would have taken from the person's config.
-function readConfigTables(files: readonly string[], read: (path: string) => string): Table[] | null {
-  const tables: Table[] = [];
+function readConfigTables(files: readonly string[], read: (path: string) => string): ConfigTable[] | null {
+  const tables: ConfigTable[] = [];
   for (const file of files) {
     let text: string;
     try {
@@ -47,7 +49,7 @@ function readConfigTables(files: readonly string[], read: (path: string) => stri
       return null;
     }
     try {
-      tables.push(parse(text));
+      tables.push({ file, table: parse(text) });
     } catch {
       return null;
     }
@@ -72,12 +74,16 @@ function choosesWindowsSandbox(value: unknown): boolean {
 
 // Codex applies [sandbox_workspace_write] only without a named profile, so
 // the run's profile carries these over itself.
-function workspaceWrite(tables: readonly Table[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp"): boolean {
-  let value = false;
-  for (const table of tables) {
+function workspaceWrite(tables: readonly ConfigTable[], key: "writable_roots"): WritableRoots | null;
+function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp"): boolean;
+function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp" | "writable_roots"): boolean | WritableRoots | null {
+  let value: boolean | WritableRoots | null = key === "writable_roots" ? null : false;
+  for (const { file, table } of tables) {
     const section = table.sandbox_workspace_write;
     const setting = isTable(section) ? section[key] : undefined;
-    if (typeof setting === "boolean") value = setting;
+    if (key === "writable_roots") {
+      if (Array.isArray(setting) && setting.every((root: unknown): root is string => typeof root === "string")) value = { file, roots: setting };
+    } else if (typeof setting === "boolean") value = setting;
   }
   return value;
 }
@@ -96,7 +102,7 @@ export function codexMayRunWithoutLogin(
   const tables = files && readConfigTables([...files.config, ...files.requirements], read);
   if (tables === null) return true;
   let provider = "openai";
-  for (const table of tables) if (typeof table.model_provider === "string") provider = table.model_provider;
+  for (const { table } of tables) if (typeof table.model_provider === "string") provider = table.model_provider;
   return provider !== "openai";
 }
 
@@ -128,6 +134,43 @@ function tomlKey(value: string): string {
   return /\p{Cc}|'/u.test(value) ? JSON.stringify(value).replace(/\u007f/gu, "\\u007f") : `'${value}'`;
 }
 
+function writableRootEntries(tables: readonly ConfigTable[], rootPath: string, platform: NodeJS.Platform, realPath: (path: string) => string = realpathSync.native): string[] {
+  const setting = workspaceWrite(tables, "writable_roots");
+  if (!setting) return [];
+  const path = platform === "win32" ? win32 : posix;
+  const normalize = (value: string): string => {
+    if (platform === "win32") return value.replace(/^\\\\[?.]\\UNC\\/u, "\\\\").replace(/^\\\\[?.]\\(?=[a-z]:[\\/])/iu, "");
+    if (platform === "darwin" && path.isAbsolute(value)) {
+      const top = `/${value.split("/")[1] ?? ""}`;
+      try {
+        return path.join(realPath(top), path.relative(top, value));
+      } catch {}
+    }
+    return value;
+  };
+  const protectedPath = normalize(path.resolve(platform === "win32" ? normalize(rootPath) : rootPath, ".dohc"));
+  const protectedKey = platform === "win32" ? lowerAscii(protectedPath) : protectedPath;
+  const base = path.dirname(platform === "win32" ? normalize(setting.file) : setting.file);
+  const entries = new Set<string>();
+  for (let root of setting.roots) {
+    // Config paths are relative to their file, expand home, and keep nested symlinks.
+    if ((platform === "win32" ? /^~(?:[\\/]|$)/u : /^~(?:\/|$)/u).test(root)) root = path.join(homedir(), root.slice(1));
+    if (platform === "win32") {
+      root = normalize(root);
+      const drive = /^([a-z]:)([^\\/].*)?$/iu.exec(root);
+      if (drive) root = path.join(`${drive[1]}\\`, drive[2] ? path.relative(path.parse(base).root, base) : "", drive[2] ?? "");
+    }
+    root = path.resolve(base, root);
+    const key = platform === "win32" ? lowerAscii(root) : normalize(root);
+    // A deeper write wins over .dohc's read rule; an equal write wins the tie.
+    if (key === protectedKey || key.startsWith(`${protectedKey}${path.sep}`)) continue;
+    // Profile write keys cannot name these characters as literal folder names.
+    if (/[*?\[\]]/u.test(root)) continue;
+    entries.add(`${tomlKey(root)}='write'`);
+  }
+  return [...entries];
+}
+
 // The --config entries a dohc Codex run adds over the person's config, which
 // it leaves unchanged.
 // - A permissions profile keeps the workspace's .dohc folder read-only. Its
@@ -153,6 +196,7 @@ export function codexRunConfig(input: {
     "':workspace_roots'={'.dohc'='read'}",
     ...(tables && workspaceWrite(tables, "exclude_tmpdir_env_var") ? ["':tmpdir'='read'"] : []),
     ...(tables && workspaceWrite(tables, "exclude_slash_tmp") ? ["':slash_tmp'='read'"] : []),
+    ...(tables ? writableRootEntries(tables, input.rootPath, input.platform, input.realPath) : []),
   ];
   const network = tables && workspaceWrite(tables, "network_access") ? ",network={enabled=true}" : "";
   const profile = `dohc_run_${createHash("sha256").update(input.runId).digest("hex").slice(0, 16)}`;
@@ -162,6 +206,6 @@ export function codexRunConfig(input: {
     `permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`,
     `default_permissions='${profile}'`,
     `projects={${projects.join(",")}}`,
-    ...(tables && requirements && ![...tables, ...requirements].some(choosesWindowsSandbox) ? ["windows.sandbox='unelevated'"] : []),
+    ...(tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
   ].flatMap((entry) => ["--config", entry]);
 }
