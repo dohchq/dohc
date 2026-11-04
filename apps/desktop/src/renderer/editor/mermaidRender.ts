@@ -1,4 +1,4 @@
-import { isCodeBlockNode, normalizeLanguage, stopEditorMouseEvent } from "./pmHelpers";
+import { documentChange, isCodeBlockNode, normalizeLanguage, stopEditorMouseEvent } from "./pmHelpers";
 // Mermaid diagram rendering inside WYSIWYG code blocks — a ProseMirror
 // decoration layer, deliberately not a schema/nodeView change. Mermaid
 // fences are plain `codeBlock` nodes with `language: "mermaid"` (the same
@@ -15,6 +15,7 @@ import { isCodeBlockNode, normalizeLanguage, stopEditorMouseEvent } from "./pmHe
 
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
+import type { Mapping } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 
 /** Inserted by the `/mermaid` slash command (slashCommands.tsx) as the
@@ -39,8 +40,12 @@ type MermaidBlock = {
 
 /** Pure: walk the doc, return every `codeBlock` with `language: "mermaid"`. */
 export function computeMermaidBlocks(doc: ProseMirrorNode): MermaidBlock[] {
+  return mermaidBlocksBetween(doc, 0, doc.content.size)
+}
+
+function mermaidBlocksBetween(doc: ProseMirrorNode, from: number, to: number): MermaidBlock[] {
   const blocks: MermaidBlock[] = []
-  doc.descendants((node, pos) => {
+  doc.nodesBetween(from, to, (node, pos) => {
     if (!isCodeBlockNode(node)) return !node.isTextblock // inline content holds no codeBlock
     if (normalizeLanguage(node.attrs.language) !== 'mermaid') return false
     blocks.push({ pos, end: pos + node.nodeSize, text: node.textContent })
@@ -98,6 +103,37 @@ export function reconcileMermaidEntries(
     }
     return { id: nextId(), pos: block.pos, end: block.end, text: block.text }
   })
+}
+
+/** Pure: the entries for `doc`, given the entries for `before`. Only fences
+ *  that touch the changed range are read again; the ones after it shift.
+ *  `changed` says whether any fence was read again, and `mapping` moves
+ *  decorations from `before` to `doc`. */
+export function updateMermaidEntries(
+  previous: readonly MermaidWidgetEntry[],
+  before: ProseMirrorNode,
+  doc: ProseMirrorNode,
+  nextId: () => string,
+): { entries: readonly MermaidWidgetEntry[]; changed: boolean; mapping: Mapping } {
+  const { range, mapping } = documentChange(before, doc)
+  if (!range) return { entries: previous, changed: false, mapping }
+  // A preview sits at its fence's end, so a fence that ends at the edit is
+  // read again too.
+  const head = previous.filter((entry) => entry.end < range.from)
+  const tail = previous.filter((entry) => entry.pos >= range.toBefore)
+  const touched = previous.filter((entry) => entry.end >= range.from && entry.pos < range.toBefore)
+  const blocks = mermaidBlocksBetween(doc, Math.max(0, range.from - 1), range.to)
+    .filter((block) => block.end >= range.from)
+  const shift = range.to - range.toBefore
+  return {
+    entries: [
+      ...head,
+      ...reconcileMermaidEntries(touched, blocks, (pos) => mapping.map(pos), nextId),
+      ...tail.map((entry) => ({ ...entry, pos: entry.pos + shift, end: entry.end + shift })),
+    ],
+    changed: touched.length > 0 || blocks.length > 0,
+    mapping,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,8 +424,18 @@ function applyMermaidResult(container: HTMLElement, result: MermaidRenderResult)
 type MermaidPluginState = {
   /** Monotonic counter for minting fresh widget ids across the plugin's life. */
   seq: number
-  entries: MermaidWidgetEntry[]
+  entries: readonly MermaidWidgetEntry[]
+  /** Ids of the fences drawn collapsed. */
+  collapsed: ReadonlySet<string>
   set: DecorationSet
+}
+
+function collapsedIds(entries: readonly MermaidWidgetEntry[], cursorPos: number): Set<string> {
+  return new Set(entries.filter((entry) => isMermaidBlockCollapsed(entry, cursorPos)).map(({ id }) => id))
+}
+
+function sameIds(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  return a.size === b.size && [...a].every((id) => b.has(id))
 }
 
 const mermaidPreviewKey = new PluginKey<MermaidPluginState>('dohc-mermaid-preview')
@@ -406,30 +452,37 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
           end: block.end,
           text: block.text,
         }))
+        const cursorPos = instance.selection.from
         return {
           seq,
           entries,
-          set: buildMermaidDecorationSet(instance.doc, entries, instance.selection.from),
+          collapsed: collapsedIds(entries, cursorPos),
+          set: buildMermaidDecorationSet(instance.doc, entries, cursorPos),
         }
       },
       apply(tr, old, _oldState, newState) {
-        // Rebuild on doc changes (source edited) OR selection changes (the
+        // Redraw on doc changes (source edited) OR selection changes (the
         // cursor moved into/out of a block — toggle collapse), same trigger
         // pair as wikilinkPlugin's source/preview toggle.
         if (!tr.docChanged && !tr.selectionSet) return old
-        const blocks = computeMermaidBlocks(newState.doc)
         let seq = old.seq
-        // Map each previous fence's position through the transaction so a fence
-        // shifted by an edit above it keeps its stable id (and painted widget)
-        // rather than being reminted under a new position-derived key.
-        const mapPos = tr.docChanged
-          ? (pos: number) => tr.mapping.map(pos)
-          : (pos: number) => pos
-        const entries = reconcileMermaidEntries(old.entries, blocks, mapPos, () => `m${seq++}`)
+        // A fence shifted by an edit above it keeps its stable id (and painted
+        // widget) rather than being reminted under a new position-derived key.
+        const update = tr.docChanged
+          ? updateMermaidEntries(old.entries, tr.before, newState.doc, () => `m${seq++}`)
+          : null
+        const entries = update?.entries ?? old.entries
+        const cursorPos = newState.selection.from
+        const collapsed = collapsedIds(entries, cursorPos)
+        if (!update?.changed && sameIds(collapsed, old.collapsed)) {
+          if (!update) return old
+          return { seq, entries, collapsed, set: old.set.map(update.mapping, newState.doc) }
+        }
         return {
           seq,
           entries,
-          set: buildMermaidDecorationSet(newState.doc, entries, newState.selection.from),
+          collapsed,
+          set: buildMermaidDecorationSet(newState.doc, entries, cursorPos),
         }
       },
     },
