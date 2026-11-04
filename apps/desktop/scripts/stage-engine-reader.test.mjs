@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { load } from "js-yaml";
 import { stageEngineReader, requireEngineReader } from "./stage-engine-reader.mjs";
 import { readPinnedCompilerNode } from "./stage-app-compiler.mjs";
+import { cachedNodeFetch, useCachedNodeDownloads } from "./pinned-node-downloads.testSupport.mjs";
 import { installedReaderConfig } from "../src/workspaces/installedReaderConfig.ts";
 
 const require = createRequire(import.meta.url);
@@ -18,6 +19,26 @@ builder("app-builder-lib");
 const { getFileMatchers, copyFiles } = builder("app-builder-lib/out/fileMatcher.js");
 const { WinPackager } = builder("app-builder-lib/out/winPackager.js");
 const desktop = fileURLToPath(new URL("..", import.meta.url));
+useCachedNodeDownloads();
+
+test("a kept pinned Node download serves later runs without the network", async t => {
+  const cache = await mkdtemp(join(tmpdir(), "dohc-pinned-node-cache-"));
+  t.after(() => rm(cache, { recursive: true, force: true }));
+  const archive = Buffer.from("pinned archive");
+  const sha256 = createHash("sha256").update(archive).digest("hex");
+  const otherSha256 = createHash("sha256").update("other archive").digest("hex");
+  const pinned = { good: { url: "https://node.test/good.tar.gz", archiveSha256: sha256 }, bad: { url: "https://node.test/bad.tar.gz", archiveSha256: otherSha256 } };
+  const body = async response => Buffer.from(await (await response).arrayBuffer());
+  const online = cachedNodeFetch({ cache, pinned, download: async url => new Response(url === pinned.good.url ? archive : "tampered") });
+  assert.deepEqual(await body(online(pinned.good.url)), archive);
+  assert.equal(String(await body(online(pinned.bad.url))), "tampered");
+  const offline = cachedNodeFetch({ cache, pinned, download: async () => { throw new TypeError("fetch failed"); } });
+  assert.deepEqual(await body(offline(pinned.good.url)), archive);
+  await assert.rejects(offline(pinned.bad.url), /fetch failed/, "a download with the wrong hash is never kept");
+  await writeFile(join(cache, sha256), "corrupted");
+  await assert.rejects(offline(pinned.good.url), /fetch failed/);
+  await assert.rejects(offline("https://node.test/other"), /fetch failed/);
+});
 
 test("reader generations and staging files stay out of git", () => {
   for (const path of ["resources/engine-reader/selection.json", "resources/engine-reader/.staging-incomplete/node", `resources/engine-reader/${"a".repeat(64)}/reader.cjs`]) {
