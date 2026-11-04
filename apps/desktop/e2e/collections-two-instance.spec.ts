@@ -7,7 +7,12 @@ import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { editorTabTestId } from "../src/testPins";
 import { createWorkspaceEngineCapture } from "../src/workspaces/workspaceEngineCapture";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
+import { probeRelayWorkspace } from "../src/workspaces/relayWorkspaceProbe";
+import { installWorkspaceDataKey } from "../src/workspaces/workspaceDataKey";
+import { bootstrapJoinedWorkspace } from "../src/workspaces/workspaceJoinEnrollment";
+import { waitForVisibleAnimations } from "./helpers/animations";
 import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
+import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { ydocLineageClaimStatus } from "./helpers/engineDb";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -295,13 +300,17 @@ test("an agent's file save on one device opens a conflict against the other devi
   const temp = await createTempWorkspace();
   const workspaceId = "collections-board-file-save-e2e";
   const sourceRoot = join(temp.baseDir, "device-a");
+  const computerCRoot = join(temp.baseDir, "device-c");
   let relay: SyncRelayHandle | null = null;
   let deviceA: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | null = null;
   let capture: ReturnType<typeof createWorkspaceEngineCapture> | null = null;
+  let deviceC: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | null = null;
+  let captureC: ReturnType<typeof createWorkspaceEngineCapture> | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
     await mkdir(join(sourceRoot, "tasks"), { recursive: true });
+    await mkdir(computerCRoot, { recursive: true });
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     deviceA = await openLiveDaemonWorkspace(
       { workspaceId, rootPath: sourceRoot },
@@ -329,6 +338,34 @@ test("an agent's file save on one device opens a conflict against the other devi
       waitForPathMoments(capture, apolloPath, 1),
     ]);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
+
+    // A third computer, also file-only, joins now and takes the Todo record.
+    // Its later save starts from Todo, so it does not continue A's side.
+    deviceC = await openLiveDaemonWorkspace(
+      { workspaceId, rootPath: computerCRoot },
+      { maxRestarts: 0 },
+    );
+    const computerCRelay = deviceC.relay.bind({
+      ...deviceC.workspace,
+      relay: { baseUrl: relay.baseUrl, token: TOKEN },
+    });
+    const probe = await probeRelayWorkspace({
+      workspaceId,
+      relay: { baseUrl: relay.baseUrl, token: TOKEN },
+    });
+    await bootstrapJoinedWorkspace({
+      workspaceId,
+      identity: probe.identity,
+      transport: computerCRelay,
+      installDataKey: async (key) => await installWorkspaceDataKey(computerCRoot, key),
+    });
+    const computerCCapture = createWorkspaceEngineCapture({
+      ...deviceC.workspace,
+      rustEngineSessions: deviceC.sessions,
+    });
+    captureC = computerCCapture;
+    await computerCCapture.runRelaySync((materializePage) => computerCRelay.pull(materializePage));
+    expect(await readFile(join(computerCRoot, apolloPath), "utf8")).toContain("Status: Todo");
 
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
@@ -448,6 +485,88 @@ test("an agent's file save on one device opens a conflict against the other devi
     await expect(todoApollo).toBeVisible();
     await expect(doingApollo).toHaveCount(0);
 
+    // The third computer saves the record from Todo. That save does not
+    // continue A's side, so B holds it behind the open conflict. The card
+    // says so; no toast, Notices row, or count is added for it.
+    const noticeToggle = page.getByTestId("notice-center-toggle");
+    const toasts = page.getByTestId("notice-toasts");
+    const syncStatus = page.getByTestId("sync-status");
+    const noticeLabelBefore = await noticeToggle.getAttribute("aria-label");
+    const syncLabelBefore = await syncStatus.getAttribute("aria-label");
+    const toastRowsBefore = await toasts.locator("[data-notice-row]").count();
+    await writeFile(join(computerCRoot, apolloPath), recordMd(APOLLO_ID, "Apollo 11", "Todo"));
+    await waitForPathMoments(computerCCapture, apolloPath, 2);
+    expect((await computerCRelay.push()).pushed).toBeGreaterThan(0);
+    await expect
+      .poll(
+        async () => {
+          nudge += 1;
+          await writeWorkspaceFiles(temp, [
+            { path: `nudges/sync-nudge-${nudge}.md`, contents: `nudge ${nudge}\n` },
+          ]);
+          return (await conflictsOnB()).map((listed) => listed.waitingVersion?.code ?? null);
+        },
+        { timeout: 90_000, intervals: [2000] },
+      )
+      .toEqual(["resolve-existing-conflict"]);
+    const [held] = await conflictsOnB();
+    expect(held?.conflictId).toBe(conflict.conflictId);
+    expect(held?.incomingText).toContain("Status: Doing");
+    expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).not.toContain("Apollo 11");
+    expect(await statusOnB()).toBe("Todo");
+    expect(await syncStatus.getAttribute("aria-label")).toBe(syncLabelBefore);
+    expect(await noticeToggle.getAttribute("aria-label")).toBe(noticeLabelBefore);
+    expect(await toasts.locator("[data-notice-row]").count()).toBeLessThanOrEqual(toastRowsBefore);
+    await expect(toasts).not.toContainText("newer version");
+
+    await noticeToggle.click();
+    const noticeCenter = page.getByTestId("notice-center");
+    await expect(noticeCenter).toBeVisible();
+    await expect(noticeCenter).not.toContainText("newer version");
+    const conflictNotice = noticeCenter.getByTestId("notice-sync-conflict");
+    await expect(conflictNotice).toHaveCount(1);
+    await conflictNotice.getByRole("button", { name: "Review" }).click();
+    const reviewCard = page.getByTestId("version-conflict");
+    await expect(reviewCard).toHaveCount(1);
+    await expect(page.getByTestId("version-conflict-waiting")).toHaveText(
+      "Another computer saved a newer version. dohc holds it until you resolve this conflict.",
+    );
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate(async (value) => {
+        document.documentElement.setAttribute("data-theme", value);
+        void getComputedStyle(document.body).backgroundColor;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }, theme);
+      await waitForVisibleAnimations(page);
+      await test.info().attach(`waiting-version-card-${theme}.png`, {
+        body: await reviewCard.screenshot(),
+        contentType: "image/png",
+      });
+    }
+    await page.evaluate(() => document.documentElement.removeAttribute("data-theme"));
+
+    // An agent listing conflicts reads the same fact, named by the path.
+    await waitForCliEndpoint(temp.homeDir);
+    const listedForAgents = JSON.parse(
+      (await runDohcCli(temp, ["--json", "version", "conflicts"])).stdout,
+    ) as { conflicts: Array<{ conflictId: string; waiting?: unknown }> };
+    await test.info().attach("dohc_list_version_conflicts.json", {
+      body: JSON.stringify(listedForAgents, null, 2),
+      contentType: "application/json",
+    });
+    expect(listedForAgents.conflicts).toHaveLength(1);
+    expect(listedForAgents.conflicts[0]).toMatchObject({
+      conflictId: conflict.conflictId,
+      path: apolloPath,
+      waiting: {
+        code: "resolve-existing-conflict",
+        message: `Another computer saved a newer version of ${apolloPath}. dohc holds it until its conflict is resolved.`,
+      },
+    });
+    expect(JSON.stringify(listedForAgents)).not.toContain("waitingVersion");
+    await page.getByTestId("conflict-review-done").click();
+    await expect(page.getByTestId("conflict-review-dialog")).toHaveCount(0);
+
     // Applying the incoming side moves the card.
     await page.evaluate(
       async ({ id, conflictId }) => {
@@ -464,16 +583,40 @@ test("an agent's file save on one device opens a conflict against the other devi
       },
       { id: workspaceId, conflictId: conflict.conflictId },
     );
-    expect(await conflictsOnB()).toEqual([]);
+    expect((await conflictsOnB()).map((listed) => listed.conflictId)).not.toContain(
+      conflict.conflictId,
+    );
     await expect
       .poll(statusOnB, { timeout: 30_000, intervals: [1000] })
       .toBe("Doing");
     await expect(doingApollo).toBeVisible({ timeout: 30_000 });
     await expect(todoApollo).toHaveCount(0);
     expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain("Status: Doing");
+
+    // The held save then applies against Doing. It started from Todo, so it
+    // opens its own conflict, and nothing waits behind that one.
+    await expect
+      .poll(
+        async () => {
+          nudge += 1;
+          await writeWorkspaceFiles(temp, [
+            { path: `nudges/sync-nudge-${nudge}.md`, contents: `nudge ${nudge}\n` },
+          ]);
+          return (await conflictsOnB()).map((listed) => ({
+            path: listed.path,
+            fromComputerC: listed.incomingText?.includes("Apollo 11") ?? false,
+            waitingVersion: listed.waitingVersion,
+          }));
+        },
+        { timeout: 90_000, intervals: [2000] },
+      )
+      .toEqual([{ path: apolloPath, fromComputerC: true, waitingVersion: null }]);
+    expect(await statusOnB()).toBe("Doing");
   } finally {
     await capture?.stop().catch(() => undefined);
     await deviceA?.close().catch(() => undefined);
+    await captureC?.stop().catch(() => undefined);
+    await deviceC?.close().catch(() => undefined);
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);
   }

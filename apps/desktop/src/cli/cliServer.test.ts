@@ -66,6 +66,7 @@ import {
   type CliRegistryWorkspace,
   type CliServerHandle,
   type CliServerOptions,
+  type CliVersionsPort,
   type CliWorkspaceContext,
 } from "./cliServer";
 import { agentWriteAuthor } from "./desktopCliServer";
@@ -2446,6 +2447,29 @@ describe("CLI socket server", () => {
     }
     await expect(invoke("collectionsWaiting", { cwd: workspaceRoot, actor: "agent" }))
       .resolves.toMatchObject({ ok: false });
+  });
+
+  it("passes a conflict's waiting version through to version conflicts and a resolve's remaining page", async () => {
+    const waiting = {
+      code: "resolve-existing-conflict" as const,
+      message: "Another computer saved a newer version of notes.md. dohc holds it until its conflict is resolved.",
+      objectId: "notes-object",
+      originId: "computer-d",
+      originSeq: 4,
+    };
+    const listed = {
+      conflictId: "c1", path: "notes.md", sourceVersionId: "main", targetVersionId: "main", origin: "sync" as const,
+      contentKind: "text" as const, currentText: "mine", incomingText: "theirs", baseText: "base",
+    };
+    const page = { conflicts: [{ ...listed, waiting }, { ...listed, conflictId: "c2" }], nextAfterConflictId: null };
+    const resolve = vi.fn(async () => undefined);
+    context.versions = { conflicts: async () => page, resolve } as unknown as CliVersionsPort;
+    await expect(invoke("versionConflicts", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toEqual({ ok: true, ...page });
+    await expect(invoke("versionResolve", {
+      cwd: workspaceRoot, actor: "agent", conflictId: "c2", resolution: { keep: "current" },
+    })).resolves.toEqual({ ok: true, ...page });
+    expect(resolve).toHaveBeenCalledWith("c2", { keep: "current" });
   });
 
   it("reads and edits documents with provenance the door derives", async () => {

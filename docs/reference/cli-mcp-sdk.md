@@ -188,7 +188,7 @@ Returns `{ ok: true, version: { id, name }, files: { path, status, currentText?,
 
 ### `dohc_list_version_conflicts`
 
-Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
+Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
 
 A shared view keeps no versions of its own, so it does not offer this tool.
 

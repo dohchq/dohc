@@ -70,6 +70,7 @@ function conflict(
     currentText: "main side\n",
     incomingText: "feature side\n",
     baseText: null,
+    waitingVersion: null,
     ...overrides,
   };
 }
@@ -78,12 +79,14 @@ const bridgeMock = {
   listWorkspaceVersionConflicts: vi.fn(),
   listWorkspaceVersions: vi.fn(),
   resolveWorkspaceVersionConflict: vi.fn(),
+  onWorkspaceActivity: vi.fn(),
 };
 
 beforeEach(() => {
   utf8ByteLengthSpy.mockClear();
   exceedsUtf8BytesSpy.mockClear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
+  bridgeMock.onWorkspaceActivity.mockReturnValue(() => {});
   bridgeMock.listWorkspaceVersions.mockResolvedValue({
     versions: [
       { id: "main", name: "Main", kind: "main", createdAtMs: 0, canMergeIntoMain: false },

@@ -3,7 +3,7 @@ import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isMergeStoppedPartway, isWorkspaceUpdatingError, isConflictStaleTarget, readError, versionNameRefusal } from "../../ipc/errorWords";
 import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
-import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Hourglass, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -35,6 +35,7 @@ import { errorDetails } from "../shell/copyDetails";
 import { SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
+import { createActivityCoalescer } from "../workspaceActivityCoalescer";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
   applyCombinedChange,
@@ -1591,6 +1592,15 @@ function ConflictResolver(props: {
               </SecondaryButton>
             </div>
           </div>
+          {conflict.origin === "sync" && conflict.waitingVersion ? (
+            <p
+              data-testid="version-conflict-waiting"
+              className="mb-0 mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
+            >
+              <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+              Another computer saved a newer version. dohc holds it until you resolve this conflict.
+            </p>
+          ) : null}
           {combined === null && combineSeed !== null ? (
             <button
               type="button"
@@ -2118,7 +2128,7 @@ export function ConflictReviewDialog(props: {
   const windowGeneration = useRef(0);
 
   useEffect(() => {
-    const token = liveToken.current();
+    const token = liveToken.next();
     void (async () => {
       try {
         const [result, versions] = await Promise.all([
@@ -2184,6 +2194,55 @@ export function ConflictReviewDialog(props: {
         : current,
     );
   }, [state, workspaceId]);
+
+  // A sync pass can hold a newer version behind a conflict on screen. Each
+  // pass signals without paths, so read the loaded window again then. Keys
+  // stay the conflict ids, so the open card and its combined copy survive.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  useEffect(() => {
+    const refresh = createActivityCoalescer(() => {
+      const shown = stateRef.current;
+      if (shown.status !== "ready") return;
+      const token = liveToken.next();
+      const generation = windowGeneration.current;
+      void (async () => {
+        const rows: WorkspaceVersionConflict[] = [];
+        let after: string | null = null;
+        try {
+          do {
+            const page = await bridge().listWorkspaceVersionConflicts({
+              workspaceId,
+              ...(after === null ? {} : { afterConflictId: after }),
+            });
+            if (!liveToken.isCurrent(token)) return;
+            if (generation !== windowGeneration.current) return;
+            rows.push(...page.conflicts);
+            after = page.nextAfterConflictId;
+          } while (after !== null && rows.length < shown.conflicts.length);
+        } catch {
+          // The window on screen stays; the next change reads it again.
+          return;
+        }
+        windowGeneration.current += 1;
+        const nextAfterConflictId = after;
+        setState((current) =>
+          current.status === "ready"
+            ? { ...current, conflicts: rows, nextAfterConflictId }
+            : current,
+        );
+      })();
+    });
+    const unsubscribe = bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+      if (event.paths?.length) return;
+      refresh.schedule();
+    });
+    return () => {
+      refresh.cancel();
+      unsubscribe();
+    };
+  }, [workspaceId]);
 
   const conflicts = state.status === "ready" ? state.conflicts : [];
   const hasMoreConflicts =

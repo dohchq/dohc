@@ -54,3 +54,21 @@ it("says what a version change did", async () => {
   expect((await executeCli({ argv: ["version", "merge", "Draft"], request })).stdout)
     .toBe("Merged Draft into Main · 2 files merged · 1 conflict\nc1 · merge · notes.md\n");
 });
+
+it("says under a conflict that a newer version waits behind it, and only there", async () => {
+  const listed = { conflictId: "c1", path: "notes.md", sourceVersionId: "main", targetVersionId: "main", origin: "sync",
+    contentKind: "text", currentText: "mine", incomingText: "theirs", baseText: "base" };
+  const waiting = { code: "resolve-existing-conflict", objectId: "notes-object", originId: "computer-d", originSeq: 4,
+    message: "Another computer saved a newer version of notes.md. dohc holds it until its conflict is resolved." };
+  const request = vi.fn(async () => ({ ok: true, nextAfterConflictId: null,
+    conflicts: [{ ...listed, waiting }, { ...listed, conflictId: "c2", path: "plan.md" }] }) as never);
+  expect((await executeCli({ argv: ["version", "conflicts"], request })).stdout).toBe([
+    "c1 · sync · notes.md",
+    "  Another computer saved a newer version. dohc holds it until you resolve this conflict.",
+    "c2 · sync · plan.md",
+    "",
+  ].join("\n"));
+  const json = JSON.parse((await executeCli({ argv: ["version", "conflicts", "--json"], request })).stdout) as { conflicts: unknown[] };
+  expect(json.conflicts[0]).toMatchObject({ waiting });
+  expect(json.conflicts[1]).not.toHaveProperty("waiting");
+});

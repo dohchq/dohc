@@ -10,6 +10,7 @@ import { useFocusSurface } from "../ui/focusReturn";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 import { readError } from "../../ipc/errorWords";
+import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "../workspaceActivityCoalescer";
 import {
   ConflictReviewDialog,
   VersionComparePage,
@@ -37,6 +38,7 @@ function conflict(id: string): WorkspaceVersionConflict {
     currentText: "main side\n",
     incomingText: "feature side\n",
     baseText: null,
+    waitingVersion: null,
   };
 }
 
@@ -53,16 +55,25 @@ async function settle() {
   await act(async () => {});
 }
 
+type ActivityListener = (event: { workspaceId?: string; paths?: string[] }) => void;
+const activityListeners = new Set<ActivityListener>();
+
 const bridgeMock = {
   listWorkspaceVersions: vi.fn(),
   listWorkspaceVersionConflicts: vi.fn(),
   resolveWorkspaceVersionConflict: vi.fn(),
   compareWorkspaceVersions: vi.fn(),
   mergeWorkspaceVersion: vi.fn(),
+  onWorkspaceActivity: vi.fn(),
 };
 
 beforeEach(() => {
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
+  activityListeners.clear();
+  bridgeMock.onWorkspaceActivity.mockImplementation((listener: ActivityListener) => {
+    activityListeners.add(listener);
+    return () => activityListeners.delete(listener);
+  });
   bridgeMock.listWorkspaceVersions.mockResolvedValue({
     versions: [
       { id: "main", name: "Main", kind: "main", createdAtMs: 0, canMergeIntoMain: false },
@@ -867,5 +878,188 @@ describe("ConflictReviewDialog read failure", () => {
     await settle();
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
     expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ConflictReviewDialog waiting version", () => {
+  const WAITING_COPY =
+    "Another computer saved a newer version. dohc holds it until you resolve this conflict.";
+  const waitingVersion = {
+    code: "resolve-existing-conflict" as const,
+    objectId: "object-1",
+    originId: "computer-d",
+    originSeq: 4,
+  };
+  const waiting = (id: string): WorkspaceVersionConflict => ({ ...syncConflict(id), waitingVersion });
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // A sync pass tells the windows without paths; the dialog reads again once
+  // the burst quiets.
+  async function signal(event: { workspaceId?: string; paths?: string[] } = { workspaceId: "ws-1" }) {
+    await act(async () => {
+      for (const listener of [...activityListeners]) listener(event);
+      await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+    });
+    await settle();
+  }
+
+  function openReview(onError = vi.fn(), workspaceId = "ws-1") {
+    const view = render(
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+        workspaceId={workspaceId}
+        onWorkspaceStateChanged={() => {}}
+        onClose={() => {}}
+        onError={onError}
+      />,
+    );
+    return { view, onError };
+  }
+
+  it("says on the card that a newer version waits, and nothing for a conflict without one", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [waiting("c-1")],
+      nextAfterConflictId: null,
+    });
+    openReview();
+    await settle();
+    expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
+    // Coordinates stay out of the card.
+    expect(screen.getByTestId("conflict-review-dialog").textContent).not.toMatch(/computer-d|object-1/);
+
+    cleanup();
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("c-1")],
+      nextAfterConflictId: null,
+    });
+    openReview();
+    await settle();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+    expect(screen.queryByTestId("version-conflict-waiting")).toBeNull();
+  });
+
+  it("shows a version that starts waiting while open, keeping the open card and its combined copy", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("c-1"), syncConflict("c-2")],
+      nextAfterConflictId: null,
+    });
+    const { onError } = openReview();
+    await settle();
+    fireEvent.click(screen.getByTestId("version-conflict-combine"));
+    fireEvent.change(screen.getByTestId("version-conflict-combined-input"), {
+      target: { value: "my combined draft\n" },
+    });
+    expect(screen.queryByTestId("version-conflict-waiting")).toBeNull();
+
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [waiting("c-1"), syncConflict("c-2")],
+      nextAfterConflictId: null,
+    });
+    await signal();
+
+    expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
+    expect(
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
+    ).toBe("my combined draft\n");
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
+    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-1" });
+    // No toast or Notices row: the card is the only place it shows.
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("reads again only for this workspace's pathless signal", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("c-1")],
+      nextAfterConflictId: null,
+    });
+    openReview();
+    await settle();
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [waiting("c-1")],
+      nextAfterConflictId: null,
+    });
+    await signal({ workspaceId: "ws-2" });
+    await signal({ workspaceId: "ws-1", paths: ["notes.md"] });
+    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("version-conflict-waiting")).toBeNull();
+  });
+
+  it("rereads every loaded page, so Show more rows stay", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
+      async (payload: { afterConflictId?: string }) =>
+        payload.afterConflictId === undefined
+          ? { conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" }
+          : { conflicts: [syncConflict("c-2")], nextAfterConflictId: null },
+    );
+    openReview();
+    await settle();
+    fireEvent.click(screen.getByTestId("conflict-list-show-more"));
+    await settle();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
+
+    bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
+      async (payload: { afterConflictId?: string }) =>
+        payload.afterConflictId === undefined
+          ? { conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" }
+          : { conflicts: [waiting("c-2")], nextAfterConflictId: null },
+    );
+    await signal();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
+    fireEvent.click(screen.getAllByTestId("version-conflict-toggle")[1]!);
+    expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
+  });
+
+  it("drops a reread answered after the dialog moved to another workspace", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("c-1")],
+      nextAfterConflictId: null,
+    });
+    const { view } = openReview();
+    await settle();
+    let answer!: (page: { conflicts: WorkspaceVersionConflict[]; nextAfterConflictId: null }) => void;
+    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(
+      new Promise((resolve) => { answer = resolve; }),
+    );
+    await signal();
+
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("c-9")],
+      nextAfterConflictId: null,
+    });
+    view.rerender(
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+        workspaceId="ws-2"
+        onWorkspaceStateChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    await settle();
+    await act(async () => {
+      answer({ conflicts: [waiting("c-1")], nextAfterConflictId: null });
+    });
+    await settle();
+    expect(
+      screen.getAllByTestId("version-conflict").map((card) => card.dataset.conflictPath),
+    ).toEqual(["c-9.md"]);
+    expect(screen.queryByTestId("version-conflict-waiting")).toBeNull();
+  });
+
+  it("keeps the list on screen when the reread fails, without a toast", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("c-1")],
+      nextAfterConflictId: null,
+    });
+    const { onError } = openReview();
+    await settle();
+    bridgeMock.listWorkspaceVersionConflicts.mockRejectedValue(new Error("engine stopped"));
+    await signal();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
   });
 });

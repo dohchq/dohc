@@ -65,6 +65,7 @@ pub use cursor::{
     abandon_ordinary_pull, commit_relay_cursor, commit_share_cursor, ordinary_pull_unfinished_in,
     read_pushed_seq, read_relay_cursor, read_share_cursor, read_shared_peer_position,
 };
+pub use deferred::{WAITING_VERSION_CODE, waiting_versions};
 pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};

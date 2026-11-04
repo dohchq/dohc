@@ -251,6 +251,7 @@ export function versionConflictForIpc(conflict: {
   current: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   incoming: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   base: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
+  waitingVersion?: WorkspaceVersionConflict["waitingVersion"];
 }): WorkspaceVersionConflict {
   // Record-level kind answers one question: can these two sides be combined as
   // text? Only the live sides decide it. A binary BASE is history, and keying
@@ -291,6 +292,7 @@ export function versionConflictForIpc(conflict: {
     targetVersionId: conflict.targetVersionId,
     origin: conflict.metadata?.origin === "sync" ? "sync" : "merge",
     contentKind,
+    waitingVersion: conflict.waitingVersion ?? null,
     currentText: textSide(conflict.current),
     incomingText: textSide(conflict.incoming),
     baseText: textSide(conflict.base),

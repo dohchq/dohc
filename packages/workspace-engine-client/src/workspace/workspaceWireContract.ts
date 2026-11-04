@@ -781,6 +781,14 @@ const ConflictFileStateSchema = mutableStruct({
   metadataCorrelationId: NullableString,
 });
 
+/** A newer version another computer saved, held until the conflict resolves. */
+const ConflictWaitingVersionSchema = mutableStruct({
+  code: Schema.Literal("resolve-existing-conflict"),
+  objectId: Schema.NonEmptyString,
+  originId: Schema.NonEmptyString,
+  originSeq: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+
 const ConflictRecordSchema = mutableStruct({
   id: Schema.String,
   workspaceId: Schema.String,
@@ -802,6 +810,8 @@ const ConflictRecordSchema = mutableStruct({
   base: ConflictFileStateSchema,
   current: ConflictFileStateSchema,
   incoming: ConflictFileStateSchema,
+  /** Listings carry it; resolve answers do not. */
+  waitingVersion: Schema.optionalKey(Schema.NullOr(ConflictWaitingVersionSchema)),
 });
 
 const ReplicatedConflictResultSchema = Schema.Union([

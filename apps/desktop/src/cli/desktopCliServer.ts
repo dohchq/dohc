@@ -538,8 +538,16 @@ export function createDesktopCliServer<State>(
                 // After a rename, a side can sit at another path than its conflict.
                 const shown = (conflict: (typeof page.conflicts)[number]) =>
                   [conflict.path, conflict.base.path, conflict.current.path, conflict.incoming.path].every(path => admitted(path));
+                const forAgents = (conflict: (typeof page.conflicts)[number]) => {
+                  const { waitingVersion, ...listed } = versionConflictForIpc(conflict);
+                  if (waitingVersion === null) return listed;
+                  // The conflict's own path, which a waiting move does not change.
+                  const message = `Another computer saved a newer version of ${conflict.path}. dohc holds it until its conflict is resolved.`;
+                  const { code, objectId, originId, originSeq } = waitingVersion;
+                  return { ...listed, waiting: { code, message, objectId, originId, originSeq } };
+                };
                 return {
-                  conflicts: page.conflicts.filter(shown).map(versionConflictForIpc),
+                  conflicts: page.conflicts.filter(shown).map(forAgents),
                   nextAfterConflictId: page.nextAfterConflictId,
                 };
               },
