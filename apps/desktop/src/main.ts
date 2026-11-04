@@ -62,6 +62,7 @@ import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collectio
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import type { AppResponseUndoSelection } from "./workspaces/ownerAppResponseModeration";
 import { RECORD_NOT_FOUND } from "@dohc/automation-executor/collection-automation-run";
+import { windowsProbeOwner } from "./agents/agentProbeProcess";
 import { claudeCodeVersion, detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler, publicationListUnavailable } from "./ipc/ownerAppPublicationIpc";
@@ -3587,6 +3588,7 @@ const chatDispatchService = createChatDispatchService({
   isPackaged: () => app.isPackaged,
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  agentOwner: () => windowsProbeOwner(resourcesBasePath()),
   queueSync: syncWorkspaceForDispatch,
   prepareRunWorkspace: async (workspace) => {
     const { registered, release } = await withWorkspaceAttachmentAsync(

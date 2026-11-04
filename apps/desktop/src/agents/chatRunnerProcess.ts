@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
+import { MAX_ADMISSION_BYTES, ownerEnvironment, type WindowsProbeOwner } from "./agentProbeProcess";
 import { agentProfileArguments, ownFlagsProblem, tokenizeRunnerCommand, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
 import { type CodexConfigFiles, codexConfigFiles, codexRequirementsRefuseReadOnly, codexRunConfig } from "./codexRunConfig";
@@ -18,15 +19,13 @@ export const APP_QUIT_KILL_GRACE_MS = 1_500;
 
 export interface RunnerProcess {
   readonly pid: number | undefined;
-  readonly rawChild?: ChildProcess;
-  // Deliver the prompt. It rides stdin rather than argv because it carries
-  // the rendered thread — unbounded in length and content — and a cmd.exe
-  // command line can carry neither (~8191 characters, and no safe
-  // representation for a double quote).
-  writeStdin(text: string): void;
   hasExited(): boolean;
   onExit(listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void): void;
   onError(listener: (error: Error) => void): void;
+  // Windows only. SIGTERM ends the run's job through its owner, which exits
+  // once the job is empty. SIGKILL also ends the owner, and closing its job
+  // ends the rest.
+  stop?(signal: NodeJS.Signals): void;
 }
 
 export interface RunnerSpawnOptions {
@@ -36,6 +35,11 @@ export interface RunnerSpawnOptions {
   stdio: ["pipe", number, number];
   windowsHide: true;
   windowsVerbatimArguments?: boolean;
+  // The prompt. It rides stdin rather than argv because it carries the
+  // rendered thread, unbounded in length and content, and a cmd.exe command
+  // line can carry neither (~8191 characters, and no safe representation for
+  // a double quote).
+  input: string;
 }
 
 export type SpawnRunner = (
@@ -60,17 +64,18 @@ function defaultSpawnRunner(
       : {}),
   };
   const child = spawn(command, args, spawnOptions);
+  // A runner that exits before reading its prompt breaks this pipe. That is
+  // the runner's outcome, reported through its exit code and log, not a
+  // dispatch-time crash.
+  child.stdin?.on("error", () => undefined);
+  child.stdin?.end(options.input);
+  return runnerProcess(child);
+}
+
+function runnerProcess(child: ChildProcess, stop?: RunnerProcess["stop"]): RunnerProcess {
   return {
     get pid() {
       return child.pid;
-    },
-    rawChild: child,
-    writeStdin: (text) => {
-      // A runner that exits before reading its prompt breaks this pipe. That
-      // is the runner's outcome, reported through its exit code and log, not
-      // a dispatch-time crash.
-      child.stdin?.on("error", () => undefined);
-      child.stdin?.end(text);
     },
     hasExited: () => child.exitCode !== null || child.signalCode !== null,
     onExit: (listener) => {
@@ -79,7 +84,40 @@ function defaultSpawnRunner(
     onError: (listener) => {
       child.once("error", listener);
     },
+    ...(stop ? { stop } : {}),
   };
+}
+
+// On Windows a run starts under the agent owner (agentProbeOwner.cs), in a
+// kill-on-close job without breakaway. Everything the runner starts stays in
+// the job, which ends when the runner exits, when dohc stops the run, and when
+// dohc exits or is killed.
+export function spawnOwnedRunner(
+  owner: WindowsProbeOwner,
+  command: string,
+  args: string[],
+  options: RunnerSpawnOptions,
+  spawnProcess: typeof spawn = spawn,
+): RunnerProcess {
+  // The environment carries credentials and the prompt carries the thread,
+  // so both travel over stdin, never a command line.
+  const admission = Buffer.from(JSON.stringify({
+    command, args, windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
+    cwd: options.cwd, env: options.env, input: options.input,
+  }));
+  if (admission.byteLength > MAX_ADMISSION_BYTES) throw new Error("This chat is too long to send to an agent.");
+  const child = spawnProcess(owner.executable, [owner.node, owner.relay, String(admission.byteLength)], {
+    cwd: owner.root, env: ownerEnvironment(), windowsHide: true, stdio: options.stdio,
+  });
+  // An owner that exits early breaks this pipe; its exit code and log say why.
+  child.stdin?.on("error", () => undefined);
+  // After the admission the owner waits for end of input, so this pipe stays
+  // open while the run lives. dohc's exit closes it too.
+  child.stdin?.write(admission);
+  return runnerProcess(child, (signal) => {
+    child.stdin?.destroy();
+    if (signal === "SIGKILL") child.kill();
+  });
 }
 
 function validPid(pid: number | undefined): pid is number {
@@ -214,6 +252,8 @@ export interface ChatRunnerProcessOptions {
   arch?: string;
   // The person's Codex config files, which a Codex run reads (codexRunConfig.ts).
   codexConfigFiles?: () => CodexConfigFiles | null;
+  // Windows: the installed agent owner, chosen by Electron main.
+  agentOwner?: () => WindowsProbeOwner;
   // Runs Codex once without a model call and returns its standard output.
   runCodexCheck?: CodexCheck;
 }
@@ -266,8 +306,17 @@ export function createChatRunnerProcess(
   options: ChatRunnerProcessOptions,
   reportError: (error: unknown) => void,
 ) {
-  const spawnRunner = options.spawnRunner ?? defaultSpawnRunner;
   const platform = options.platform ?? process.platform;
+  const spawnRunner: SpawnRunner = options.spawnRunner ?? (platform === "win32"
+    ? (command, args, spawnOptions) => spawnOwnedRunner(runOwner(), command, args, spawnOptions)
+    : defaultSpawnRunner);
+
+  function runOwner(): WindowsProbeOwner {
+    try {
+      if (options.agentOwner) return options.agentOwner();
+    } catch {}
+    throw new Error("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+  }
 
   function prepareLog(logPath: string): number {
     const directory = dirname(logPath);
@@ -454,8 +503,8 @@ export function createChatRunnerProcess(
       ...(resolved.windowsVerbatimArguments
         ? { windowsVerbatimArguments: true }
         : {}),
+      input: input.prompt,
     });
-    child.writeStdin(input.prompt);
     return child;
   }
 
@@ -486,8 +535,8 @@ export function createChatRunnerProcess(
     signal: NodeJS.Signals,
   ): void {
     if (processHandle.hasExited() || !validPid(processHandle.pid)) return;
-    if (platform === "win32" && processHandle.rawChild) {
-      void killChildTreeWin32(processHandle.rawChild).catch(() => undefined);
+    if (platform === "win32") {
+      processHandle.stop?.(signal);
       return;
     }
     try {

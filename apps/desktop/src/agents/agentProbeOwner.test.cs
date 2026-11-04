@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
@@ -17,13 +18,20 @@ sealed class FakeJob : IProbeJob {
     readonly int assign;
     readonly int[] terminate;
     readonly long[] query;
+    readonly Stopwatch clock = Stopwatch.StartNew();
     int terminated, queried;
+    // Milliseconds from creation to the first termination, or -1.
+    public long FirstTerminateMs = -1;
 
     public FakeJob(int assign, int[] terminate, long[] query) {
         this.assign = assign; this.terminate = terminate; this.query = query;
     }
     public int Assign(IntPtr process) { Calls.Add("assign"); return assign; }
-    public int Terminate() { Calls.Add("terminate"); return terminate[Math.Min(terminated++, terminate.Length - 1)]; }
+    public int Terminate() {
+        Calls.Add("terminate");
+        if (FirstTerminateMs < 0) FirstTerminateMs = clock.ElapsedMilliseconds;
+        return terminate[Math.Min(terminated++, terminate.Length - 1)];
+    }
     public int QueryActive(out uint active) {
         Calls.Add("query");
         long result = query[Math.Min(queried++, query.Length - 1)];
@@ -58,9 +66,14 @@ static class AgentProbeOwnerTests {
     // The command creates the marker and prints "probe ok", so the marker shows that it ran.
     static byte[] Admission(string node, string cwd, string marker) {
         string script = "require('fs').writeFileSync(process.argv[1], ''); process.stdout.write('probe ok')";
-        return Encoding.UTF8.GetBytes("{\"command\":" + Json(node) + ",\"args\":[\"-e\"," + Json(script) + "," + Json(marker) +
-            "],\"windowsVerbatimArguments\":false,\"cwd\":" + Json(cwd) + ",\"env\":{\"SystemRoot\":" +
-            Json(Environment.GetEnvironmentVariable("SystemRoot")) + "}}");
+        return Admission(node, cwd, "[\"-e\"," + Json(script) + "," + Json(marker) + "]", null);
+    }
+
+    // A run's admission also carries the prompt as input.
+    static byte[] Admission(string node, string cwd, string args, string input) {
+        return Encoding.UTF8.GetBytes("{\"command\":" + Json(node) + ",\"args\":" + args +
+            ",\"windowsVerbatimArguments\":false,\"cwd\":" + Json(cwd) + ",\"env\":{\"SystemRoot\":" +
+            Json(Environment.GetEnvironmentVariable("SystemRoot")) + "}" + (input == null ? "" : ",\"input\":" + Json(input)) + "}");
     }
 
     static string Json(string value) { return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""; }
@@ -110,6 +123,19 @@ static class AgentProbeOwnerTests {
             "a completed probe keeps its output and exit code");
         Check(string.Join(",", completed.Calls) == "assign,terminate,query,terminate,query",
             "a completed probe still drains its job through a failed attempt");
+
+        stdout = new MemoryStream();
+        string echo = "process.stdin.pipe(process.stdout)";
+        code = Run(node, relay, Admission(node, scratch, "[\"-e\"," + Json(echo) + "]", "the prompt"), never,
+            new FakeJob(0, new[] { 0 }, new long[] { 0 }), stdout);
+        Check(code == 0 && Encoding.UTF8.GetString(stdout.ToArray()) == "the prompt", "a run's input reaches its command's stdin");
+
+        // The command exits at once and leaves a process that holds its output for 3 seconds.
+        string leaves = "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'inherit' }).unref()";
+        FakeJob left = new FakeJob(0, new[] { 0 }, new long[] { 0 });
+        code = Run(node, relay, Admission(node, scratch, "[\"-e\"," + Json(leaves) + "]", null), never, left, new MemoryStream());
+        Check(code == 0 && left.FirstTerminateMs >= 0 && left.FirstTerminateMs < 2000,
+            "the job ends what a command leaves running once the command exits (first termination at " + left.FirstTerminateMs + " ms)");
 
         return failures == 0 ? 0 : 1;
     }
