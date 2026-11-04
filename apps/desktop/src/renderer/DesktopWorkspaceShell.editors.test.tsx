@@ -1752,7 +1752,10 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
   });
 
-  it("warns when a refresh quarantines the share collision record", async () => {
+  it.each([
+    [false, "A refresh can replace them with the shared version, and dohc keeps no copy of yours."],
+    [true, "A refresh can count them as your edits, so check Send changes before you send."],
+  ])("warns when a refresh sets the share collision record aside (takes local writes: %s)", async (takesLocalWrites, risk) => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     bridge.refreshSharedView = vi.fn(async () => ({
       ok: true as const,
@@ -1761,9 +1764,55 @@ describe("ui-state merge-on-load", () => {
       excludedPaths: [],
       unjournalablePaths: [],
       collisionRecordQuarantined: true,
+      takesLocalWrites,
       refusedOps: 0,
       refusedDetail: null,
     }));
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: takesLocalWrites ? "edit" : "view",
+      },
+    });
+
+    // A warning the person may need to act on: an error toast, then a row
+    // in Notices. Nothing is inserted above the workbench.
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      `dohc could not read this share's record of your files with the same path as a shared file. ${risk}`,
+    );
+    // The record is gone, so nothing stays wrong and its row keeps its ×.
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText(risk, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).getByRole("button", { name: "Dismiss notice" })).toBeTruthy();
+  });
+
+  it("keeps a refresh that can't read the share collision record in Notices until a refresh completes", async () => {
+    const words =
+      "dohc did not update these shared files because it could not read .dohc/local/share-refresh/share-collision-record.json. " +
+      "It keeps a refresh from replacing your own files.";
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const refused: RefreshSharedViewResult = {
+      ok: false,
+      changedPaths: 0,
+      errorKind: "collision-record",
+      errorMessage: words,
+      errorCause: "Invalid share collision record.",
+    };
+    const refreshed: RefreshSharedViewResult = {
+      ok: true,
+      status: "unchanged",
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
+      refusedOps: 0,
+      refusedDetail: null,
+    };
+    let refreshes = 0;
+    const refresh = vi.fn(async () => (++refreshes > 1 ? refreshed : refused));
+    bridge.refreshSharedView = refresh;
     renderShell(bridge, {
       ...WORKSPACE,
       shareView: {
@@ -1773,11 +1822,25 @@ describe("ui-state merge-on-load", () => {
       },
     });
 
-    // A warning the person may need to act on: an error toast, then a row
-    // in Notices. Nothing is inserted above the workbench.
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(words);
+    expect(toast.textContent).not.toContain("Couldn't refresh the shared view.");
+    // Details carries what kept dohc from reading the record.
+    fireEvent.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain("Cause: Invalid share collision record."),
     );
+    // The record still keeps the person's own files apart, so its row has no ×.
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+
+    // Try again runs the refresh, and the refresh that completes ends the row.
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(notices).queryByText(words, { exact: false })).toBeNull());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   it("repaints changed files and removes generic chat before an ended share becomes read-only", async () => {

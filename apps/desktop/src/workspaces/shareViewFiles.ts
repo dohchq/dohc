@@ -945,6 +945,7 @@ export function createShareViewFiles(
         excludedPaths: [],
         unjournalablePaths: recovered.unjournalablePaths,
         collisionRecordQuarantined: recovered.collisionRecordQuarantined,
+        ...(recovered.collisionRecordQuarantined ? { takesLocalWrites: recovered.takesLocalWrites ?? false } : {}),
         refusedOps: 0,
         refusedDetail: null,
       };

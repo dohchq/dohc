@@ -5702,6 +5702,9 @@ const RefreshSharedViewSuccessResult = z.object({
     }),
   ),
   collisionRecordQuarantined: z.boolean().optional(),
+  // Set with collisionRecordQuarantined: whether this view's refreshes count
+  // the person's changed files as their edits, which the notice says.
+  takesLocalWrites: z.boolean().optional(),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
   refusedOps: z.number().int().nonnegative(),
@@ -5713,11 +5716,14 @@ const RefreshSharedViewSuccessResult = z.object({
 const RefreshSharedViewFailureResult = z.object({
   ok: z.literal(false),
   probed: z.literal(true).optional(),
-  errorKind: z.enum(["unauthorized", "transient"]).optional(),
+  errorKind: z.enum(["unauthorized", "transient", "collision-record"]).optional(),
   // Capture runs before the pull. A failed pull can still leave repaired
   // projection files that the renderer must repaint.
   changedPaths: z.number().int().nonnegative(),
   errorMessage: z.string(),
+  // For a collision-record refusal: what kept dohc from reading or setting
+  // aside the record, for Details.
+  errorCause: z.string().optional(),
 });
 
 export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
