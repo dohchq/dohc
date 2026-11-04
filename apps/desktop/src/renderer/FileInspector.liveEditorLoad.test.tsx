@@ -116,7 +116,14 @@ function stubResizeObservers() {
       }
     },
   );
-  return () =>
+  // The elements watched by the observers that watch the note's pane content.
+  const watched = () => {
+    const pane = screen.getByTestId("view-markdown");
+    return observers
+      .filter(({ targets }) => targets.some((target) => target.parentElement === pane))
+      .flatMap(({ targets }) => targets);
+  };
+  const resize = () =>
     act(() => {
       const pane = screen.getByTestId("view-markdown");
       for (const { callback, targets, observer } of observers) {
@@ -128,6 +135,7 @@ function stubResizeObservers() {
         );
       }
     });
+  return { resize, watched };
 }
 
 // Opens the note with the person scrolled partway down its read view, then
@@ -136,7 +144,7 @@ async function openScrolledWithShortEditor(layout: { tall: boolean }) {
   code.editor.release();
   code.collaboration.release();
   stubEditorGlobals();
-  const resize = stubResizeObservers();
+  const { resize, watched } = stubResizeObservers();
   const { bridge, bind } = heldOpenBridge();
   vi.stubGlobal("dohcDesktop", bridge);
   const restoreLayout = stubPaneLayout(() => layout.tall);
@@ -154,7 +162,7 @@ async function openScrolledWithShortEditor(layout: { tall: boolean }) {
   bind();
   await screen.findByTestId("markdown-editor");
   expect(screen.getByTestId("view-markdown").scrollTop).toBe(0);
-  return { resize, restoreLayout };
+  return { resize, watched, restoreLayout };
 }
 
 afterEach(async () => {
@@ -229,8 +237,13 @@ describe("a live note whose editor code loads after it opens", () => {
 
   it("moves the editor to where the person was reading once its content is tall enough", async () => {
     const layout = { tall: true };
-    const { resize, restoreLayout } = await openScrolledWithShortEditor(layout);
+    const { resize, watched, restoreLayout } = await openScrolledWithShortEditor(layout);
     try {
+      // The editor's wrapper fills the pane, so the watched content includes
+      // the editor's document, which grows with the note.
+      const editorDocument = screen.getByTestId("view-markdown").querySelector(".ProseMirror");
+      expect(editorDocument).not.toBeNull();
+      expect(watched()).toContain(editorDocument);
       // An image loads, and the content grows without a new node.
       layout.tall = true;
       resize();
