@@ -1,12 +1,12 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { test, expect, type Locator } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { installFakeAgentTools } from "./helpers/agentTools";
+import { installFakeAgentTools, openMyAgent } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import {
   cleanupDesktopWorkspace,
@@ -73,38 +73,6 @@ async function seedRunnerSettings(
     `${JSON.stringify(settings, null, 2)}\n`,
   );
   return command;
-}
-
-async function openMyAgent(page: Page): Promise<void> {
-  // Workspace open starts the UI-independent dispatch scan, which provisions
-  // the owner-only agent channel. Wait on that real main-process result before
-  // mounting Chats so its one-shot overview load cannot race provisioning.
-  await expect
-    .poll(() =>
-      page.evaluate(async () => {
-        const api = (window as unknown as {
-          dohcDesktop: {
-            getWorkspaceRegistry(): Promise<{
-              workspaces: Array<{ workspaceId: string }>;
-            }>;
-            listChatChannels(payload: { workspaceId: string }): Promise<{
-              channels: Array<{ kind: string }>;
-            }>;
-          };
-        }).dohcDesktop;
-        const registry = await api.getWorkspaceRegistry();
-        const workspace = registry.workspaces[0];
-        if (!workspace) return false;
-        const result = await api.listChatChannels({ workspaceId: workspace.workspaceId });
-        return result.channels.some((channel) => channel.kind === "agent");
-      }),
-    )
-    .toBe(true);
-
-  await page.getByTestId(activityPin("chats")).click();
-  await expect(page.getByTestId("chats-view")).toBeVisible();
-  await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
-  await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
 }
 
 test("picking the agent in a group's post says it runs when you send, and the offer leaves after the send", async () => {

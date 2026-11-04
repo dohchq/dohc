@@ -1,3 +1,5 @@
+import type { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
@@ -6,7 +8,10 @@ import { createTestScratch } from "../workspaces/testTemp";
 import {
   createChatRunnerProcess,
   readRunnerNodeAvailable,
+  RUNNER_KILL_GRACE_MS,
+  spawnOwnedRunner,
   tokenizeRunnerCommand,
+  type RunnerProcess,
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
 import type { AgentLaunchProfile } from "./agentToolCatalog";
@@ -30,7 +35,6 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
         calls.push({ command, options });
         return {
           pid: 4_100,
-          writeStdin: () => undefined,
           hasExited: () => false,
           onExit: () => undefined,
           onError: () => undefined,
@@ -338,7 +342,7 @@ describe("chat runner process", () => {
       codexConfigFiles: () => ({ requirements: [], config: [config] }),
       spawnRunner: (_command, args) => {
         started.push(args.join(" "));
-        return { pid: 4_100, writeStdin: () => undefined, hasExited: () => false, onExit: () => undefined, onError: () => undefined };
+        return { pid: 4_100, hasExited: () => false, onExit: () => undefined, onError: () => undefined };
       },
     }, () => undefined);
     for (const executable of ["codex.cmd", "codex.exe"]) {
@@ -357,5 +361,107 @@ describe("chat runner process", () => {
     expect(shim).not.toContain("o'brien");
     expect(direct).toContain(`'${plain}'='write'`);
     expect(direct).toContain(`${JSON.stringify(apostrophe)}='write'`);
+  });
+});
+
+describe("Windows run owner", () => {
+  const owner = {
+    root: "C:\\dohc\\resources\\agent-probe",
+    executable: "C:\\dohc\\resources\\agent-probe\\agentProbeOwner.exe",
+    relay: "C:\\dohc\\resources\\agent-probe\\agentProbeRelay.mjs",
+    node: "C:\\dohc\\resources\\app-compiler\\node.exe",
+  };
+
+  function fakeOwnerProcess() {
+    const stdin = { on: vi.fn(), write: vi.fn(), end: vi.fn(), destroy: vi.fn() };
+    stdin.on.mockReturnValue(stdin);
+    const child = Object.assign(new EventEmitter(), { pid: 77, exitCode: null, signalCode: null, stdin, kill: vi.fn() });
+    const spawnProcess = vi.fn(() => child);
+    return { child, stdin, spawnProcess: spawnProcess as unknown as typeof spawn, calls: spawnProcess.mock.calls as unknown[][] };
+  }
+
+  it("starts a run under the owner with its command, environment and prompt on stdin, and keeps stdin open", () => {
+    vi.stubEnv("SystemRoot", "C:\\Windows");
+    const { stdin, spawnProcess, calls } = fakeOwnerProcess();
+    const prompt = 'Plan day 2, "quoted"';
+    const options: RunnerSpawnOptions = {
+      cwd: "C:\\work", env: { PATH: "C:\\bin", OPENAI_API_KEY: "secret" }, detached: false,
+      stdio: ["pipe", 5, 5], windowsHide: true, windowsVerbatimArguments: true, input: prompt,
+    };
+    spawnOwnedRunner(owner, "C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", "codex.cmd"], options, spawnProcess);
+
+    expect(calls).toHaveLength(1);
+    const [executable, args, spawnOptions] = calls[0] as [string, string[], { cwd: string; env: NodeJS.ProcessEnv; stdio: unknown }];
+    expect(executable).toBe(owner.executable);
+    expect(args.slice(0, 2)).toEqual([owner.node, owner.relay]);
+    expect(args.join(" ")).not.toContain("Plan day 2");
+    expect(spawnOptions.cwd).toBe(owner.root);
+    expect(spawnOptions.stdio).toEqual(["pipe", 5, 5]);
+    expect(spawnOptions.env.SystemRoot).toBe("C:\\Windows");
+    expect(Object.keys(spawnOptions.env).every((name) => ["SystemRoot", "WINDIR", "TEMP", "TMP"].includes(name))).toBe(true);
+
+    expect(stdin.write).toHaveBeenCalledTimes(1);
+    const admission = stdin.write.mock.calls[0]![0] as Buffer;
+    expect(String(admission.byteLength)).toBe(args[2]);
+    expect(JSON.parse(admission.toString("utf8"))).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", "codex.cmd"], windowsVerbatimArguments: true,
+      cwd: "C:\\work", env: { PATH: "C:\\bin", OPENAI_API_KEY: "secret" }, input: prompt,
+    });
+    expect(stdin.end).not.toHaveBeenCalled();
+    expect(stdin.destroy).not.toHaveBeenCalled();
+  });
+
+  it("stops a run by ending the owner's input, and ends the owner only when forced", () => {
+    const { child, stdin, spawnProcess } = fakeOwnerProcess();
+    const run = spawnOwnedRunner(owner, "C:\\agent.exe", [], {
+      cwd: "C:\\work", env: {}, detached: false, stdio: ["pipe", 5, 5], windowsHide: true, input: "prompt",
+    }, spawnProcess);
+    run.stop?.("SIGTERM");
+    expect(stdin.destroy).toHaveBeenCalledTimes(1);
+    expect(child.kill).not.toHaveBeenCalled();
+    run.stop?.("SIGKILL");
+    expect(child.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a run whose input is too large for the owner", () => {
+    const { spawnProcess, calls } = fakeOwnerProcess();
+    expect(() => spawnOwnedRunner(owner, "C:\\agent.exe", [], {
+      cwd: "C:\\work", env: {}, detached: false, stdio: ["pipe", 5, 5], windowsHide: true, input: "x".repeat(16 * 1024 * 1024),
+    }, spawnProcess)).toThrow("This chat is too long to send to an agent.");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("signals a Windows run through its owner, never its process group", () => {
+    vi.useFakeTimers();
+    try {
+      const stop = vi.fn();
+      const killProcessGroup = vi.fn();
+      const runner = createChatRunnerProcess({
+        stateDir: () => "C:\\state", appRoot: () => "C:\\dohc", isPackaged: () => false, platform: "win32", killProcessGroup,
+      }, () => undefined);
+      const run: RunnerProcess = { pid: 4_100, hasExited: () => false, onExit: () => undefined, onError: () => undefined, stop };
+      runner.terminateWithEscalation(run, null);
+      expect(stop.mock.calls).toEqual([["SIGTERM"]]);
+      vi.advanceTimersByTime(RUNNER_KILL_GRACE_MS);
+      expect(stop.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
+      expect(killProcessGroup).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says to reinstall when the owner is missing, and starts nothing", async () => {
+    const root = await createTestScratch("dohc-chat-runner-owner-");
+    for (const agentOwner of [undefined, () => { throw new Error("Agent detection is missing agentProbeOwner.exe."); }]) {
+      const runner = createChatRunnerProcess({
+        stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, platform: "win32",
+        ...(agentOwner ? { agentOwner } : {}),
+      }, () => undefined);
+      const logPath = join(root, "logs", `run-${agentOwner ? "broken" : "none"}.log`);
+      expect(() => runner.spawnConfiguredRunner({
+        rootPath: root, runId: "run-1", logPath, command: `"${process.execPath}"`, prompt: "", assertMayStart: () => undefined,
+      })).toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+      expect(readFileSync(logPath, "utf8")).toContain("Reinstall dohc");
+    }
   });
 });
