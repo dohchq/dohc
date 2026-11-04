@@ -228,7 +228,8 @@ export function WorkspaceManager(props: {
   // stays as it was, so the row is still there to act on. Each failure has an
   // identity, so a repeat replaces its row and a later success takes it back.
   const { reportError, clearIdentity } = connectionNotices;
-  const reportRowError = (action: RowAction, workspaceId: string, fallback: string, cause: unknown, retry: () => void) =>
+  // A retry that returns false started nothing, so its failure stays listed.
+  const reportRowError = (action: RowAction, workspaceId: string, fallback: string, cause: unknown, retry: () => void | false) =>
     reportError(fallback, cause, retry, undefined, rowIdentity(action, workspaceId));
   // The removed row is gone, so none of its failures has anything to retry.
   const clearRow = (workspaceId: string) => {
@@ -238,6 +239,8 @@ export function WorkspaceManager(props: {
   // something the removal has to ask about.
   const workspacesRef = useRef(props.workspaces);
   workspacesRef.current = props.workspaces;
+  const removingRef = useRef(removing);
+  removingRef.current = removing;
 
   async function open(workspace: Workspace) {
     try {
@@ -277,17 +280,26 @@ export function WorkspaceManager(props: {
     } catch (cause) {
       reportRowError("remove", workspaceId, REMOVE_FAILED, cause, () => {
         const current = workspacesRef.current.find((row) => row.workspaceId === workspaceId);
-        if (current) requestRemoval(current);
-        else clearIdentity(rowIdentity("remove", workspaceId));
+        if (!current) {
+          clearIdentity(rowIdentity("remove", workspaceId));
+          return undefined;
+        }
+        // Blocked by another row's open dialog: false keeps this failure listed.
+        return requestRemoval(current) ? undefined : false;
       });
     }
   }
 
   // A row that holds more than its place asks first and says what goes. An
-  // open dialog stays as it is.
-  function requestRemoval(workspace: Workspace) {
-    if (removalFacts(workspace).length === 0) void removeFromList(workspace);
-    else setRemoving((shown) => shown ?? { workspace, busy: false, error: null });
+  // open dialog stays as it is, and the request says it started nothing.
+  function requestRemoval(workspace: Workspace): boolean {
+    if (removalFacts(workspace).length === 0) {
+      void removeFromList(workspace);
+      return true;
+    }
+    if (removingRef.current) return false;
+    setRemoving((shown) => shown ?? { workspace, busy: false, error: null });
+    return true;
   }
 
   async function confirmRemoval(workspace: Workspace) {

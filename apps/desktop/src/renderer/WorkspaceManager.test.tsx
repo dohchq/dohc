@@ -960,6 +960,35 @@ describe("workspace manager with registered workspaces", () => {
     expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps another row's dialog and the retried failure when Try again cannot ask yet", async () => {
+    const user = userEvent.setup();
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    const view = render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await screen.findByTestId("workspace-shell-error");
+
+    // Both rows now hold sync, and personal's dialog is open.
+    const synced = KNOWN.map((row) => ({ ...row, sync: "on" as const }));
+    view.rerender(
+      <WorkspaceManager workspaces={synced} current={null} onForgot={async () => synced} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(screen.getByRole("button", { name: "More for personal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    const dialog = screen.getByTestId("workspace-remove-confirm");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Remove personal from this list?");
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(within(screen.getByTestId("workspace-remove-confirm")).getByRole("heading").textContent)
+      .toBe("Remove personal from this list?");
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+      "dohc could not remove this workspace from the list.",
+    );
+    expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it("does nothing on Try again when the row has left the list", async () => {
     const user = userEvent.setup();
     bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full"));
