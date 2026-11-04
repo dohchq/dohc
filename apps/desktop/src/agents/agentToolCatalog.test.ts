@@ -40,24 +40,31 @@ describe("agent launch profiles", () => {
   it("puts the person's own flags once, after the subcommand and before dohc's", () => {
     const run = ["--config", "mcp_servers.dohc.required=true"];
     expect(agentProfileArguments({ tool: "codex", executable: "/bin/codex", arguments: ["--model", "o3"] }, run)).toEqual(
-      ["exec", "--model", "o3", "--config", "approval_policy=never", ...run, "--skip-git-repo-check", "--ephemeral", "-"],
+      ["exec", "--model", "o3", "--config=approval_policy=never", "--config", "approval_policy=never", ...run, "--skip-git-repo-check", "--ephemeral", "-"],
     );
     const claude = agentProfileArguments({ tool: "claude", executable: "/bin/claude", arguments: ["--model", "opus"] }, ["--mcp-config", "/x.json"]);
-    expect(claude.slice(0, 4)).toEqual(["-p", "--model", "opus", "--permission-prompts"]);
+    expect(claude.slice(0, 5)).toEqual(["-p", "--model", "opus", "--setting-sources=user", "--permission-prompts"]);
     expect(claude.filter((arg) => arg === "opus")).toHaveLength(1);
     expect(claude.indexOf("--model")).toBeLessThan(claude.indexOf("--mcp-config"));
+  });
+  it("lets a last flag that needs a value take only a repeat of what dohc sets later", () => {
+    const codex = agentProfileArguments({ tool: "codex", executable: "/bin/codex", arguments: ["--model"] });
+    expect(codex.slice(0, 5)).toEqual(["exec", "--model", "--config=approval_policy=never", "--config", "approval_policy=never"]);
+    const claude = agentProfileArguments({ tool: "claude", executable: "/bin/claude", arguments: ["--settings"] });
+    expect(claude.slice(0, 3)).toEqual(["-p", "--settings", "--setting-sources=user"]);
+    expect(claude.slice(3, 8)).toEqual(["--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user"]);
   });
   it("leaves the person's own flags out of a reply-only run, and keeps them in the owner's", () => {
     const run = ["--config", "mcp_servers.dohc.required=true"];
     const codexFlags = ["--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "--enable", "shell_tool"];
     const codex = { tool: "codex", executable: "/bin/codex", arguments: codexFlags } as const;
     expect(agentProfileArguments(codex, run, true)).toEqual(agentProfileArguments({ tool: "codex", executable: "/bin/codex" }, run, true));
-    expect(agentProfileArguments(codex, run)).toEqual(["exec", ...codexFlags, ...agentProfileArguments({ tool: "codex", executable: "/bin/codex" }, run).slice(1)]);
+    expect(agentProfileArguments(codex, run)).toEqual(["exec", ...codexFlags, "--config=approval_policy=never", ...agentProfileArguments({ tool: "codex", executable: "/bin/codex" }, run).slice(1)]);
     const claudeFlags = ["--allowedTools", "Bash", "--model", "opus"];
     const claude = { tool: "claude", executable: "/bin/claude", arguments: claudeFlags } as const;
     const mcp = ["--mcp-config", "/x.json"];
     expect(agentProfileArguments(claude, mcp, true)).toEqual(agentProfileArguments({ tool: "claude", executable: "/bin/claude" }, mcp, true));
-    expect(agentProfileArguments(claude, mcp)).toEqual(["-p", ...claudeFlags, ...agentProfileArguments({ tool: "claude", executable: "/bin/claude" }, mcp).slice(1)]);
+    expect(agentProfileArguments(claude, mcp)).toEqual(["-p", ...claudeFlags, "--setting-sources=user", ...agentProfileArguments({ tool: "claude", executable: "/bin/claude" }, mcp).slice(1)]);
   });
   it("starts a chosen tool over a typed command, and needs one of them", () => {
     const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
@@ -70,9 +77,20 @@ describe("agent launch profiles", () => {
   it("rejects unsupported tools, relative executable paths and flags with line breaks", () => {
     for (const profile of [
       { tool: "cursor", executable: "/bin/agent" }, { tool: "codex", executable: "./codex" }, { tool: "claude", executable: "C:\\claude\n.exe" },
-      { tool: "claude", executable: "/bin/claude", arguments: ["--model\nopus"] }, { tool: "claude", executable: "/bin/claude", arguments: ["x".repeat(4097)] },
+      { tool: "claude", executable: "/bin/claude", arguments: ["--model\nopus"] }, { tool: "claude", executable: "/bin/claude", arguments: [`--${"x".repeat(4095)}`] },
     ]) {
       expect(AgentLaunchProfile.safeParse(profile).success).toBe(false);
+    }
+  });
+  it("rejects own flags that don't start with a flag or that hold a bare --", () => {
+    for (const [tool, flags] of [
+      ["codex", ["resume", "--last"]], ["codex", ["-"]], ["claude", ["--"]], ["claude", ["--model", "opus", "--", "hi"]], ["codex", ["--model", "o3", "--"]],
+    ] as const) {
+      expect(AgentLaunchProfile.safeParse({ tool, executable: `/bin/${tool}`, arguments: flags }).success).toBe(false);
+      expect(launchFromCommand(`/bin/${tool} ${flags.join(" ")}`, { tool, executable: `/bin/${tool}` })).toEqual({ command: `/bin/${tool} ${flags.join(" ")}` });
+    }
+    for (const flags of [["-c", "x=1"], ["--model", "-"], ["--full-auto"]]) {
+      expect(AgentLaunchProfile.safeParse({ tool: "codex", executable: "/bin/codex", arguments: flags }).success).toBe(true);
     }
   });
   it("preserves the raw command and round-trips spaces, quotes and backslashes", () => {

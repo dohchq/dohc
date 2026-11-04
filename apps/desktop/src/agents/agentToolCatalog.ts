@@ -6,9 +6,12 @@ export const AgentLaunchProfile = z.object({
     (value) => /^(?:\/|[a-z]:[\\/]|\\\\)/iu.test(value) && !/[\r\n\0]/u.test(value),
     "Choose an absolute executable path.",
   ),
-  // The person's own flags, at most as long as a typed command.
+  // The person's own flags, at most as long as a typed command. They start
+  // with a flag, so none is read as a subcommand, and a bare -- would turn
+  // dohc's flags after them into prompt text.
   arguments: z.array(z.string().refine((value) => !/[\r\n\0]/u.test(value)))
-    .max(2048).refine((values) => values.join(" ").length <= 4096).optional(),
+    .max(2048).refine((values) => values.join(" ").length <= 4096)
+    .refine((values) => values.length === 0 || (/^-[^-]|^--./u.test(values[0]!) && !values.includes("--"))).optional(),
 }).strict();
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
 
@@ -99,6 +102,9 @@ export const AGENT_TOOLS = [
 // takes no --ignore-rules, so it stays out of runArguments.
 export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = [], readOnly = false): string[] {
   const own = readOnly ? [] : profile.arguments ?? [];
+  // If the person's last flag needs a value, it takes the next argument. That
+  // argument repeats one dohc sets again later, so taking it changes nothing.
+  const repeat = own.length === 0 ? [] : [profile.tool === "claude" ? "--setting-sources=user" : "--config=approval_policy=never"];
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   // mcp__dohc allows every tool the run's dohc server offers.
@@ -108,8 +114,8 @@ export function agentProfileArguments(profile: AgentLaunchProfile, runArguments:
     ? ["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
     : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
   return profile.tool === "claude"
-    ? ["-p", ...own, "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, ...claudeTools]
-    : ["exec", ...own, "--config", "approval_policy=never", ...runArguments, ...(readOnly ? ["--ignore-rules"] : []), "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", ...own, ...repeat, "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...runArguments, ...claudeTools]
+    : ["exec", ...own, ...repeat, "--config", "approval_policy=never", ...runArguments, ...(readOnly ? ["--ignore-rules"] : []), "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 // Double quotes group, and a backslash escapes only a double quote or
