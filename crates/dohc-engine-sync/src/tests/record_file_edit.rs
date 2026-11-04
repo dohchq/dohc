@@ -1553,7 +1553,7 @@ fn a_receives_from_b(a: &mut EngineStore, b: &EngineStore, after_seq: i64) {
 /// a redelivery too. B's lineage is its own, so A takes the resolution
 /// without holding it.
 #[test]
-fn saves_that_build_on_a_resolved_record_conflict_come_in() {
+fn saves_that_build_on_an_applied_incoming_file_of_an_unclaimed_record_come_in() {
     let (planned, flown, landed, recovered_text) =
         (md(PLANNED), md(FLOWN), md(LANDED), md(RECOVERED));
     let (_a_scratch, mut a) = device("device-a");
