@@ -16,7 +16,10 @@ function loadAnalytics(): Promise<PostHog> {
       api_host: "/ingest",
       ui_host: "https://us.posthog.com",
       // No cookies, no storage, and no identifier kept in the browser.
+      // Memory persistence stops the SDK probing for cookie support when
+      // the browser refuses storage.
       cookieless_mode: "always",
+      persistence: "memory",
       // Only the site's own pages, so file names a visitor types in the demo
       // stay in the browser. PostHog drops a click when any element from the
       // target up, through shadow roots, matches the ignore list. The allow
