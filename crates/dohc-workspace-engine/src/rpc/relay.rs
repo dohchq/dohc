@@ -4277,11 +4277,13 @@ mod tests {
         let ran = poll_once(update.as_mut()).await;
         drop(hold);
         relay.release();
-        let page_one = page_one.await.expect("join").expect("page one lands");
+        // Fetch leaves local updates free to take the gate. Poll the admitted
+        // update while apply waits for it to release that gate.
+        let (page_one, ()) = tokio::join!(page_one, async {
+            if !ran { update.as_mut().await; }
+        });
+        let page_one = page_one.expect("join").expect("page one lands");
         assert_eq!(page_one["hasMore"], json!(true));
-        if !ran {
-            update.as_mut().await;
-        }
         drop(update);
         assert_eq!(f.edges(), 1, "the update did not see page one alone");
         assert!(f.owed(), "the update waits for the terminal page");
@@ -4349,9 +4351,19 @@ mod tests {
     async fn an_update_leaves_its_work_to_a_pull_that_registered_while_it_waited() {
         let ctx = RequestContext::unbounded();
         let (relay, f) = half_pull_fixture("owed-checked-before-pull", false).await;
+        relay.release();
+        let fetched = f.service.sync_fetch_pull(&ctx, Some(f.handle.clone()),
+            json!({"workspaceId": f.workspace_id})).await.expect("fetch before gate admission");
         // The gate serves its waiters in order: the pull, then the update.
         let gate = Arc::clone(&f.open.capture_apply_gate).lock_owned().await;
-        let mut page_one = Box::pin(pull(&f));
+        let hold = f.service.hold_actor(&f.handle).await;
+        let service = Arc::clone(&f.service);
+        let handle = f.handle.clone();
+        let workspace_id = f.workspace_id;
+        let mut page_one = Box::pin(async move {
+            service.sync_apply_pull(&RequestContext::unbounded(), Some(handle),
+                json!({"workspaceId": workspace_id, "pageToken": fetched["pageToken"]})).await
+        });
         assert!(!poll_once(page_one.as_mut()).await, "the pull waits");
         let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
         assert!(
@@ -4364,11 +4376,11 @@ mod tests {
         assert_eq!(
             f.open.pulls_in_flight.load(Ordering::SeqCst),
             1,
-            "the pull registered and waits for its first page"
+            "the apply registered and waits for the actor"
         );
         assert!(f.owed(), "the update leaves its work owed");
         assert_eq!(f.edges(), 0, "and the Collections alone");
-        relay.release();
+        drop(hold);
         let page_one = page_one.await.expect("join").expect("page one lands");
         assert_eq!(page_one["hasMore"], json!(true));
         finish_half_pull(f, page_one).await;

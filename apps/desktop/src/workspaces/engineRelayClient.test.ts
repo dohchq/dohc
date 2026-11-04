@@ -733,7 +733,7 @@ describe("EngineRelayClient", () => {
 
     const materialize = vi.fn(async () => undefined);
     await expect(client.pull(async (apply) => apply(materialize))).rejects.toThrow(
-      /sync\.pull result:[\s\S]*changedPaths[\s\S]*versionId/,
+      /sync\.applyPull result:[\s\S]*changedPaths[\s\S]*versionId/,
     );
     expect(materialize).not.toHaveBeenCalled();
     expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);

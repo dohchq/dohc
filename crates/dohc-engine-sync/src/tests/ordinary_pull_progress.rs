@@ -144,15 +144,13 @@ fn prepared_pull_restart_replays_before_apply_during_apply_and_before_cursor_com
         assert_eq!(changed_paths.len(), 2, "replay keeps every unprojected path");
         assert_eq!(prepared_counts(&engine), (2, 2));
         assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
-        let jobs = dohc_engine_files::run_pending_jobs(&mut engine, scratch.path(), &MaterializeOptions {
-            holds: None, policy: dohc_engine_files::DurabilityPolicy::per_os(),
-            replacer: &dohc_engine_files::StdReplacer, backoff: &dohc_engine_files::NoBackoff,
-            now_ms: 3_000, faults: &NoFaults,
-        }).unwrap();
-        assert!(!jobs.is_empty());
-        assert!(jobs.iter().all(|job| matches!(job.outcome, dohc_engine_files::JobOutcome::Completed)));
+        // Ordinary import returns placement paths; the RPC layer projects them.
         for seq in 0..2 {
-            assert_eq!(std::fs::read_to_string(scratch.path().join(format!("prepared-{seq}.txt"))).unwrap(), format!("remote {seq}\n"));
+            let path = format!("prepared-{seq}.txt");
+            assert!(changed_paths.iter().any(|change| change.version_id == "main" && change.path == path));
+            let head = VersionedTextStore::new(&mut engine).read_text("ws", "main", &path).unwrap().unwrap();
+            assert_eq!(head.text, format!("remote {seq}\n"));
+            assert!(!scratch.path().join(path).exists());
         }
         assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
         commit(&offline, &mut engine, &cursor);

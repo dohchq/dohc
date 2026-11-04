@@ -125,6 +125,10 @@ interface LiveDaemonCapture {
   close(step?: CloseStep): Promise<void>;
 }
 
+function pullCaptured(relay: EngineRelayWorkspaceClient, capture: WorkspaceEngineCapture) {
+  return relay.pull(apply => capture.runRelaySync(apply));
+}
+
 async function pushUntilDrained(relay: EngineRelayWorkspaceClient) {
   let result = await relay.push();
   let pushed = result.pushed;
@@ -590,7 +594,7 @@ it.skipIf(engine.missing)(
       });
       expect(JSON.stringify(relayServer.diagnostics())).not.toContain("invalid-schema");
       capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
-      await relay.pull(apply => capture.runRelaySync(apply));
+      await pullCaptured(relay, capture);
       await relay.push();
       const assertRecipientState = async () => {
         const markdown = await readFile(join(rootB, path), "utf8");
@@ -1515,7 +1519,7 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
         await pullAndExpect(peer, rootB, record.path, await readFile(join(rootA, record.path)), "text");
         expect((await peer.capture.listMoments({ limit: 100 })).moments.some(moment => moment.path === record.path)).toBe(true);
-        const echo = await relay.pull(apply => capture.runRelaySync(apply));
+        const echo = await pullCaptured(relay, capture);
         expect(echo.sharingDeclined).toEqual([]);
         expect(await owner.sessions.run(owner.workspace, ({ client, workspace }) =>
           new WorkspaceDaemonRequester(client).request("sync.refusalNotices", { workspaceId }, { workspace }),
@@ -2001,8 +2005,8 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
 
       // Both editors remain live. Each pull may persist the foreign base, but
       // it must not arbitrate behind the editor or change either projection.
-      await daemonA!.relay.pull(apply => daemonA.capture.runRelaySync(apply));
-      await daemonB!.relay.pull(apply => daemonB.capture.runRelaySync(apply));
+      await pullCaptured(daemonA.relay, daemonA.capture);
+      await pullCaptured(daemonB.relay, daemonB.capture);
       expect(await readFile(join(rootA, path), "utf8")).toBe(textA);
       expect(await readFile(join(rootB, path), "utf8")).toBe(textB);
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
@@ -2035,7 +2039,7 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
       expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       await pullAndExpect(daemonA, rootA, path, chosen);
       // Advance B's cursor past its own resolution before reopening editors.
-      await daemonB!.relay.pull(apply => daemonB.capture.runRelaySync(apply));
+      await pullCaptured(daemonB.relay, daemonB.capture);
 
       // Reopen both editors to inspect the daemon's chosen CRDT lineage,
       // then prove it accepts edits from either machine without another conflict.
@@ -2053,11 +2057,11 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
         );
         await typeAtEnd(editorA, "continued on A\n");
         expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
-        await daemonB!.relay.pull(apply => daemonB.capture.runRelaySync(apply));
+        await pullCaptured(daemonB.relay, daemonB.capture);
         await vi.waitFor(() => expect(shown(editorB)).toBe(afterA), arrival);
         await typeAtEnd(editorB, "continued on B\n");
         expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
-        await daemonA!.relay.pull(apply => daemonA.capture.runRelaySync(apply));
+        await pullCaptured(daemonA.relay, daemonA.capture);
         await vi.waitFor(() => expect(shown(editorA)).toBe(finalText), arrival);
         expect(shown(editorB)).toBe(finalText);
       } finally {
@@ -2078,7 +2082,7 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
         rootPath: rootC,
         relay: { baseUrl: relay.baseUrl, token },
       });
-      await daemonC!.relay.pull(apply => daemonC.capture.runRelaySync(apply));
+      await pullCaptured(daemonC.relay, daemonC.capture);
       expect(await readFile(join(rootC, path), "utf8")).toBe(finalText);
       expect(await daemonC.capture.countOpenConflicts()).toBe(0);
       expect(await readdir(join(rootC, "notes"))).toEqual(["shared.txt"]);
@@ -2386,7 +2390,7 @@ it.skipIf(engine.missing)(
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
 
-      await daemonA!.relay.pull(apply => daemonA.capture.runRelaySync(apply));
+      await pullCaptured(daemonA.relay, daemonA.capture);
       const conflictPage = await daemonA.capture.listOpenConflictsPage();
       const conflict = conflictPage.conflicts.find((entry) => entry.path === path);
       expect(conflict).toBeDefined();
@@ -2401,7 +2405,7 @@ it.skipIf(engine.missing)(
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
 
-      await daemonB!.relay.pull(apply => daemonB.capture.runRelaySync(apply));
+      await pullCaptured(daemonB.relay, daemonB.capture);
       expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
 
@@ -2770,12 +2774,12 @@ it.skipIf(engine.missing).each([false, true])(
       try {
         if (peerTypedFirst) await typeAtEnd(peerEditor, "peer before artifact\n");
         await sourceSession.close({ settle: false });
-        await daemonA!.relay.pull(apply => daemonA.capture.runRelaySync(apply));
+        await pullCaptured(daemonA.relay, daemonA.capture);
         const sourceEditor = await openEditor(daemonA, path);
         try {
           await typeAtEnd(sourceEditor, "origin after artifact\n");
           expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
-          await daemonB!.relay.pull(apply => daemonB.capture.runRelaySync(apply));
+          await pullCaptured(daemonB.relay, daemonB.capture);
           await vi.waitFor(() => expect(shown(peerEditor)).toContain("origin after artifact\n"), {
             timeout: REAL_DAEMON_DEADLINE_MS,
           });
@@ -2789,7 +2793,7 @@ it.skipIf(engine.missing).each([false, true])(
       } finally {
         await peerEditor.session.close();
       }
-      await daemonB!.relay.pull(apply => daemonB.capture.runRelaySync(apply));
+      await pullCaptured(daemonB.relay, daemonB.capture);
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
       expect(await readFile(join(rootB, path), "utf8")).toContain("peer after artifact\n");
     } finally {
@@ -3112,7 +3116,7 @@ it.skipIf(engine.missing)(
         rootPath: rootB,
         relay: relayConnection,
       });
-      await daemonB!.relay.pull(apply => daemonB.capture.runRelaySync(apply));
+      await pullCaptured(daemonB.relay, daemonB.capture);
       const editorB = await openEditor(daemonB, path);
       editors.push(editorB);
       expect(shown(editorB)).toBe("Starting together.\n");
@@ -3213,7 +3217,7 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
     await hosted.settleNow();
     await pushUntilDrained(relay);
     peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection, holdEditorResync: true });
-    await peer!.relay.pull(apply => peer.capture.runRelaySync(apply));
+    await pullCaptured(peer.relay, peer.capture);
     const lease = await peer.capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
     expect(lease.objectId).toBe(binding.objectId);
     expect(lease.lineageClaimId).toBe(binding.lineageClaimId);
@@ -3232,7 +3236,7 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
         });
         expect(applied.result).toMatchObject({ status: "applied" });
       }
-      await relay.pull(apply => capture.runRelaySync(apply));
+      await pullCaptured(relay, capture);
       await pushUntilDrained(relay);
       await peer.relay.pull(async (apply) => apply(async () => undefined));
       const parked = new DatabaseSync(join(rootB, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });

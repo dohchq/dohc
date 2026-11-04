@@ -2400,13 +2400,13 @@ function engineForWorkspace(
       push: () => daemonRelay.push(),
       // Each page's files, once written, go to the Collection automation
       // executor: a pull need not leave a watcher batch.
-      pull: async (materializePage) => {
-        try { return await daemonRelay.pull(async (changed) => {
+      pull: async (runBatch) => {
+        try { return await daemonRelay.pull(apply => runBatch(materializePage => apply(async (changed) => {
           await materializePage(changed);
           await withWorkspaceAttachmentAsync(workspace, lease => workspaceActivity.handlePulledPaths(
             lease.state.activity, changed.map(change => change.path))).catch(error =>
               console.error(`[desktop] reload pulled file consumers for ${workspace.workspaceId}:`, error));
-        }); } finally {
+        }))); } finally {
           withWorkspaceAttachment(workspace, lease => workspaceActivity.pullFinished(lease.state.activity));
         }
       },
