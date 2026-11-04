@@ -2459,7 +2459,8 @@ impl ActorHandle {
                                 ..
                             })
                         );
-                        if !is_fetch && !is_push && !unchanged_commit && (!is_pull || pull_changed) {
+                        if !is_fetch && !is_push && !unchanged_commit && (!is_pull || pull_changed)
+                        {
                             cache.clear();
                         }
                         outcome
