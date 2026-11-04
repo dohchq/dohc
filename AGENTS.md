@@ -1,10 +1,10 @@
 # dohc
 
-dohc is a local-first workspace where people and their agents build on files, documents, data, chat, and apps.
-It provides sync, sharing, permissions, and history so each workflow does not have to recreate them.
+dohc is a local-first workspace where people and their agents build, share, and manage small apps alongside their files, documents, data, and chat.
+It provides sync, sharing, permissions, and history so each app and workflow does not have to recreate them.
 Users own their work and choose their tools, agents, and workflows.
 
-We are building the MVP and have not launched with users.
+dohc is an early alpha released as nightly builds. Nobody outside the team uses it yet.
 
 ## How to use this document
 
@@ -34,6 +34,20 @@ Separate product choices from demonstrated advantages. Support claims of superio
 
 A workspace must be useful to one person on one device. Team collaboration is still core: adding another person or agent should extend the same work, not require exports, copied context, or a new system.
 
+### The job
+
+An agent can build a small app really quickly. The hard part comes after. Each app needs these things:
+
+- a place for its data;
+- an interface people already know;
+- a safe way for other people to use it;
+- a way to work on it together;
+- a record of what each agent made and changed.
+
+Developers can assemble these from separate tools. Most people cannot. dohc provides them in one workspace.
+Prefer work that makes one of these easier.
+Documents, Collections, and chat must stay useful without an app.
+
 ### Product commitments
 
 1. **Local first and user owned.** Creating, inspecting, and editing local work must not require an account or network connection. Sync and sharing add capability. They do not make local work a cache of a remote product. Keep the underlying files and data inspectable or exportable so the user can recover their work without dohc. Self-hosting must be meaningful; dohc Drive should win through the managed network and operational experience, not a crippled local product.
@@ -52,7 +66,7 @@ A workspace must be useful to one person on one device. Team collaboration is st
 
 8. **Rigid substrate, flexible workflow.** Be strict about ownership, authentication, permissions, sync, history, provenance, links, and isolation. Let users and agents decide their folders, tools, rituals, agents, and domain workflows. Apps and Collection automations extend the work; their source and definitions live in the workspace, where any agent can read and change them. People customize dohc through a settings file and pinned apps. They do not rewrite built-in parts, and updates keep their settings and apps. The core must already provide the reliable substrate.
 
-Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
+Do not turn dohc into an AI wrapper, company brain, Notion clone, dashboard generator, an app builder whose apps live apart from the work, chat overlay, prescribed workflow, template marketplace, or productivity theater. Reusable examples and templates are useful; making users conform to them is not the product.
 
 ### Design for work nobody has read
 

@@ -40,4 +40,4 @@ The project's [security requirements](AGENTS.md#product-invariants) describe the
 
 ## Supported versions
 
-dohc is pre-launch. Only the latest release receives security fixes. If you run dohc services yourself, keep them on the latest release.
+dohc is an early alpha. Only the latest release receives security fixes. If you run dohc services yourself, keep them on the latest release.

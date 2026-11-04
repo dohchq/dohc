@@ -65,7 +65,7 @@ reviews:
   path_instructions:
     - path: "**/*"
       instructions: |
-        Review dohc as a pre-launch local-first workspace. Focus on correctness,
+        Review dohc as an early alpha local-first workspace. Focus on correctness,
         data durability, workspace isolation, authorization, review gates, and
         maintainability. Avoid style-only comments.
     - path: "crates/**"
