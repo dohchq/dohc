@@ -64,9 +64,9 @@ export async function forwardAppBackend(input: {
       input.signal.throwIfAborted();
       return Response.json(refusal, { status: 409, headers: responseHeaders });
     }
-    if (relay.status !== 200 || relay.redirected || relay.headers.has("location")) return input.capability
+    if (relay.status !== 200 || relay.redirected || relay.headers.has("location")) return input.capability || relay.status === 410
       ? await relayLinkRefusal(relay, input.signal)
-      : error(relay.status === 401 || relay.status === 403 ? 404 : [400, 404, 409, 410, 413, 429].includes(relay.status) ? relay.status : 503);
+      : error(relay.status === 401 || relay.status === 403 ? 404 : [400, 404, 409, 413, 429].includes(relay.status) ? relay.status : 503);
     const value = await readBoundedJson(relay, action === "file" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : APP_BACKEND_RESULT_BYTES, input.signal);
     if (!record(value)) return error(503);
     let result: unknown;

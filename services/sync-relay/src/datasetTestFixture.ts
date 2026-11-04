@@ -53,8 +53,8 @@ export function fixture() {
     blobs: [{sha256: sha(bytes), bytes}]});
   return {get storage() {return storage;}, publicationId: publication.publicationId,
     restart() {storage.close(); storage = openSyncRelayStorage(path) as StorageContext;},
-    link(id: string): AppBackendAuth {
-      storage.mintLinkSession({session: {sessionId: `session-${id}`, capabilityHash: `capability-${id}`, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs: 1000}});
+    link(id: string, expiresAtMs = 1000): AppBackendAuth {
+      storage.mintLinkSession({session: {sessionId: `session-${id}`, capabilityHash: `capability-${id}`, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs}});
       return {kind: "link", capabilityHash: `capability-${id}`, profileTokenHash: `profile-${id}`};
     },
   };

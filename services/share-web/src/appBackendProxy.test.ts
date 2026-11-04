@@ -22,7 +22,8 @@ it("forwards a deleted Collection's refusal to link and named apps", async () =>
   const body = linkRefusalBody("app_collection_missing");
   const link = await forward(invoke, async () => Response.json(body, {status: 410}));
   expect(link.status).toBe(410); expect(await link.json()).toEqual(body);
-  expect((await forward(invoke, async () => Response.json(body, {status: 410}), "application/json", undefined, false)).status).toBe(410);
+  const named = await forward(invoke, async () => Response.json(body, {status: 410}), "application/json", undefined, false);
+  expect(named.status).toBe(410); expect(await named.json()).toEqual(body);
 });
 
 function forward(body: unknown, fetchRelay: (request: Request) => Promise<Response>, contentType = "application/json", signal = new AbortController().signal, link = true) {

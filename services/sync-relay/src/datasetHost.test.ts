@@ -72,7 +72,8 @@ async function fixture(startupExclusive = false, prepared = { revision, schemaSq
     host.bindPublication(owner, {...scope, publicationId: result.publicationId});
     return result.publicationId;
   }
-  return {...base, get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
+  // These tests move the clock by minutes, so their link sessions outlast it.
+  return {...base, link: (id: string) => base.link(id, Number.MAX_SAFE_INTEGER), get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
     async reopen() {await host.close(); host = await create();}, advance(ms: number) {now += ms;}};
 }
 
