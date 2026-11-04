@@ -39,7 +39,7 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
 export function createWorkspaceForget<Workspace extends {workspaceId: string; rootPath: string}>(dependencies: {
   currentBinding(workspaceId: string): WorkspaceAuthorityBinding<Workspace>;
   removePhysicalWorkspace: ReturnType<typeof createPhysicalWorkspaceRemoval<Workspace>>;
-  trust: Pick<WorkspaceTrust, "restrict" | "isRevoked">;
+  trust: Pick<WorkspaceTrust, "restrict">;
   clearNotices(workspaceId: string): void;
   notifyRenderer(): void;
 }) {
@@ -48,11 +48,11 @@ export function createWorkspaceForget<Workspace extends {workspaceId: string; ro
     // A forgotten workspace opened again is an existing folder: it starts in
     // Restricted Mode. The grant goes once the person agrees and before the
     // workspace closes, so a failed write leaves the workspace listed, not
-    // forgotten with a grant that returns. Going back keeps the grant. Trust
-    // is checked again once the workspace has closed.
+    // forgotten with a grant that returns. Going back keeps the grant. Forget
+    // restricts again once the workspace has closed, before its row goes.
     const removed = await dependencies.removePhysicalWorkspace(
       dependencies.currentBinding(workspaceId),
-      async () => { if (!dependencies.trust.isRevoked(workspaceId)) await restrict(); },
+      restrict,
       restrict,
     );
     if (!removed) return;

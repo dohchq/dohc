@@ -139,8 +139,9 @@ it("restricts a forgotten workspace after its typing question and while it is st
   expect(h.notifyRenderer).not.toHaveBeenCalled();
 
   await h.forget("workspace");
-  expect(h.restrict).toHaveBeenCalledTimes(2);
+  expect(h.restrict).toHaveBeenCalledTimes(3);
   expect(h.restrict.mock.invocationCallOrder[1]).toBeLessThan(h.removeWorkspace.mock.invocationCallOrder[0]!);
+  expect(h.restrict.mock.invocationCallOrder[2]).toBeLessThan(h.removeWorkspace.mock.invocationCallOrder[0]!);
   expect(h.current()).toBeNull();
   expect(h.grants()).toEqual([]);
   expect(h.clearNotices).toHaveBeenCalledExactlyOnceWith("workspace");
@@ -170,6 +171,30 @@ it("leaves no grant behind when a Trust is given while Forget runs", async () =>
   });
   await h.forget("workspace");
   expect(await late).toBe(true);
+  expect(h.grants()).toEqual([]);
+  expect(h.current()).toBeNull();
+});
+
+it("leaves no grant behind when another window's Restrict fails while Forget runs", async () => {
+  const h = harness(true, vi.fn(async () => true));
+  await h.trustIt();
+  const error = new Error("trust file is busy");
+  let late: Promise<boolean> | undefined;
+  let restricted: Promise<unknown> | undefined;
+  h.writeText
+    .mockImplementationOnce(async (file, text) => {
+      late = h.owner.withAuthority("workspace", () => h.trustIt());
+      h.files.set(file, text);
+    })
+    .mockImplementationOnce(async (file, text) => {
+      // Another window restricts while that Trust writes, and its own write fails.
+      restricted = h.trust.restrict("workspace").catch((failure: unknown) => failure);
+      h.files.set(file, text);
+    })
+    .mockImplementationOnce(async () => { throw error; });
+  await h.forget("workspace");
+  expect(await late).toBe(false);
+  expect(await restricted).toBe(error);
   expect(h.grants()).toEqual([]);
   expect(h.current()).toBeNull();
 });
