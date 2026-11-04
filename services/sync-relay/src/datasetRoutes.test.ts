@@ -452,7 +452,7 @@ it("refuses a missing Collection's app calls with the same words for people and 
   f.advance(120_000);
   const refused = await f.named("invoke", submit("second"));
   expect(refused.status).toBe(410);
-  expect(await refused.json()).toEqual({ok: false, error: "This app can't find its data. Ask the person who shared this link.", code: "app_collection_missing"});
+  expect(await refused.json()).toEqual({ok: false, error: "This app can't find its data. Ask the person who shared it with you.", code: "app_collection_missing"});
 });
 
 it("uploads and atomically attaches a receipt, then discloses bytes only through the approved read operation", async () => {

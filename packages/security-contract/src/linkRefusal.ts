@@ -5,7 +5,7 @@ export const LINK_REFUSALS = {
   link_live_unavailable: {status: 503, error: "Live editing is unavailable. Try again later."},
   link_unavailable: {status: 503, error: "This link can't be reached right now. Try again in a moment."},
   link_read_rate_limited: {status: 429, error: "This link has reached its request limit. Try again later."},
-  app_collection_missing: {status: 410, error: "This app can't find its data. Ask the person who shared this link."},
+  app_collection_missing: {status: 410, error: "This app can't find its data. Ask the person who shared it with you."},
 } as const;
 
 export type LinkRefusalCode = keyof typeof LINK_REFUSALS;

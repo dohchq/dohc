@@ -84,7 +84,7 @@ it("offers a retry when the account check fails", async () => {
 it.each([
   [404, "Ask the owner to share it with you"],
   [503, "Check your connection"],
-  [410, "This app can't find its data. Ask the person who shared this link."],
+  [410, "This app can't find its data. Ask the person who shared it with you."],
 ])("distinguishes launch status %s, then retries from the same control", async (status, message) => {
   let launches = 0;
   vi.stubGlobal("fetch", account(() => true, path => path === "/api/apps/launch" ? (launches++ === 0 ? jsonResponse({}, status) : jsonResponse(launch())) : jsonResponse({}, 404)));

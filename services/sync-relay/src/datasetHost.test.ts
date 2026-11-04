@@ -549,6 +549,8 @@ it("stops a deleted Collection's apps, reads included, two minutes after the ser
   f.advance(1);
   await expect(f.invoke(link, id(5), {name: "After"}, publicationId, "after")).rejects.toMatchObject(collectionMissing);
   await expect(f.invoke(helper, id(6), {}, publicationId, "read-2")).rejects.toMatchObject(collectionMissing);
+  // An account without access keeps its own refusal, the one that person can fix.
+  await expect(f.invoke({...helper, userId: "stranger"}, id(6), {}, publicationId, "stranger")).rejects.toMatchObject({statusCode: 404});
   expect(() => f.host.bindPublication(owner, {...scope, publicationId})).toThrow(expect.objectContaining(collectionMissing));
   expect((await f.invoke(owner, id(6))).result).toHaveLength(2);
   pushFile(f.storage, "restored", null, collectionFile());
