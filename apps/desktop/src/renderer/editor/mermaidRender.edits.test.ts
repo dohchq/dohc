@@ -101,7 +101,7 @@ describe('makeMermaidPreviewPlugin — edits', () => {
       doc: doc(paragraph('lead'), codeBlock('graph TD;', 'mermaid'), paragraph('after')),
       plugins: [plugin],
     })
-    const ids = () => (plugin.getState(state) as { entries: { id: string }[] }).entries.map(({ id }) => id)
+    const ids = () => (plugin.getState(state) as { entries: readonly { id: string }[] }).entries.map(({ id }) => id)
     const before = ids()
 
     const tr = state.tr.insertText('x', 1)
