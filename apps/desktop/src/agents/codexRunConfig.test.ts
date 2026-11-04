@@ -198,7 +198,7 @@ describe("a dohc Codex run", () => {
 
   it("gives a Codex run behind cmd.exe none of the writable folders whose keys need double quotes", () => {
     const roots = ["C:\\other", "C:\\o'brien", "C:\\a\u007fb"];
-    const config = { [USER]: `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots).replace(/\u007f/gu, "\\u007f")}\n` };
+    const config: Record<string, string> = { [USER]: `[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify(roots).replace(/\u007f/gu, "\\u007f")}\n` };
     const run = (behindCmd: boolean) => filesystem(codexRunConfig({
       rootPath: WORKSPACE, runId: "run_1", platform: "win32", files: { requirements: [], config: [USER] },
       readConfig: (path) => config[path] ?? missing(path), ...disk("win32", [WORKSPACE, ...OUTSIDE]), behindCmd,
