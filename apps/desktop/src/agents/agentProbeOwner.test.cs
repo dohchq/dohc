@@ -131,7 +131,8 @@ static class AgentProbeOwnerTests {
         Check(code == 0 && Encoding.UTF8.GetString(stdout.ToArray()) == "the prompt", "a run's input reaches its command's stdin");
 
         // The command exits at once and leaves a process that holds its output for 3 seconds.
-        string leaves = "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'inherit' }).unref()";
+        // Detached keeps that process out of the command's libuv job, which would end it with the command.
+        string leaves = "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'inherit', detached: true }).unref()";
         FakeJob left = new FakeJob(0, new[] { 0 }, new long[] { 0 });
         code = Run(node, relay, Admission(node, scratch, "[\"-e\"," + Json(leaves) + "]", null), never, left, new MemoryStream());
         Check(code == 0 && left.FirstTerminateMs >= 0 && left.FirstTerminateMs < 2000,
