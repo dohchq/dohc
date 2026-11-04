@@ -656,8 +656,9 @@ export function focusEditorGroup(
   return { ...state, activeEditorGroup: groupId };
 }
 
-// Open a tab the workspace keeps one of, such as Versions. A copy open in any
-// group takes focus, and only a missing one opens in the requested group.
+// Open a tab whose second copy shows nothing new, such as Versions. A copy open
+// in any group takes focus, and only a missing one opens in the requested
+// group. A split still makes a copy, because the person asked for one.
 export function openTabOnce(
   state: WorkbenchState,
   path: string,

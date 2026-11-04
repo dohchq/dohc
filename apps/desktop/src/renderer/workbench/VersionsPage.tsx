@@ -86,8 +86,8 @@ export function VersionsPage(props: {
   }, [workspaceId, versionIds, props.historyKey, props.versionKey]);
 
   // Versions whose count is out of date, and the one run that counts them. It
-  // takes them in row order until none are left, so a change during the run
-  // adds to what it counts instead of starting it over.
+  // goes round the rows in order until none are left, so a change during the
+  // run adds to what it counts instead of starting it over.
   const staleCounts = useRef(new Set<string>());
   const countRun = useRef<number | null>(null);
   const counted = useRef<{ versionKey: string; historyKey: string } | null>(null);
@@ -117,8 +117,14 @@ export function VersionsPage(props: {
     countRun.current = token;
     void (async () => {
       // One at a time: each count waits its turn behind the workspace's captures.
+      let last: string | null = null;
       for (;;) {
-        const versionId = countOrder.current.find((id) => staleCounts.current.has(id));
+        // The next row after the last one counted, so a row marked again while
+        // it counted waits behind the rest. Steady writes, such as a count's
+        // own capture, then still reach every row.
+        const order = countOrder.current;
+        const start = last === null ? 0 : order.indexOf(last) + 1;
+        const versionId = [...order.slice(start), ...order.slice(0, start)].find((id) => staleCounts.current.has(id));
         if (versionId === undefined) break;
         staleCounts.current.delete(versionId);
         let count: Count;
@@ -128,9 +134,10 @@ export function VersionsPage(props: {
           count = "failed";
         }
         if (!countReads.isCurrent(token)) return;
-        // Marked again while it counted, so this count is already out of date.
-        if (staleCounts.current.has(versionId)) continue;
+        // Newer than what the row shows, even if it was marked again while it
+        // counted. The mark counts it again in its turn.
         setCounts((current) => new Map(current).set(versionId, count));
+        last = versionId;
       }
       countRun.current = null;
     })();
@@ -472,9 +479,10 @@ function VersionRow(props: {
           ))}
         </div>
       </div>
-      {/* Shown on hover and while focus is in the row, and always on the
-          version you're in. */}
-      <div className={`flex shrink-0 items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}>
+      {/* Shown on hover and while keyboard focus is on one of them, and always
+          on the version you're in. A click on the row's text focuses the row,
+          which doesn't hold them open. */}
+      <div className={`flex shrink-0 items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}>
         {props.active ? null : (
           <SecondaryButton size="row" data-testid="versions-page-switch" {...rowAction(props.onSwitch)}>
             Switch

@@ -206,7 +206,7 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledTimes(3));
   });
 
-  it("counts one version at a time while history grows, and shows the newest count", async () => {
+  it("counts one version at a time while history grows, and counts a changed one again after the rest", async () => {
     const first = deferred<{ count: number }>();
     bridgeMock.countWorkspaceVersionChanges.mockImplementationOnce(() => first.promise);
     const { rerender } = render(<Page historyKey="0" />);
@@ -217,9 +217,25 @@ describe("VersionsPage", () => {
     bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) =>
       ({ count: versionId === "draft" ? 7 : 0 }));
     first.resolve({ count: 3 });
-    await waitFor(() => expect(within(row("fresh")).queryByTestId("versions-page-count")).not.toBeNull());
-    expect(details("draft")).toContain("7 files differ from Main");
-    expect(bridgeMock.countWorkspaceVersionChanges.mock.calls.map(([payload]) => payload.versionId)).toEqual(["draft", "draft", "nested", "fresh"]);
+    await waitFor(() => expect(details("draft")).toContain("7 files differ from Main"));
+    expect(bridgeMock.countWorkspaceVersionChanges.mock.calls.map(([payload]) => payload.versionId)).toEqual(["draft", "nested", "fresh", "draft"]);
+  });
+
+  it("reaches every row while Main's history keeps growing during the counts", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT, NESTED, FRESH], activeVersionId: "main" });
+    const nested = deferred<{ count: number }>();
+    bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) =>
+      versionId === "nested" ? nested.promise : { count: 0 });
+    const { rerender } = render(<Page historyKey="0" />);
+    await waitFor(() => expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledTimes(2));
+    // History grows while Draft two counts, as a count's own capture can make it.
+    rerender(<Page historyKey="1" />);
+    nested.resolve({ count: 4 });
+    await waitFor(() => expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledTimes(5));
+    // Fresh gets its turn before the rows marked again start over.
+    expect(bridgeMock.countWorkspaceVersionChanges.mock.calls.map(([payload]) => payload.versionId))
+      .toEqual(["draft", "nested", "fresh", "draft", "nested"]);
+    await waitFor(() => expect(details("nested")).toContain("4 files differ from Main"));
   });
 
   it("shows Try again in place of a count that failed, and counts that version again", async () => {

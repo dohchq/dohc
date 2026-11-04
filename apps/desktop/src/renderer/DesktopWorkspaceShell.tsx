@@ -3086,7 +3086,7 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     openVirtualTab(HISTORY_TAB_PATH);
   }, [openVirtualTab]);
-  // One per workspace: opening it again goes to the open tab.
+  // Opening it again goes to the open tab, in any group.
   const openVersionsTab = useCallback(() => {
     openVirtualTab(VERSIONS_TAB_PATH, false, true);
   }, [openVirtualTab]);
