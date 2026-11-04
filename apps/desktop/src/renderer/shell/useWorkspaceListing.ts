@@ -58,10 +58,8 @@ export function useWorkspaceListing(workspaceId: string) {
   const [fileListingCommit, setFileListingCommit] = useState<{
     request: number;
     listingSource: "cached" | "fresh";
-    // Main walked the files for this request, after it was made. A request
-    // that allows the cache can join a walk that started earlier.
-    ownWalk: boolean;
   } | null>(null);
+  // Resolves with main's answer, also when a newer answer already shows.
   const refreshFiles = useCallback(
     async (options: { allowCached?: true } = {}) => {
       const request = ++filesRequest.current;
@@ -73,7 +71,7 @@ export function useWorkspaceListing(workspaceId: string) {
           ...options,
         });
         if (workspaceToken.current !== token || request <= committedFilesRequest.current) {
-          return result.cached === true;
+          return result;
         }
         committedFilesRequest.current = request;
         // IPC returns new arrays even when revalidation found no change.
@@ -104,9 +102,8 @@ export function useWorkspaceListing(workspaceId: string) {
         setFileListingCommit({
           request,
           listingSource: result.cached === true ? "cached" : "fresh",
-          ownWalk: options.allowCached !== true,
         });
-        return result.cached === true;
+        return result;
       } catch (error) {
         if (workspaceToken.current === token && request > failedFilesRequest.current) {
           failedFilesRequest.current = request;
@@ -127,9 +124,6 @@ export function useWorkspaceListing(workspaceId: string) {
     () => committedFilesRequest.current !== 0,
     [],
   );
-  // The newest listing asked for. A commit with a higher `request` was asked
-  // for after this call.
-  const issuedFilesRequest = useCallback(() => filesRequest.current, []);
   const prepareRestoredTabPruning = useCallback(
     (restoredTabPaths: ReadonlySet<string>, dirtyPaths: ReadonlySet<string>) => {
       if (!filesRevalidated || restoredTabPaths.size === 0) return null;
@@ -176,7 +170,6 @@ export function useWorkspaceListing(workspaceId: string) {
     fileListingCommit,
     refreshFiles,
     hasCommittedListing,
-    issuedFilesRequest,
     prepareRestoredTabPruning,
   };
 }

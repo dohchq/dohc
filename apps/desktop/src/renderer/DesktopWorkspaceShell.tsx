@@ -333,6 +333,22 @@ function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
 
+// A move that failed, and whether its destination was already taken.
+type FailedMove = { move: PendingTreeMove; destinationTaken: boolean };
+
+// What a listing says of a failed move: made, or its destination taken.
+function failedMoveNow(
+  failed: FailedMove,
+  files: Parameters<typeof listedMoveEnds>[1],
+  folders: Parameters<typeof listedMoveEnds>[2],
+) {
+  const ends = listedMoveEnds(failed.move, files, folders);
+  return {
+    made: ends.to && !ends.from && !failed.destinationTaken,
+    taken: ends.to && (ends.from || failed.destinationTaken),
+  };
+}
+
 function groupsMountingNewDocument(
   current: WorkbenchState,
   next: WorkbenchState,
@@ -627,7 +643,6 @@ export function DesktopWorkspaceShell(props: {
     invalidateVisibility,
     refreshFiles,
     hasCommittedListing,
-    issuedFilesRequest,
     prepareRestoredTabPruning,
   } = useWorkspaceListing(props.workspace.workspaceId);
   // Main's single answer to "does anything record here": when the
@@ -974,36 +989,50 @@ export function DesktopWorkspaceShell(props: {
   );
   // A failed move's row goes once the move happens, by any route. A move made
   // through the CLI or MCP reaches the shell only as workspace activity and
-  // the listing that follows. So a listing main walked for a request made
-  // after the failure, with the source gone and the destination there,
-  // clears the row. A walk that started earlier can show a move main was
-  // still undoing, and a request that allows the cache can get one. When such
-  // a listing would change a failed move, one full listing confirms it. A
-  // destination listed beside the source was taken, and counts only after a
-  // listing shows it gone, since a deleted source would look the same. The
-  // shell remounts for each workspace, and so does this map.
+  // the listing that follows. But a listing can come from a walk main made
+  // while it was still undoing a refused move. So a listing only raises the
+  // question: when one shows a failed move's ends changed, the shell asks for
+  // a full listing, which main walks anew, and only that answer decides. One
+  // asks at a time, and a question raised meanwhile asks once more after it.
+  // A destination listed beside the source was taken, and counts only after
+  // an answer shows it gone, since a deleted source would look the same.
   const listing = useRef({ files, folders });
   listing.current = { files, folders };
-  const failedMoves = useRef(new Map<string, { move: PendingTreeMove; destinationTaken: boolean; after: number }>());
+  const failedMoves = useRef(new Map<string, FailedMove>());
   const clearFailedMove = useCallback((identity: string) => {
     failedMoves.current.delete(identity);
     clearIdentity(identity);
   }, [clearIdentity]);
+  const confirming = useRef<"idle" | "asking" | "again">("idle");
+  const confirmFailedMoves = useCallback(async () => {
+    if (confirming.current !== "idle") {
+      confirming.current = "again";
+      return;
+    }
+    const id = workspaceId;
+    do {
+      confirming.current = "asking";
+      const asked = new Map(failedMoves.current);
+      // A failed listing keeps the rows, and the next activity asks again.
+      const answer = await refreshFiles().catch(() => null);
+      if (!answer || workspaceIdRef.current !== id) continue;
+      for (const [identity, failed] of asked) {
+        if (failedMoves.current.get(identity) !== failed) continue;
+        const now = failedMoveNow(failed, answer.files, answer.folders ?? []);
+        if (now.made) clearFailedMove(identity);
+        else failed.destinationTaken = now.taken;
+      }
+    } while (confirming.current === "again" && failedMoves.current.size > 0);
+    confirming.current = "idle";
+  }, [workspaceId, refreshFiles, clearFailedMove]);
   useEffect(() => {
     if (!fileListingCommit) return;
-    let confirm = false;
-    for (const [identity, failed] of failedMoves.current) {
-      if (fileListingCommit.request <= failed.after) continue;
-      const ends = listedMoveEnds(failed.move, files, folders);
-      const taken = ends.to && (ends.from || failed.destinationTaken);
-      const made = ends.to && !ends.from && !failed.destinationTaken;
-      if (!fileListingCommit.ownWalk) confirm ||= made || taken !== failed.destinationTaken;
-      else if (made) clearFailedMove(identity);
-      else failed.destinationTaken = taken;
-    }
-    // A failed listing keeps the row, and the next activity lists again.
-    if (confirm) void refreshFiles().catch(() => undefined);
-  }, [fileListingCommit, files, folders, clearFailedMove, refreshFiles]);
+    const changed = [...failedMoves.current.values()].some((failed) => {
+      const now = failedMoveNow(failed, files, folders);
+      return now.made || now.taken !== failed.destinationTaken;
+    });
+    if (changed) void confirmFailedMoves();
+  }, [fileListingCommit, files, folders, confirmFailedMoves]);
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
@@ -1016,7 +1045,7 @@ export function DesktopWorkspaceShell(props: {
       if (move && identity) {
         const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
         const destinationTaken = failedMoves.current.get(identity)?.destinationTaken === true || (ends.from && ends.to);
-        failedMoves.current.set(identity, { move, destinationTaken, after: issuedFilesRequest() });
+        failedMoves.current.set(identity, { move, destinationTaken });
       }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
@@ -1024,7 +1053,7 @@ export function DesktopWorkspaceShell(props: {
         ...(livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
     },
-    [issuedFilesRequest, reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
+    [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
   // Chats' failures. An archive refused for live editing opens Live documents
   // at the page's row, and the page's archive takes the refusal back.
@@ -4504,7 +4533,7 @@ export function DesktopWorkspaceShell(props: {
       setWorkspaceOpenFailedFor(null);
 
       const refreshInitialFiles = async () => {
-        const paintedCachedListing = await refreshFiles({ allowCached: true });
+        const paintedCachedListing = (await refreshFiles({ allowCached: true })).cached === true;
         if (cancelled || !paintedCachedListing) return;
         await refreshFiles();
       };

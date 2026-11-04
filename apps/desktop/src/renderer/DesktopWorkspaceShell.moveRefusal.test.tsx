@@ -126,6 +126,30 @@ it("a failed move's toast and Notices row go once an agent makes the same move t
   expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1);
 });
 
+// More activity can paint the tree before the full listing that confirms a
+// move answers. That answer still decides, and nothing asks again.
+it("a failed move's row goes on its confirming listing's answer, though a newer listing painted the tree first", async () => {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn().mockRejectedValue(LIVE_MOVE_REFUSAL) });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await rename(user);
+  await screen.findByTestId("workspace-shell-error");
+  const confirm = deferred<ReturnType<typeof listing>>();
+  bridge.listWorkspaceFiles
+    .mockResolvedValueOnce(listing("renamed.md", "b.md", "c.md"))
+    .mockImplementationOnce(() => confirm.promise)
+    .mockResolvedValue(listing("renamed.md", "b.md", "d.md"));
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["a.md", "renamed.md"] }));
+  await waitFor(() => expect(allowedCache(bridge).slice(-2)).toEqual([true, false]));
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["b.md", "d.md"] }));
+  await waitFor(() => expect(listed("d.md")).toBe(true));
+  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
+  await act(async () => confirm.resolve(listing("renamed.md", "b.md", "c.md")));
+  await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  expect(await noticeRows(user)).toEqual([]);
+  expect(allowedCache(bridge).slice(-3)).toEqual([true, false, true]);
+});
+
 it("a failed move's toast and Notices row stay when its file goes but nothing arrives where it was going", async () => {
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn().mockRejectedValue(LIVE_MOVE_REFUSAL) });
   const user = userEvent.setup();
