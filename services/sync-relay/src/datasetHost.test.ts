@@ -472,8 +472,8 @@ async function movingCollection() {
   try { for await (const bytes of archive.stream()) chunks.push(bytes); } finally { await archive.dispose(); }
   const body = Buffer.concat(chunks);
   return {fileId: file.fileId, sourceCursor,
-    importInto: (host: RelayDatasetHost, activate: boolean) => host.importRecovery(owner, {...scope, transferId: "move", manifestSha256, sourceCursor, activate,
-      stream: (async function* () { yield body; })()})};
+    importInto: (host: RelayDatasetHost, activate: boolean, signal?: AbortSignal) => host.importRecovery(owner, {...scope, transferId: "move", manifestSha256, sourceCursor, activate,
+      signal, stream: (async function* () { yield body; })()})};
 }
 
 it("finishes a move whose import stopped when the relay stopped, once the relay starts again (#2903)", async () => {
@@ -512,6 +512,29 @@ it("finishes a move whose import stopped when the relay stopped, once the relay 
   expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
   expect(target.host.ownerReadFile(owner, {...scope, revision: 1, revisionSha256: receipts.revision.revisionSha256, fileId: moved.fileId}))
     .toMatchObject({bytesBase64: receiptBytes});
+});
+
+it("finishes a move whose import request was cut off, on the next try (#3067)", async () => {
+  const moved = await movingCollection(), target = await fixture(true, receipts);
+  const usageBefore = workspaceUsageBytes(target.storage, "w");
+  // The request's deadline passes inside the final install transaction, which rolls back.
+  const deadline = new AbortController(), prepare = target.storage.db.prepare.bind(target.storage.db);
+  const cut = vi.spyOn(target.storage.db, "prepare").mockImplementation(sql => {
+    if (sql.startsWith("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN")) deadline.abort(new DOMException("Recovery import timed out", "TimeoutError"));
+    return prepare(sql);
+  });
+  await expect(moved.importInto(target.host, true, deadline.signal)).rejects.toThrow("Recovery import timed out");
+  cut.mockRestore();
+  // The cut-off import cleared its copy and released its quota, with the relay still running.
+  expect({
+    imports: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n),
+    attachments: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n),
+    stages: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n),
+    usage: workspaceUsageBytes(target.storage, "w"),
+  }).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore});
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({transferId: "move", sourceCursor: moved.sourceCursor,
+    targetCursor: {revision: moved.sourceCursor.revision + 1}});
+  expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
 });
 
 it.each([false, true])("keeps an installed or claimed import, its quota, and its attachments across startup (claimed: %s)", async claimed => {
