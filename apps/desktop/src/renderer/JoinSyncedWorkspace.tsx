@@ -299,6 +299,7 @@ export function JoinSyncedWorkspace(props: {
             placeholder={usedFolder ? "Choose another empty folder" : "Choose an empty folder"}
             testId="join-choose-folder"
             errorId={fieldErrors.folder ? "join-choose-folder-error" : undefined}
+            disabled={joining}
             onClick={() => void chooseFolder()}
           />
           {fieldErrors.folder ? (

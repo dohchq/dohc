@@ -161,7 +161,7 @@ describe("JoinSyncedWorkspace", () => {
     expect(document.getElementById("join-sync-passphrase-error")).toBeNull();
   });
 
-  it("keeps both fields read-only while a join runs, so a wrong answer marks what was sent", async () => {
+  it("keeps the fields read-only and the folder chip off while a join runs, so a wrong answer marks what was sent", async () => {
     const user = userEvent.setup();
     let rejectJoin: (error: Error) => void = () => undefined;
     bridgeMock.cloudJoinWorkspace
@@ -179,6 +179,8 @@ describe("JoinSyncedWorkspace", () => {
 
     await waitFor(() => expect(passphrase.readOnly).toBe(true));
     expect(code.readOnly).toBe(true);
+    const chip = screen.getByTestId("join-choose-folder") as HTMLButtonElement;
+    expect(chip.disabled).toBe(true);
     await user.type(passphrase, " typed later");
     await user.type(code, "x");
     expect(passphrase.value).toBe("sent");
@@ -187,6 +189,7 @@ describe("JoinSyncedWorkspace", () => {
     await act(async () => rejectJoin(new Error("Passphrase could not unlock synced secrets.")));
     await waitFor(() => expect(passphrase.readOnly).toBe(false));
     expect(code.readOnly).toBe(false);
+    expect(chip.disabled).toBe(false);
     expect(document.activeElement).toBe(passphrase);
     expect(passphrase.value.slice(passphrase.selectionStart ?? 0, passphrase.selectionEnd ?? 0)).toBe("sent");
   });

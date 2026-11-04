@@ -64,6 +64,7 @@ export const FolderChip = forwardRef<HTMLButtonElement, {
   // The id of the FieldError under the chip while it shows one. A button
   // takes no aria-invalid, so the error reaches it as its description.
   errorId?: string;
+  disabled?: boolean;
   onClick: () => void;
 }>(function FolderChip(props, ref) {
   return (
@@ -73,8 +74,9 @@ export const FolderChip = forwardRef<HTMLButtonElement, {
       data-testid={props.testId}
       aria-label={props.folder ? "Change folder" : "Choose folder"}
       aria-describedby={props.errorId}
+      disabled={props.disabled}
       onClick={props.onClick}
-      className={`group flex h-9 w-full items-center gap-2.5 rounded-md border bg-bg px-3 text-left transition-colors ${
+      className={`group flex h-9 w-full items-center gap-2.5 rounded-md border bg-bg px-3 text-left transition-colors disabled:opacity-50 ${
         props.errorId ? "border-danger" : "border-line hover:border-ink"
       }`}
     >
