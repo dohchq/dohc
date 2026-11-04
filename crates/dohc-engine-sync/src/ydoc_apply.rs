@@ -4184,8 +4184,8 @@ pub(crate) fn imported_text_head_in_tx(
     }
     if hex_sha256(projection.content.as_bytes()) == head {
         // The lineage holds only the head the text continues, so the text
-        // replaces nothing. The caller holds back a text from another branch
-        // than an open conflict on this object.
+        // replaces nothing. While this object has an open conflict, the caller
+        // holds back a text that doesn't continue its incoming side.
         if continues_head {
             match marker.lineage_claim_status {
                 dohc_engine_collab::LineageClaimStatus::Exact
