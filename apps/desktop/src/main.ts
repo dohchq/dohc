@@ -2110,14 +2110,9 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
 // registry row. The folder is untouched; opening it again re-adopts the
 // manifest and its identity.
 const forgetWorkspace = createWorkspaceForget({
-  // A forgotten workspace opened again is an existing folder: it starts in
-  // Restricted Mode.
-  // The grant goes first, so a failed write cannot leave one that returns
-  // when the folder opens again.
-  remove: async workspaceId => {
-    await workspaceTrust.restrict(workspaceId);
-    await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
-  },
+  remove: (workspaceId, confirmed) =>
+    removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId), undefined, confirmed),
+  restrict: workspaceId => workspaceTrust.restrict(workspaceId),
   clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
   notifyRenderer,
 });

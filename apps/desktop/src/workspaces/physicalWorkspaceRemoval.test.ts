@@ -22,12 +22,13 @@ function harness(registeredInitially = true, confirmDraftRemoval?: (workspaceId:
     findWorkspace: () => registered,
     removeWorkspace, removeDrafts, onError, confirmDraftRemoval,
   });
+  const restrict = vi.fn(async (_workspaceId: string) => {});
   const forget = createWorkspaceForget({
-    remove: workspaceId => remove(owner.currentBinding(workspaceId)),
-    clearNotices, notifyRenderer,
+    remove: (workspaceId, confirmed) => remove(owner.currentBinding(workspaceId), undefined, confirmed),
+    restrict, clearNotices, notifyRenderer,
   });
   return {
-    workspace, owner, remove, forget, removeWorkspace, removeDrafts, onError, clearNotices, notifyRenderer,
+    workspace, owner, remove, forget, removeWorkspace, removeDrafts, onError, restrict, clearNotices, notifyRenderer,
     current: () => registered,
     setRegistered: (next: RegistryEntry | null) => { registered = next; },
   };
@@ -90,9 +91,34 @@ it("reports a draft cleanup failure during failed-join rollback without replacin
   expect(logError.mock.calls[0]?.[1]).toBe(joinError);
 });
 
-it("warns before removing unresolved typing and leaves its registry and copies when cancelled", async () => {
+it("warns before removing unresolved typing and leaves its trust, registry and copies when cancelled", async () => {
  const confirm = vi.fn(async () => false); const h = harness(true, confirm);
  await expect(h.forget("workspace")).resolves.toBeUndefined();
+ expect(h.restrict).not.toHaveBeenCalled();
  expect(h.clearNotices).not.toHaveBeenCalled();expect(h.notifyRenderer).not.toHaveBeenCalled();expect(h.onError).not.toHaveBeenCalled();
  expect(confirm).toHaveBeenCalledExactlyOnceWith("workspace"); expect(h.removeWorkspace).not.toHaveBeenCalled(); expect(h.removeDrafts).not.toHaveBeenCalled(); expect(h.current()).toEqual(h.workspace);
+});
+
+it("restricts a forgotten workspace after its typing question and while it is still open, and a failed restrict removes nothing", async () => {
+  const confirm = vi.fn(async () => true);
+  const h = harness(true, confirm);
+  const error = new Error("trust file is busy");
+  h.restrict.mockImplementationOnce(async () => {
+    h.owner.acquire("workspace").release();
+    throw error;
+  });
+  await expect(h.forget("workspace")).rejects.toBe(error);
+  expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(h.restrict.mock.invocationCallOrder[0]!);
+  expect(h.current()).toEqual(h.workspace);
+  expect(h.owner.workspaceIds()).toEqual(["workspace"]);
+  expect(h.removeWorkspace).not.toHaveBeenCalled();
+  expect(h.removeDrafts).not.toHaveBeenCalled();
+  expect(h.clearNotices).not.toHaveBeenCalled();
+  expect(h.notifyRenderer).not.toHaveBeenCalled();
+
+  await h.forget("workspace");
+  expect(h.restrict).toHaveBeenCalledTimes(2);
+  expect(h.restrict.mock.invocationCallOrder[1]).toBeLessThan(h.removeWorkspace.mock.invocationCallOrder[0]!);
+  expect(h.current()).toBeNull();
+  expect(h.clearNotices).toHaveBeenCalledExactlyOnceWith("workspace");
 });
