@@ -1152,7 +1152,7 @@ On a computer that doesn't keep the workspace's Collections, list returns the Co
 - `limit`: `integer`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }`.
+Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }` or `{ kind: "collections-refused", refusal: { kind, words } | { kind: "elsewhere", words, computer } | { kind: "server-unavailable", words, computer, failure } }`.
 
 #### `dohc dataset describe`
 

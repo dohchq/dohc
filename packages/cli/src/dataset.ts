@@ -1,4 +1,5 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { AUTOMATION_COMPUTER_LABEL_MAX_CHARS, isNoticeLine } from "@dohc/workspace-contracts/relay";
 import { PublicationAgent } from "./appPublication";
 import { z } from "zod";
 import { CreationPartial } from "./creation";
@@ -190,6 +191,8 @@ const description = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
 export type AddressedDatasetDescription = z.infer<typeof description>;
+// A computer's name, checked as the Collections record checks it, so every name a record holds passes.
+const computerLabel = z.string().refine(label => isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS), "Invalid computer name.");
 /**
  * A list on a computer that doesn't keep the workspace's Collections. It
  * holds the Collections on `server`, which this computer asked, and
@@ -197,9 +200,25 @@ export type AddressedDatasetDescription = z.infer<typeof description>;
  */
 export const DatasetListElsewhere = z.object({
   server: z.string().url().max(2048),
-  computer: z.object({ label: z.string().min(1).max(64), sameName: z.boolean() }).strict(),
+  computer: z.object({ label: computerLabel, sameName: z.boolean() }).strict(),
 }).strict();
 export type DatasetListElsewhere = z.infer<typeof DatasetListElsewhere>;
+// No limit: an unreadable record's words can carry the error that stopped dohc reading it, with the workspace's path.
+const refusalWords = z.string().min(1);
+const refusalComputer = computerLabel.nullable();
+/**
+ * Why this computer can't list a workspace's Collections. `words` say why
+ * and what to do. `elsewhere`: another computer keeps them, and `computer`
+ * names it. `server-unavailable`: another computer keeps them, and this
+ * computer's server didn't answer. Its `words` say where the Collections
+ * are, and `failure` is the server's error.
+ */
+export const DatasetListRefusal = z.discriminatedUnion("kind", [
+  z.object({ kind: z.enum(["unclaimed", "unreadable", "missing", "replaced", "changed"]), words: refusalWords }).strict(),
+  z.object({ kind: z.literal("elsewhere"), words: refusalWords, computer: refusalComputer }).strict(),
+  z.object({ kind: z.literal("server-unavailable"), words: refusalWords, computer: refusalComputer, failure: z.string().max(4096) }).strict(),
+]);
+export type DatasetListRefusal = z.infer<typeof DatasetListRefusal>;
 export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetHistoryRevision.extend({ kind: z.literal("history-revision") }).strict(),
   DatasetDeletePreview.extend({ kind: z.literal("delete-preview") }).strict(),
@@ -214,6 +233,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
   z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable(), elsewhere: DatasetListElsewhere.optional() }).strict(),
+  z.object({ kind: z.literal("collections-refused"), refusal: DatasetListRefusal }).strict(),
   z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),
   DatasetPermissionsPage.extend({ kind: z.literal("permissions"), place: DatasetPlace.optional() }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),

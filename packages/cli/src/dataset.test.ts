@@ -58,6 +58,26 @@ describe("dataset CLI", () => {
     const failed = await list(async () => { throw new Error("dohc could not reach the server."); });
     expect(failed).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: dohc could not reach the server.\n" });
   });
+  it.each([false, true])("fails a Collections list this computer can't give (JSON: %s)", async json => {
+    const list = (refusal: unknown) => executeCli({ argv: ["dataset", "list", JSON.stringify({ workspaceId: "workspace" }), ...(json ? ["--json"] : [])],
+      env: {}, request: async () => ({ kind: "collections-refused", refusal }) });
+    const words = "Choose which computer keeps this workspace's Collections.";
+    expect(await list({ kind: "unclaimed", words })).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${words}\n` });
+    expect(await list({ kind: "server-unavailable", words: "These Collections are on Laptop.", computer: "Laptop", failure: "TypeError: fetch failed" }))
+      .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: These Collections are on Laptop. TypeError: fetch failed\n" });
+  });
+  it("counts a computer's name in characters, as its record does, and takes a refusal's words at any length", () => {
+    // 64 characters outside the BMP: 128 UTF-16 units.
+    const name = "🐢".repeat(64), longer = `${name}🐢`;
+    const listed = (label: string) => ({ kind: "list", datasets: [], nextCursor: null, elsewhere: { server: "https://relay.example", computer: { label, sameName: false } } });
+    const refused = (computer: string) => ({ kind: "collections-refused", refusal: { kind: "server-unavailable", words: `These Collections are on ${computer}.`, computer, failure: "TypeError: fetch failed" } });
+    expect(DatasetResult.safeParse(listed(name)).success).toBe(true);
+    expect(DatasetResult.safeParse(refused(name)).success).toBe(true);
+    expect(DatasetResult.safeParse(listed(longer)).success).toBe(false);
+    expect(DatasetResult.safeParse(refused(longer)).success).toBe(false);
+    const words = `EACCES: permission denied, realpath '${"C:\\Users\\person\\".repeat(200)}'`;
+    expect(DatasetResult.safeParse({ kind: "collections-refused", refusal: { kind: "unreadable", words } }).success).toBe(true);
+  });
   it.each([false, true])("exits nonzero and preserves partial form facts (JSON: %s)", async json => {
     const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
       retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };

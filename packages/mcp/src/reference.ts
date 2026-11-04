@@ -43,7 +43,7 @@ type AppKind = OwnerAppPublicationResult["kind"];
 // The result kinds the desktop answers each `dohc dataset` verb with
 // (apps/desktop/src/ipc/datasetIpc.ts). A new action fails typecheck here.
 export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
-  list: ["list"],
+  list: ["list", "collections-refused"],
   describe: ["description"],
   history: ["history"],
   historyRevision: ["history-revision"],

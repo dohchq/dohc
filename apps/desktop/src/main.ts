@@ -36,7 +36,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
+import { CollectionMoveUnfinishedError, ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
 import { liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
@@ -55,7 +55,7 @@ import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
 import { readServerDataset, serverRunsOfAnswer } from "./automations/serverDataset";
-import { collectionPlace, finishedTransfer, moveCollectionToServer } from "./workspaces/collectionMove";
+import { collectionPlace, createBackgroundDatasetRouter, finishedTransfer, movedTransfer, moveCollectionToServer } from "./workspaces/collectionMove";
 import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
@@ -4637,7 +4637,8 @@ function createCollectionAutomationsFor(
     serverDataset: (datasetId) => withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
       const server = await serverCollectionOf(operation.workspace, datasetId, operation.signal);
-      return server && await readServerDataset(workspaceId, datasetId, server.data, server.automationHost).catch((error: unknown) => {
+      if (server === null || "unfinished" in server) return server;
+      return await readServerDataset(workspaceId, datasetId, server.data, server.automationHost).catch((error: unknown) => {
         // The server doesn't have it: the computer that keeps the workspace's other Collections does.
         if (error instanceof CollectionsRefusalError) return null;
         throw error;
@@ -4778,18 +4779,29 @@ interface ServerCollection {
   /** The owner's automation host state, which says what the server runs. */
   automationHost(): Promise<{ status: number; body: unknown }>;
 }
-// A Collection's transfer record once its move finished, which every read of a Collection on this computer waits for.
-function finishedTransferOf(workspace: RegistryEntry, local: LocalDatasetHost, datasetId: string, signal: AbortSignal) {
-  return finishedTransfer({ local, workspaceId: workspace.workspaceId, datasetId, server: () => remoteForWorkspace(workspace),
-    currentCredentialGeneration: () => credentialCacheGeneration, relayStream: relayShareJsonWithCredentials, signal });
+// A Collection's transfer record once its move finished, which the work a person starts in a Collection waits for.
+// A background read passes `movedTransfer`, which never waits for an unfinished move or resumes a stopped one.
+function finishedTransferOf(workspace: RegistryEntry, local: LocalDatasetHost, datasetId: string, signal: AbortSignal,
+  read: typeof finishedTransfer = finishedTransfer) {
+  return read({ local, datasetId, ...transferSession(workspace, signal) });
 }
-async function serverCollectionOf(workspace: RegistryEntry & { attachmentId?: symbol }, datasetId: string, signal: AbortSignal): Promise<ServerCollection | null> {
+function transferSession(workspace: RegistryEntry, signal: AbortSignal) {
+  return { workspaceId: workspace.workspaceId, server: () => remoteForWorkspace(workspace),
+    currentCredentialGeneration: () => credentialCacheGeneration, relayStream: relayShareJsonWithCredentials, signal };
+}
+// The automations panel, buttons and presses ask here. None of them waits for an unfinished move or resumes a stopped
+// one: a Collection whose move hasn't finished answers `unfinished`, in the words of the move's own error.
+async function serverCollectionOf(workspace: RegistryEntry & { attachmentId?: symbol }, datasetId: string, signal: AbortSignal):
+  Promise<ServerCollection | { unfinished: string } | null> {
   const authority = await collectionsAuthorityFor(workspace, signal);
   let credentials: CloudSessionCredentials, credentialGeneration: number;
   if (authority.kind === "server") ({ credentials, credentialGeneration } = authority.server);
   else {
-    const transfer = await finishedTransferOf(workspace, authority.local, datasetId, signal);
-    if (transfer === null) return null;
+    const transfer = await finishedTransferOf(workspace, authority.local, datasetId, signal, movedTransfer);
+    if (transfer === null) {
+      const moving = authority.local.transferStatus(datasetId);
+      return moving?.state === "ready" ? { unfinished: new CollectionMoveUnfinishedError(new URL(moving.targetOrigin).host, { cause: null }).message } : null;
+    }
     ({ credentials, credentialGeneration } = await remoteForWorkspace(workspace));
     signal.throwIfAborted();
     if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw new Error("Sign in to the server that hosts this Collection.");
@@ -6500,16 +6512,14 @@ function registerIpcHandlers(): void {
       return {
         scope: JSON.stringify([scope, generation]),
         local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
-        remote: remote((signal, current) => createDatasetAuthorityRouter(local, {
-          status: async id => { current(); return finishedTransferOf(workspace, local, id, signal); },
-          marker: id => local.transferStatus(id),
-          remote: async targetOrigin => {
-            const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
-            if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
-            return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
-              currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
-          },
-        })),
+        // History reads every Collection with a transfer record, and reads ahead in the background. A Collection
+        // whose move hasn't finished reads this computer's history, which still keeps its records.
+        remote: remote((signal, current) => createBackgroundDatasetRouter(local, transferSession(workspace, signal), async targetOrigin => {
+          const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
+          if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+          return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+            currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
+        }, current)),
       };
     },
     recordHistoryPersonName:(workspaceId, userId, sender) => {
@@ -6763,13 +6773,14 @@ function registerIpcHandlers(): void {
         offline: { relayResponse: (credentials, path, init) => relayShareResponseWithCredentials(credentials, path, init, true), cache },
       }); } catch (error) { await cache.clear(); throw error; }
     },
-    dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal): Promise<OwnerDatasetData> => {
+    dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal,
+      read: typeof finishedTransfer = finishedTransfer): Promise<OwnerDatasetData> => {
       // On a computer that doesn't keep the Collections, the server's, as every Collection action chooses.
       const authority = await collectionsAuthorityFor(workspace, signal);
       if (authority.kind === "server") return authority.server.data(signal, () => signal.throwIfAborted());
       const { local } = authority;
       return createDatasetAuthorityRouter(local, {
-        status: datasetId => { signal.throwIfAborted(); return finishedTransferOf(workspace, local, datasetId, signal); },
+        status: datasetId => { signal.throwIfAborted(); return finishedTransferOf(workspace, local, datasetId, signal, read); },
         marker: datasetId => local.transferStatus(datasetId),
         remote: async (targetOrigin, datasetId) => {
           const remote = await remoteForWorkspace(workspace);
@@ -6982,8 +6993,11 @@ function registerIpcHandlers(): void {
     },
   });
   datasetForCli = async (input, agent) => DatasetResult.parse(await cliDataset(input.workspaceId, input, agent));
+  // Buttons read a Collection whose move hasn't finished from this computer, so reading them never resumes a stopped move.
+  const buttonDatasetDependencies = { namedDataForWorkspace: datasetDependencies.namedDataForWorkspace,
+    dataForWorkspace: (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => datasetDependencies.dataForWorkspace(workspace, signal, movedTransfer) };
   describeDatasetForCli = (workspaceId, datasetId) => withPhysicalWorkspaceOperation(workspaceId,
-    operation => describeAutomationDataset(operation, datasetId, datasetDependencies));
+    operation => describeAutomationDataset(operation, datasetId, buttonDatasetDependencies));
   const localDatasetLaunches = new WeakMap<LocalDatasetHost, Promise<LocalAppLaunchHost>>();
   const localAppLauncher = async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) =>
     workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
@@ -7152,7 +7166,7 @@ function registerIpcHandlers(): void {
     },
     describeDataset: (sender, workspaceId, datasetId) => withRendererWorkspaceOperation(sender, workspaceId,
       "Collection changes stopped because this window changed workspaces.",
-      operation => describeAutomationDataset(operation, datasetId, datasetDependencies)),
+      operation => describeAutomationDataset(operation, datasetId, buttonDatasetDependencies)),
     pressedBy: pressingPerson,
     inspectionAccount: async () => {
       await credentialSessionCache.warm(() => cloudLogin().credentials());
@@ -7192,7 +7206,11 @@ function registerIpcHandlers(): void {
       }
       return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch }).inspect(shareId, input);
     },
-    serverCollection: (operation, datasetId) => serverCollectionOf(operation.workspace, datasetId, operation.signal),
+    // A press of a Collection whose move hasn't finished goes to this computer's executor, which refuses it with the button's reason.
+    serverCollection: async (operation, datasetId) => {
+      const server = await serverCollectionOf(operation.workspace, datasetId, operation.signal);
+      return server !== null && "unfinished" in server ? null : server;
+    },
     inspectionChanged: (workspaceId, attachmentId) => {
       withWorkspaceAttachment({ workspaceId }, lease => {
         if (lease.binding.attachmentId === attachmentId) notifyCollectionAutomationsChanged(workspaceId);

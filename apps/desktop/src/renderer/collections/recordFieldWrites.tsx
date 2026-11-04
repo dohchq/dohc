@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { frontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
 import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
-import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../markdown/frontmatter";
+import { PROPERTIES_READ_ONLY_REASON } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
@@ -9,6 +9,7 @@ import { useBoundNoteCheck } from "../editor/lossyNote";
 import { useRecordSourceCheck } from "./recordSourceCheck";
 import { SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
+import { OpenExternallyLink } from "../fileInspectorUi";
 import { ShellErrorReporter } from "../shell/useShellError";
 import { addSelectOption } from "./schemaAuthoring";
 import { rewriteCollectionSchema } from "./schemaWrite";
@@ -237,13 +238,13 @@ export function CollectionRecordFieldWrite({
       return;
     }
     if (frontmatterEditsRefused(doc)) {
-      onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+      onFailed(PROPERTIES_READ_ONLY_REASON);
       return;
     }
     try {
       setFrontmatterValue(doc, change.field, frontmatterWriteValue(change.value));
     } catch {
-      onFailed(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+      onFailed(PROPERTIES_READ_ONLY_REASON);
       return;
     }
     applied.current = true;
@@ -902,9 +903,12 @@ function CollectionWriteFailureRow({
   // is a Discard that cannot be undone. A refused copy keeps its instruction
   // until the next copy starts.
   const [copyRefused, setCopyRefused] = useState(false);
+  // A failed Open externally says so in place, for the same reason.
+  const [openRefused, setOpenRefused] = useState<string | null>(null);
   const lineage = useCollectionWriteLineage(failure.workspaceId);
   const stale = failure.lineage !== lineage;
   const recoverOnly = stale || failure.superseded || failure.recoveryOnly;
+  const message = stale ? STALE_LINEAGE_MESSAGE : failure.superseded ? SUPERSEDED_MESSAGE : failure.recoveryOnly ? failure.message : accessRefusal ?? failure.message;
   const value = failure.change.value;
   const recoveryText = typeof value === "string"
     ? value
@@ -921,8 +925,27 @@ function CollectionWriteFailureRow({
         {failure.change.field} in {file}
       </span>
       <span className="text-[12px] text-ink">
-        {stale ? STALE_LINEAGE_MESSAGE : failure.superseded ? SUPERSEDED_MESSAGE : failure.recoveryOnly ? failure.message : accessRefusal ?? failure.message}
+        {message}
+        {/* Read-only properties are edited in the system's app for the file. */}
+        {message === PROPERTIES_READ_ONLY_REASON ? (
+          <>
+            {" "}
+            <span className="contents" onClickCapture={() => setOpenRefused(null)}>
+              <OpenExternallyLink
+                testId="collection-write-open-externally"
+                workspaceId={failure.workspaceId}
+                path={failure.change.recordPath}
+                onError={(fallback) => setOpenRefused(fallback)}
+              />
+            </span>
+          </>
+        ) : null}
       </span>
+      {openRefused ? (
+        <span data-testid="collection-write-open-refused" className="text-[12px] text-muted">
+          {openRefused}
+        </span>
+      ) : null}
       <textarea
         aria-label="Unsaved collection value"
         readOnly

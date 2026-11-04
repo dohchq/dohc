@@ -13,7 +13,7 @@ import {
   setFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter-map";
 import { PropertiesPanel } from "./PropertiesPanel";
-import { parseFrontmatter } from "./markdown/frontmatter";
+import { parseFrontmatter, PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 import {
   EDGE_DISPLAY,
   EDGE_FRONTMATTER,
@@ -98,7 +98,7 @@ describe("PropertiesPanel", () => {
     try {
       render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={initialBody} onChange={onChange} />);
       await user.click(screen.getByLabelText("Remove property a"));
-      expect(screen.getByTestId("properties-locked").getAttribute("title")).toContain("without rewriting the others");
+      expect(screen.getByText("Properties are read-only").title).toBe(PROPERTIES_READ_ONLY_REASON);
       expect(onChange).not.toHaveBeenCalled();
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       expect(yDocToMarkdown(doc)).toBe(initialBody);
@@ -501,11 +501,33 @@ describe("PropertiesPanel", () => {
       const doc = markdownToYDoc(body);
       try {
         render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={vi.fn()} />);
-        expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
+        expect(screen.getByTestId("properties-locked").textContent).toBe("Properties are read-only");
         expect(screen.getAllByTestId("property-row")).toHaveLength(2);
         expect(screen.queryByTestId("property-add")).toBeNull();
         expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
       } finally { doc.destroy(); }
+    });
+
+    it("says read-only properties in the warning tone and offers to open the file externally", () => {
+      render(
+        <PropertiesPanel
+          body={"---\n{status: draft, owner: Sam}\n---\n\nBody"}
+          onChange={vi.fn()}
+          file={{ workspaceId: "ws", path: "plan.md" }}
+        />,
+      );
+      const row = screen.getByTestId("properties-locked");
+      const label = screen.getByText("Properties are read-only");
+      expect(label.title).toBe(PROPERTIES_READ_ONLY_REASON);
+      expect(label.className).toContain("text-warning");
+      expect(label.className).not.toContain("text-danger");
+      const lock = row.querySelector("svg.lucide-lock");
+      expect(lock?.getAttribute("aria-hidden")).toBe("true");
+      expect(lock?.getAttribute("width")).toBe("12");
+      const open = screen.getByRole("button", { name: "Open externally" });
+      expect(row.contains(open)).toBe(true);
+      expect(open.className).toContain("text-muted");
+      expect(screen.queryByText("Show in Explorer")).toBeNull();
     });
 
     it("keeps a long value whole in its tooltip", () => {
@@ -799,7 +821,7 @@ describe("PropertiesPanel", () => {
     const initialBody = `---\n# Keep\n${yaml}\n---\n\n# Plan\n`;
     render(<ControlledPropertiesPanel initialBody={initialBody} />);
 
-    expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
+    expect(screen.getByTestId("properties-locked").textContent).toBe("Properties are read-only");
     await user.type(screen.getByLabelText("Property status value"), "x");
     // A locked block offers no + and no ×, which could do nothing.
     expect(screen.queryByTestId("property-add")).toBeNull();

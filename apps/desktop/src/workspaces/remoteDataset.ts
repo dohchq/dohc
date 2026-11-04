@@ -12,7 +12,7 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import type { CollectionsRefusalError } from "./collectionsHolder";
-import { ipcWireError, SERVER_COLLECTIONS_UNAVAILABLE } from "../ipc/errorWords";
+import { ipcWireError } from "../ipc/errorWords";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
 import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
@@ -266,18 +266,20 @@ export function createRemoteDatasetData(input: {
 
 /**
  * The server didn't give the list of a workspace's Collections, on a
- * computer that doesn't keep the workspace's own. Its first line says where
- * those are. The rest is the server's error as it would cross IPC alone, so
- * a window shows both as before and the CLI prints both.
+ * computer that doesn't keep the workspace's own. `elsewhere` says where
+ * those are. `failure` is the server's error as it would cross IPC alone, so
+ * a window reports it as it would that error.
  */
 export class ServerCollectionsUnavailableError extends Error {
   override name = "ServerCollectionsUnavailableError";
-  readonly code = SERVER_COLLECTIONS_UNAVAILABLE;
-  readonly computerLabel: string | null;
+  readonly elsewhere: CollectionsRefusalError;
+  readonly failure: string;
   constructor(elsewhere: CollectionsRefusalError, cause: unknown) {
     const wire = ipcWireError(cause);
-    super(`${elsewhere.message}\n${wire instanceof Error && wire.name === "Error" ? wire.message : String(wire)}`, { cause });
-    this.computerLabel = elsewhere.computerLabel;
+    const failure = wire instanceof Error && wire.name === "Error" ? wire.message : String(wire);
+    super(`${elsewhere.message}\n${failure}`, { cause });
+    this.elsewhere = elsewhere;
+    this.failure = failure;
   }
 }
 
@@ -397,7 +399,8 @@ export function createDatasetAuthorityRouter(local: OwnerDatasetData | Pick<impo
         const localPage = await local.list({ after, limit, includeArchived: true });
         for (let index = 0; index < localPage.datasets.length; index++) {
           // A dataset whose move hasn't finished lists from this computer, which still keeps its records.
-          // Listing never waits for a move or resumes a stopped one, so a stop can't fail the whole list.
+          // Listing never waits for an unfinished move or resumes a stopped one, so a stop can't fail the whole list.
+          // A finished move's dataset can still wait briefly while the move removes its archive.
           const row = localPage.datasets[index]!, authority = route.marker(row.datasetId)?.state === "imported" ? await target(row.datasetId) : local;
           after = row.datasetId;
           if (authority !== local && authority.deletionStatus && (await authority.deletionStatus({ datasetId: row.datasetId })).deleted) continue;

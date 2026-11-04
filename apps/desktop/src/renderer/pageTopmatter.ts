@@ -8,5 +8,8 @@ export const TOPMATTER_MEASURE = "mx-auto max-w-[720px]";
 export const PROPERTIES_PANEL = `${TOPMATTER_ROW} pt-3.5`;
 export const PROPERTIES_LINE = `${TOPMATTER_MEASURE} flex min-h-6 flex-wrap items-center gap-1.5`;
 
-// A name or a block the page cannot save, said beside the edit it refused.
-export const TOPMATTER_FLAG = "overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-danger";
+const FLAG = "overflow-hidden text-ellipsis whitespace-nowrap text-[11px]";
+// A name the page cannot save, said beside the edit it refused.
+export const TOPMATTER_FLAG = `${FLAG} text-danger`;
+// Properties the page can show but not save, in the lossy note's tone.
+export const TOPMATTER_READ_ONLY_FLAG = `${FLAG} text-warning`;

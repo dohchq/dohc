@@ -1,5 +1,6 @@
 import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
+import type { DatasetListRefusal } from "@dohc/cli/dataset";
 import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 
 // Electron hands a rejected handler's error to the renderer as one string,
@@ -446,23 +447,6 @@ export function collectionsElsewhereWords(computer: { label: string; sameName: b
 export interface CollectionsElsewhere { computer: string | null; others: boolean; words: string }
 
 /**
- * The code of a Collections list this computer's server didn't give, where
- * another computer keeps the workspace's own Collections.
- */
-export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
-
-/**
- * main's words for that list: on the first line, where the workspace's
- * Collections are. After it, the server's error, which reads as it would alone.
- */
-export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; computer: string | null; failure: string } | null {
-  const { name, code, computer, message } = parse(error);
-  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
-  const [elsewhere = "", ...failure] = message.split("\n");
-  return elsewhere ? { elsewhere, computer, failure: failure.join("\n") } : null;
-}
-
-/**
  * main's refusal to use a workspace's Collections here, with its words.
  * Another computer's refusal names it, or null when the error named none.
  */
@@ -516,6 +500,13 @@ export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead |
   const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
   if (kind === "elsewhere") return { kind, words: message, computer };
   return kind === undefined ? null : { kind, words: message };
+}
+
+/** A list main refused, as the error a report reads it from. */
+export function collectionsRefusalError(refusal: DatasetListRefusal): Error {
+  if (refusal.kind === "server-unavailable") return Object.assign(new Error(`${refusal.words}\n${refusal.failure}`), { name: "ServerCollectionsUnavailableError" });
+  return Object.assign(new Error(refusal.words), { name: "CollectionsRefusalError", code: `${COLLECTIONS_REFUSAL_CODE}${refusal.kind}`,
+    computerLabel: refusal.kind === "elsewhere" ? refusal.computer : null });
 }
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
