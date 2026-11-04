@@ -1822,7 +1822,7 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(closeWorkspace).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps a save accepted before shutdown and refuses one asked for after it", async () => {
+  it("keeps saves accepted before shutdown and refuses other waiting work and later saves", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const engine = liveCapture(root, new VersionedLoopbackEngine());
     const person = { kind: "human", humanId: "local-person" } as const;
@@ -1836,12 +1836,18 @@ describe("workspaceEngineCapture batch capture", () => {
         },
       }).catch((error: unknown) => error);
       await admitted.promise;
+      // Both wait behind the running save when quit starts.
+      const count = engine.compareVersionsChangedCount("main").catch((error: unknown) => error);
+      const queued = engine.writeAuthoredFile(join(root, "queued.md"), "queued\n", person).catch((error: unknown) => error);
       engine.beginShutdown();
       const late = engine.writeAuthoredFile(join(root, "late.md"), "late\n", person).catch((error: unknown) => error);
       release.resolve();
       expect(await kept).toMatchObject({ materializeOutcome: "applied" });
+      expect(await count, "Work that isn't a save still stops at quit").toMatchObject({ name: "AbortError" });
+      expect(await queued, "A save queued before quit still lands").toMatchObject({ materializeOutcome: "applied" });
       expect(await late).toMatchObject({ name: "AbortError" });
       expect(await readFile(join(root, "kept.md"), "utf8")).toBe("kept\n");
+      expect(await readFile(join(root, "queued.md"), "utf8")).toBe("queued\n");
       expect(existsSync(join(root, "late.md"))).toBe(false);
     } finally {
       release.resolve();

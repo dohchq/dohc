@@ -37,6 +37,7 @@ import { openLiveDaemonWorkspace, type CloseStep } from "../../e2e/helpers/daemo
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
+import { WILL_QUIT_BUDGET_MS } from "../shutdownBudgets";
 import type { EngineRelayWorkspaceClient } from "./engineRelayClient";
 import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
@@ -1742,6 +1743,16 @@ describe.skipIf(engine.missing)("Quit while a save is in progress", () => {
     } finally { clearTimeout(timer); }
   }
 
+  // The app exits when its quit budget ends, so accepted work has to land inside it.
+  async function insideQuitBudget<T>(work: Promise<T>, quitStarted: number): Promise<T | string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([work, new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve("past the quit budget"), Math.max(0, WILL_QUIT_BUDGET_MS - (performance.now() - quitStarted)));
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
   // Quitting faster must never drop accepted work: a write the capture admitted
   // before quit holds the close until it lands.
   it("holds quit for a local write admitted before it, and keeps the write", async () => {
@@ -1766,11 +1777,12 @@ describe.skipIf(engine.missing)("Quit while a save is in progress", () => {
         },
       }).then(() => "written", (error: unknown) => error);
       await admitted.promise;
+      const quitStarted = performance.now();
       quit = quitLikeTheDesktop(daemon);
       daemon = null;
       expect(await closedWithin(quit, 1_000), "Quit waits for the admitted write").toMatch(/^still waiting on /);
       release.resolve();
-      expect(await written, "The admitted write lands during quit").toBe("written");
+      expect(await insideQuitBudget(written, quitStarted), "The admitted write lands inside the quit budget").toBe("written");
       expect(await closedWithin(quit, REAL_DAEMON_DEADLINE_MS)).toBe("closed");
 
       daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay: connection });

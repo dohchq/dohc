@@ -1933,7 +1933,7 @@ export function createWorkspaceEngineCapture(
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
-      admittedCaptureWaitAbort.signal,
+      captureWaitAbort.signal,
     );
     return liveStores;
   }
@@ -1948,8 +1948,9 @@ export function createWorkspaceEngineCapture(
   const durableLocalListeners = new Set<(path: string) => void>();
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
-  // Quit cancels capture waits at once, except in work dohc accepted before
-  // quit, so a save in progress at quit still reaches the disk.
+  // Quit cancels capture waits at once. A save dohc accepted before quit waits
+  // on this one instead, which ends when the work queued before quit has run,
+  // so the save still reaches the disk.
   const admittedCaptureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
@@ -2054,7 +2055,7 @@ export function createWorkspaceEngineCapture(
   // Whether capture still holds a change made outside dohc to this path.
   async function outsideWriteWaits(path: string): Promise<boolean> {
     const engine = await engineStore();
-    await engine.flushCapture?.({ signal: captureWaitAbort.signal });
+    await engine.flushCapture?.();
     return (await engine.watcherStatus?.())?.deferredWrites.includes(path) ?? false;
   }
   // Set-aside drafts of a deleted file's text that a newer draft or a save
@@ -6373,7 +6374,7 @@ export function createWorkspaceEngineCapture(
           throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
-        await engine.flushCapture?.();
+        await engine.flushCapture?.({ signal: admittedCaptureWaitAbort.signal });
         const versionId = writeOptions.versionId ?? await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
           origin: localFileOrApi(author),
@@ -8336,7 +8337,7 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("flush capture", async () => {
         const engine = await engineStore();
         await drainPendingCollectionAdoptions(engine);
-        await engine.flushCapture?.({ signal: captureWaitAbort.signal });
+        await engine.flushCapture?.();
         await drainPendingCollectionAdoptions(engine);
       });
     },
@@ -8359,7 +8360,7 @@ export function createWorkspaceEngineCapture(
             await drainPendingCollectionAdoptions(store);
             // Normal stop captures the last disk edits. Explicit shutdown
             // cancels convergence before session retirement and skips this wait.
-            if (!captureWaitAbort.signal.aborted) await store.flushCapture?.({ signal: captureWaitAbort.signal });
+            if (!captureWaitAbort.signal.aborted) await store.flushCapture?.();
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
