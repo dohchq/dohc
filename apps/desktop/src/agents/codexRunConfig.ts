@@ -76,20 +76,25 @@ const READ_ONLY_FEATURE_ALIASES = ["connectors", "experimental_use_unified_exec_
 
 // Whether the system requirements would override what a read-only run sets,
 // which Codex does with a warning instead of refusing: they allow only listed
-// permission profiles, and the run's is new each time; they turn on a feature
-// the run turns off; or on Windows they leave the unelevated sandbox out of
-// the ones they allow, or require MXC. A requirements file dohc can't read or
-// parse counts as yes.
+// permission profiles, and the run's is new each time; they leave out the
+// never approval policy; they turn on a feature the run turns off; or on
+// Windows they leave the unelevated sandbox out of the ones they allow, or
+// require MXC. On Unix, a managed config that sets anything also counts,
+// because it wins over every setting the run passes. A file dohc can't read
+// or parse counts as yes.
 export function codexRequirementsRefuseReadOnly(
   files: CodexConfigFiles | null,
   platform: NodeJS.Platform,
   read: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): boolean {
   const tables = files && readConfigTables(files.requirements, read);
-  if (tables === null) return true;
+  const managed = files && readConfigTables(files.config.filter((file) => posix.basename(file) === "managed_config.toml"), read);
+  if (tables === null || managed === null || managed.some(({ table }) => Object.keys(table).length > 0)) return true;
   const disabled = new Set<string>([...READ_ONLY_DISABLED_FEATURES, ...REPLY_ONLY_DISABLED_FEATURES, ...READ_ONLY_FEATURE_ALIASES]);
   return tables.some(({ table }) => {
     if ("allowed_permission_profiles" in table) return true;
+    const approvals = table.allowed_approval_policies;
+    if (approvals !== undefined && !(Array.isArray(approvals) && approvals.includes("never"))) return true;
     if ([table.features, table.feature_requirements].some((features) =>
       isTable(features) && Object.entries(features).some(([key, on]) => on === true && disabled.has(key)))) return true;
     if (platform !== "win32" || !isTable(table.windows)) return false;
@@ -287,8 +292,8 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
 //   organization chose. Without a choice it gets the unelevated one, which
 //   needs no setup. A read-only run always gets the unelevated one, without
 //   MXC.
-// - A read-only run doesn't start where the system requirements would
-//   override these (codexRequirementsRefuseReadOnly).
+// - A read-only run doesn't start where the system requirements or a Unix
+//   managed config would override these (codexRequirementsRefuseReadOnly).
 export function codexRunConfig(input: {
   rootPath: string;
   runId: string;
