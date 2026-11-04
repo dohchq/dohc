@@ -4615,8 +4615,10 @@ mod tests {
         );
     }
 
-    /// An admitted Collections update releases the gate when fetch starts,
-    /// and leaves its work owed until the terminal commit.
+    /// A Collections update is admitted under the capture gate before a pull
+    /// starts. The pull registers only once the update lets the gate go, so
+    /// the update reconciles the relation before page one removes its
+    /// target, and the page leaves that relation alone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_pull_waits_for_an_admitted_collections_update() {
         let ctx = RequestContext::unbounded();
@@ -4640,10 +4642,10 @@ mod tests {
         relay.release();
         drop(hold);
         update.await;
-        assert!(f.owed(), "the fetch token keeps the update owed");
+        assert!(!f.owed(), "the update ran");
         let page_one = page_one.await.expect("join").expect("page one lands");
         assert_eq!(page_one["hasMore"], json!(true));
-        assert_eq!(f.edges(), 0, "the update waits for the whole pull");
+        assert_eq!(f.edges(), 1, "the update reconciled before page one landed");
         assert!(
             f.open
                 .actor
