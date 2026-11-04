@@ -108,6 +108,225 @@ fn prepared_repairs_prioritize_the_page_object_past_the_cap() {
 }
 
 #[test]
+fn prepared_repairs_keep_the_earliest_base_when_a_later_copy_arrives() {
+    earliest_base_survives_later_copies(false);
+}
+
+#[test]
+fn prepared_repairs_keep_pending_dependencies_on_the_winning_base() {
+    earliest_base_survives_later_copies(true);
+}
+
+fn earliest_base_survives_later_copies(pending_dependencies: bool) {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+
+    let (_scratch, _path, mut store) = open_store();
+    let padding_claim = dohc_engine_storage::hex_sha256(&Ydoc::wire().encode_full_state());
+    let padding: Vec<_> = (0..MAX_BASE_REPAIR_LOOKUPS)
+        .map(|index| format!("00000000-0000-0000-0000-{index:012x}"))
+        .collect();
+    seed(&mut store, &padding, &padding_claim);
+    let key = DocKey::new("ws", "main", "zz-document").unwrap();
+    let path = "document.md";
+    assert!(padding.iter().all(|object| object < &key.object_id));
+
+    let local = Ydoc::wire();
+    local.plaintext_insert(0, "local base");
+    let local_claim = store.put_binary_blob(&local.encode_full_state()).unwrap();
+    let competing = Ydoc::wire();
+    competing.plaintext_insert(0, "competing base");
+    let competing_claim = store
+        .put_binary_blob(&competing.encode_full_state())
+        .unwrap();
+    assert_ne!(local_claim, competing_claim);
+    let base = |origin: &str, claim: &str, relay_seq: i64, recorded_at_ms: i64| ReplicationEnvelope {
+        workspace_id: "ws".into(),
+        origin_id: origin.into(),
+        origin_seq: 0,
+        op_kind: "ydoc.update".into(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": key.object_id,
+            "path": path,
+            "contentKind": "plaintext",
+            "lineageClaimId": claim,
+            "updateBlobSha256": claim,
+            "isBaseState": true
+        }),
+        recorded_at_ms,
+        relay_seq: Some(relay_seq),
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+    };
+    let original = base("original-base", &local_claim, 5, 1_000);
+    let duplicate = base("duplicate-base", &local_claim, 1_002, 1_200);
+    let competing = base("competing-base", &competing_claim, 1_001, 1_300);
+    let mut cache = WriterDocCache::new();
+    let outcome = crate::apply_ydoc_envelope(
+        &mut store,
+        &mut cache,
+        &original,
+        &NoFaults,
+        &crate::NoLiveLeases,
+    )
+    .unwrap();
+    assert!(matches!(outcome.primary, ApplyDisposition::Applied(_)));
+    if pending_dependencies {
+        let dependency = Ydoc::wire();
+        let _predecessor = dependency.plaintext_insert(0, "dependency");
+        let pending = dependency.plaintext_insert(0, "pending ");
+        let pending_sha = store.put_binary_blob(&pending).unwrap();
+        let mut delta = original.clone();
+        delta.origin_id = "pending-dependency".into();
+        delta.relay_seq = Some(6);
+        delta.recorded_at_ms = 1_100;
+        delta.payload["updateBlobSha256"] = json!(pending_sha);
+        delta.payload["isBaseState"] = json!(false);
+        let outcome = crate::apply_ydoc_envelope(
+            &mut store,
+            &mut cache,
+            &delta,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(outcome.primary, ApplyDisposition::Applied(_)));
+    }
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET base_relay_seq=NULL \
+                 WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates \
+                 (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) \
+                 VALUES ('ws','main',?1,?2,?3,0)",
+                params![key.object_id, local_claim, original.origin_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO sync_relay_cursors \
+                 (workspace_id,cursor,replication_epoch,stream_identity,bootstrap_complete) \
+                 VALUES ('ws','1000','epoch','stream',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let before = dohc_engine_collab::load_persisted(&store, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before.marker.lineage_claim_id.as_deref(),
+        Some(local_claim.as_str())
+    );
+    assert_eq!(before.marker.base_relay_seq, None);
+    assert!(!before.marker.base_relay_confirmed_absent);
+    assert_eq!(before.doc.has_pending_dependencies(), pending_dependencies);
+    assert_eq!(remaining(&store), MAX_BASE_REPAIR_LOOKUPS + 1);
+
+    let mut relay = PagedRelay::new([(
+        1_000,
+        PullResponse {
+            ops: vec![competing.clone(), duplicate.clone()],
+            next_cursor: 1_002,
+            has_more: false,
+        },
+    )]);
+    for index in 0..padding.len() {
+        relay = relay.with_coordinate("peer", index as i64, LogCoordinateResponse::Absent);
+    }
+    relay = relay.with_coordinate(
+        &original.origin_id,
+        original.origin_seq,
+        LogCoordinateResponse::Present(original.clone()),
+    );
+    let client = RelaySyncClient::new(relay);
+    let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+    assert_eq!(
+        crate::read_relay_cursor(&store, "ws")
+            .unwrap()
+            .unwrap()
+            .cursor,
+        1_000
+    );
+    assert_eq!(
+        dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .base_relay_seq,
+        None
+    );
+    let offline = RelaySyncClient::new(PagedRelay::new([]));
+    let outcome = offline
+        .apply_pull(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &page,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            2_000,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        SyncPassOutcome::Complete {
+            fetched: 2,
+            refused: 0,
+            pending_cursor: Some(RelayCursor {
+                cursor: 1_002,
+                ..
+            }),
+            ..
+        }
+    ));
+    for origin in [&duplicate.origin_id, &competing.origin_id] {
+        assert_eq!(
+            crate::read_replication_acked_seq(&store, "ws", origin).unwrap(),
+            0
+        );
+    }
+    let archived: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_inactive_lineages \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id=?1 AND lineage_claim_id=?2",
+                params![key.object_id, local_claim],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    if pending_dependencies {
+        assert_eq!(archived, 0, "the winning lineage must remain active");
+    }
+    let after = dohc_engine_collab::load_persisted(&store, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.marker.lineage_claim_id.as_deref(),
+        Some(local_claim.as_str()),
+        "the base at relay position 5 must beat the base at 1001"
+    );
+    assert_eq!(after.marker.base_relay_seq, Some(5));
+    assert_eq!(
+        after.marker.base_origin_id.as_deref(),
+        Some(original.origin_id.as_str())
+    );
+    assert_eq!(after.doc.has_pending_dependencies(), pending_dependencies);
+    assert_eq!(
+        after.doc.project(ContentKind::Plaintext).unwrap().content,
+        "local base"
+    );
+    assert_eq!(archived, 0);
+}
+
+#[test]
 fn prepared_page_waits_for_repairs_that_exceed_the_cap() {
     let (_scratch, _path, mut store) = open_store();
     let claim =
