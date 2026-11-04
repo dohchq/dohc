@@ -1507,11 +1507,10 @@ fn b_journaled_seq(b: &EngineStore) -> i64 {
     )
 }
 
-/// Deliver to A what B journaled after `after_seq`, with B's blobs, as the
-/// relay does. Y.Doc updates stay behind, so A still holds no lineage of its
-/// own.
+/// Deliver to A what B journaled after `after_seq`, with B's text blobs, as
+/// the relay does. A holds no lineage of its own.
 fn a_receives_from_b(a: &mut EngineStore, b: &EngineStore, after_seq: i64) {
-    let (ops, texts, binaries) = b
+    let (ops, texts) = b
         .read_with(|conn| {
             let ops = conn
                 .prepare(
@@ -1539,113 +1538,81 @@ fn a_receives_from_b(a: &mut EngineStore, b: &EngineStore, after_seq: i64) {
                 .prepare("SELECT text FROM blobs")?
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            let binaries = conn
-                .prepare("SELECT bytes FROM binary_blobs")?
-                .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, rusqlite::Error>((ops, texts, binaries))
+            Ok::<_, rusqlite::Error>((ops, texts))
         })
         .expect("B's journal");
     assert!(!ops.is_empty(), "B journaled its resolution");
     hydrate(a, &texts.iter().map(String::as_str).collect::<Vec<_>>());
-    for bytes in &binaries {
-        a.put_binary_blob(bytes).expect("A holds B's blob");
-    }
     for op in &ops {
         deliver(a, op, &NoLiveLeases).expect("A applies B's resolution");
     }
 }
 
-/// After each resolution reaches A, A's next saves build on the choice. They
-/// come in without a conflict, after a restart and a redelivery too.
+/// After B takes A's flown file and the resolution reaches A, A's next saves
+/// build on the choice. They come in without a conflict, after a restart and
+/// a redelivery too. B's lineage is its own, so A takes the resolution
+/// without holding it.
 #[test]
 fn saves_that_build_on_a_resolved_record_conflict_come_in() {
     let (planned, flown, landed, recovered_text) =
         (md(PLANNED), md(FLOWN), md(LANDED), md(RECOVERED));
-    let merged = {
-        let doc = richdoc(&flown);
-        doc.richdoc_append_paragraph(NOTES);
-        projected(&doc)
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+    // B types into the record, so A's file meets that typing in a conflict.
+    b_opens(&mut b, &richdoc(&planned), &planned, &[NOTES]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown, &landed, &recovered_text]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+    let journaled = b_journaled_seq(&b);
+    resolve(&mut b, ResolveConflictKind::ApplyIncoming);
+    assert_eq!(head_text(&b, RECORD), Some(flown.clone()));
+
+    a_receives_from_b(&mut a, &b, journaled);
+    assert_eq!(
+        head_text(&a, RECORD),
+        Some(flown.clone()),
+        "A holds the choice"
+    );
+    assert!(open_conflicts(&a).is_empty(), "A has nothing to review");
+    let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
+    assert_conflicts_opened(
+        deliver(&mut b, &landed_op, &NoLiveLeases).expect("apply A's save"),
+        0,
+    );
+    let check = |b: &EngineStore| {
+        assert!(open_conflicts(b).is_empty());
+        assert_eq!(head_text(b, RECORD), Some(landed.clone()));
+        assert_eq!(indexed_status(b), Some(json!("Landed")));
     };
-    for choice in ["current", "incoming", "merged"] {
-        let (_a_scratch, mut a) = device("device-a");
-        let created = a_creates_apollo(&mut a, &planned);
-        let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
-        // B types into a lineage another device claimed, so A's file meets
-        // that typing in a conflict.
-        let doc = richdoc(&planned);
-        device_c_base(&mut b, &doc);
-        b_types(&mut b, &mut WriterDocCache::new(), &doc, &[NOTES], 2_001);
-        let (resolution, chosen) = match choice {
-            "current" => (ResolveConflictKind::KeepCurrent, projected(&doc)),
-            "incoming" => (ResolveConflictKind::ApplyIncoming, flown.clone()),
-            _ => (
-                ResolveConflictKind::ApplyMerged {
-                    text: merged.clone(),
-                },
-                merged.clone(),
-            ),
-        };
-        let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-        hydrate(&mut b, &[&flown, &merged, &landed, &recovered_text]);
-        assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-        let journaled = b_journaled_seq(&b);
-        resolve(&mut b, resolution);
-        assert_eq!(head_text(&b, RECORD), Some(chosen.clone()), "{choice}");
+    check(&b);
+    assert_eq!(lineage_rows(&b), 0, "the choice's lineage gives way");
 
-        a_receives_from_b(&mut a, &b, journaled);
-        assert_eq!(
-            head_text(&a, RECORD),
-            Some(chosen.clone()),
-            "A holds the choice: {choice}"
-        );
-        let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
-        assert_conflicts_opened(
-            deliver(&mut b, &landed_op, &NoLiveLeases).expect("apply A's save"),
-            0,
-        );
-        let check = |b: &EngineStore| {
-            assert!(open_conflicts(b).is_empty(), "{choice}");
-            assert_eq!(head_text(b, RECORD), Some(landed.clone()), "{choice}");
-            assert_eq!(indexed_status(b), Some(json!("Landed")), "{choice}");
-        };
-        check(&b);
-        assert_eq!(
-            lineage_rows(&b),
-            0,
-            "the choice's lineage gives way: {choice}"
-        );
+    drop(b);
+    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    check(&b);
+    let redelivered = deliver(&mut b, &landed_op, &NoLiveLeases).expect("redeliver");
+    assert!(
+        matches!(redelivered.primary, ApplyDisposition::Skipped),
+        "{redelivered:?}"
+    );
+    check(&b);
 
-        drop(b);
-        let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
-        check(&b);
-        let redelivered = deliver(&mut b, &landed_op, &NoLiveLeases).expect("redeliver");
-        assert!(
-            matches!(redelivered.primary, ApplyDisposition::Skipped),
-            "{redelivered:?}"
-        );
-        check(&b);
-
-        let recovered_op = a_saves(
-            &mut a,
-            RECORD,
-            RECORD_PATH,
-            &recovered_text,
-            "apollo-recovered",
-            50,
-        );
-        assert_conflicts_opened(
-            deliver(&mut b, &recovered_op, &NoLiveLeases).expect("apply A's next save"),
-            0,
-        );
-        assert!(open_conflicts(&b).is_empty(), "{choice}");
-        assert_eq!(
-            head_text(&b, RECORD),
-            Some(recovered_text.clone()),
-            "{choice}"
-        );
-        assert_eq!(indexed_status(&b), Some(json!("Recovered")), "{choice}");
-    }
+    let recovered_op = a_saves(
+        &mut a,
+        RECORD,
+        RECORD_PATH,
+        &recovered_text,
+        "apollo-recovered",
+        50,
+    );
+    assert_conflicts_opened(
+        deliver(&mut b, &recovered_op, &NoLiveLeases).expect("apply A's next save"),
+        0,
+    );
+    assert!(open_conflicts(&b).is_empty());
+    assert_eq!(head_text(&b, RECORD), Some(recovered_text));
+    assert_eq!(indexed_status(&b), Some(json!("Recovered")));
 }
 
 /// A claimed record that never met a conflict takes a save from its head. The

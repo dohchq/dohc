@@ -5622,7 +5622,7 @@ fn fix1_remote_delete_releases_capture_hold() {
 }
 
 #[test]
-fn moment_append_live_lease_blocks_all_mutations_and_write_conflicts_after_close() {
+fn moment_append_live_lease_blocks_all_mutations_until_it_closes() {
     for (operation, after_path, after_text) in [
         ("write", "head.md", "changed"),
         ("rename", "renamed.md", "before"),
@@ -5775,26 +5775,34 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_conflicts_after_close
             &leases,
         );
         if operation == "write" {
-            // The lineage is not a disposable seed, so the file meets it in a
-            // conflict instead of waiting for a rewrite its origin never makes.
+            // The write continues the head, and the lineage holds only that
+            // head and never left this device, so the lineage retires.
             assert!(matches!(
                 closed,
                 Ok(ApplyOutcome {
                     primary: ApplyDisposition::Applied(ref applied),
                     ..
-                }) if applied.conflicts_opened == 1
+                }) if applied.conflicts_opened == 0
             ));
             assert_eq!(
                 read_replication_acked_seq(&store, "ws", &origin_id).expect("write ack"),
                 0,
-                "the write must be acknowledged once its conflict opens"
+                "the write must be acknowledged once the lease closes"
             );
+            assert_eq!(snapshot(&store, &object_id).unwrap().3, moment_id);
+            assert!(conflict_ids(&store).is_empty());
             assert_eq!(
-                snapshot(&store, &object_id).unwrap().3,
-                "local-head",
-                "the conflict keeps the head"
+                store
+                    .read_with(|conn| conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                         AND version_id='main' AND object_id=?1",
+                        [&object_id],
+                        |row| row.get::<_, i64>(0),
+                    ))
+                    .expect("lineage after write"),
+                0,
+                "the lineage retires"
             );
-            assert_eq!(conflict_ids(&store).len(), 1);
             continue;
         }
         assert!(matches!(
