@@ -38,14 +38,20 @@ const listing = (...paths: string[]) => ({
   folders: [],
 });
 
+const listed = (marker: string) => screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === marker);
+
 // The shell hears of a change made outside the tree as workspace activity,
 // then lists the files again. `marker` is a file only this listing holds, so
-// its row in the tree shows that the listing has landed.
-async function listAfterActivity(bridge: ReturnType<typeof makeBridge>, paths: string[], marker: string, cached = false) {
-  bridge.listWorkspaceFiles.mockResolvedValue({ ...listing(...paths, marker), ...(cached ? { cached: true } : {}) });
-  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
-  await waitFor(() => expect(screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === marker)).toBe(true));
+// its row in the tree shows that the listing has landed. Activity that names
+// its `changed` paths lists through main's cache.
+async function listAfterActivity(bridge: ReturnType<typeof makeBridge>, paths: string[], marker: string, changed?: string[]) {
+  bridge.listWorkspaceFiles.mockResolvedValue(listing(...paths, marker));
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, ...(changed ? { paths: changed } : {}) }));
+  await waitFor(() => expect(listed(marker)).toBe(true));
 }
+
+const allowedCache = (bridge: ReturnType<typeof makeBridge>) =>
+  bridge.listWorkspaceFiles.mock.calls.map(([payload]) => payload.allowCached === true);
 
 function refusedOnce() {
   const moveWorkspacePath = vi.fn().mockRejectedValueOnce(LIVE_MOVE_REFUSAL).mockResolvedValue({ path: "renamed.md", undo: { available: false, reason: "" } });
@@ -111,10 +117,12 @@ it("a failed move's toast and Notices row go once an agent makes the same move t
   await listAfterActivity(bridge, ["a.md", "b.md"], "c.md");
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
   expect(await noticeRows(user)).toHaveLength(1);
-  // The agent's move of a.md to renamed.md.
-  await listAfterActivity(bridge, ["renamed.md", "b.md"], "d.md");
+  // The agent's move of a.md to renamed.md. Its activity names both paths,
+  // so the listing comes through main's cache, and a full one confirms it.
+  await listAfterActivity(bridge, ["renamed.md", "b.md"], "d.md", ["a.md", "renamed.md"]);
   await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   expect(await noticeRows(user)).toEqual([]);
+  expect(allowedCache(bridge).slice(-2)).toEqual([true, false]);
   expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1);
 });
 
@@ -144,7 +152,7 @@ async function failWhileListed(bridge: ReturnType<typeof makeBridge> & { moveWor
   await listAfterActivity(bridge, during, "c.md");
   bridge.listWorkspaceFiles.mockResolvedValue(listing(...after, "refreshed.md"));
   held.reject(cause);
-  await waitFor(() => expect(screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === "refreshed.md")).toBe(true));
+  await waitFor(() => expect(listed("refreshed.md")).toBe(true));
 }
 
 // The agent's move lands before the tree's own attempt fails.
@@ -166,10 +174,35 @@ it("a failed move keeps its toast and Notices row when a listing during the move
   await failWhileListed(bridge, user, ["renamed.md", "b.md"], LIVE_MOVE_REFUSAL, ["a.md", "b.md"]);
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
   expect(await noticeRows(user)).toHaveLength(1);
-  // Main's cache can still hold the walk taken mid-move.
-  await listAfterActivity(bridge, ["renamed.md", "b.md"], "d.md", true);
+  // A listing through main's cache can join a walk that started mid-move.
+  // The full listing that confirms it shows a.md back.
+  bridge.listWorkspaceFiles.mockResolvedValueOnce(listing("renamed.md", "b.md", "d.md")).mockResolvedValue(listing("a.md", "b.md", "e.md"));
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["a.md", "renamed.md"] }));
+  await waitFor(() => expect(listed("e.md")).toBe(true));
+  expect(allowedCache(bridge).slice(-2)).toEqual([true, false]);
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
   expect(await noticeRows(user)).toHaveLength(1);
+});
+
+// The displayed listing shows the destination taken when the move fails, and
+// the tree's own listing after it fails.
+it("a move that failed onto a taken name keeps its row when the tree's next listing fails and the file then goes", async () => {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn() });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  const held = deferred<never>();
+  bridge.moveWorkspacePath.mockImplementationOnce(() => held.promise);
+  await rename(user);
+  await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
+  await listAfterActivity(bridge, ["a.md", "b.md", "renamed.md"], "c.md");
+  const listings = bridge.listWorkspaceFiles.mock.calls.length;
+  bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("dohc could not list the files."));
+  held.reject(TAKEN);
+  await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
+  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
+  // a.md is deleted.
+  await listAfterActivity(bridge, ["b.md", "renamed.md"], "d.md");
+  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
 });
 
 // With renamed.md already there, a listing without a.md could be a delete, so

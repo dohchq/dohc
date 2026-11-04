@@ -58,6 +58,9 @@ export function useWorkspaceListing(workspaceId: string) {
   const [fileListingCommit, setFileListingCommit] = useState<{
     request: number;
     listingSource: "cached" | "fresh";
+    // Main walked the files for this request, after it was made. A request
+    // that allows the cache can join a walk that started earlier.
+    ownWalk: boolean;
   } | null>(null);
   const refreshFiles = useCallback(
     async (options: { allowCached?: true } = {}) => {
@@ -101,6 +104,7 @@ export function useWorkspaceListing(workspaceId: string) {
         setFileListingCommit({
           request,
           listingSource: result.cached === true ? "cached" : "fresh",
+          ownWalk: options.allowCached !== true,
         });
         return result.cached === true;
       } catch (error) {

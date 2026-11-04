@@ -974,27 +974,36 @@ export function DesktopWorkspaceShell(props: {
   );
   // A failed move's row goes once the move happens, by any route. A move made
   // through the CLI or MCP reaches the shell only as workspace activity and
-  // the listing that follows. So a fresh listing asked for after the failure,
-  // with the source gone and the destination there, clears the row. A listing
-  // walked earlier can show a move main was still undoing. A destination listed
-  // beside the source was taken, and counts only after a listing shows it
-  // gone, since a deleted source would look the same. The shell remounts for
-  // each workspace, and so does this map.
+  // the listing that follows. So a listing main walked for a request made
+  // after the failure, with the source gone and the destination there,
+  // clears the row. A walk that started earlier can show a move main was
+  // still undoing, and a request that allows the cache can get one. When such
+  // a listing would change a failed move, one full listing confirms it. A
+  // destination listed beside the source was taken, and counts only after a
+  // listing shows it gone, since a deleted source would look the same. The
+  // shell remounts for each workspace, and so does this map.
+  const listing = useRef({ files, folders });
+  listing.current = { files, folders };
   const failedMoves = useRef(new Map<string, { move: PendingTreeMove; destinationTaken: boolean; after: number }>());
   const clearFailedMove = useCallback((identity: string) => {
     failedMoves.current.delete(identity);
     clearIdentity(identity);
   }, [clearIdentity]);
   useEffect(() => {
-    if (fileListingCommit?.listingSource !== "fresh") return;
+    if (!fileListingCommit) return;
+    let confirm = false;
     for (const [identity, failed] of failedMoves.current) {
       if (fileListingCommit.request <= failed.after) continue;
       const ends = listedMoveEnds(failed.move, files, folders);
-      if (!ends.to) failed.destinationTaken = false;
-      else if (ends.from) failed.destinationTaken = true;
-      else if (!failed.destinationTaken) clearFailedMove(identity);
+      const taken = ends.to && (ends.from || failed.destinationTaken);
+      const made = ends.to && !ends.from && !failed.destinationTaken;
+      if (!fileListingCommit.ownWalk) confirm ||= made || taken !== failed.destinationTaken;
+      else if (made) clearFailedMove(identity);
+      else failed.destinationTaken = taken;
     }
-  }, [fileListingCommit, files, folders, clearFailedMove]);
+    // A failed listing keeps the row, and the next activity lists again.
+    if (confirm) void refreshFiles().catch(() => undefined);
+  }, [fileListingCommit, files, folders, clearFailedMove, refreshFiles]);
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
@@ -1005,7 +1014,9 @@ export function DesktopWorkspaceShell(props: {
         : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
       // A Try again keeps what the first failure knew of the destination.
       if (move && identity) {
-        failedMoves.current.set(identity, { move, destinationTaken: failedMoves.current.get(identity)?.destinationTaken ?? false, after: issuedFilesRequest() });
+        const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
+        const destinationTaken = failedMoves.current.get(identity)?.destinationTaken === true || (ends.from && ends.to);
+        failedMoves.current.set(identity, { move, destinationTaken, after: issuedFilesRequest() });
       }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
