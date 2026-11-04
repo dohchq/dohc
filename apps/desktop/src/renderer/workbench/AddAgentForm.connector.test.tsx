@@ -115,8 +115,8 @@ it("editing the Advanced command removes the profile and its permission claim", 
 });
 
 it.each([
-  ["Claude Code", "claude", "C:\\Tools\\claude.exe", "dohc adds its reply tool. The conversation arrives through stdin."],
-  ["Codex", "codex", "C:\\Tools\\codex.cmd", "dohc adds its reply tool and sandbox. The conversation arrives through stdin."],
+  ["Claude Code", "claude", "C:\\Tools\\claude.exe", "dohc adds its reply tool. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds."],
+  ["Codex", "codex", "C:\\Tools\\codex.cmd", "dohc adds its reply tool and sandbox. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds."],
 ] as const)("keeps the %s profile when its Advanced command changes and changes back", async (name, tool, executable, hint) => {
   const f = fixture();
   render(<AddAgentForm {...f.props} />);
