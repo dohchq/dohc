@@ -218,7 +218,9 @@ it('shows opening and a stopped session as a centered dohc message in both theme
   expect(style).toContain('#mark{display:none;color:var(--danger)}[data-state=stopped] #mark{display:block}');
   expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent='This app session ended. Reopen the share link.';");
   expect(html).toContain("document.body.dataset.state='running';document.getElementById('status').textContent='';");
-  expect(style).toContain('[data-state=running] #message{display:none}');
+  // A hidden live region drops out of the accessibility tree and misses the session-ended announcement.
+  expect(style).toContain('[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}');
+  expect(style).not.toMatch(/#(message|status)\{display:none/);
   expect(html).not.toMatch(/style="|<link|@import|@font-face|url\(/);
 });
 it('keeps the launch page policy strict and its words free of link and workspace details', async () => {
