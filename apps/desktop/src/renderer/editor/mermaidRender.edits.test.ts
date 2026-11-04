@@ -94,4 +94,50 @@ describe('makeMermaidPreviewPlugin — edits', () => {
     }
     expect(shown(state, plugin)).toEqual(expected(state).shown)
   })
+
+  it("keeps a diagram's id through one edit on both sides of it, and through a remote update", () => {
+    const plugin = makeMermaidPreviewPlugin(render)
+    let state = EditorState.create({
+      doc: doc(paragraph('lead'), codeBlock('graph TD;', 'mermaid'), paragraph('after')),
+      plugins: [plugin],
+    })
+    const ids = () => (plugin.getState(state) as { entries: { id: string }[] }).entries.map(({ id }) => id)
+    const before = ids()
+
+    const tr = state.tr.insertText('x', 1)
+    state = state.apply(tr.insertText('y', tr.doc.content.size - 1))
+    expect(ids()).toEqual(before)
+
+    const remote = doc(paragraph('lead, edited'), codeBlock('graph TD;', 'mermaid'), paragraph('after, edited'))
+    state = state.apply(state.tr.replaceWith(0, state.doc.content.size, remote.content))
+    expect(ids()).toEqual(before)
+    expect(shown(state, plugin)).toEqual(expected(state).shown)
+  })
+
+  it('makes decorations again only for the diagram typed in, and the two the cursor moved between', () => {
+    const plugin = makeMermaidPreviewPlugin(render)
+    const fences = Array.from({ length: 2000 }, (_, index) => codeBlock(`graph TD; A${index}`, 'mermaid'))
+    let state = EditorState.create({ doc: doc(paragraph('lead'), ...fences), plugins: [plugin] })
+    const inside = (fence: number) => {
+      let pos = 1
+      for (let index = 0; index <= fence; index += 1) pos += state.doc.child(index).nodeSize
+      return pos
+    }
+    const widget = vi.spyOn(Decoration, 'widget')
+    const node = vi.spyOn(Decoration, 'node')
+    try {
+      state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, inside(1000))))
+      expect([widget.mock.calls.length, node.mock.calls.length]).toEqual([1, 1])
+      state = state.apply(state.tr.insertText('x'))
+      expect([widget.mock.calls.length, node.mock.calls.length]).toEqual([2, 2])
+      state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, inside(1001))))
+      expect([widget.mock.calls.length, node.mock.calls.length]).toEqual([4, 4])
+    } finally {
+      widget.mockRestore()
+      node.mockRestore()
+    }
+    const { shown: wanted, classes: wantedClasses } = expected(state)
+    expect(shown(state, plugin)).toEqual(wanted)
+    expect(classes(state, plugin)).toEqual(wantedClasses)
+  })
 })
