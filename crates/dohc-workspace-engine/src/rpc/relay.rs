@@ -3284,7 +3284,7 @@ mod tests {
 
         /// The Collections' records, fields and relations without the
         /// workspace id, so two workspaces can be compared.
-        fn collections_state(&self) -> Vec<String> {
+        fn collections_rows(&self) -> Vec<String> {
             let conn = rusqlite::Connection::open_with_flags(
                 self.open.actor.database_path(),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -4304,7 +4304,7 @@ mod tests {
         commit_page(&f, &page_two).await.expect("commit page two");
         assert!(!f.owed());
         assert_eq!(f.edges(), 1, "the source still relates to the target");
-        let state = f.collections_state();
+        let state = f.collections_rows();
         f.close().await;
         state
     }
@@ -4362,7 +4362,7 @@ mod tests {
         commit_page(&f, &page_two).await.expect("commit page two");
         assert!(!f.owed());
         assert_eq!(f.edges(), 1, "the source still relates to the target");
-        let state = f.collections_state();
+        let state = f.collections_rows();
         f.close().await;
 
         // The same pull and update, with the update run only after the
