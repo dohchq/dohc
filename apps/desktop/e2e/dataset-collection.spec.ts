@@ -195,6 +195,7 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     const deletion = page.getByRole("dialog", { name: "Delete Equipment permanently?" });
     await expect(deletion).toContainText("This cannot be undone on this host, even with a recovery file.");
     await expect(deletion).toContainText("Recovery requires another clean host with this workspace's identity.");
+    await expect(deletion).toContainText(`The ${dirname(listed.datasets[0].datasetPath!)} folder and its files stay. Find them in Files.`);
     await deletion.getByRole("checkbox", { name: "I understand that dohc cannot undo this deletion." }).check();
     await deletion.getByRole("button", { name: "Delete Collection permanently", exact: true }).click();
     await expect(deletion).toBeHidden();
