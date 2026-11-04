@@ -849,7 +849,7 @@ describe("DocumentMenu", () => {
       const { report, clear, wrapper } = notices();
       const openPlan = vi.fn();
       const menu = (key: string, name: string, markdown: string) => (
-        <DocumentMenu path="Plan.md" workspaceId="ws-1" path={`${key}/${name}.md`} documentKey={key} suggestedName={name} getMarkdown={() => markdown} onOpen={key === "a" ? openPlan : undefined} />
+        <DocumentMenu workspaceId="ws-1" path={`${key}/${name}.md`} documentKey={key} suggestedName={name} getMarkdown={() => markdown} onOpen={key === "a" ? openPlan : undefined} />
       );
       const view = render(menu("a", "Plan", MARKDOWN), { wrapper });
       writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused")));
