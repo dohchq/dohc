@@ -203,7 +203,7 @@ export function EmailShareForm(props: {
             <code data-testid="share-code" title={created.shareCode}>{created.shareCode}</code>
           </CopyField>
           <p className="m-0 text-[11px] leading-relaxed text-subtle">
-            You can end this share anytime from Settings → Cloud.
+            You can end this share anytime from Sharing.
           </p>
           <SecondaryButton
             type="button"
