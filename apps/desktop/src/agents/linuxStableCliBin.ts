@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { access, chmod, constants, copyFile, lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { agentRuntimeTarget, bundledPosixLauncher, posixMcpLauncher } from "../../scripts/mcp-launchers.mjs";
 import { PINNED_NODE } from "../../scripts/pinned-node.mjs";
 
@@ -32,10 +32,24 @@ async function contentHash(filePath: string): Promise<string> {
   return createHash("sha256").update(await readFile(filePath)).digest("hex").slice(0, 16);
 }
 
-async function streamedSha256(filePath: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
-  return hash.digest("hex");
+// Hashing dohc's 120 MB Node.js on Electron's main thread held up the first
+// workspace shell after a copy, so a worker reads and hashes it.
+const SHA256_WORKER_SOURCE = `
+const { parentPort, workerData } = require("node:worker_threads");
+const hash = require("node:crypto").createHash("sha256");
+require("node:fs").createReadStream(workerData)
+  .on("data", (chunk) => hash.update(chunk))
+  .on("end", () => parentPort.postMessage(hash.digest("hex")))
+  .on("error", (error) => { throw error; });
+`;
+
+function sha256InWorker(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(SHA256_WORKER_SOURCE, { eval: true, workerData: filePath });
+    worker.once("message", (digest: string) => resolve(digest));
+    worker.once("error", reject);
+    worker.once("exit", (code) => reject(new Error(`The Node.js hash worker stopped with code ${code}.`)));
+  });
 }
 
 async function isExecutableFile(filePath: string): Promise<boolean> {
@@ -58,7 +72,7 @@ async function publishNode(sourcePath: string, targetPath: string, sha256: strin
   await atomicReplaceFile(targetPath, async (tempPath) => {
     await copyFile(sourcePath, tempPath);
     await chmod(tempPath, 0o755);
-    if (await streamedSha256(tempPath) !== sha256) {
+    if (await sha256InWorker(tempPath) !== sha256) {
       throw new Error("dohc's Node.js does not match its pinned release.");
     }
   });
