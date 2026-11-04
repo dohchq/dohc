@@ -795,7 +795,16 @@ pub struct RelaySyncClient<T> {
 /// gathered: a fresh pass would skip the rows already applied and report
 /// none of it. A new request starts empty.
 #[derive(Clone, Default)]
-pub struct PullContinuation(std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>);
+pub struct PullContinuation(
+    std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>,
+    std::sync::Arc<std::sync::Mutex<Option<FetchPullToken>>>,
+);
+
+struct FetchPullToken {
+    identity: crate::SyncIdentity,
+    token: String,
+    previous: Option<String>,
+}
 
 struct SuspendedPull {
     workspace_id: String,
@@ -839,6 +848,30 @@ fn ordinary_pull_token(
             )
         })
         .map_err(|error| local(SyncError::corrupt(error)))
+}
+
+fn replace_ordinary_pull_token(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    token: &str,
+    replacement: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<bool, RelayError> {
+    match store
+        .write_with(faults, |tx| {
+            tx.execute(
+                "UPDATE sync_identity SET ordinary_pull_token=?3 \
+                 WHERE workspace_id=?1 AND ordinary_pull_token=?2",
+                params![workspace_id, token, replacement],
+            )
+            .map(|changed| changed > 0)
+            .map_err(SyncError::persist)
+        })
+        .map_err(local)?
+    {
+        TxnOutcome::Committed(changed) => Ok(changed),
+        TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+    }
 }
 
 fn pull_objects(page: &[ReplicationEnvelope]) -> BTreeSet<String> {
@@ -2500,11 +2533,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<PreparedOrdinaryPull, RelayError> {
-        let result = self.fetch_pull_inner(store, workspace_id, faults);
-        if result.is_err() && !self.transport.request_pending() {
-            crate::cursor::abandon_ordinary_pull(store, workspace_id, faults).map_err(local)?;
-        }
-        result
+        self.fetch_pull_with_repairs(store, workspace_id, faults, false)
     }
 
     pub fn fetch_pull_settling_repairs(
@@ -2513,27 +2542,84 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<PreparedOrdinaryPull, RelayError> {
-        let prepared = self.fetch_pull(store, workspace_id, faults)?;
-        // Finish validated repairs in this writer step, before another local
-        // write can change their candidates. Page operations still wait for apply.
-        let repaired = {
-            let ops = prepared
-                .ops
+        self.fetch_pull_with_repairs(store, workspace_id, faults, true)
+    }
+
+    fn fetch_pull_with_repairs(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        settle_repairs: bool,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        let result = self
+            .fetch_pull_inner(store, workspace_id, faults)
+            .and_then(|prepared| {
+                if settle_repairs {
+                    let ops = prepared
+                        .ops
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match self.repair_base_orders(
+                        store,
+                        workspace_id,
+                        &prepared.identity,
+                        faults,
+                        &ops,
+                        BaseRepairPhase::Apply(&prepared.repairs),
+                    ) {
+                        Ok(()) | Err(RelayError::RepairPending) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(prepared)
+            });
+        if result.is_ok() {
+            self.continuation
+                .1
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.repair_base_orders(
-                store,
-                workspace_id,
-                &prepared.identity,
-                faults,
-                &ops,
-                BaseRepairPhase::Apply(&prepared.repairs),
-            )
-        };
-        match repaired {
-            Ok(()) | Err(RelayError::RepairPending) => Ok(prepared),
-            Err(error) => Err(error),
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        } else if !self.transport.request_pending()
+            && !matches!(&result, Err(RelayError::ValidationPending(_)))
+            && self
+                .pending_preparation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            self.abandon_fetch_pull(store, workspace_id, faults)?;
         }
+        result
+    }
+
+    /// Release this request's failed fetch without clearing an earlier pass.
+    pub fn abandon_fetch_pull(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, RelayError> {
+        let mut fetching = self
+            .continuation
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(fetch) = fetching.as_ref() else {
+            return Ok(false);
+        };
+        if fetch.identity.workspace_id != workspace_id {
+            return Err(RelayError::InvalidResponse);
+        }
+        let released = replace_ordinary_pull_token(
+            store,
+            workspace_id,
+            &fetch.token,
+            fetch.previous.as_deref(),
+            faults,
+        )?;
+        fetching.take();
+        Ok(released)
     }
 
     fn fetch_pull_inner(
@@ -2562,12 +2648,34 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
-        let pull_token = match ordinary_pull_token(store, workspace_id)? {
-            Some(token) => token,
-            None => {
-                match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-                    TxnOutcome::Committed(token) => token,
-                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+        let pull_token = {
+            let mut fetching = self
+                .continuation
+                .1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = ordinary_pull_token(store, workspace_id)?;
+            match fetching.as_ref() {
+                Some(fetch)
+                    if fetch.identity == identity
+                        && previous.as_deref() == Some(fetch.token.as_str()) =>
+                {
+                    fetch.token.clone()
+                }
+                Some(_) => return Err(RelayError::InvalidResponse),
+                None => {
+                    let token = match crate::cursor::begin_ordinary_pull(store, &identity, faults)
+                        .map_err(local)?
+                    {
+                        TxnOutcome::Committed(token) => token,
+                        TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                    };
+                    *fetching = Some(FetchPullToken {
+                        identity: identity.clone(),
+                        token: token.clone(),
+                        previous,
+                    });
+                    token
                 }
             }
         };
@@ -2748,8 +2856,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let (fetch, progress) =
                 match self.begin_prepared_pull(store, workspace_id, prepared, faults) {
                     Err(RelayError::RepairPending) => {
-                        crate::cursor::abandon_ordinary_pull(store, workspace_id, faults)
-                            .map_err(local)?;
+                        replace_ordinary_pull_token(
+                            store,
+                            workspace_id,
+                            prepared.pull_token(),
+                            None,
+                            faults,
+                        )?;
                         return Err(RelayError::RepairPending);
                     }
                     answer => answer?,

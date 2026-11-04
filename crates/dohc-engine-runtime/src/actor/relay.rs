@@ -789,6 +789,60 @@ mod deferred_relay_tests {
     use super::*;
 
     #[test]
+    fn a_fetch_keeps_one_token_across_io_and_restores_earlier_progress_on_failure() {
+        let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1, &NoFaults,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE sync_identity SET ordinary_pull_token='earlier' WHERE workspace_id='ws'",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let token = |store: &EngineStore| -> Option<String> {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap()
+        };
+        let transport = DeferredRelayTransport::default();
+        let client = RelaySyncClient::resuming(transport.clone(), transport.continuation.clone());
+        assert!(matches!(
+            client.fetch_pull(&mut store, "ws", &NoFaults),
+            Err(RelayError::Local(reason)) if reason == RELAY_IO_PENDING
+        ));
+        let fetching = token(&store).expect("fetch token");
+        assert_ne!(fetching, "earlier");
+        assert!(matches!(
+            client.fetch_pull(&mut store, "ws", &NoFaults),
+            Err(RelayError::Local(reason)) if reason == RELAY_IO_PENDING
+        ));
+        assert_eq!(token(&store).as_deref(), Some(fetching.as_str()));
+        let request = transport.take_pending().unwrap();
+        transport.complete(request, Err(RelayError::ServerInternal));
+        assert!(matches!(
+            client.fetch_pull(&mut store, "ws", &NoFaults),
+            Err(RelayError::ServerInternal)
+        ));
+        assert_eq!(token(&store).as_deref(), Some("earlier"));
+        assert!(
+            dohc_engine_sync::read_relay_cursor(&store, "ws")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_lane_drain_is_not_repeated_when_a_push_resumes_after_blob_io() {
         use dohc_engine_domain::{VersionedTextStore, WriteText};
         use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -2331,133 +2385,153 @@ impl ActorHandle {
             | RelayOperation::PullHosted { .. } => Some(self.pulls.acquire(&token).await?),
             _ => None,
         };
-        // Once the relay may have stored something, the operation runs to its
-        // end so the request answers with what landed. Until then each step
-        // and each effect-free read stops on cancellation.
-        let mut preparation_attempt = 0;
-        loop {
-            if token.is_cancelled() {
-                return Err(RuntimeError::Cancelled);
-            }
-            let queued_transport = transport.clone();
-            let queued_operation = operation.clone();
-            let queued_leases = leases.clone();
-            let queued_token = token.clone();
-            let queued_reservation = reservation.clone();
-            let queued_claims = self.claims.clone();
-            let outcome = self
-                .run_with_registrations(move |store, cache, registrations| {
-                    let _reservation = queued_reservation;
-                    let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
-                    let is_pull = matches!(&queued_operation, RelayOperation::ApplyPull { .. });
-                    let is_fetch = matches!(
-                        &queued_operation,
-                        RelayOperation::FetchPull {
-                            settle_repairs: false,
-                            ..
-                        }
-                    );
-                    let outcome = if queued_token.is_cancelled() {
-                        Err(RuntimeError::Cancelled)
-                    } else {
-                        execute_relay_operation(
-                            store,
-                            cache,
-                            queued_transport,
-                            queued_operation,
-                            &queued_leases,
-                            &queued_claims,
-                            registrations,
-                        )
-                    };
-                    // Push handles enrollment resets below. A pull that only
-                    // redelivers durable echoes leaves the writer cache valid;
-                    // applied or materialized work still invalidates it.
-                    let pull_changed = match &outcome {
-                        Ok(RelayOperationOutcome::Sync(
-                            SyncPassOutcome::Complete {
-                                applied,
-                                changed_paths,
+        let fetching_workspace = match &operation {
+            RelayOperation::FetchPull { workspace_id, .. } => Some(workspace_id.clone()),
+            _ => None,
+        };
+        let answer = async {
+            // Once the relay may have stored something, the operation runs to its
+            // end so the request answers with what landed. Until then each step
+            // and each effect-free read stops on cancellation.
+            let mut preparation_attempt = 0;
+            loop {
+                if token.is_cancelled() {
+                    return Err(RuntimeError::Cancelled);
+                }
+                let queued_transport = transport.clone();
+                let queued_operation = operation.clone();
+                let queued_leases = leases.clone();
+                let queued_token = token.clone();
+                let queued_reservation = reservation.clone();
+                let queued_claims = self.claims.clone();
+                let outcome = self
+                    .run_with_registrations(move |store, cache, registrations| {
+                        let _reservation = queued_reservation;
+                        let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
+                        let is_pull = matches!(&queued_operation, RelayOperation::ApplyPull { .. });
+                        let is_fetch = matches!(
+                            &queued_operation,
+                            RelayOperation::FetchPull {
+                                settle_repairs: false,
                                 ..
                             }
-                            | SyncPassOutcome::CrashedAfterApply {
-                                applied,
-                                changed_paths,
+                        );
+                        let outcome = if queued_token.is_cancelled() {
+                            Err(RuntimeError::Cancelled)
+                        } else {
+                            execute_relay_operation(
+                                store,
+                                cache,
+                                queued_transport,
+                                queued_operation,
+                                &queued_leases,
+                                &queued_claims,
+                                registrations,
+                            )
+                        };
+                        // Push handles enrollment resets below. A pull that only
+                        // redelivers durable echoes leaves the writer cache valid;
+                        // applied or materialized work still invalidates it.
+                        let pull_changed = match &outcome {
+                            Ok(RelayOperationOutcome::Sync(
+                                SyncPassOutcome::Complete {
+                                    applied,
+                                    changed_paths,
+                                    ..
+                                }
+                                | SyncPassOutcome::CrashedAfterApply {
+                                    applied,
+                                    changed_paths,
+                                    ..
+                                },
+                            )) => *applied > 0 || !changed_paths.is_empty(),
+                            Err(RuntimeError::Relay(RelayError::Local(reason)))
+                                if reason == RELAY_IO_PENDING =>
+                            {
+                                false
+                            }
+                            _ => true,
+                        };
+                        let unchanged_commit = matches!(
+                            &outcome,
+                            Ok(RelayOperationOutcome::CursorCommitted {
+                                writer_cache_changed: false,
                                 ..
-                            },
-                        )) => *applied > 0 || !changed_paths.is_empty(),
-                        Err(RuntimeError::Relay(RelayError::Local(reason)))
-                            if reason == RELAY_IO_PENDING =>
-                        {
-                            false
+                            })
+                        );
+                        if !is_fetch && !is_push && !unchanged_commit && (!is_pull || pull_changed) {
+                            cache.clear();
                         }
-                        _ => true,
-                    };
-                    let unchanged_commit = matches!(
-                        &outcome,
-                        Ok(RelayOperationOutcome::CursorCommitted {
-                            writer_cache_changed: false,
-                            ..
-                        })
-                    );
-                    if !is_fetch && !is_push && !unchanged_commit && (!is_pull || pull_changed) {
-                        cache.clear();
-                    }
-                    outcome
-                })
-                .await;
-            match outcome {
-                Err(RuntimeError::Relay(RelayError::Local(reason)))
-                    if reason == RELAY_IO_PENDING =>
-                {
-                    if matches!(&operation, RelayOperation::ApplyPull { .. }) {
-                        return Err(RuntimeError::Relay(RelayError::InvalidResponse));
-                    }
-                    let request = transport
-                        .take_pending()
-                        .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
-                    if request.changes_relay() {
-                        token = CancellationToken::new();
-                    }
-                    let io_request = request.clone();
-                    let result = tokio::select! {
-                        biased;
-                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                        result = execute_io(io_request, token.clone()) => result,
-                    };
-                    transport.complete(request, result);
-                }
-                // The attempt's transaction ended and the actor is free. The
-                // store's worker validates; once it completes, a fresh
-                // attempt rereads every fact and goes on from the progress
-                // the transport kept.
-                Err(RuntimeError::Relay(RelayError::ValidationPending(pending))) => {
-                    tokio::select! {
-                        biased;
-                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                        validated = pending.validate() => validated.map_err(validation_failed)?,
-                    }
-                }
-                Ok(mut outcome) => {
-                    transport.apply_progress(&mut outcome);
-                    return Ok(outcome);
-                }
-                Err(error) => {
-                    let result: Result<(), RuntimeError> = Err(error);
-                    if super::wait_for_reader(
-                        &result,
-                        preparation_attempt,
-                        self.markdown_recovery.clone(),
-                    )
-                    .await
+                        outcome
+                    })
+                    .await;
+                match outcome {
+                    Err(RuntimeError::Relay(RelayError::Local(reason)))
+                        if reason == RELAY_IO_PENDING =>
                     {
-                        preparation_attempt += 1;
-                        continue;
+                        if matches!(&operation, RelayOperation::ApplyPull { .. }) {
+                            return Err(RuntimeError::Relay(RelayError::InvalidResponse));
+                        }
+                        let request = transport
+                            .take_pending()
+                            .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
+                        if request.changes_relay() {
+                            token = CancellationToken::new();
+                        }
+                        let io_request = request.clone();
+                        let result = tokio::select! {
+                            biased;
+                            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                            result = execute_io(io_request, token.clone()) => result,
+                        };
+                        transport.complete(request, result);
                     }
-                    return result.map(|()| unreachable!());
+                    // The attempt's transaction ended and the actor is free. The
+                    // store's worker validates; once it completes, a fresh
+                    // attempt rereads every fact and goes on from the progress
+                    // the transport kept.
+                    Err(RuntimeError::Relay(RelayError::ValidationPending(pending))) => {
+                        tokio::select! {
+                            biased;
+                            () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                            validated = pending.validate() => validated.map_err(validation_failed)?,
+                        }
+                    }
+                    Ok(mut outcome) => {
+                        transport.apply_progress(&mut outcome);
+                        return Ok(outcome);
+                    }
+                    Err(error) => {
+                        let result: Result<(), RuntimeError> = Err(error);
+                        if super::wait_for_reader(
+                            &result,
+                            preparation_attempt,
+                            self.markdown_recovery.clone(),
+                        )
+                        .await
+                        {
+                            preparation_attempt += 1;
+                            continue;
+                        }
+                        return result.map(|()| unreachable!());
+                    }
                 }
             }
         }
+        .await;
+        if answer.is_err()
+            && let Some(workspace_id) = fetching_workspace
+        {
+            self.run(move |store, _cache| {
+                let continuation = transport.continuation.clone();
+                RelaySyncClient::resuming(transport, continuation)
+                    .abandon_fetch_pull(store, &workspace_id, &NoFaults)
+                    .map(|_| ())
+                    .map_err(RuntimeError::from)
+            })
+            .await?;
+        }
+        answer
     }
 }
 

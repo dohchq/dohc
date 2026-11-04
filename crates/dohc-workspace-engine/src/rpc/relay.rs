@@ -1103,7 +1103,7 @@ impl EngineService {
     async fn abandon_fetched_pull(
         &self,
         open: &OpenWorkspace,
-        token: Option<String>,
+        token: String,
     ) -> Result<(), WireError> {
         let held = open
             .actor
@@ -1112,20 +1112,11 @@ impl EngineService {
             .unwrap_or(true);
         let answer = self
             .wake_after_abandoned_pull(&RequestContext::unbounded(), open, async {
-                match token {
-                    Some(token) => {
-                        open.actor
-                            .abandon_prepared_pull(open.workspace_id.clone(), token)
-                            .await
-                    }
-                    None => {
-                        open.actor
-                            .abandon_ordinary_pull(open.workspace_id.clone())
-                            .await
-                    }
-                }
-                .map(|_| ())
-                .map_err(map_runtime)
+                open.actor
+                    .abandon_prepared_pull(open.workspace_id.clone(), token)
+                    .await
+                    .map(|_| ())
+                    .map_err(map_runtime)
             })
             .await;
         if !held {
@@ -1297,9 +1288,10 @@ impl EngineService {
             guard = open.pending_pull.lock() => guard,
         };
         if let Some(previous) = pending.take() {
-            self.abandon_fetched_pull(&open, Some(previous.page.pull_token().to_owned()))
+            self.abandon_fetched_pull(&open, previous.page.pull_token().to_owned())
                 .await?;
         }
+        let mut fetched_token = None;
         let answer = async {
             let outcome = self
                 .relay_execute(
@@ -1320,6 +1312,7 @@ impl EngineService {
                     "unexpected pull fetch outcome",
                 ));
             };
+            fetched_token = Some(page.pull_token().to_owned());
             if !Arc::ptr_eq(&self.open(handle.as_ref())?, &open) {
                 return Err(workspace_unavailable());
             }
@@ -1333,7 +1326,17 @@ impl EngineService {
         }
         .await;
         if answer.is_err() {
-            self.abandon_fetched_pull(&open, None).await?;
+            if let Some(token) = fetched_token {
+                self.abandon_fetched_pull(&open, token).await?;
+            } else if matches!(
+                open.actor
+                    .ordinary_pull_unfinished(open.workspace_id.clone())
+                    .await,
+                Ok(false)
+            ) {
+                self.collections_changed(&RequestContext::unbounded(), &open)
+                    .await;
+            }
         }
         answer
     }
@@ -1397,7 +1400,7 @@ impl EngineService {
         if matches!(&outcome, RelayOperationOutcome::PullRetry) {
             drop(pulling);
             open.pull_repair_retries.fetch_add(1, Ordering::SeqCst);
-            self.abandon_fetched_pull(&open, Some(pull_token.clone())).await?;
+            self.abandon_fetched_pull(&open, pull_token.clone()).await?;
             eprintln!("engine: sync pull retry: waiting for repairs");
             return Ok(json!({"status": "retry"}));
         }
@@ -1485,7 +1488,7 @@ impl EngineService {
         Ok(result)
         }.await;
         if answer.is_err() {
-            self.abandon_fetched_pull(&open, Some(pull_token)).await?;
+            self.abandon_fetched_pull(&open, pull_token).await?;
         }
         answer
     }
