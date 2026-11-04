@@ -124,6 +124,32 @@ describe("makeCalloutChromePlugin — edits", () => {
     expect(shown(state, plugin)).toEqual(expected(state.doc));
   });
 
+  it("keeps the focused callout's owner when the same edit sets its attributes again, or moves it, and adds a callout", () => {
+    const plugin = makeCalloutChromePlugin();
+    const a = callout("note", "Title", paragraph("body"));
+    const after = paragraph("after");
+    const start = EditorState.create({ doc: doc(paragraph("lead"), a, after), plugins: [plugin] });
+    const [ownerA] = headers(start, plugin).map(({ owner }) => owner);
+    const [posA] = calloutPositions(start.doc);
+
+    // Setting the same attributes replaces the callout's opening.
+    let state = start.apply(
+      start.tr
+        .setNodeMarkup(posA!, undefined, a.attrs)
+        .insert(posA! + a.nodeSize, callout("tip", "New"))
+        .insertText("x", 1),
+    );
+    expect(headers(state, plugin).map(({ owner }) => owner)[0]).toBe(ownerA);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+
+    // The callout moves below the next paragraph, and a callout is added at the end.
+    const end = posA! + a.nodeSize + after.nodeSize;
+    const move = start.tr.insert(end, a).delete(posA!, posA! + a.nodeSize);
+    state = start.apply(move.insert(move.doc.content.size, callout("tip", "New")));
+    expect(headers(state, plugin).map(({ owner }) => owner)[0]).toBe(ownerA);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
   it("keeps the focused callout's owner when the same edit adds a callout and a line at the start of its body", () => {
     const plugin = makeCalloutChromePlugin();
     const a = callout("note", "Title");

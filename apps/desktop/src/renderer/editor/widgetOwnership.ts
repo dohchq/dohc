@@ -29,9 +29,10 @@ export function throughEdit(steps: Mappable, range: Mappable): Mappable {
 
 /** The owners of the widgets an edit draws again, by their new position. A
  *  widget sits `inside` positions after its block's start, and keeps its owner
- *  where `mapping` moves that start. A remote update replaces the whole
- *  document, so its steps place nothing: when as many widgets are left as
- *  blocks, they keep their owners in order. */
+ *  where `mapping` moves that start. The steps place nothing under a remote
+ *  update, which replaces the whole document, nor a block whose opening an
+ *  edit replaced or that it moved. The widgets left keep their owners in
+ *  order, as when every widget was keyed by its place among the blocks. */
 export function ownersInRange(
   previous: readonly Decoration[],
   positions: readonly number[],
@@ -57,6 +58,6 @@ export function ownersInRange(
     }
   }
   const open = positions.filter((pos) => !owners.has(pos));
-  if (open.length === unplaced.length) open.forEach((pos, index) => owners.set(pos, unplaced[index]!));
+  open.slice(0, unplaced.length).forEach((pos, index) => owners.set(pos, unplaced[index]!));
   return owners;
 }
