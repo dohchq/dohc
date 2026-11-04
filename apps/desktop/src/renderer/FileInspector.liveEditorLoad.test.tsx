@@ -80,11 +80,12 @@ function heldOpenBridge() {
 }
 
 // The note's pane is tall once it shows the note's text, as the read view or
-// as the editor, and empty until then.
-function stubPaneLayout() {
+// as the editor, and empty until then. `tall` holds the editor's content short
+// until its nodes and images have rendered.
+function stubPaneLayout(tall: () => boolean = () => true) {
   const pane = (element: Element) => element.matches("[data-testid='view-markdown']");
   const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return pane(this) && this.textContent?.includes("Base paragraph.") ? 2_000 : 0;
+    return pane(this) && tall() && this.textContent?.includes("Base paragraph.") ? 2_000 : 0;
   });
   const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
     return pane(this) ? 200 : 0;
@@ -93,6 +94,67 @@ function stubPaneLayout() {
     scrollHeight.mockRestore();
     clientHeight.mockRestore();
   };
+}
+
+// Keeps each ResizeObserver, so a test can report that the note's content
+// changed size.
+function stubResizeObservers() {
+  const observers: Array<{ callback: ResizeObserverCallback; targets: Element[]; observer: ResizeObserver }> = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      private readonly targets: Element[] = [];
+      constructor(callback: ResizeObserverCallback) {
+        observers.push({ callback, targets: this.targets, observer: this as unknown as ResizeObserver });
+      }
+      observe(target: Element) {
+        this.targets.push(target);
+      }
+      unobserve() {}
+      disconnect() {
+        this.targets.length = 0;
+      }
+    },
+  );
+  return () =>
+    act(() => {
+      const pane = screen.getByTestId("view-markdown");
+      for (const { callback, targets, observer } of observers) {
+        const content = targets.filter((target) => target.parentElement === pane);
+        if (content.length === 0) continue;
+        callback(
+          content.map((target) => ({ target, contentRect: target.getBoundingClientRect() }) as ResizeObserverEntry),
+          observer,
+        );
+      }
+    });
+}
+
+// Opens the note with the person scrolled partway down its read view, then
+// shows its editor while the editor's content is still short.
+async function openScrolledWithShortEditor(layout: { tall: boolean }) {
+  code.editor.release();
+  code.collaboration.release();
+  stubEditorGlobals();
+  const resize = stubResizeObservers();
+  const { bridge, bind } = heldOpenBridge();
+  vi.stubGlobal("dohcDesktop", bridge);
+  const restoreLayout = stubPaneLayout(() => layout.tall);
+  render(<FileInspector workspaceId="ws-1" path="a.md" />);
+  await waitFor(() =>
+    expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
+  );
+  await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
+  act(() => {
+    const pane = screen.getByTestId("view-markdown");
+    pane.scrollTop = 600;
+    pane.dispatchEvent(new Event("scroll"));
+  });
+  layout.tall = false;
+  bind();
+  await screen.findByTestId("markdown-editor");
+  expect(screen.getByTestId("view-markdown").scrollTop).toBe(0);
+  return { resize, restoreLayout };
 }
 
 afterEach(async () => {
@@ -163,5 +225,39 @@ describe("a live note whose editor code loads after it opens", () => {
     expect(frames.slice(shown).filter((frame) => frame.rows || !frame.text)).toEqual([]);
     // The editor's first frame opens where the person was reading.
     expect(frames.find((frame) => frame.editor)?.top).toBe(600);
+  });
+
+  it("moves the editor to where the person was reading once its content is tall enough", async () => {
+    const layout = { tall: true };
+    const { resize, restoreLayout } = await openScrolledWithShortEditor(layout);
+    try {
+      // An image loads, and the content grows without a new node.
+      layout.tall = true;
+      resize();
+      expect(screen.getByTestId("view-markdown").scrollTop).toBe(600);
+    } finally {
+      restoreLayout();
+    }
+  });
+
+  it("leaves the editor where the person moved it before its content was tall enough", async () => {
+    const layout = { tall: true };
+    const { resize, restoreLayout } = await openScrolledWithShortEditor(layout);
+    try {
+      const pane = screen.getByTestId("view-markdown");
+      act(() => {
+        pane.scrollTop = 50;
+        pane.dispatchEvent(new Event("scroll"));
+      });
+      // Later edits make the content tall enough for the old position.
+      layout.tall = true;
+      await act(async () => {
+        pane.appendChild(document.createElement("div"));
+      });
+      resize();
+      expect(pane.scrollTop).toBe(50);
+    } finally {
+      restoreLayout();
+    }
   });
 });
