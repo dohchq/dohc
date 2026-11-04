@@ -348,8 +348,8 @@ export function codexRunConfig(input: {
           // A model can start sub-agents whatever multi_agent says, unless
           // agents.enabled is false and multi_agent_v2 is off.
           "agents.enabled=false",
-          // A request goes to the person, who isn't there to approve it, and
-          // never to their auto-review.
+          // The person's own auto-review setting can't approve a request. It
+          // goes to the person, who isn't there to approve it.
           "approvals_reviewer='user'",
         ]
         : [`permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`, `default_permissions='${profile}'`]),
