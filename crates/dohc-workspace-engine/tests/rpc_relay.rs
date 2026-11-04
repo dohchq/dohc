@@ -466,9 +466,14 @@ async fn call(
 ) -> Value {
     *id += 1;
     if method == "sync.applyPull" && params.get("pageToken").is_none() {
-        return pull_batch(transport, RequestContext::unbounded(),
-            request(*id, "sync.fetchPull", Some(handle.clone()), params))
-            .await.unwrap_or_else(|error| panic!("pull batch failed: {error:?}")).result;
+        return pull_batch(
+            transport,
+            RequestContext::unbounded(),
+            request(*id, "sync.fetchPull", Some(handle.clone()), params),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("pull batch failed: {error:?}"))
+        .result;
     }
     call_with_busy_retry(
         transport,
@@ -484,7 +489,14 @@ async fn call(
 async fn fetched_pull_tokens_reject_replacement_reuse_foreign_handles_and_cursor_changes() {
     let workspace_id = "rpc-relay-fetched-token";
     let relay = FakeRelay::start(RelayState {
-        workspace_ops: vec![workspace_row(1, workspace_id, "remote", 0, "workspace.init", json!({}))],
+        workspace_ops: vec![workspace_row(
+            1,
+            workspace_id,
+            "remote",
+            0,
+            "workspace.init",
+            json!({}),
+        )],
         ..RelayState::default()
     });
     let scratch = ScratchDir::new().unwrap();
@@ -495,29 +507,97 @@ async fn fetched_pull_tokens_reject_replacement_reuse_foreign_handles_and_cursor
     let foreign = open_workspace(&transport, &foreign_scratch, &relay, 2, "foreign").await;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
     seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
-    let first = call(&transport, &handle, &mut id, "sync.fetchPull", json!({"workspaceId": workspace_id})).await;
-    let second = call(&transport, &handle, &mut id, "sync.fetchPull", json!({"workspaceId": workspace_id})).await;
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
     assert_ne!(first["pageToken"], second["pageToken"]);
     let apply = |handle: &WorkspaceHandle, token: Value, workspace: &str| {
-        transport.call(RequestContext::unbounded(), request(10_000, "sync.applyPull", Some(handle.clone()),
-            json!({"workspaceId": workspace, "pageToken": token})))
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                10_000,
+                "sync.applyPull",
+                Some(handle.clone()),
+                json!({"workspaceId": workspace, "pageToken": token}),
+            ),
+        )
     };
-    assert_eq!(apply(&handle, first["pageToken"].clone(), workspace_id).await.unwrap_err().code, ErrorCode::InvalidParams);
-    assert_eq!(apply(&foreign, second["pageToken"].clone(), "foreign").await.unwrap_err().code, ErrorCode::InvalidParams);
-    let applied = apply(&handle, second["pageToken"].clone(), workspace_id).await.unwrap().result;
+    assert_eq!(
+        apply(&handle, first["pageToken"].clone(), workspace_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
+    assert_eq!(
+        apply(&foreign, second["pageToken"].clone(), "foreign")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
+    let applied = apply(&handle, second["pageToken"].clone(), workspace_id)
+        .await
+        .unwrap()
+        .result;
     assert_eq!(applied["applied"], 1);
-    assert_eq!(apply(&handle, second["pageToken"].clone(), workspace_id).await.unwrap_err().code, ErrorCode::InvalidParams);
+    assert_eq!(
+        apply(&handle, second["pageToken"].clone(), workspace_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
 
-    let before_commit = call(&transport, &handle, &mut id, "sync.fetchPull", json!({"workspaceId": workspace_id})).await;
-    call(&transport, &handle, &mut id, "sync.commitCursor",
-        json!({"workspaceId": workspace_id, "pendingCursor": applied["pendingCursor"]})).await;
+    let before_commit = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({"workspaceId": workspace_id, "pendingCursor": applied["pendingCursor"]}),
+    )
+    .await;
     let moved = apply(&handle, before_commit["pageToken"].clone(), workspace_id).await;
     assert_eq!(moved.unwrap_err().code, ErrorCode::RelayInvalidResponse);
 
-    let before_close = call(&transport, &handle, &mut id, "sync.fetchPull", json!({"workspaceId": workspace_id})).await;
+    let before_close = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
     close(&transport, &handle, &mut id).await;
     let reopened = open_workspace(&transport, &scratch, &relay, id + 1, workspace_id).await;
-    assert_eq!(apply(&reopened, before_close["pageToken"].clone(), workspace_id).await.unwrap_err().code, ErrorCode::InvalidParams);
+    assert_eq!(
+        apply(&reopened, before_close["pageToken"].clone(), workspace_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidParams
+    );
     close(&transport, &reopened, &mut id).await;
     close(&transport, &foreign, &mut id).await;
 }
@@ -526,7 +606,14 @@ async fn fetched_pull_tokens_reject_replacement_reuse_foreign_handles_and_cursor
 async fn fetched_pull_restarts_without_applying_and_fetches_the_same_batch_again() {
     let workspace_id = "rpc-relay-fetch-restart";
     let relay = FakeRelay::start(RelayState {
-        workspace_ops: vec![workspace_row(1, workspace_id, "remote", 0, "workspace.init", json!({}))],
+        workspace_ops: vec![workspace_row(
+            1,
+            workspace_id,
+            "remote",
+            0,
+            "workspace.init",
+            json!({}),
+        )],
         ..RelayState::default()
     });
     let scratch = ScratchDir::new().unwrap();
@@ -535,36 +622,76 @@ async fn fetched_pull_restarts_without_applying_and_fetches_the_same_batch_again
     let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
     seed_main(&transport, &handle, &mut id, workspace_id).await;
     seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
-    let first = call(&transport, &handle, &mut id, "sync.fetchPull", json!({"workspaceId": workspace_id})).await;
-    let assert_unapplied = || {
-        let db = Connection::open(engine_db_path(&scratch).unwrap()).unwrap();
-        let applied: i64 = db.query_row(
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
+    let assert_unapplied =
+        || {
+            let db = Connection::open(engine_db_path(&scratch).unwrap()).unwrap();
+            let applied: i64 = db.query_row(
             "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND origin_id='remote'",
             [workspace_id], |row| row.get(0)).unwrap();
-        let cursor: Option<String> = db.query_row(
-            "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
-            [workspace_id], |row| row.get(0)).optional().unwrap();
-        let token: Option<String> = db.query_row(
-            "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1",
-            [workspace_id], |row| row.get(0)).unwrap();
-        assert_eq!(applied, 0);
-        assert_eq!(cursor, None);
-        assert_eq!(token, None);
-    };
+            let cursor: Option<String> = db
+                .query_row(
+                    "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
+                    [workspace_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            let token: Option<String> = db
+                .query_row(
+                    "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1",
+                    [workspace_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(applied, 0);
+            assert_eq!(cursor, None);
+            assert_eq!(token, None);
+        };
     assert_unapplied();
     close(&transport, &handle, &mut id).await;
     drop(transport);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, &relay, id + 1, workspace_id).await;
     assert_unapplied();
-    let stale = transport.call(RequestContext::unbounded(), request(10_000, "sync.applyPull", Some(handle.clone()),
-        json!({"workspaceId": workspace_id, "pageToken": first["pageToken"]}))).await.unwrap_err();
+    let stale = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10_000,
+                "sync.applyPull",
+                Some(handle.clone()),
+                json!({"workspaceId": workspace_id, "pageToken": first["pageToken"]}),
+            ),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(stale.code, ErrorCode::InvalidParams);
-    let second = call(&transport, &handle, &mut id, "sync.fetchPull", json!({"workspaceId": workspace_id})).await;
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.fetchPull",
+        json!({"workspaceId": workspace_id}),
+    )
+    .await;
     assert_ne!(first["pageToken"], second["pageToken"]);
     assert_unapplied();
-    let applied = call(&transport, &handle, &mut id, "sync.applyPull",
-        json!({"workspaceId": workspace_id, "pageToken": second["pageToken"]})).await;
+    let applied = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.applyPull",
+        json!({"workspaceId": workspace_id, "pageToken": second["pageToken"]}),
+    )
+    .await;
     assert_eq!(applied["fetched"], 1);
     assert_eq!(applied["applied"], 1);
     assert_eq!(applied["skipped"], 0);
@@ -3617,7 +3744,10 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
     let methods = [
         ("sync.push", json!({ "workspaceId": "other" })),
         ("sync.fetchPull", json!({ "workspaceId": "other" })),
-        ("sync.applyPull", json!({ "workspaceId": "other", "pageToken": "foreign" })),
+        (
+            "sync.applyPull",
+            json!({ "workspaceId": "other", "pageToken": "foreign" }),
+        ),
         ("sync.refusalNotices", json!({ "workspaceId": "other" })),
         (
             "sync.dismissRefusal",

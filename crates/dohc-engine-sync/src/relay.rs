@@ -832,7 +832,9 @@ struct BaseRepairAnswers {
 
 impl Default for BaseRepairAnswers {
     fn default() -> Self {
-        Self { encoded: Vec::with_capacity(MAX_PREPARED_BASE_REPAIR_BYTES) }
+        Self {
+            encoded: Vec::with_capacity(MAX_PREPARED_BASE_REPAIR_BYTES),
+        }
     }
 }
 
@@ -847,11 +849,19 @@ enum BaseRepairDecision {
         relay_seq: Option<i64>,
         recorded_at_ms: i64,
     },
-    Deferred { origin_id: String, origin_seq: i64, relay_seq: i64 },
+    Deferred {
+        origin_id: String,
+        origin_seq: i64,
+        relay_seq: i64,
+    },
 }
 
 impl BaseRepairAnswers {
-    fn keep(&mut self, signature: String, decision: BaseRepairDecision) -> Result<bool, RelayError> {
+    fn keep(
+        &mut self,
+        signature: String,
+        decision: BaseRepairDecision,
+    ) -> Result<bool, RelayError> {
         let encoded = serde_json::to_vec(&(signature, decision))
             .map_err(|error| local(SyncError::corrupt(error)))?;
         if encoded.len() + 1 > MAX_PREPARED_BASE_REPAIR_BYTES - self.encoded.len() {
@@ -863,13 +873,20 @@ impl BaseRepairAnswers {
     }
 
     fn decode(&self) -> Result<BTreeMap<String, BaseRepairDecision>, RelayError> {
-        self.encoded.split(|byte| *byte == b'\n').filter(|line| !line.is_empty())
-            .map(|line| serde_json::from_slice(line).map_err(|error| local(SyncError::corrupt(error))))
+        self.encoded
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_slice(line).map_err(|error| local(SyncError::corrupt(error)))
+            })
             .collect()
     }
 }
 
-fn base_repair_signature<'a>(pushed_seq: i64, repairs: impl Iterator<Item = &'a PendingBaseRelayRepair>) -> String {
+fn base_repair_signature<'a>(
+    pushed_seq: i64,
+    repairs: impl Iterator<Item = &'a PendingBaseRelayRepair>,
+) -> String {
     let rows: Vec<_> = repairs.map(|repair| serde_json::json!({
         "version": repair.key.version_id, "object": repair.key.object_id,
         "claim": repair.lineage_claim_id, "origin": repair.origin_id, "seq": repair.origin_seq,
@@ -879,13 +896,27 @@ fn base_repair_signature<'a>(pushed_seq: i64, repairs: impl Iterator<Item = &'a 
 }
 
 fn deferred_repair_signature(pushed_seq: i64, repair: &PendingDeferredRelayRepair) -> String {
-    dohc_engine_storage::hex_sha256(serde_json::json!([
-        pushed_seq, repair.origin_id, repair.origin_seq, repair.op_kind, repair.payload, repair.recorded_at_ms
-    ]).to_string().as_bytes())
+    dohc_engine_storage::hex_sha256(
+        serde_json::json!([
+            pushed_seq,
+            repair.origin_id,
+            repair.origin_seq,
+            repair.op_kind,
+            repair.payload,
+            repair.recorded_at_ms
+        ])
+        .to_string()
+        .as_bytes(),
+    )
 }
 
 impl BaseRepairDecision {
-    fn apply(&self, store: &mut EngineStore, workspace_id: &str, faults: &dyn FaultInjector) -> Result<(), RelayError> {
+    fn apply(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), RelayError> {
         match store.write_with(faults, |tx| {
             match self {
                 Self::Base { version_id, object_id, lineage_claim_id, origin_id, origin_seq, relay_seq, recorded_at_ms } => {
@@ -1549,8 +1580,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 };
                 if let Some(relay_seq) = relay_seq {
                     if matches!(&phase, BaseRepairPhase::Fetch(_)) {
-                        prepared_deferred.push((deferred_repair_signature(local_pushed_seq, &repair),
-                            BaseRepairDecision::Deferred { origin_id: repair.origin_id.clone(), origin_seq: repair.origin_seq, relay_seq }));
+                        prepared_deferred.push((
+                            deferred_repair_signature(local_pushed_seq, &repair),
+                            BaseRepairDecision::Deferred {
+                                origin_id: repair.origin_id.clone(),
+                                origin_seq: repair.origin_seq,
+                                relay_seq,
+                            },
+                        ));
                     }
                     deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
                 }
@@ -1612,21 +1649,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             if let BaseRepairPhase::Fetch(answers) = &mut phase {
                 for candidates in grouped.values() {
-                    let signature = base_repair_signature(local_pushed_seq, candidates.iter().map(|(repair, ..)| repair));
-                    let resolved = candidates.iter().filter_map(|(repair, seq, _)| seq.map(|seq| (repair, seq)))
+                    let signature = base_repair_signature(
+                        local_pushed_seq,
+                        candidates.iter().map(|(repair, ..)| repair),
+                    );
+                    let resolved = candidates
+                        .iter()
+                        .filter_map(|(repair, seq, _)| seq.map(|seq| (repair, seq)))
                         .min_by_key(|(_, seq)| *seq);
                     let (chosen, relay_seq) = match resolved {
                         Some((repair, seq)) => (repair, Some(seq)),
                         None => (&candidates[0].0, None),
                     };
-                    if !answers.keep(signature, BaseRepairDecision::Base {
-                        version_id: chosen.key.version_id.clone(), object_id: chosen.key.object_id.clone(),
-                        lineage_claim_id: chosen.lineage_claim_id.clone(), origin_id: chosen.origin_id.clone(),
-                        origin_seq: chosen.origin_seq, relay_seq, recorded_at_ms: chosen.recorded_at_ms,
-                    })? { return Ok(()); }
+                    if !answers.keep(
+                        signature,
+                        BaseRepairDecision::Base {
+                            version_id: chosen.key.version_id.clone(),
+                            object_id: chosen.key.object_id.clone(),
+                            lineage_claim_id: chosen.lineage_claim_id.clone(),
+                            origin_id: chosen.origin_id.clone(),
+                            origin_seq: chosen.origin_seq,
+                            relay_seq,
+                            recorded_at_ms: chosen.recorded_at_ms,
+                        },
+                    )? {
+                        return Ok(());
+                    }
                 }
                 for (signature, decision) in prepared_deferred {
-                    if !answers.keep(signature, decision)? { return Ok(()); }
+                    if !answers.keep(signature, decision)? {
+                        return Ok(());
+                    }
                 }
                 continue;
             }
@@ -2384,7 +2437,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 TxnOutcome::Committed(token) => Some(token),
                 TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
             }
-        } else { None };
+        } else {
+            None
+        };
         let mut repairs = BaseRepairAnswers::default();
         self.repair_base_orders(
             store,
@@ -2392,7 +2447,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &identity,
             faults,
             &ops[..fetched_op_count],
-            if immediate_repairs { BaseRepairPhase::Immediate } else { BaseRepairPhase::Fetch(&mut repairs) },
+            if immediate_repairs {
+                BaseRepairPhase::Immediate
+            } else {
+                BaseRepairPhase::Fetch(&mut repairs)
+            },
         )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         ops.truncate(fetched_op_count);
@@ -2455,10 +2514,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .map_err(local)?;
         let pull_token = match &prepared.started_pull_token {
             Some(token) => token.clone(),
-            None => match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-                TxnOutcome::Committed(token) => token,
-                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
-            },
+            None => {
+                match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+                    TxnOutcome::Committed(token) => token,
+                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                }
+            }
         };
         let ordered = merge_by_origin(ops);
         let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
@@ -2504,7 +2565,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none()
         {
-            let (fetch, progress) = self.begin_prepared_pull(store, workspace_id, prepared, faults)?;
+            let (fetch, progress) =
+                self.begin_prepared_pull(store, workspace_id, prepared, faults)?;
             self.continuation
                 .keep(workspace_id, Fetched::Ordinary(fetch), progress);
         }

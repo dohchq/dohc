@@ -1016,9 +1016,14 @@ mod deferred_relay_tests {
         let transport = DeferredRelayTransport::default();
         let mut cache = WriterDocCache::new();
         let operation = if prepared {
-            RelayOperation::FetchPull { workspace_id: "ws".into() }
+            RelayOperation::FetchPull {
+                workspace_id: "ws".into(),
+            }
         } else {
-            RelayOperation::Pull { workspace_id: "ws".into(), now_ms: 1200 }
+            RelayOperation::Pull {
+                workspace_id: "ws".into(),
+                now_ms: 1200,
+            }
         };
         let mut probes = 0;
         let mut lookups = 0;
@@ -1047,12 +1052,27 @@ mod deferred_relay_tests {
                     assert_eq!(state, (None, None));
                     let offline = DeferredRelayTransport::default();
                     let applied = execute_relay_operation(
-                        &mut store, &mut cache, offline.clone(),
-                        RelayOperation::ApplyPull { workspace_id: "ws".into(), page, now_ms: 1200 },
-                        &LeaseRegistry::default(), &ClaimAnnouncer::default(),
+                        &mut store,
+                        &mut cache,
+                        offline.clone(),
+                        RelayOperation::ApplyPull {
+                            workspace_id: "ws".into(),
+                            page,
+                            now_ms: 1200,
+                        },
+                        &LeaseRegistry::default(),
+                        &ClaimAnnouncer::default(),
                         &mut crate::actor::live_application::Registry::default(),
                     );
-                    assert!(matches!(applied, Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. }))), "{applied:?}");
+                    assert!(
+                        matches!(
+                            applied,
+                            Ok(RelayOperationOutcome::Sync(
+                                SyncPassOutcome::Complete { .. }
+                            ))
+                        ),
+                        "{applied:?}"
+                    );
                     assert!(offline.take_pending().is_none());
                     break;
                 }
@@ -2241,10 +2261,10 @@ impl ActorHandle {
             ..DeferredRelayTransport::default()
         };
         let _pull = match &operation {
-            RelayOperation::Pull { .. } | RelayOperation::FetchPull { .. }
-            | RelayOperation::ApplyPull { .. } | RelayOperation::PullHosted { .. } => {
-                Some(self.pulls.acquire(&token).await?)
-            }
+            RelayOperation::Pull { .. }
+            | RelayOperation::FetchPull { .. }
+            | RelayOperation::ApplyPull { .. }
+            | RelayOperation::PullHosted { .. } => Some(self.pulls.acquire(&token).await?),
             _ => None,
         };
         // Once the relay may have stored something, the operation runs to its
@@ -2265,8 +2285,10 @@ impl ActorHandle {
                 .run_with_registrations(move |store, cache, registrations| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
-                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. }
-                        | RelayOperation::ApplyPull { .. });
+                    let is_pull = matches!(
+                        &queued_operation,
+                        RelayOperation::Pull { .. } | RelayOperation::ApplyPull { .. }
+                    );
                     let is_fetch = matches!(&queued_operation, RelayOperation::FetchPull { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
@@ -2806,8 +2828,20 @@ fn run_relay_operation(
             .fetch_pull(store, &workspace_id, &NoFaults)
             .map(|page| RelayOperationOutcome::PullFetched(Arc::new(page)))
             .map_err(RuntimeError::from),
-        RelayOperation::ApplyPull { workspace_id, page, now_ms } => client
-            .apply_pull(store, doc_cache, &workspace_id, &page, &NoFaults, leases, now_ms)
+        RelayOperation::ApplyPull {
+            workspace_id,
+            page,
+            now_ms,
+        } => client
+            .apply_pull(
+                store,
+                doc_cache,
+                &workspace_id,
+                &page,
+                &NoFaults,
+                leases,
+                now_ms,
+            )
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::CommitCursor {

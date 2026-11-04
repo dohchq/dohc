@@ -1259,19 +1259,32 @@ impl EngineService {
             guard = open.pending_pull.lock() => guard,
         };
         *pending = None;
-        let outcome = self.relay_execute(
-            ctx, &open, configuration,
-            RelayOperation::FetchPull { workspace_id: open.workspace_id.clone() },
-            "sync.fetchPull",
-        ).await?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::FetchPull {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.fetchPull",
+            )
+            .await?;
         let RelayOperationOutcome::PullFetched(page) = outcome else {
-            return Err(WireError::new(ErrorCode::Internal, "unexpected pull fetch outcome"));
+            return Err(WireError::new(
+                ErrorCode::Internal,
+                "unexpected pull fetch outcome",
+            ));
         };
         if !Arc::ptr_eq(&self.open(handle.as_ref())?, &open) {
             return Err(workspace_unavailable());
         }
         let token = sync_identifier("pull")?;
-        *pending = Some(PendingPull { handle: bound_handle.clone(), token: token.clone(), page });
+        *pending = Some(PendingPull {
+            handle: bound_handle.clone(),
+            token: token.clone(),
+            page,
+        });
         Ok(json!({ "pageToken": token }))
     }
 
@@ -1290,10 +1303,14 @@ impl EngineService {
             () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.applyPull")),
             guard = open.pending_pull.lock() => guard,
         };
-        if !pending.as_ref().is_some_and(|page| {
-            page.handle == *bound_handle && page.token == params.page_token
-        }) {
-            return Err(WireError::new(ErrorCode::InvalidParams, "pull page token is stale or foreign"));
+        if !pending
+            .as_ref()
+            .is_some_and(|page| page.handle == *bound_handle && page.token == params.page_token)
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "pull page token is stale or foreign",
+            ));
         }
         let page = pending.take().expect("validated pull page").page;
         // A Collections update already admitted under the gate runs before
@@ -4210,10 +4227,13 @@ mod tests {
         let (service, handle, workspace_id) =
             (Arc::clone(&f.service), f.handle.clone(), f.workspace_id);
         async move {
-            let fetched = service.sync_fetch_pull(
-                &RequestContext::unbounded(), Some(handle.clone()),
-                json!({ "workspaceId": workspace_id }),
-            ).await?;
+            let fetched = service
+                .sync_fetch_pull(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({ "workspaceId": workspace_id }),
+                )
+                .await?;
             service
                 .sync_apply_pull(
                     &RequestContext::unbounded(),
@@ -4280,7 +4300,9 @@ mod tests {
         // Fetch leaves local updates free to take the gate. Poll the admitted
         // update while apply waits for it to release that gate.
         let (page_one, ()) = tokio::join!(page_one, async {
-            if !ran { update.as_mut().await; }
+            if !ran {
+                update.as_mut().await;
+            }
         });
         let page_one = page_one.expect("join").expect("page one lands");
         assert_eq!(page_one["hasMore"], json!(true));
@@ -4352,8 +4374,15 @@ mod tests {
         let ctx = RequestContext::unbounded();
         let (relay, f) = half_pull_fixture("owed-checked-before-pull", false).await;
         relay.release();
-        let fetched = f.service.sync_fetch_pull(&ctx, Some(f.handle.clone()),
-            json!({"workspaceId": f.workspace_id})).await.expect("fetch before gate admission");
+        let fetched = f
+            .service
+            .sync_fetch_pull(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id}),
+            )
+            .await
+            .expect("fetch before gate admission");
         // The gate serves its waiters in order: the pull, then the update.
         let gate = Arc::clone(&f.open.capture_apply_gate).lock_owned().await;
         let hold = f.service.hold_actor(&f.handle).await;
@@ -4361,8 +4390,13 @@ mod tests {
         let handle = f.handle.clone();
         let workspace_id = f.workspace_id;
         let mut page_one = Box::pin(async move {
-            service.sync_apply_pull(&RequestContext::unbounded(), Some(handle),
-                json!({"workspaceId": workspace_id, "pageToken": fetched["pageToken"]})).await
+            service
+                .sync_apply_pull(
+                    &RequestContext::unbounded(),
+                    Some(handle),
+                    json!({"workspaceId": workspace_id, "pageToken": fetched["pageToken"]}),
+                )
+                .await
         });
         assert!(!poll_once(page_one.as_mut()).await, "the pull waits");
         let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
