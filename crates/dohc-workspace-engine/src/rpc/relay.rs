@@ -1100,15 +1100,38 @@ impl EngineService {
         answer
     }
 
-    async fn abandon_fetched_pull(&self, open: &OpenWorkspace, token: Option<String>) -> Result<(), WireError> {
-        let held = open.actor.ordinary_pull_unfinished(open.workspace_id.clone()).await.unwrap_or(true);
-        let answer = self.wake_after_abandoned_pull(&RequestContext::unbounded(), open, async {
-            match token {
-                Some(token) => open.actor.abandon_prepared_pull(open.workspace_id.clone(), token).await,
-                None => open.actor.abandon_ordinary_pull(open.workspace_id.clone()).await,
-            }.map(|_| ()).map_err(map_runtime)
-        }).await;
-        if !held { self.collections_changed(&RequestContext::unbounded(), open).await; }
+    async fn abandon_fetched_pull(
+        &self,
+        open: &OpenWorkspace,
+        token: Option<String>,
+    ) -> Result<(), WireError> {
+        let held = open
+            .actor
+            .ordinary_pull_unfinished(open.workspace_id.clone())
+            .await
+            .unwrap_or(true);
+        let answer = self
+            .wake_after_abandoned_pull(&RequestContext::unbounded(), open, async {
+                match token {
+                    Some(token) => {
+                        open.actor
+                            .abandon_prepared_pull(open.workspace_id.clone(), token)
+                            .await
+                    }
+                    None => {
+                        open.actor
+                            .abandon_ordinary_pull(open.workspace_id.clone())
+                            .await
+                    }
+                }
+                .map(|_| ())
+                .map_err(map_runtime)
+            })
+            .await;
+        if !held {
+            self.collections_changed(&RequestContext::unbounded(), open)
+                .await;
+        }
         answer
     }
 
@@ -1274,38 +1297,41 @@ impl EngineService {
             guard = open.pending_pull.lock() => guard,
         };
         if let Some(previous) = pending.take() {
-            self.abandon_fetched_pull(&open, Some(previous.page.pull_token().to_owned())).await?;
+            self.abandon_fetched_pull(&open, Some(previous.page.pull_token().to_owned()))
+                .await?;
         }
         let answer = async {
-        let outcome = self
-            .relay_execute(
-                ctx,
-                &open,
-                configuration,
-                RelayOperation::FetchPull {
-                    workspace_id: open.workspace_id.clone(),
-                    settle_repairs: open.pull_repair_retries.load(Ordering::SeqCst) >= MAX_PULL_REPAIR_RETRIES,
-                },
-                "sync.fetchPull",
-            )
-            .await?;
-        let RelayOperationOutcome::PullFetched(page) = outcome else {
-            return Err(WireError::new(
-                ErrorCode::Internal,
-                "unexpected pull fetch outcome",
-            ));
-        };
-        if !Arc::ptr_eq(&self.open(handle.as_ref())?, &open) {
-            return Err(workspace_unavailable());
+            let outcome = self
+                .relay_execute(
+                    ctx,
+                    &open,
+                    configuration,
+                    RelayOperation::FetchPull {
+                        workspace_id: open.workspace_id.clone(),
+                        settle_repairs: open.pull_repair_retries.load(Ordering::SeqCst)
+                            >= MAX_PULL_REPAIR_RETRIES,
+                    },
+                    "sync.fetchPull",
+                )
+                .await?;
+            let RelayOperationOutcome::PullFetched(page) = outcome else {
+                return Err(WireError::new(
+                    ErrorCode::Internal,
+                    "unexpected pull fetch outcome",
+                ));
+            };
+            if !Arc::ptr_eq(&self.open(handle.as_ref())?, &open) {
+                return Err(workspace_unavailable());
+            }
+            let token = sync_identifier("pull")?;
+            *pending = Some(PendingPull {
+                handle: bound_handle.clone(),
+                token: token.clone(),
+                page,
+            });
+            Ok(json!({ "pageToken": token }))
         }
-        let token = sync_identifier("pull")?;
-        *pending = Some(PendingPull {
-            handle: bound_handle.clone(),
-            token: token.clone(),
-            page,
-        });
-        Ok(json!({ "pageToken": token }))
-        }.await;
+        .await;
         if answer.is_err() {
             self.abandon_fetched_pull(&open, None).await?;
         }
@@ -4372,28 +4398,59 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_relation_written_during_fetch_keeps_its_page_two_target() {
         let (relay, f) = half_pull_fixture("relation-during-fetch", true).await;
-        f.write("tasks/source.md", &record(SOURCE, None)).await.expect("clear relation");
+        f.write("tasks/source.md", &record(SOURCE, None))
+            .await
+            .expect("clear relation");
         f.pulled_removal("tasks/target.md").await;
         lock(&relay.ops)[0] = PagedRelay::row(f.workspace_id, 0, "workspace.init", json!({}));
         let page_one = tokio::spawn(pull(&f));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !relay.started.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
-        }).await.expect("fetch started");
-        f.write("tasks/source.md", &record(SOURCE, Some(TARGET))).await.expect("local relation");
+            while !relay.started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fetch started");
+        f.write("tasks/source.md", &record(SOURCE, Some(TARGET)))
+            .await
+            .expect("local relation");
         assert!(f.pull_token().is_some());
         assert!(f.owed(), "the local update waits for the target's page");
-        let source = f.open.actor.versioned_text_read(f.workspace_id.into(), "main".into(),
-            "tasks/source.md".into(), dohc_engine_runtime::CancellationToken::new()).await.unwrap().unwrap();
+        let source = f
+            .open
+            .actor
+            .versioned_text_read(
+                f.workspace_id.into(),
+                "main".into(),
+                "tasks/source.md".into(),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert!(source.text.contains(TARGET));
         relay.release();
         let first = page_one.await.unwrap().unwrap();
         commit_page(&f, &first).await.unwrap();
         let second = pull(&f).await.unwrap();
         commit_page(&f, &second).await.unwrap();
-        let after = f.open.actor.versioned_text_read(f.workspace_id.into(), "main".into(),
-            "tasks/source.md".into(), dohc_engine_runtime::CancellationToken::new()).await.unwrap().unwrap();
+        let after = f
+            .open
+            .actor
+            .versioned_text_read(
+                f.workspace_id.into(),
+                "main".into(),
+                "tasks/source.md".into(),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(after.text, source.text);
-        assert_eq!(after.latest_moment_id, source.latest_moment_id, "no cleanup wrote a removal");
+        assert_eq!(
+            after.latest_moment_id, source.latest_moment_id,
+            "no cleanup wrote a removal"
+        );
         assert_eq!(f.edges(), 1);
         f.close().await;
     }
@@ -4406,13 +4463,25 @@ mod tests {
         let handle = f.handle.clone();
         let cancel = ctx.cancel.clone();
         let fetch = tokio::spawn(async move {
-            service.sync_fetch_pull(&ctx, Some(handle), json!({"workspaceId": "failed-fetch-collections"})).await
+            service
+                .sync_fetch_pull(
+                    &ctx,
+                    Some(handle),
+                    json!({"workspaceId": "failed-fetch-collections"}),
+                )
+                .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !relay.started.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
-        }).await.expect("fetch started");
+            while !relay.started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fetch started");
         assert!(f.pull_token().is_some());
-        f.service.collections_changed(&RequestContext::unbounded(), &f.open).await;
+        f.service
+            .collections_changed(&RequestContext::unbounded(), &f.open)
+            .await;
         assert!(f.owed());
         cancel.cancel();
         assert!(fetch.await.unwrap().is_err());

@@ -555,7 +555,11 @@ macro_rules! relay_transport_method {
 
 impl RelayTransport for DeferredRelayTransport {
     fn request_pending(&self) -> bool {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending.is_some()
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .is_some()
     }
     fn publishes_native_settlements(&self) -> bool {
         self.native_settlements
@@ -2140,7 +2144,11 @@ impl ActorHandle {
         .await
     }
 
-    pub async fn abandon_prepared_pull(&self, workspace_id: String, token: String) -> Result<bool, RuntimeError> {
+    pub async fn abandon_prepared_pull(
+        &self,
+        workspace_id: String,
+        token: String,
+    ) -> Result<bool, RuntimeError> {
         self.run(move |store, _cache| {
             match store.write_with(&NoFaults, |tx| {
                 tx.execute("UPDATE sync_identity SET ordinary_pull_token=NULL WHERE workspace_id=?1 AND ordinary_pull_token=?2",
@@ -2264,16 +2272,39 @@ impl ActorHandle {
         Fut: std::future::Future<Output = Result<RelayIoResponse, RelayError>>,
     {
         loop {
-            let fetched = self.relay_with_io(native_settlements,
-                RelayOperation::FetchPull { workspace_id: workspace_id.clone(), settle_repairs: false },
-                leases.clone(), token.clone(), reservation.clone(), &execute_io).await?;
+            let fetched = self
+                .relay_with_io(
+                    native_settlements,
+                    RelayOperation::FetchPull {
+                        workspace_id: workspace_id.clone(),
+                        settle_repairs: false,
+                    },
+                    leases.clone(),
+                    token.clone(),
+                    reservation.clone(),
+                    &execute_io,
+                )
+                .await?;
             let RelayOperationOutcome::PullFetched(page) = fetched else {
                 return Err(RuntimeError::Relay(RelayError::InvalidResponse));
             };
-            let result = self.relay_with_io(native_settlements,
-                RelayOperation::ApplyPull { workspace_id: workspace_id.clone(), page, now_ms },
-                leases.clone(), token.clone(), reservation.clone(), &execute_io).await?;
-            if !matches!(result, RelayOperationOutcome::PullRetry) { return Ok(result); }
+            let result = self
+                .relay_with_io(
+                    native_settlements,
+                    RelayOperation::ApplyPull {
+                        workspace_id: workspace_id.clone(),
+                        page,
+                        now_ms,
+                    },
+                    leases.clone(),
+                    token.clone(),
+                    reservation.clone(),
+                    &execute_io,
+                )
+                .await?;
+            if !matches!(result, RelayOperationOutcome::PullRetry) {
+                return Ok(result);
+            }
         }
     }
 
@@ -2318,11 +2349,14 @@ impl ActorHandle {
                 .run_with_registrations(move |store, cache, registrations| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
-                    let is_pull = matches!(
+                    let is_pull = matches!(&queued_operation, RelayOperation::ApplyPull { .. });
+                    let is_fetch = matches!(
                         &queued_operation,
-                        RelayOperation::ApplyPull { .. }
+                        RelayOperation::FetchPull {
+                            settle_repairs: false,
+                            ..
+                        }
                     );
-                    let is_fetch = matches!(&queued_operation, RelayOperation::FetchPull { settle_repairs: false, .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -2849,26 +2883,29 @@ fn run_relay_operation(
                 .map(RelayOperationOutcome::Sync)
                 .map_err(RuntimeError::from)
         }
-        RelayOperation::FetchPull { workspace_id, settle_repairs } => (if settle_repairs {
+        RelayOperation::FetchPull {
+            workspace_id,
+            settle_repairs,
+        } => (if settle_repairs {
             client.fetch_pull_settling_repairs(store, &workspace_id, &NoFaults)
-        } else { client.fetch_pull(store, &workspace_id, &NoFaults) })
-            .map(|page| RelayOperationOutcome::PullFetched(Arc::new(page)))
-            .map_err(RuntimeError::from),
+        } else {
+            client.fetch_pull(store, &workspace_id, &NoFaults)
+        })
+        .map(|page| RelayOperationOutcome::PullFetched(Arc::new(page)))
+        .map_err(RuntimeError::from),
         RelayOperation::ApplyPull {
             workspace_id,
             page,
             now_ms,
-        } => match client
-            .apply_pull(
-                store,
-                doc_cache,
-                &workspace_id,
-                &page,
-                &NoFaults,
-                leases,
-                now_ms,
-            )
-        {
+        } => match client.apply_pull(
+            store,
+            doc_cache,
+            &workspace_id,
+            &page,
+            &NoFaults,
+            leases,
+            now_ms,
+        ) {
             Ok(outcome) => Ok(RelayOperationOutcome::Sync(outcome)),
             Err(RelayError::RepairPending) => Ok(RelayOperationOutcome::PullRetry),
             Err(error) => Err(RuntimeError::from(error)),

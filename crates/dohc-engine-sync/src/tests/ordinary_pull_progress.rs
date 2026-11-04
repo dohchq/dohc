@@ -313,13 +313,34 @@ fn prepared_fetch_reuses_its_token_and_refuses_apply_after_release() {
     let retry = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
     assert_eq!(first.pull_token(), retry.pull_token());
     abandon_ordinary_pull(&mut engine, "ws", &NoFaults).unwrap();
-    assert!(matches!(client.apply_pull(&mut engine, &mut Default::default(), "ws", &retry,
-        &NoFaults, &NoLiveLeases, 2_000), Err(RelayError::InvalidResponse)));
+    assert!(matches!(
+        client.apply_pull(
+            &mut engine,
+            &mut Default::default(),
+            "ws",
+            &retry,
+            &NoFaults,
+            &NoLiveLeases,
+            2_000
+        ),
+        Err(RelayError::InvalidResponse)
+    ));
     assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
     let next = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
     assert_ne!(next.pull_token(), first.pull_token());
-    assert!(client.apply_pull(&mut engine, &mut Default::default(), "ws", &next,
-        &NoFaults, &NoLiveLeases, 2_000).is_ok());
+    assert!(
+        client
+            .apply_pull(
+                &mut engine,
+                &mut Default::default(),
+                "ws",
+                &next,
+                &NoFaults,
+                &NoLiveLeases,
+                2_000
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -467,7 +488,10 @@ fn prepared_pull_keeps_operation_page_and_payload_limits() {
             client.fetch_pull(&mut engine, "ws", &NoFaults).is_ok(),
             payload_bytes == crate::model::MAX_PAYLOAD_JSON_BYTES
         );
-        assert_eq!(pull_token(&engine).is_some(), payload_bytes == crate::model::MAX_PAYLOAD_JSON_BYTES);
+        assert_eq!(
+            pull_token(&engine).is_some(),
+            payload_bytes == crate::model::MAX_PAYLOAD_JSON_BYTES
+        );
     }
 }
 

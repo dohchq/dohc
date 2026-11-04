@@ -656,7 +656,9 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
-    fn request_pending(&self) -> bool { false }
+    fn request_pending(&self) -> bool {
+        false
+    }
     /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
@@ -824,10 +826,19 @@ impl PreparedOrdinaryPull {
     }
 }
 
-fn ordinary_pull_token(store: &EngineStore, workspace_id: &str) -> Result<Option<String>, RelayError> {
-    store.read_with(|conn| conn.query_row(
-        "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1", [workspace_id],
-        |row| row.get(0))).map_err(|error| local(SyncError::corrupt(error)))
+fn ordinary_pull_token(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Option<String>, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .map_err(|error| local(SyncError::corrupt(error)))
 }
 
 fn pull_objects(page: &[ReplicationEnvelope]) -> BTreeSet<String> {
@@ -837,14 +848,22 @@ fn pull_objects(page: &[ReplicationEnvelope]) -> BTreeSet<String> {
                 if let Some(object) = fields.get("objectId").and_then(|value| value.as_str()) {
                     objects.insert(object.to_owned());
                 }
-                for value in fields.values() { collect(value, objects); }
+                for value in fields.values() {
+                    collect(value, objects);
+                }
             }
-            serde_json::Value::Array(values) => for value in values { collect(value, objects); },
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect(value, objects);
+                }
+            }
             _ => {}
         }
     }
     let mut objects = BTreeSet::new();
-    for op in page { collect(&op.payload, &mut objects); }
+    for op in page {
+        collect(&op.payload, &mut objects);
+    }
     objects
 }
 
@@ -877,11 +896,7 @@ enum BaseRepairDecision {
 }
 
 impl BaseRepairAnswers {
-    fn keep(
-        &mut self,
-        signature: String,
-        decision: BaseRepairDecision,
-    ) -> bool {
+    fn keep(&mut self, signature: String, decision: BaseRepairDecision) -> bool {
         if self.decisions.len() == MAX_BASE_REPAIR_LOOKUPS {
             return false;
         }
@@ -890,7 +905,10 @@ impl BaseRepairAnswers {
     }
 
     fn by_signature(&self) -> BTreeMap<&str, &BaseRepairDecision> {
-        self.decisions.iter().map(|(signature, decision)| (signature.as_str(), decision)).collect()
+        self.decisions
+            .iter()
+            .map(|(signature, decision)| (signature.as_str(), decision))
+            .collect()
     }
 }
 
@@ -1496,7 +1514,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     missing = true;
                 }
             }
-            return if missing { Err(RelayError::RepairPending) } else { Ok(()) };
+            return if missing {
+                Err(RelayError::RepairPending)
+            } else {
+                Ok(())
+            };
         }
         let touched = pull_objects(page);
         let mut groups: Vec<_> = groups.into_values().collect();
@@ -1506,7 +1528,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut chunks = Vec::new();
         let mut chunk = BaseRelayRepairChunk::default();
         // Finish page dependencies before unrelated repair work.
-        let (priority, other): (Vec<_>, Vec<_>) = groups.into_iter()
+        let (priority, other): (Vec<_>, Vec<_>) = groups
+            .into_iter()
             .partition(|group| touched.contains(&group[0].key.object_id));
         for group in priority {
             if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
@@ -1528,21 +1551,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 chunks.push(std::mem::take(&mut chunk));
             }
             chunk.repairs.extend(group);
-            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS { chunks.push(std::mem::take(&mut chunk)); }
+            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
+            }
         }
         if chunk.len() > 0 {
             chunks.push(chunk);
         }
 
-        for BaseRelayRepairChunk { mut repairs, mut deferred } in chunks {
+        for BaseRelayRepairChunk {
+            mut repairs,
+            mut deferred,
+        } in chunks
+        {
             if let BaseRepairPhase::Fetch(answers) = &phase {
                 let mut available = MAX_BASE_REPAIR_LOOKUPS - answers.decisions.len();
-                if available == 0 { break; }
+                if available == 0 {
+                    break;
+                }
                 let mut selected = BTreeSet::new();
                 repairs.retain(|repair| {
-                    let key = (repair.key.version_id.clone(), repair.key.object_id.clone(), repair.lineage_claim_id.clone());
-                    if selected.contains(&key) { return true; }
-                    if available == 0 { return false; }
+                    let key = (
+                        repair.key.version_id.clone(),
+                        repair.key.object_id.clone(),
+                        repair.lineage_claim_id.clone(),
+                    );
+                    if selected.contains(&key) {
+                        return true;
+                    }
+                    if available == 0 {
+                        return false;
+                    }
                     selected.insert(key);
                     available -= 1;
                     true
@@ -1641,7 +1680,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
                 } else if matches!(&phase, BaseRepairPhase::Fetch(_)) {
-                    prepared_deferred.push((deferred_repair_signature(local_pushed_seq, &repair), BaseRepairDecision::Unchanged));
+                    prepared_deferred.push((
+                        deferred_repair_signature(local_pushed_seq, &repair),
+                        BaseRepairDecision::Unchanged,
+                    ));
                 }
             }
             let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
@@ -1690,12 +1732,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .push((repair, relay_seq, unresolved_local_coordinate));
             }
 
-            if !matches!(&phase, BaseRepairPhase::Fetch(_)) { grouped.retain(|_, candidates| {
-                candidates
-                    .iter()
-                    .any(|(_, relay_seq, _)| relay_seq.is_some())
-                    || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
-            }); }
+            if !matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                grouped.retain(|_, candidates| {
+                    candidates
+                        .iter()
+                        .any(|(_, relay_seq, _)| relay_seq.is_some())
+                        || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
+                });
+            }
             if grouped.is_empty() && deferred_repairs.is_empty() && prepared_deferred.is_empty() {
                 continue;
             }
@@ -1713,8 +1757,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         Some((repair, seq)) => (repair, Some(seq)),
                         None => (&candidates[0].0, None),
                     };
-                    if relay_seq.is_none() && candidates.iter().any(|(_, _, unresolved)| *unresolved) {
-                        if !answers.keep(signature, BaseRepairDecision::Unchanged) { return Ok(()); }
+                    if relay_seq.is_none()
+                        && candidates.iter().any(|(_, _, unresolved)| *unresolved)
+                    {
+                        if !answers.keep(signature, BaseRepairDecision::Unchanged) {
+                            return Ok(());
+                        }
                         continue;
                     }
                     if !answers.keep(
@@ -2407,12 +2455,26 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
-        if self.continuation.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some() {
+        if self
+            .continuation
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
             return self.resume_ordinary_pull(store, cache, workspace_id, faults, leases, now_ms);
         }
         loop {
             let prepared = self.fetch_pull(store, workspace_id, faults)?;
-            match self.apply_pull(store, cache, workspace_id, &prepared, faults, leases, now_ms) {
+            match self.apply_pull(
+                store,
+                cache,
+                workspace_id,
+                &prepared,
+                faults,
+                leases,
+                now_ms,
+            ) {
                 Err(RelayError::RepairPending) => continue,
                 result => return result,
             }
@@ -2434,15 +2496,27 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     }
 
     pub fn fetch_pull_settling_repairs(
-        &self, store: &mut EngineStore, workspace_id: &str, faults: &dyn FaultInjector,
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
     ) -> Result<PreparedOrdinaryPull, RelayError> {
         let prepared = self.fetch_pull(store, workspace_id, faults)?;
         // Finish validated repairs in this writer step, before another local
         // write can change their candidates. Page operations still wait for apply.
         let repaired = {
-            let ops = prepared.ops.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.repair_base_orders(store, workspace_id, &prepared.identity, faults,
-                &ops, BaseRepairPhase::Apply(&prepared.repairs))
+            let ops = prepared
+                .ops
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.repair_base_orders(
+                store,
+                workspace_id,
+                &prepared.identity,
+                faults,
+                &ops,
+                BaseRepairPhase::Apply(&prepared.repairs),
+            )
         };
         match repaired {
             Ok(()) | Err(RelayError::RepairPending) => Ok(prepared),
@@ -2478,10 +2552,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let pull_token = match ordinary_pull_token(store, workspace_id)? {
             Some(token) => token,
-            None => match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-                TxnOutcome::Committed(token) => token,
-                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
-            },
+            None => {
+                match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+                    TxnOutcome::Committed(token) => token,
+                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                }
+            }
         };
         let mut cursor = current.as_ref().map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
@@ -2570,21 +2646,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             return Err(RelayError::InvalidResponse);
         }
         let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
-        let mut held_ops = prepared.ops.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut held_ops = prepared
+            .ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::deferred::check_redelivery(store, &held_ops)?;
         let fetched = held_ops.len();
-        let fetched_coordinates: BTreeSet<_> = held_ops.iter()
-            .map(|op| (op.origin_id.clone(), op.origin_seq)).collect();
-        held_ops.extend(queued.iter()
-            .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
-            .cloned());
+        let fetched_coordinates: BTreeSet<_> = held_ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        held_ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
         let prepared_state = (|| {
             preflight_collisions(store, workspace_id, &identity.origin_id, &held_ops)?;
-            self.repair_base_orders(store, workspace_id, &identity, faults, &held_ops,
-                BaseRepairPhase::Apply(&prepared.repairs))?;
-            store.read_with(|conn| {
-                crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
-            }).map_err(local)
+            self.repair_base_orders(
+                store,
+                workspace_id,
+                &identity,
+                faults,
+                &held_ops,
+                BaseRepairPhase::Apply(&prepared.repairs),
+            )?;
+            store
+                .read_with(|conn| {
+                    crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
+                })
+                .map_err(local)
         })();
         let bootstrap_complete = match prepared_state {
             Ok(complete) => complete,
@@ -2641,13 +2733,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none()
         {
-            let (fetch, progress) = match self.begin_prepared_pull(store, workspace_id, prepared, faults) {
-                Err(RelayError::RepairPending) => {
-                    crate::cursor::abandon_ordinary_pull(store, workspace_id, faults).map_err(local)?;
-                    return Err(RelayError::RepairPending);
-                }
-                answer => answer?,
-            };
+            let (fetch, progress) =
+                match self.begin_prepared_pull(store, workspace_id, prepared, faults) {
+                    Err(RelayError::RepairPending) => {
+                        crate::cursor::abandon_ordinary_pull(store, workspace_id, faults)
+                            .map_err(local)?;
+                        return Err(RelayError::RepairPending);
+                    }
+                    answer => answer?,
+                };
             self.continuation
                 .keep(workspace_id, Fetched::Ordinary(fetch), progress);
         }

@@ -7,7 +7,8 @@ use serde_json::json;
 
 fn boundary_objects(delta: isize, _claim: &str) -> Vec<String> {
     (0..(MAX_BASE_REPAIR_LOOKUPS as isize + delta) as usize)
-        .map(|index| format!("00000000-0000-0000-0000-{index:012x}")).collect()
+        .map(|index| format!("00000000-0000-0000-0000-{index:012x}"))
+        .collect()
 }
 
 fn seed(store: &mut EngineStore, objects: &[String], claim: &str) -> PagedRelay {
@@ -79,24 +80,38 @@ fn touching(mut relay: PagedRelay, object: &str) -> PagedRelay {
 #[test]
 fn prepared_repairs_prioritize_the_page_object_past_the_cap() {
     let (_scratch, _path, mut store) = open_store();
-    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let claim =
+        dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
     let mut objects = boundary_objects(0, &claim);
     objects.push("zz-page".into());
     let relay = touching(seed(&mut store, &objects, &claim), "zz-page");
     let client = RelaySyncClient::new(relay);
     let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-    assert!(page.repairs.by_signature().values().any(|decision| matches!(decision,
-        BaseRepairDecision::Base {object_id, ..} if object_id == "zz-page")));
+    assert!(
+        page.repairs
+            .by_signature()
+            .values()
+            .any(|decision| matches!(decision,
+        BaseRepairDecision::Base {object_id, ..} if object_id == "zz-page"))
+    );
     apply(&mut store, &page);
-    let unresolved: i64 = store.read_with(|conn| conn.query_row(
-        "SELECT COUNT(*) FROM ydoc_base_relay_candidates WHERE object_id='zz-page'", [], |row| row.get(0))).unwrap();
+    let unresolved: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_base_relay_candidates WHERE object_id='zz-page'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
     assert_eq!(unresolved, 0);
 }
 
 #[test]
 fn prepared_page_waits_for_repairs_that_exceed_the_cap() {
     let (_scratch, _path, mut store) = open_store();
-    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let claim =
+        dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
     let objects: Vec<_> = (0..600).map(|index| format!("doc-{index:05}")).collect();
     let mut relay = seed(&mut store, &objects, &claim);
     relay.pages.get_mut(&0).unwrap().ops[0].payload = json!({"objects": objects.iter()
@@ -105,15 +120,25 @@ fn prepared_page_waits_for_repairs_that_exceed_the_cap() {
     let mut before = objects.len();
     loop {
         let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-        match client.apply_pull(&mut store, &mut Default::default(), "ws", &page,
-            &NoFaults, &crate::NoLiveLeases, 2_000) {
+        match client.apply_pull(
+            &mut store,
+            &mut Default::default(),
+            "ws",
+            &page,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            2_000,
+        ) {
             Err(RelayError::RepairPending) => {
                 let after = remaining(&store);
                 assert!(after > 0 && after < before);
                 assert_eq!(crate::read_relay_cursor(&store, "ws").unwrap(), None);
                 before = after;
             }
-            Ok(_) => { assert_eq!(remaining(&store), 0); break; }
+            Ok(_) => {
+                assert_eq!(remaining(&store), 0);
+                break;
+            }
             Err(error) => panic!("unexpected pull: {error:?}"),
         }
     }
@@ -122,7 +147,8 @@ fn prepared_page_waits_for_repairs_that_exceed_the_cap() {
 #[test]
 fn prepared_page_retries_changed_repairs_once_then_applies() {
     let (_scratch, _path, mut store) = open_store();
-    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let claim =
+        dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
     let client = RelaySyncClient::new(touching(seed(&mut store, &["doc".into()], &claim), "doc"));
     let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
     change_candidate(&mut store);
@@ -133,20 +159,52 @@ fn prepared_page_retries_changed_repairs_once_then_applies() {
 }
 
 fn change_candidate(store: &mut EngineStore) {
-    store.write_with(&NoFaults, |tx| {
-        tx.execute("UPDATE replication_log SET recorded_at_ms=recorded_at_ms+1 WHERE origin_id='peer'", []).map_err(SyncError::persist)?;
-        Ok::<_, SyncError>(())
-    }).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET recorded_at_ms=recorded_at_ms+1 WHERE origin_id='peer'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
 }
 
-fn assert_repair_retry(client: &RelaySyncClient<PagedRelay>, store: &mut EngineStore, page: &PreparedOrdinaryPull) {
-    assert!(matches!(client.apply_pull(store, &mut Default::default(), "ws", page,
-        &NoFaults, &crate::NoLiveLeases, 2_000), Err(RelayError::RepairPending)));
+fn assert_repair_retry(
+    client: &RelaySyncClient<PagedRelay>,
+    store: &mut EngineStore,
+    page: &PreparedOrdinaryPull,
+) {
+    assert!(matches!(
+        client.apply_pull(
+            store,
+            &mut Default::default(),
+            "ws",
+            page,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            2_000
+        ),
+        Err(RelayError::RepairPending)
+    ));
     assert_eq!(crate::read_relay_cursor(store, "ws").unwrap(), None);
-    let (token, applied): (Option<String>, i64) = store.read_with(|conn| Ok::<_, rusqlite::Error>((
-        conn.query_row("SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'", [], |row| row.get(0))?,
-        conn.query_row("SELECT COUNT(*) FROM replication_log WHERE origin_id='remote'", [], |row| row.get(0))?,
-    ))).unwrap();
+    let (token, applied): (Option<String>, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE origin_id='remote'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
     assert_eq!(token, None);
     assert_eq!(applied, 0);
 }
@@ -154,14 +212,17 @@ fn assert_repair_retry(client: &RelaySyncClient<PagedRelay>, store: &mut EngineS
 #[test]
 fn repeated_repair_changes_finish_at_the_fetch_writer_boundary() {
     let (_scratch, _path, mut store) = open_store();
-    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let claim =
+        dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
     let client = RelaySyncClient::new(touching(seed(&mut store, &["doc".into()], &claim), "doc"));
     for _ in 0..3 {
         let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
         change_candidate(&mut store);
         assert_repair_retry(&client, &mut store, &page);
     }
-    let page = client.fetch_pull_settling_repairs(&mut store, "ws", &NoFaults).unwrap();
+    let page = client
+        .fetch_pull_settling_repairs(&mut store, "ws", &NoFaults)
+        .unwrap();
     assert_eq!(remaining(&store), 0);
     change_candidate(&mut store);
     apply(&mut store, &page);
@@ -193,30 +254,58 @@ fn boundary(delta: isize) {
     let objects = boundary_objects(delta, &claim);
     let origin = "origin_0123456789abcdef0123456789abcdef";
     let mut relay = seed(&mut store, &objects, &claim);
-    store.write_with(&NoFaults, |tx| {
-        tx.execute("UPDATE replication_log SET origin_id=?1 WHERE origin_id='peer'", [origin]).map_err(SyncError::persist)?;
-        tx.execute("UPDATE ydoc_base_relay_candidates SET origin_id=?1 WHERE origin_id='peer'", [origin]).map_err(SyncError::persist)?;
-        Ok::<_, SyncError>(())
-    }).unwrap();
-    for index in 0..objects.len() { relay = relay.with_coordinate(origin, index as i64, LogCoordinateResponse::Absent); }
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET origin_id=?1 WHERE origin_id='peer'",
+                [origin],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE ydoc_base_relay_candidates SET origin_id=?1 WHERE origin_id='peer'",
+                [origin],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    for index in 0..objects.len() {
+        relay = relay.with_coordinate(origin, index as i64, LogCoordinateResponse::Absent);
+    }
     let client = RelaySyncClient::new(relay);
     let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
     assert_eq!(remaining(&store), objects.len(), "fetch applies no repair");
     let held = objects.len().min(MAX_BASE_REPAIR_LOOKUPS);
     assert_eq!(page.repairs.decisions.len(), held);
-    assert_eq!(client.transport().coordinate_lookups.lock().unwrap().len(), held);
-    assert!(page.repairs.decisions.iter().all(|(_, decision)| matches!(decision,
+    assert_eq!(
+        client.transport().coordinate_lookups.lock().unwrap().len(),
+        held
+    );
+    assert!(
+        page.repairs
+            .decisions
+            .iter()
+            .all(|(_, decision)| matches!(decision,
         BaseRepairDecision::Base {object_id, origin_id, lineage_claim_id, ..}
-        if object_id.len() == 36 && origin_id == origin && lineage_claim_id.len() == 64)));
+        if object_id.len() == 36 && origin_id == origin && lineage_claim_id.len() == 64))
+    );
     apply(&mut store, &page);
     assert_eq!(remaining(&store), usize::from(delta > 0));
     let next = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
     assert_eq!(next.repairs.decisions.len(), usize::from(delta > 0));
     if delta > 0 {
-        assert!(matches!(&next.repairs.decisions[0].1,
-            BaseRepairDecision::Base {origin_seq: 256, ..}));
+        assert!(matches!(
+            &next.repairs.decisions[0].1,
+            BaseRepairDecision::Base {
+                origin_seq: 256,
+                ..
+            }
+        ));
     }
-    assert_eq!(client.transport().coordinate_lookups.lock().unwrap().len(), objects.len());
+    assert_eq!(
+        client.transport().coordinate_lookups.lock().unwrap().len(),
+        objects.len()
+    );
     apply(&mut store, &next);
     assert_eq!(
         remaining(&store),
@@ -392,7 +481,10 @@ fn prepared_deferred_repairs_share_the_count_cap_and_resume_on_the_next_fetch() 
     while unresolved(&store) > 0 {
         let before = unresolved(&store);
         let next = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-        assert_eq!(next.repairs.decisions.len(), before.min(MAX_BASE_REPAIR_LOOKUPS));
+        assert_eq!(
+            next.repairs.decisions.len(),
+            before.min(MAX_BASE_REPAIR_LOOKUPS)
+        );
         apply(&mut store, &next);
         assert!(unresolved(&store) < before);
     }

@@ -63,13 +63,36 @@ fn prepared_step(
     claims: &ClaimAnnouncer,
     registrations: &mut crate::actor::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
-    let fetched = execute_relay_operation(store, cache, transport, operation, leases, claims, registrations)?;
-    let RelayOperationOutcome::PullFetched(page) = fetched else { return Ok(fetched); };
+    let fetched = execute_relay_operation(
+        store,
+        cache,
+        transport,
+        operation,
+        leases,
+        claims,
+        registrations,
+    )?;
+    let RelayOperationOutcome::PullFetched(page) = fetched else {
+        return Ok(fetched);
+    };
     let offline = DeferredRelayTransport::default();
-    let result = execute_relay_operation(store, cache, offline.clone(),
-        RelayOperation::ApplyPull { workspace_id: "ws".into(), page, now_ms: 1_200 },
-        leases, claims, registrations);
-    assert!(offline.take_pending().is_none(), "apply must not request repairs");
+    let result = execute_relay_operation(
+        store,
+        cache,
+        offline.clone(),
+        RelayOperation::ApplyPull {
+            workspace_id: "ws".into(),
+            page,
+            now_ms: 1_200,
+        },
+        leases,
+        claims,
+        registrations,
+    );
+    assert!(
+        offline.take_pending().is_none(),
+        "apply must not request repairs"
+    );
     result
 }
 
@@ -164,8 +187,10 @@ fn finish(store: &mut EngineStore, relay: &mut Relay) -> usize {
             &mut crate::actor::live_application::Registry::default(),
         ) {
             Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => {
-                if remaining(store) == 0 { break; }
-            },
+                if remaining(store) == 0 {
+                    break;
+                }
+            }
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {
                 let request = transport.take_pending().unwrap();
                 if !matches!(request, RelayIoRequest::Pull(_)) {
@@ -220,12 +245,20 @@ async fn deadline_preserves_chunk(deferred: bool) {
         ..Relay::default()
     }));
     let first_relay = Arc::clone(&relay);
-    actor.pull_with_io_for_test(false, ("ws".into(), 1_200),
-        LeaseRegistry::default(), CancellationToken::new(), None,
-        move |request, _| {
-            let relay = Arc::clone(&first_relay);
-            async move { Ok(relay.lock().unwrap().answer(&request)) }
-        }).await.unwrap();
+    actor
+        .pull_with_io_for_test(
+            false,
+            ("ws".into(), 1_200),
+            LeaseRegistry::default(),
+            CancellationToken::new(),
+            None,
+            move |request, _| {
+                let relay = Arc::clone(&first_relay);
+                async move { Ok(relay.lock().unwrap().answer(&request)) }
+            },
+        )
+        .await
+        .unwrap();
     let io_relay = Arc::clone(&relay);
     let result = actor
         .relay_with_io(

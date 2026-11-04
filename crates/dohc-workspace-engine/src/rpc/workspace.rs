@@ -1527,7 +1527,10 @@ impl EngineService {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
-            let _ = removed.actor.abandon_ordinary_pull(removed.workspace_id.clone()).await;
+            let _ = removed
+                .actor
+                .abandon_ordinary_pull(removed.workspace_id.clone())
+                .await;
             let finished = tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
                 None => Ok(()),
