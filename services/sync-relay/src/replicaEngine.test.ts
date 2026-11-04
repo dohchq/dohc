@@ -23,6 +23,7 @@ class Child extends EventEmitter {
   mode = "replica";
   abi: unknown = 2;
   limitOnPull?: string;
+  fetched: unknown = {pageToken: "fetched"};
   requests: Array<{ method: string; workspace?: string; params: Record<string, unknown> }> = [];
   pages = [{ status: "complete", nextCursor: 2, pendingCursor: { kind: "relay", token: "issued-2" }, hasMore: true },
     { status: "complete", nextCursor: 3, pendingCursor: { kind: "relay", token: "issued-3" }, hasMore: false }];
@@ -42,7 +43,7 @@ class Child extends EventEmitter {
           if (row.method === "sync.applyPull" && this.limitOnPull) {this.finish(this.limitOnPull); return;}
           const result = row.method === "engine.ping" ? {ok: true, mode: this.mode, landlockAbi: this.abi} : row.method === "workspace.open" ? { workspace: "private-handle" } :
             row.method === "replica.frontiers" ? {revision: 1, logCursor: 3, journalCursor: 0} :
-            row.method === "sync.fetchPull" ? {pageToken: "fetched"} : row.method === "sync.applyPull" ? this.pages.shift() : { adopted: true, committed: true };
+            row.method === "sync.fetchPull" ? this.fetched : row.method === "sync.applyPull" ? this.pages.shift() : { adopted: true, committed: true };
           this.stdout.write(frame({ type: "response", id: row.id, result }));
         }
       }
@@ -80,6 +81,15 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
     expect(new URL(journalRequest.url).pathname).toBe("/sync/w/live-journal");
     expect(journalRequest.headers.get("authorization")).toBe(`Bearer ${input().lease.bearer}`);
     expect(JSON.stringify(child.requests)).not.toContain("serviceHost"); expect(JSON.stringify(child.requests)).not.toContain("ownerSecret");
+  } finally { await replica.close(); }
+});
+
+it.each([{}, {pageToken: 1}, {pageToken: null}])("rejects an invalid fetched page before apply: %s", async fetched => {
+  const child = new Child(); child.fetched = fetched;
+  const {replica} = await fixture(child);
+  try {
+    await expect(replica.pull()).rejects.toThrow(/sync\.fetchPull result:/);
+    expect(child.requests.some(row => row.method === "sync.applyPull")).toBe(false);
   } finally { await replica.close(); }
 });
 

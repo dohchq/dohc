@@ -250,7 +250,7 @@ fn prepared_repairs_replay_after_a_stop_before_apply() {
     let first = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
     let decisions = first.repairs.decisions.clone();
     assert_eq!(decisions.len(), MAX_BASE_REPAIR_LOOKUPS);
-    let ops = first.ops.clone();
+    let ops = first.ops.lock().unwrap().clone();
     drop(first);
     drop(store);
     let mut store = EngineStore::open(&path, 2_000).unwrap();
@@ -267,7 +267,7 @@ fn prepared_repairs_replay_after_a_stop_before_apply() {
         .unwrap();
     assert_eq!(imported, 0);
     let second = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-    assert_eq!(second.ops, ops);
+    assert_eq!(*second.ops.lock().unwrap(), ops);
     assert_eq!(second.repairs.decisions, decisions);
     assert_eq!(remaining(&store), objects.len());
     assert_eq!(crate::read_relay_cursor(&store, "ws").unwrap(), None);

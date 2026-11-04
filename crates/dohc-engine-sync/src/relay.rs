@@ -811,7 +811,7 @@ enum Fetched {
 pub struct PreparedOrdinaryPull {
     identity: crate::SyncIdentity,
     current: Option<RelayCursor>,
-    ops: Vec<ReplicationEnvelope>,
+    ops: std::sync::Mutex<Vec<ReplicationEnvelope>>,
     cursor: i64,
     has_more: bool,
     repairs: BaseRepairAnswers,
@@ -2439,8 +2439,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let prepared = self.fetch_pull(store, workspace_id, faults)?;
         // Finish validated repairs in this writer step, before another local
         // write can change their candidates. Page operations still wait for apply.
-        match self.repair_base_orders(store, workspace_id, &prepared.identity, faults,
-            &prepared.ops, BaseRepairPhase::Apply(&prepared.repairs)) {
+        let repaired = {
+            let ops = prepared.ops.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.repair_base_orders(store, workspace_id, &prepared.identity, faults,
+                &ops, BaseRepairPhase::Apply(&prepared.repairs))
+        };
+        match repaired {
             Ok(()) | Err(RelayError::RepairPending) => Ok(prepared),
             Err(error) => Err(error),
         }
@@ -2539,7 +2543,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(PreparedOrdinaryPull {
             identity,
             current,
-            ops,
+            ops: std::sync::Mutex::new(ops),
             cursor,
             has_more,
             repairs,
@@ -2566,33 +2570,31 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             return Err(RelayError::InvalidResponse);
         }
         let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
-        crate::deferred::check_redelivery(store, &prepared.ops)?;
-        let fetched_coordinates: BTreeSet<_> = prepared
-            .ops
-            .iter()
-            .map(|op| (op.origin_id.clone(), op.origin_seq))
-            .collect();
-        let mut ops = prepared.ops.clone();
-        ops.extend(
-            queued
-                .iter()
-                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
-                .cloned(),
-        );
-        preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
-        self.repair_base_orders(
-            store,
-            workspace_id,
-            &identity,
-            faults,
-            &ops,
-            BaseRepairPhase::Apply(&prepared.repairs),
-        )?;
-        let bootstrap_complete = store
-            .read_with(|conn| {
+        let mut held_ops = prepared.ops.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::deferred::check_redelivery(store, &held_ops)?;
+        let fetched = held_ops.len();
+        let fetched_coordinates: BTreeSet<_> = held_ops.iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq)).collect();
+        held_ops.extend(queued.iter()
+            .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+            .cloned());
+        let prepared_state = (|| {
+            preflight_collisions(store, workspace_id, &identity.origin_id, &held_ops)?;
+            self.repair_base_orders(store, workspace_id, &identity, faults, &held_ops,
+                BaseRepairPhase::Apply(&prepared.repairs))?;
+            store.read_with(|conn| {
                 crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
-            })
-            .map_err(local)?;
+            }).map_err(local)
+        })();
+        let bootstrap_complete = match prepared_state {
+            Ok(complete) => complete,
+            Err(error) => {
+                held_ops.truncate(fetched);
+                return Err(error);
+            }
+        };
+        let ops = std::mem::take(&mut *held_ops);
+        drop(held_ops);
         let pull_token = prepared.pull_token().to_owned();
         let ordered = merge_by_origin(ops);
         let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
@@ -2602,7 +2604,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 queued,
                 ordered,
                 cursor: prepared.cursor,
-                fetched: prepared.ops.len(),
+                fetched,
                 has_more: prepared.has_more,
                 bootstrap_complete,
                 pull_token,

@@ -1,3 +1,4 @@
+import { decodeOrdinarySyncResult } from "@dohc/workspace-engine-client/relay-wire";
 import {decodeReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -90,7 +91,8 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
         let page: Record<string, unknown>;
         let previous: number | undefined;
         for (;;) {
-          const fetched = await request("sync.fetchPull", { workspaceId: lease.workspaceId });
+          const fetched = decodeOrdinarySyncResult("sync.fetchPull",
+            await request("sync.fetchPull", { workspaceId: lease.workspaceId }));
           page = await request("sync.applyPull", { workspaceId: lease.workspaceId, pageToken: fetched.pageToken });
           if (page.status === "retry") continue;
           if (page.status !== "complete" || !Number.isSafeInteger(page.nextCursor) || typeof page.nextCursor !== "number" ||

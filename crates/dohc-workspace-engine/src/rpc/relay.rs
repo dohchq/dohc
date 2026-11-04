@@ -1337,6 +1337,7 @@ impl EngineService {
             ));
         }
         let page = pending.take().expect("validated pull page").page;
+        drop(pending);
         let pull_token = page.pull_token().to_owned();
         let answer = async {
         // A Collections update already admitted under the gate runs before
