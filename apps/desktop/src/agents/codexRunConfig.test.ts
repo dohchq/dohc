@@ -229,7 +229,7 @@ describe("a dohc Codex run", () => {
     expect(windows({}, NONE, "linux")).toEqual([]);
   });
 
-  it("refuses a read-only run where the system requirements would override it, or can't be read", () => {
+  it("refuses a read-only run where the system requirements or a Unix managed config would override it, or can't be read", () => {
     const refuses = (text: string | null, platform: NodeJS.Platform = "win32") =>
       codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER] }, platform, (path) => path === REQUIREMENTS && text !== null ? text : missing(path));
     for (const platform of ["win32", "linux"] as const) {
@@ -242,6 +242,9 @@ describe("a dohc Codex run", () => {
       expect(refuses("[features]\nshell_tool = true\n", platform)).toBe(true);
       expect(refuses("[feature_requirements]\nview_image = true\n", platform)).toBe(true);
       expect(refuses("[features]\ncollab = true\n", platform)).toBe(true);
+      // Codex swaps never for the first approval policy the list allows.
+      expect(refuses("allowed_approval_policies = ['on-request', 'never']\n", platform)).toBe(false);
+      expect(refuses("allowed_approval_policies = ['on-request']\n", platform)).toBe(true);
       expect(refuses("[windows\n", platform)).toBe(true);
     }
     expect(refuses("[windows]\nallowed_sandbox_implementations = ['elevated', 'unelevated']\n")).toBe(false);
@@ -252,6 +255,14 @@ describe("a dohc Codex run", () => {
     expect(refuses("[windows]\nrequire_mxc = true\n", "linux")).toBe(false);
     expect(codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [] }, "win32", () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })).toBe(true);
     expect(codexRequirementsRefuseReadOnly(null, "linux")).toBe(true);
+    // A Unix managed config wins over every setting the run passes.
+    const MANAGED = "/etc/codex/managed_config.toml";
+    const managed = (text: string | null) =>
+      codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER, MANAGED] }, "linux", (path) => path === MANAGED && text !== null ? text : missing(path));
+    expect(managed(null)).toBe(false);
+    expect(managed("")).toBe(false);
+    expect(managed("default_permissions = ':read-only'\n")).toBe(true);
+    expect(managed("[features\n")).toBe(true);
   });
 
   it("carries the person's network access into the run's profile", () => {
