@@ -431,6 +431,14 @@ describe("registered received-view handlers", () => {
     expect(h.workspace.shareView).toMatchObject({ granterEmail: info.granterEmail, grantedSelector: info.selector, unsavedPaths: null });
   });
 
+  it("keeps the sharer's email on refresh when the server sends a different one", async () => {
+    const h = await harness();
+    h.fetchInfo.mockResolvedValue({ ...info, granterEmail: "other@example.test" });
+    await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
+    expect(h.fetchInfo).toHaveBeenCalled();
+    expect(h.workspace.shareView!.granterEmail).toBe(info.granterEmail);
+  });
+
   it.each(["background", "manual"] as const)("asks the server nothing on a %s refresh while another account is signed in", async (trigger) => {
     const h = await harness();
     // A share reopened after Forget, which another account opened.

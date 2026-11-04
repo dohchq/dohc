@@ -490,7 +490,8 @@ export function registerSharedViewsIpcHandlers<
                 ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
                 receivedIdentity: refreshReceivedReferencePin(current.shareView.receivedIdentity, info),
                 genericChatWritable: info.genericChatWritable,
-                granterEmail: info.granterEmail,
+                // Forget clears the email, so a reopened share takes the server's. A share that has one keeps it.
+                granterEmail: current.shareView.granterEmail ?? info.granterEmail,
                 subjectName: info.subjectName,
                 sharerName: info.sharerName,
               };
