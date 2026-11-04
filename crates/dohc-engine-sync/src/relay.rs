@@ -2319,7 +2319,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
-        let (fetch, progress) = match self.continuation.take(workspace_id) {
+        let (fetch, mut progress) = match self.continuation.take(workspace_id) {
             Some((Fetched::Ordinary(fetch), progress)) => (fetch, progress),
             _ => return Err(RelayError::InvalidResponse),
         };
@@ -2330,16 +2330,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &fetch.identity,
             &fetch.queued,
             &fetch.ordered,
-            progress,
+            &mut progress,
             None,
             faults,
             leases,
-        )? {
-            Applying::Done(pass) => *pass,
-            Applying::Suspended(pending, progress) => {
+        ) {
+            Ok(Applying::Done(pass)) => *pass,
+            Ok(Applying::Suspended(pending)) => {
                 self.continuation
-                    .keep(workspace_id, Fetched::Ordinary(fetch), *progress);
+                    .keep(workspace_id, Fetched::Ordinary(fetch), progress);
                 return Err(RelayError::ValidationPending(pending));
+            }
+            Err(error) => {
+                if self
+                    .pending_preparation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+                {
+                    self.continuation
+                        .keep(workspace_id, Fetched::Ordinary(fetch), progress);
+                }
+                return Err(error);
             }
         };
         let OrdinaryFetch {
@@ -2800,7 +2812,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<HostedPassOutcome, RelayError> {
-        let (fetch, progress) = match self.continuation.take(workspace_id) {
+        let (fetch, mut progress) = match self.continuation.take(workspace_id) {
             Some((Fetched::Hosted(fetch), progress)) => (fetch, progress),
             _ => match self.fetch_hosted(store, workspace_id, faults)? {
                 Some(fetched) => fetched,
@@ -2820,15 +2832,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &fetch.identity,
             &fetch.queued,
             &fetch.ordered,
-            progress,
+            &mut progress,
             Some(relay_namespace),
             faults,
             leases,
         )? {
             Applying::Done(pass) => *pass,
-            Applying::Suspended(pending, progress) => {
+            Applying::Suspended(pending) => {
                 self.continuation
-                    .keep(workspace_id, Fetched::Hosted(fetch), *progress);
+                    .keep(workspace_id, Fetched::Hosted(fetch), progress);
                 return Err(RelayError::ValidationPending(pending));
             }
         };
@@ -3351,12 +3363,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::SyncIdentity,
         queued: &[ReplicationEnvelope],
         ordered: &[ReplicationEnvelope],
-        mut progress: ApplyProgress,
+        progress: &mut ApplyProgress,
         relay_namespace: Option<&str>,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<Applying, RelayError> {
-        let p = &mut progress;
+        let p = progress;
         // Recovery that waits for validation leaves every drain's rows
         // queued and runs again after it, reporting them then. The rows one
         // that completes removes leave drain reports, so a later wait loses
@@ -3384,7 +3396,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             p.pass.conflicts_opened += recovered.conflicts_opened;
             p.pass.replace_drain_holds(recovered.holds);
             match recovered.waiting {
-                Some(pending) => return Ok(Applying::Suspended(pending, Box::new(progress))),
+                Some(pending) => return Ok(Applying::Suspended(pending)),
                 None => p.recovering = false,
             }
         }
@@ -3402,7 +3414,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     leases,
                 ) {
                     Err(RelayError::ValidationPending(pending)) => {
-                        return Ok(Applying::Suspended(pending, Box::new(progress)));
+                        return Ok(Applying::Suspended(pending));
                     }
                     applied => applied?,
                 }
@@ -3514,7 +3526,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 drained.holds
             }
             Err(SyncError::ValidationPending(pending)) => {
-                return Ok(Applying::Suspended(pending, Box::new(progress)));
+                return Ok(Applying::Suspended(pending));
             }
             Err(error) => return Err(self.local(error)),
         };
@@ -3547,7 +3559,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 push_refusal_once(&mut p.pass.refusals, refusal);
             }
             if let Some(pending) = released.waiting {
-                return Ok(Applying::Suspended(pending, Box::new(progress)));
+                return Ok(Applying::Suspended(pending));
             }
         }
         let drained = crate::moment_apply::pending::drain_and_claim(
@@ -3567,7 +3579,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // The settlements before the one that waits committed into the
             // report the pass goes on with.
             Err(SyncError::ValidationPending(pending)) => {
-                return Ok(Applying::Suspended(pending, Box::new(progress)));
+                return Ok(Applying::Suspended(pending));
             }
             Err(error) => return Err(local(error)),
         }
@@ -5893,10 +5905,7 @@ enum Applying {
     Done(Box<AppliedPass>),
     /// An op or owner settlement waits for released-tail validation; nothing
     /// of it applied.
-    Suspended(
-        Box<dohc_engine_collab::live_update_application::PendingValidation>,
-        Box<ApplyProgress>,
-    ),
+    Suspended(Box<dohc_engine_collab::live_update_application::PendingValidation>),
 }
 
 /// The documents a scope names, each once, with its path.
