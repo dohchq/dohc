@@ -72,12 +72,26 @@ describe("forgotten share views", () => {
     const { file, workspace, register, registered } = await setup();
     const skippedOps = {
       ops: [{ originId: "origin", originSeq: 4, opKind: "write", code: "outside_grant", detail: "notes.md", atMs: 1 }],
-      more: 0, generation: 1,
+      more: 1, counted: ["origin\u00004", "origin\u00005"], generation: 2, acknowledgedGeneration: 1,
+      inexact: true, lastUncountedBatch: ["origin\u00006"],
     };
     const store = createForgottenShareViews({ file });
     await store.remember(workspace, { ...shareView, ended: true, skippedOps });
     await store.reopen(workspace, register);
     expect(registered[0]?.shareView).toMatchObject({ shareId: "share-1", ended: true, skippedOps });
+  });
+
+  it.each([{ counted: {} }, { ops: [null] }])("opens the share without its skip notice when the skip record is damaged: %o", async (damage) => {
+    const { file, workspace, register, registered, saved } = await setup();
+    const warn = vi.fn();
+    const store = createForgottenShareViews({ file, warn });
+    await store.remember(workspace, { ...shareView, skippedOps: { ops: [], more: 0, generation: 1 } });
+    const [record] = await saved() as [{ skippedOps: object }];
+    await writeFile(file, JSON.stringify({ version: 1, forgotten: [{ ...record, skippedOps: { ...record.skippedOps, ...damage } }] }));
+    await store.reopen(workspace, register);
+    expect(registered[0]?.shareView).toMatchObject({ shareId: "share-1" });
+    expect(registered[0]?.shareView).not.toHaveProperty("skippedOps");
+    expect(warn).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("skipped-content record was damaged"), "trip");
   });
 
   it("runs Open and Forget one at a time, so an open that waits can't bring back an older record", async () => {

@@ -1,7 +1,9 @@
 import { normalizeRootPath } from "@dohc/workspace-core";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { z } from "zod";
 import { atomicReplaceFile } from "../atomicReplaceFile";
+import { ShareSkippedOpsSummary } from "../ipc/bridgeContract";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { RegistryEntry, ShareSkippedOps, ShareViewIdentity } from "./registryStore";
 import type { ShareViewSelector } from "./shareViewInfo";
@@ -33,20 +35,23 @@ interface ForgottenShareView {
   granterUserId?: string;
   receivedIdentity?: ReceivedReferencePin;
   // An ended share opens ended, and content its pulls skipped stays reported.
+  // A damaged skip record is null: the share still opens, and the log says
+  // its notice is gone. Pulls resume past that content, so none rebuilds it.
   ended?: true;
-  skippedOps?: ShareSkippedOps;
+  skippedOps?: ShareSkippedOps | null;
 }
 
 const filled = (value: unknown): value is string => typeof value === "string" && value.length > 0;
 
-// dohc wrote it, so, as the registry does, this checks only its shape.
-function skipRecord(value: unknown): ShareSkippedOps | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const raw = value as Record<string, unknown>;
-  return Array.isArray(raw.ops) && Number.isInteger(raw.more) && Number.isInteger(raw.generation)
-    ? value as ShareSkippedOps
-    : undefined;
-}
+// The whole skip record as the registry keeps it. A damaged field would throw
+// in the next pull that records a skip, so a record that fails any field
+// becomes null.
+const SkipRecord = ShareSkippedOpsSummary.extend({
+  counted: z.array(z.string()).optional(),
+  lastUncountedBatch: z.array(z.string()).optional(),
+});
+const skipRecord = (value: unknown): ShareSkippedOps | null | undefined =>
+  value === undefined ? undefined : SkipRecord.safeParse(value).data ?? null;
 
 function parseRecord(value: unknown): ForgottenShareView | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -61,7 +66,6 @@ function parseRecord(value: unknown): ForgottenShareView | null {
     (raw.ended !== undefined && raw.ended !== true)) {
     return null;
   }
-  // A damaged skip record costs its notice, not the share.
   return {
     workspaceId: raw.workspaceId,
     rootPath: raw.rootPath,
@@ -73,7 +77,7 @@ function parseRecord(value: unknown): ForgottenShareView | null {
     ...(filled(raw.granterUserId) ? { granterUserId: raw.granterUserId } : {}),
     ...(receivedIdentity ? { receivedIdentity } : {}),
     ...(raw.ended === true ? { ended: true } : {}),
-    ...(skippedOps ? { skippedOps } : {}),
+    ...(skippedOps !== undefined ? { skippedOps } : {}),
   };
 }
 
@@ -172,7 +176,7 @@ export function createForgottenShareViews(dependencies: {
       ...(filled(granterUserId) ? { granterUserId } : {}),
       ...(receivedIdentity ? { receivedIdentity } : {}),
       ...(shareView.ended === true ? { ended: true } : {}),
-      ...(skippedOps ? { skippedOps } : {}),
+      ...(skippedOps !== undefined ? { skippedOps } : {}),
     };
   }
 
@@ -206,6 +210,9 @@ export function createForgottenShareViews(dependencies: {
         if (!record) {
           register(workspace);
           return workspace;
+        }
+        if (record.skippedOps === null) {
+          warn("[desktop] a forgotten share's skipped-content record was damaged, so its notice is gone", record.workspaceId);
         }
         const entry: RegistryEntry = {
           ...workspace,

@@ -250,12 +250,15 @@ export function WorkspaceManager(props: {
   async function forget(workspace: Workspace) {
     setError(null);
     setNotice(null);
+    // One row per workspace, which a later Forget that works takes back.
+    const identity = `forget:${workspace.workspaceId}`;
     try {
       await bridge().forgetWorkspace({ workspaceId: workspace.workspaceId });
+      connectionNotices.clearIdentity(identity);
       await props.onForgot();
       setNotice(`Forgot ${workspaceName(workspace)}. Its folder was not deleted.`);
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      connectionNotices.reportError(`Could not forget ${workspaceName(workspace)}.`, cause, () => void forget(workspace), undefined, identity);
     }
   }
 

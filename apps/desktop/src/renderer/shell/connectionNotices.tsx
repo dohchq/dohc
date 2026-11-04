@@ -53,6 +53,7 @@ export function useConnectionNotices() {
     hideShellError,
     dismissShellError,
     clearKind,
+    clearIdentity,
   } = useShellError(NO_WORKSPACE);
 
   // One reporter per surface: `reopen` is what that surface does when the
@@ -104,6 +105,7 @@ export function useConnectionNotices() {
     hideNotice: hideShellError,
     dismissNotice: dismissShellError,
     clearKind,
+    clearIdentity,
   };
 }
 

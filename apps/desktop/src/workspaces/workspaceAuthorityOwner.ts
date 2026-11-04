@@ -693,6 +693,12 @@ export function createWorkspaceAuthorityOwner<
       // goes either way, so it can be opened or removed again at once.
       try {
         await retirement.finalize?.();
+        // Another removal of this attachment may have failed, and the workspace
+        // opened again since. Removing its row would strand that open one.
+        const current = slots.get(binding.workspaceId)?.current;
+        if (current && current !== record) {
+          throw new Error("This workspace changed while this ran. Try again.");
+        }
         await retirement.removeBinding();
       } finally {
         const slot = slots.get(binding.workspaceId);
