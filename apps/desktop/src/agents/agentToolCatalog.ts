@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+// Claude Code flags that read a file or folder. With no value, one takes
+// dohc's next argument as a path in the workspace, so own flags can't end with one.
+const CLAUDE_PATH_FLAGS = new Set(["--settings", "--mcp-config", "--plugin-dir", "--add-dir", "--system-prompt-file", "--append-system-prompt-file", "--agents", "--debug-file"]);
+
 export const AgentLaunchProfile = z.object({
   tool: z.enum(["claude", "codex"]),
   executable: z.string().min(1).max(2048).refine(
@@ -12,7 +16,7 @@ export const AgentLaunchProfile = z.object({
   arguments: z.array(z.string().refine((value) => !/[\r\n\0]/u.test(value)))
     .max(2048).refine((values) => values.join(" ").length <= 4096)
     .refine((values) => values.length === 0 || (/^-[^-]|^--./u.test(values[0]!) && !values.includes("--"))).optional(),
-}).strict();
+}).strict().refine((profile) => profile.tool !== "claude" || !CLAUDE_PATH_FLAGS.has(profile.arguments?.at(-1) ?? ""));
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
 
 // How dohc starts an agent: a tool it knows, or the person's own command.
@@ -103,7 +107,8 @@ export const AGENT_TOOLS = [
 export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = [], readOnly = false): string[] {
   const own = readOnly ? [] : profile.arguments ?? [];
   // If the person's last flag needs a value, it takes the next argument. That
-  // argument repeats one dohc sets again later, so taking it changes nothing.
+  // argument repeats one dohc sets again later, so a name or number taking it
+  // changes nothing. A path flag can't be last (CLAUDE_PATH_FLAGS).
   const repeat = own.length === 0 ? [] : [profile.tool === "claude" ? "--setting-sources=user" : "--config=approval_policy=never"];
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
