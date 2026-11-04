@@ -745,17 +745,20 @@ describe("workspace manager with registered workspaces", () => {
     await user.click(screen.getByRole("menuitem", { name: "Forget" }));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("Could not forget team. This workspace changed while this ran. Try again.");
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getAllByRole("alert")).toEqual([toast]);
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeDefined();
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = screen.getByTestId("notice-center");
-    expect(within(notices).getAllByText(/Could not forget team\./)).toHaveLength(1);
+    expect(within(notices).getAllByText(/Could not forget team\. This workspace changed while this ran\. Try again\./)).toHaveLength(1);
     expect(onForgot).not.toHaveBeenCalled();
 
     await user.click(within(notices).getByRole("button", { name: "Try again" }));
     expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(2);
     expect(bridge.forgetWorkspace).toHaveBeenLastCalledWith({ workspaceId: "ws-b" });
     await waitFor(() => expect(onForgot).toHaveBeenCalledOnce());
-    expect(within(notices).queryByText(/Could not forget team\./)).toBeNull();
+    // Once Forget works, no toast or Notices row is left, so Notices goes away.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
   it("stays open with the reason when opening fails, then lets the person retry", async () => {
