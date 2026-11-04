@@ -98,6 +98,7 @@ import { AboutConversationLinksView, type ConversationLinksView, type MentionedF
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { MERGE_RETRY_AFTER_CLOSE } from "../shell/useVersionMergeNotices";
 import { DismissConfirm, RecoveryList } from "../RecoveryList";
 import type { OrphanedDraftRow } from "../orphanedDrafts";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
@@ -1178,6 +1179,30 @@ const COLLECTIONS_WAITING_NOTICE = {
   onDismiss: noop,
 };
 
+// A failed merge while another merge dialog is open: Try again is disabled,
+// with its reason under it. The app can't show this row, since the open
+// dialog covers Notices.
+const MERGE_BLOCKED_TOAST = {
+  id: "merge-blocked",
+  title: "dohc could not merge Draft into Main",
+  message: "Try again in a moment.",
+  details: "Error: Rust engine daemon exited.",
+  atMs: 0,
+  canRetry: true,
+  retryBlocked: MERGE_RETRY_AFTER_CLOSE,
+  seen: false,
+};
+const MERGE_BLOCKED_NOTICE = {
+  id: "merge-blocked",
+  tone: "danger" as const,
+  title: MERGE_BLOCKED_TOAST.title,
+  body: MERGE_BLOCKED_TOAST.message,
+  Icon: AlertTriangle,
+  actions: [{ label: "Try again", onClick: noop, disabled: true, reason: MERGE_RETRY_AFTER_CLOSE }],
+  copyText: MERGE_BLOCKED_TOAST.details,
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1788,6 +1813,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
           </div>
           <WorkspaceErrorToast error={toast("success")} onHide={noop} />
+          <WorkspaceErrorToast error={MERGE_BLOCKED_TOAST} onRetry={noop} onHide={noop} />
         </div>
       </Section>
 
@@ -1802,6 +1828,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={MERGE_BLOCKED_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>

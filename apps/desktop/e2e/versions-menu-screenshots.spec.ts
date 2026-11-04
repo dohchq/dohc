@@ -331,6 +331,15 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(failedAway).toBeVisible({ timeout: 30_000 });
     await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeVisible();
     await shootWindow(page, "merge-closed-failure");
+    // While another merge dialog is open, Try again waits and says why.
+    await openMenu(page);
+    await page.getByTestId("version-merge").click();
+    await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeDisabled();
+    await expect(failedAway.getByTestId("workspace-shell-error-retry-reason")).toHaveText("Close the open merge first.");
+    await shootWindow(page, "merge-closed-failure-blocked");
+    await page.getByTestId("version-merge-cancel").click();
+    await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
+    await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeEnabled();
     // Try again opens the dialog merging again, and the answer shows there.
     await failedAway.getByTestId("workspace-shell-error-retry").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, { timeout: 30_000 });
