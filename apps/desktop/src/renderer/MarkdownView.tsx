@@ -1153,12 +1153,19 @@ export function MarkdownView(props: {
       return true;
     };
     if (land()) return;
-    // The editor's content can arrive after its first frame.
-    const observer = new MutationObserver(() => {
-      if (land()) observer.disconnect();
+    // The editor's content can grow after its first frame, as its nodes and
+    // images render. The position waits for it, unless the person moves first.
+    const moves = ["scroll", "wheel", "keydown", "pointerdown"] as const;
+    const stop = () => {
+      observer.disconnect();
+      for (const move of moves) pane.removeEventListener(move, stop);
+    };
+    const observer = new ResizeObserver(() => {
+      if (land()) stop();
     });
-    observer.observe(pane, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    for (const child of Array.from(pane.children)) observer.observe(child);
+    for (const move of moves) pane.addEventListener(move, stop);
+    return stop;
   }, [engineShown, props.documentKey]);
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
     number | null
