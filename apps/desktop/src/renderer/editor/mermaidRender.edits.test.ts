@@ -114,6 +114,30 @@ describe('makeMermaidPreviewPlugin — edits', () => {
     expect(shown(state, plugin)).toEqual(expected(state).shown)
   })
 
+  it("gives no diagram another diagram's id when one edit deletes a diagram and adds one", () => {
+    const plugin = makeMermaidPreviewPlugin(render)
+    const a = codeBlock('graph A;', 'mermaid')
+    const b = codeBlock('graph B;', 'mermaid')
+    const c = codeBlock('graph C;', 'mermaid')
+    const start = EditorState.create({ doc: doc(paragraph('lead'), a, b, paragraph('after')), plugins: [plugin] })
+    const ids = (state: EditorState) =>
+      (plugin.getState(state) as { entries: readonly { id: string }[] }).entries.map(({ id }) => id)
+    const [idA, idB] = ids(start)
+    const posA = paragraph('lead').nodeSize
+    const posB = posA + a.nodeSize
+
+    let tr = start.tr.insert(posB + b.nodeSize, c)
+    tr = tr.delete(posA, posA + a.nodeSize)
+    let state = start.apply(tr.insertText('x', 1))
+    expect(ids(state)[0]).toBe(idB)
+    expect([idA, idB]).not.toContain(ids(state)[1])
+
+    const remote = doc(paragraph('lead, edited'), b, c, paragraph('after, edited'))
+    state = start.apply(start.tr.replaceWith(0, start.doc.content.size, remote.content))
+    expect(ids(state)[0]).toBe(idB)
+    expect([idA, idB]).not.toContain(ids(state)[1])
+  })
+
   it('makes decorations again only for the diagram typed in, and the two the cursor moved between', () => {
     const plugin = makeMermaidPreviewPlugin(render)
     const fences = Array.from({ length: 2000 }, (_, index) => codeBlock(`graph TD; A${index}`, 'mermaid'))

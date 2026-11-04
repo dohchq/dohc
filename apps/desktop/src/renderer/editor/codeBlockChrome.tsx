@@ -373,8 +373,9 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
         });
         const owners = ownersInRange(
           old.find(range.from, range.toBefore),
-          blocks.map(({ pos }) => pos),
+          blocks.map(({ node, pos }) => ({ at: pos, node })),
           throughEdit(tr.mapping, mapping),
+          (from) => tr.before.nodeAt(from),
         );
         const toolbars = blocks.map(({ node, pos }) =>
           codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report),

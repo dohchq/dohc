@@ -87,22 +87,29 @@ export type MermaidWidgetEntry = {
 export function reconcileMermaidEntries(
   previous: readonly MermaidWidgetEntry[],
   blocks: readonly MermaidBlock[],
-  mapPos: (pos: number) => number,
+  mapPos: (pos: number) => number | null,
   nextId: () => string,
 ): MermaidWidgetEntry[] {
   const byMappedPos = new Map<number, MermaidWidgetEntry>()
   for (const entry of previous) {
     const mapped = mapPos(entry.pos)
-    if (!byMappedPos.has(mapped)) byMappedPos.set(mapped, entry)
+    if (mapped !== null && !byMappedPos.has(mapped)) byMappedPos.set(mapped, entry)
   }
-  const used = new Set<MermaidWidgetEntry>()
-  return blocks.map((block) => {
-    const match = byMappedPos.get(block.pos)
-    if (match && !used.has(match)) {
-      used.add(match)
-      return { id: match.id, pos: block.pos, end: block.end, text: block.text }
+  const placed = blocks.map((block) => byMappedPos.get(block.pos))
+  // A remote update replaces the whole document, so its steps place no fence
+  // inside it. There a fence keeps the id of the next unplaced fence with the
+  // same text, in order.
+  const used = new Set(placed)
+  const unplaced = previous.filter((entry) => !used.has(entry))
+  let next = 0
+  return blocks.map((block, index) => {
+    let match = placed[index]
+    for (let at = next; !match && at < unplaced.length; at += 1) {
+      if (unplaced[at]!.text !== block.text) continue
+      match = unplaced[at]
+      next = at + 1
     }
-    return { id: nextId(), pos: block.pos, end: block.end, text: block.text }
+    return { id: match?.id ?? nextId(), pos: block.pos, end: block.end, text: block.text }
   })
 }
 
@@ -114,9 +121,7 @@ export type MermaidRedraw = { ids: ReadonlySet<string>; from: number; to: number
  *  that touch the changed range are read again; the ones after it shift.
  *  `changed` says whether any fence was read again, `redrawn` which ones, and
  *  `mapping` moves decorations from `before` to `doc`. `steps`, the edit's
- *  own mapping, places a fence the edit moved. When the changed range holds
- *  as many fences as before, each keeps its id in order, as a fence between
- *  two of the edit's changes, or under a remote update, does. */
+ *  own mapping, places a fence the edit moved. */
 export function updateMermaidEntries(
   previous: readonly MermaidWidgetEntry[],
   before: ProseMirrorNode,
@@ -140,10 +145,15 @@ export function updateMermaidEntries(
     .filter((block) => block.end >= range.from)
   const shift = range.to - range.toBefore
   const edit = steps ? throughEdit(steps, mapping) : mapping
-  const read =
-    touched.length === blocks.length
-      ? blocks.map((block, index) => ({ ...block, id: touched[index]!.id }))
-      : reconcileMermaidEntries(touched, blocks, (pos) => edit.map(pos), nextId)
+  const read = reconcileMermaidEntries(
+    touched,
+    blocks,
+    (pos) => {
+      const mapped = edit.mapResult(pos, 1)
+      return mapped.deleted ? null : mapped.pos
+    },
+    nextId,
+  )
   const changed = touched.length > 0 || blocks.length > 0
   return {
     entries: [
@@ -351,6 +361,11 @@ function focusMermaidSource(view: EditorView, blockPos: number): void {
   view.focus()
 }
 
+/** Each view's last result per fence id. ProseMirror draws a preview again
+ *  when its fence moves into another block, as when it is wrapped in a quote;
+ *  the fence's text has not changed, so nothing renders it again. */
+const paintedResults = new WeakMap<EditorView, Map<string, MermaidRenderResult>>()
+
 function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElement {
   return (view) => {
     const container = document.createElement('div')
@@ -378,6 +393,8 @@ function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElemen
     })
 
     container.append(canvas, status)
+    const painted = paintedResults.get(view)?.get(id)
+    if (painted) applyMermaidResult(container, painted)
     return container
   }
 }
@@ -532,7 +549,10 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
       },
     },
     view(editorView) {
+      const painted = new Map<string, MermaidRenderResult>()
+      paintedResults.set(editorView, painted)
       const scheduler = new MermaidRenderScheduler(render, (key, result) => {
+        if (result.status !== 'pending') painted.set(key, result)
         const container = editorView.dom.querySelector<HTMLElement>(
           `.dohc-mermaid-preview[data-mermaid-id="${key}"]`,
         )
@@ -549,6 +569,7 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
         // Prune scheduler state for fences deleted since the last sync so
         // timers/lastSource/generation don't accumulate across the session.
         scheduler.prune(activeIds)
+        for (const id of painted.keys()) if (!activeIds.has(id)) painted.delete(id)
       }
 
       let lastThemeKey = currentThemeName()
@@ -573,6 +594,7 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
         destroy() {
           observer.disconnect()
           scheduler.disposeAll()
+          paintedResults.delete(editorView)
         },
       }
     },
