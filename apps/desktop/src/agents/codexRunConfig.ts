@@ -320,10 +320,11 @@ export function codexRunConfig(input: {
 
 // The features a read-only run turns off, because they act outside the
 // sandbox, bring in the person's own tools, or aren't needed to read and
-// reply. Codex refuses a name it doesn't know.
+// reply. Codex refuses a name it doesn't know. The code-mode host stays on,
+// because a model that uses code mode makes every tool call through it.
 export const READ_ONLY_DISABLED_FEATURES = [
   "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
-  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "code_mode_host", "token_budget",
+  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "token_budget",
 ] as const;
 
 // A reply-only run also turns off the shell and view_image.
