@@ -460,8 +460,8 @@ export const FileInspector = memo(function FileInspector(
   // unmounts — and a version switch that removes the file bumps refreshKey and
   // engineVersionKey together, so the reread ENOENTs before the queued open
   // answers. The child went with the branch, the refusal landed on nobody, and
-  // the user was told "Couldn't read this file": true of the read, silent about
-  // the version.
+  // the user was told "dohc could not read this file": true of the read,
+  // silent about the version.
   //
   // `enabled` waits for the read to answer, so this opens no earlier than it
   // used to. A scene can open after a truncated read because the engine owns
@@ -847,11 +847,10 @@ export const FileInspector = memo(function FileInspector(
             branch withholds. */}
         {recoveryNotices}
         {error ? (
-          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file.">
-            {/* A note opens only once a read checks it, so reading again is its way back. */}
-            {checksLossyNote ? (
-              <SecondaryButton data-testid="file-read-retry" onClick={refreshAfterConflict}>Try again</SecondaryButton>
-            ) : null}
+          <EmptyState icon={TriangleAlert} tone="danger" title="dohc could not read this file.">
+            {/* Reading again is every text file's way back: a read that met a
+                locked file or a brief disk error can pass the next time. */}
+            <SecondaryButton data-testid="file-read-retry" onClick={refreshAfterConflict}>Try again</SecondaryButton>
           </EmptyState>
         ) : kind === "markdown" ? (
           // Where the title and the first lines land when the document opens:

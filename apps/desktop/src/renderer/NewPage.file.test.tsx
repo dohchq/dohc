@@ -110,5 +110,5 @@ it("shows a file that could not be read", async () => {
 
   await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
   expect(screen.getByTestId("file-inspector").parentElement!.hasAttribute("inert")).toBe(false);
-  expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+  expect(screen.getByText("dohc could not read this file.")).toBeTruthy();
 });

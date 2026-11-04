@@ -1117,7 +1117,7 @@ describe("FileInspector Excalidraw view", () => {
     expect(notice.textContent).toContain(
       "dohc could not open this document for editing.",
     );
-    expect(notice.textContent).toContain("It is read-only for now.");
+    expect(notice.textContent).toContain("You can still read it.");
     expect(screen.getByTestId("mock-excalidraw-canvas").dataset.readOnly).toBe(
       "true",
     );
@@ -1188,7 +1188,7 @@ describe("FileInspector Excalidraw view", () => {
     expect(notice.textContent).toContain(
       "dohc could not verify this drawing's images.",
     );
-    expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+    expect(screen.getByText("dohc could not read this file.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Open externally" }));
