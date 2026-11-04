@@ -1002,9 +1002,11 @@ export function DesktopWorkspaceShell(props: {
         : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
       if (move && identity) {
         const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
+        // A Try again keeps what the first failure knew of the destination.
+        const destinationTaken = ends.to && (ends.from || failedMoves.current.get(identity)?.destinationTaken === true);
         // A listing that landed before this failure can already show the move made.
-        if (!ends.from && ends.to) return;
-        failedMoves.current.set(identity, { move, destinationTaken: ends.to });
+        if (ends.to && !ends.from && !destinationTaken) return;
+        failedMoves.current.set(identity, { move, destinationTaken });
       }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;

@@ -157,15 +157,27 @@ it("a failed move leaves no toast or Notices row when the listing already shows 
   expect(await noticeRows(user)).toEqual([]);
 });
 
-// With renamed.md already there, a listing without a.md could be a delete.
-it("a move that failed onto a taken name keeps its row when a.md goes and renamed.md stays", async () => {
+// With renamed.md already there, a listing without a.md could be a delete, so
+// an agent's overwrite keeps the row. Its Try again then says why it fails,
+// and the person can dismiss it.
+it("after an agent overwrites the taken name, the failed move's Try again says the file is gone, and its row dismisses", async () => {
+  const GONE_WORDS = "The file or folder is not there anymore.";
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn() });
   const user = userEvent.setup();
   renderShell(bridge);
   await failWhileListed(bridge, user, ["a.md", "b.md", "renamed.md"], TAKEN);
-  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
   await listAfterActivity(bridge, ["b.md", "renamed.md"], "d.md");
   expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
+  // What main sends for a move whose source is gone.
+  bridge.moveWorkspacePath.mockRejectedValueOnce(new Error("Error invoking remote method 'desktop:move-workspace-path': Error [ENOENT]: ENOENT: no such file or directory, lstat 'a.md'"));
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  const row = () => shownRows().find((candidate) => [TAKEN_WORDS, GONE_WORDS].some((words) => candidate.textContent?.includes(words)));
+  await user.click(within(row()!).getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(row()?.textContent).toContain(`dohc could not change these files. ${GONE_WORDS}`));
+  expect(shownRows().filter((candidate) => candidate.textContent?.includes(TAKEN_WORDS))).toEqual([]);
+  await user.click(within(row()!).getByRole("button", { name: "Dismiss notice" }));
+  await waitFor(() => expect(row()).toBeUndefined());
 });
 
 it("a move that failed onto a taken name loses its row once that name is free and an agent makes the move", async () => {
