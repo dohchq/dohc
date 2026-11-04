@@ -111,16 +111,21 @@ it("a failed move's toast and Notices row go once an agent makes the same move t
   await listAfterActivity(bridge, ["a.md", "b.md"], "c.md");
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
   expect(await noticeRows(user)).toHaveLength(1);
+  // So does one that takes a.md away without putting it at renamed.md, such
+  // as a delete or a move to another name.
+  await listAfterActivity(bridge, ["b.md"], "d.md");
+  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
+  expect(await noticeRows(user)).toHaveLength(1);
   // The agent's move of a.md to renamed.md.
-  await listAfterActivity(bridge, ["renamed.md", "b.md"], "d.md");
+  await listAfterActivity(bridge, ["renamed.md", "b.md"], "e.md");
   await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   expect(await noticeRows(user)).toEqual([]);
   expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1);
 });
 
-// The same move is the same source and destination. A move of the file to
-// another name has not made the move that failed.
-it("a different move of the same file keeps the failed move's Notices row", async () => {
+// After the person moves the file again from the tree, to any name, the
+// failed move's Try again would fail, so its row goes.
+it("a later move of the same file from the tree, to another name, takes the failed move's toast and Notices row", async () => {
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
     moveWorkspacePath: vi.fn().mockRejectedValueOnce(LIVE_MOVE_REFUSAL).mockResolvedValue({ path: "other.md", undo: { available: false, reason: "" } }),
   });
@@ -128,11 +133,12 @@ it("a different move of the same file keeps the failed move's Notices row", asyn
   renderShell(bridge);
   await rename(user);
   await screen.findByTestId("workspace-shell-error");
+  expect(await noticeRows(user)).toHaveLength(1);
   await rename(user, "other.md");
   await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
   expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ fromPath: "a.md", toPath: "other.md" }));
-  await listAfterActivity(bridge, ["other.md", "b.md"], "c.md");
-  expect(await noticeRows(user)).toHaveLength(1);
+  await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  expect(await noticeRows(user)).toEqual([]);
 });
 
 // A rename refused while History is off has no Try again. The person renames

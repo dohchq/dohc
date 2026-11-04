@@ -971,25 +971,26 @@ export function DesktopWorkspaceShell(props: {
       reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
-  // A failed move's row goes once the move happens, by any route. The tree's
-  // own success clears it in onExplorerPathsChanged. A move made through the
-  // CLI or MCP reaches the shell only as workspace activity and the listing
-  // that follows, so this effect clears the row once a listing shows the
-  // source gone and the destination there. If both were listed when the move
-  // failed, a deleted source would look the same, so only the tree's success
-  // clears that row.
+  // A failed move's row goes once the move happens, by any route. A move made
+  // through the CLI or MCP reaches the shell only as workspace activity and
+  // the listing that follows, so this effect clears the row once a listing
+  // shows the source gone and the destination there. If both were listed when
+  // the move failed, a deleted source would look the same, so only the tree's
+  // success clears that row. The shell remounts for each workspace, and so
+  // does this map.
   const listing = useRef({ files, folders });
   listing.current = { files, folders };
-  const failedMoves = useRef(new Map<string, { workspaceId: string; move: PendingTreeMove; bothListed: boolean }>());
+  const failedMoves = useRef(new Map<string, { move: PendingTreeMove; bothListed: boolean }>());
+  const clearFailedMove = useCallback((identity: string) => {
+    failedMoves.current.delete(identity);
+    clearIdentity(identity);
+  }, [clearIdentity]);
   useEffect(() => {
     for (const [identity, failed] of failedMoves.current) {
       const ends = listedMoveEnds(failed.move, files, folders);
-      const current = failed.workspaceId === workspaceId;
-      if (current && (failed.bothListed || ends.from || !ends.to)) continue;
-      failedMoves.current.delete(identity);
-      if (current) clearIdentity(identity);
+      if (!failed.bothListed && !ends.from && ends.to) clearFailedMove(identity);
     }
-  }, [files, folders, workspaceId, clearIdentity]);
+  }, [files, folders, clearFailedMove]);
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
@@ -1000,7 +1001,7 @@ export function DesktopWorkspaceShell(props: {
         : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
       if (move && identity) {
         const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
-        failedMoves.current.set(identity, { workspaceId, move, bothListed: ends.from && ends.to });
+        failedMoves.current.set(identity, { move, bothListed: ends.from && ends.to });
       }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
@@ -3943,9 +3944,15 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
-      // A move that succeeds takes back its earlier failure.
+      // A move that succeeds from the tree takes back every failed move of
+      // the same path, whatever its destination, since their Try again would
+      // now fail.
       for (const change of changes) {
-        if (change.kind === "folder" || change.kind === "file") clearIdentity(moveFailureIdentity(workspaceId, change));
+        if (change.kind === "folder" || change.kind === "file") {
+          for (const [identity, failed] of failedMoves.current) {
+            if (failed.move.fromPath === change.fromPath) clearFailedMove(identity);
+          }
+        }
         if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
       }
       // Set-aside drafts key by path, so recovery follows the same projection
@@ -3973,7 +3980,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [clearIdentity, mutateWb, workspaceId],
+    [clearFailedMove, clearIdentity, mutateWb, workspaceId],
   );
 
   const {
