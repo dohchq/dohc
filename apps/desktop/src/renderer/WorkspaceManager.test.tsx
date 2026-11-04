@@ -261,49 +261,112 @@ describe("workspace manager", () => {
     );
   });
 
-  it("refuses an empty or nested folder name", async () => {
+  // The name's error, under the folder tab and above the location line.
+  const expectNameError = (message: string) => {
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe(message);
+    expect(alert.id).toBe("new-workspace-name-error");
+    expect(alert.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    expect(alert.nextElementSibling?.contains(screen.getByTestId("new-workspace-location"))).toBe(true);
+    expect(nameField().getAttribute("aria-invalid")).toBe("true");
+    expect(nameField().getAttribute("aria-describedby")).toBe(alert.id);
+    expect(nameField().className).toContain("shadow-[inset_0_-1px_0_var(--dohc-danger)]");
+  };
+  const expectNoNameError = () => {
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(nameField().hasAttribute("aria-invalid")).toBe(false);
+    expect(nameField().hasAttribute("aria-describedby")).toBe(false);
+    expect(nameField().className).not.toContain("danger");
+  };
+
+  it("labels the name field above its tab", async () => {
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal");
+    const label = screen.getByText("Workspace name", { selector: "label" });
+    expect(label.getAttribute("for")).toBe(nameField().id);
+    expect(screen.getByLabelText("Workspace name", { selector: "input" })).toBe(nameField());
+  });
+
+  it.each([
+    ["", "Enter a workspace name."],
+    ["   ", "Enter a workspace name."],
+    [".", "Choose a name other than . or .."],
+    ["..", "Choose a name other than . or .."],
+    ["a/b", "Use a name without slashes."],
+    ["a\\b", "Use a name without slashes."],
+  ])("keeps Create on for %j, and pressing it says what to fix and focuses the name", async (typed, message) => {
     const user = userEvent.setup();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    const name = nameField();
+    await locationReads("/home/sam/dohc/Personal");
     const create = screen.getByRole("button", { name: /create workspace/i });
-    await user.clear(name);
-    expect(create).toHaveProperty("disabled", true);
-    await user.type(name, "a/b");
-    expect(create).toHaveProperty("disabled", true);
+    await user.clear(nameField());
+    if (typed) await user.keyboard(typed);
+    expect(nameField().value).toBe(typed);
+    expectNoNameError();
+    expect(create).toHaveProperty("disabled", false);
+
+    await user.click(create);
+    expectNameError(message);
+    expect(document.activeElement).toBe(nameField());
+    expect(create).toHaveProperty("disabled", false);
+    expect(bridge.createLocalWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("checks the name when focus leaves it, and clears the error once the person types", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal");
+    await user.clear(nameField());
+    await user.keyboard("a/");
+    expectNoNameError();
+    await user.tab();
+    expectNameError("Use a name without slashes.");
+    expect(screen.getByRole("button", { name: "Change location" })).toBe(document.activeElement);
+
+    await user.click(nameField());
+    await user.keyboard("{Backspace}");
+    expectNoNameError();
+    await user.keyboard("{Enter}");
+    expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(expect.objectContaining({ rootPath: "/home/sam/dohc/a" }));
   });
 
   it.each([
     ["Trip?", "A name cannot contain a question mark (?). Remove it."],
     ["CON", 'Windows keeps "CON" for itself. Choose another name.'],
     ["Trip.", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
-    ["Trip ", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
-  ])("says as %s is typed why Windows refuses it, and creates nothing", async (typed, message) => {
+  ])("says on Enter why Windows refuses %s, and creates nothing", async (typed, message) => {
     bridge.platform = "win32";
     try {
       const user = userEvent.setup();
       render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
       await locationReads("\\home\\sam\\dohc\\Personal");
-      const name = nameField();
       const create = screen.getByRole("button", { name: /create workspace/i });
       await user.keyboard(typed);
-      const alert = screen.getByRole("alert");
-      expect(alert.textContent).toBe(message);
-      expect(alert.previousElementSibling?.contains(screen.getByTestId("new-workspace-location"))).toBe(true);
-      expect(name.getAttribute("aria-invalid")).toBe("true");
-      expect(name.getAttribute("aria-describedby")).toBe(alert.id);
-      expect(name.className).toContain("shadow-[inset_0_-1px_0_var(--dohc-danger)]");
-      expect(create).toHaveProperty("disabled", true);
+      expectNoNameError();
       await user.keyboard("{Enter}");
+      expectNameError(message);
+      expect(document.activeElement).toBe(nameField());
+      expect(create).toHaveProperty("disabled", false);
       expect(bridge.createLocalWorkspace).not.toHaveBeenCalled();
 
-      await user.clear(name);
+      await user.clear(nameField());
       await user.keyboard("Trip");
-      expect(screen.queryByRole("alert")).toBeNull();
-      expect(name.hasAttribute("aria-invalid")).toBe(false);
-      expect(name.hasAttribute("aria-describedby")).toBe(false);
-      expect(name.className).not.toContain("danger");
-      expect(create).toHaveProperty("disabled", false);
+      expectNoNameError();
       await user.keyboard("{Enter}");
+      expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(expect.objectContaining({ rootPath: "/home/sam/dohc/Trip" }));
+    } finally {
+      bridge.platform = "linux";
+    }
+  });
+
+  it("creates a name typed with a trailing space under the trimmed name on Windows", async () => {
+    bridge.platform = "win32";
+    try {
+      const user = userEvent.setup();
+      render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+      await locationReads("\\home\\sam\\dohc\\Personal");
+      await user.keyboard("Trip {Enter}");
+      expectNoNameError();
       expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(expect.objectContaining({ rootPath: "/home/sam/dohc/Trip" }));
     } finally {
       bridge.platform = "linux";
@@ -316,26 +379,12 @@ describe("workspace manager", () => {
       const user = userEvent.setup();
       render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
       await locationReads("\\home\\sam\\dohc\\Personal");
-      await user.keyboard("Trip? Lisbon");
+      await user.keyboard("Trip? Lisbon{Enter}");
+      expectNameError("A name cannot contain a question mark (?). Remove it.");
       expect(nameField().value).toBe("Trip? Lisbon");
       await user.keyboard("{Backspace>8/} Lisbon");
       expect(nameField().value).toBe("Trip Lisbon");
-      expect(screen.queryByRole("alert")).toBeNull();
-    } finally {
-      bridge.platform = "linux";
-    }
-  });
-
-  it("treats a name of only spaces as empty on Windows: no message, no Create", async () => {
-    bridge.platform = "win32";
-    try {
-      const user = userEvent.setup();
-      render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-      await locationReads("\\home\\sam\\dohc\\Personal");
-      await user.keyboard("   ");
-      expect(screen.queryByRole("alert")).toBeNull();
-      expect(nameField().hasAttribute("aria-invalid")).toBe(false);
-      expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", true);
+      expectNoNameError();
     } finally {
       bridge.platform = "linux";
     }
@@ -350,8 +399,8 @@ describe("workspace manager", () => {
       for (const typed of ["Trip?", "CON"]) {
         await user.clear(nameField());
         await user.keyboard(typed);
-        expect(screen.queryByRole("alert")).toBeNull();
-        expect(nameField().hasAttribute("aria-invalid")).toBe(false);
+        fireEvent.blur(nameField());
+        expectNoNameError();
         expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
       }
     } finally {
