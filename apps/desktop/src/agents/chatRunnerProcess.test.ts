@@ -619,7 +619,7 @@ describe("Windows run owner", () => {
     const { spawnProcess, calls } = fakeOwnerProcess();
     expect(() => spawnOwnedRunner(owner, "C:\\agent.exe", [], {
       cwd: "C:\\work", env: {}, detached: false, stdio: ["pipe", 5, 5], windowsHide: true, input: "x".repeat(16 * 1024 * 1024),
-    }, spawnProcess)).toThrow("This chat is too long to send to an agent.");
+    }, spawnProcess)).toThrow("This chat is too long to send to an agent. Start a new chat with the agent.");
     expect(calls).toHaveLength(0);
   });
 
@@ -644,16 +644,19 @@ describe("Windows run owner", () => {
 
   it("says to reinstall when the owner is missing, and starts nothing", async () => {
     const root = await createTestScratch("dohc-chat-runner-owner-");
-    for (const agentOwner of [undefined, () => { throw new Error("Agent detection is missing agentProbeOwner.exe."); }]) {
+    const missing = new Error("Agent detection is missing agentProbeOwner.exe.");
+    for (const agentOwner of [undefined, () => { throw missing; }]) {
+      const reportError = vi.fn();
       const runner = createChatRunnerProcess({
         stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, platform: "win32",
         ...(agentOwner ? { agentOwner } : {}),
-      }, () => undefined);
+      }, reportError);
       const logPath = join(root, "logs", `run-${agentOwner ? "broken" : "none"}.log`);
       expect(() => runner.spawnConfiguredRunner({
         rootPath: root, runId: "run-1", logPath, command: `"${process.execPath}"`, prompt: "", assertMayStart: () => undefined,
       })).toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
       expect(readFileSync(logPath, "utf8")).toContain("Reinstall dohc");
+      expect(reportError.mock.calls).toEqual(agentOwner ? [[missing]] : []);
     }
   });
 });
