@@ -642,7 +642,7 @@ export function WorkspaceErrorToast(props: {
             ) : null}
             {/* A disabled control says why, where the keyboard can't miss it. */}
             {retry && error.retryBlocked !== undefined ? (
-              <p id={reasonId} data-testid="workspace-shell-error-retry-reason" className="m-0 mt-1 text-muted">
+              <p id={reasonId} data-testid="workspace-shell-error-retry-reason" className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
                 {error.retryBlocked}
               </p>
             ) : null}
@@ -792,7 +792,7 @@ export function LocalNoticeRow(props: {
                   ))}
                 </div>
                 {notice.actions.map((action, index) => action.reason === undefined ? null : (
-                  <p key={action.label} id={`${reasonId}-${index}`} className="m-0 mt-1 text-[12px] text-muted">
+                  <p key={action.label} id={`${reasonId}-${index}`} className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
                     {action.reason}
                   </p>
                 ))}
