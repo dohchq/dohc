@@ -3325,11 +3325,13 @@ mod tests {
 
         /// A text write through `versionedText.write`.
         async fn write(&self, path: &str, text: &str) -> Result<Value, WireError> {
+            static NEXT_WRITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let request_id = NEXT_WRITE.fetch_add(1, Ordering::Relaxed);
             self.service
                 .versioned_text_write(
                     &RequestContext::unbounded(),
                     dohc_engine_protocol::wire::Request {
-                        id: 0,
+                        id: request_id,
                         method: "versionedText.write".into(),
                         workspace: Some(self.handle.clone()),
                         deadline_ms: None,
