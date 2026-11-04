@@ -685,11 +685,14 @@ const HomeRow = memo(function HomeRow(props: {
   const [fixMenuOpen, setFixMenuOpen] = useState(false);
   const rowButton = useRef<HTMLButtonElement | null>(null);
   const dragPath = drag && path ? path : null;
+  // A cause takes its own line under the name, so the name never gives way to
+  // it. The first line keeps the row's 28px, so the mark and ••• stay on it.
+  const cause = row.unavailable ? row.detail : undefined;
   return (
     <li role="none" className="px-1">
       <div
         onPointerEnter={reached ? undefined : () => setReached(true)}
-        className={`group relative flex h-7 items-center rounded-md transition-colors duration-75 ${fill}`}
+        className={`group relative flex items-center rounded-md transition-colors duration-75 ${cause ? "" : "h-7"} ${fill}`}
       >
         <button
           type="button"
@@ -725,7 +728,11 @@ const HomeRow = memo(function HomeRow(props: {
           onDragLeave={drag?.leave}
           onDragEnd={drag?.end}
           style={{ paddingLeft: 8 + (row.depth - 1) * 20, paddingRight: 8 + trailing * 24 }}
-          className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left text-[13px] ${active ? "bg-transparent" : ""}`}
+          className={`dohc-focus-row min-w-0 flex-1 items-center rounded-md text-left text-[13px] ${
+            cause
+              ? `grid grid-rows-[28px_auto] gap-x-2 pb-1 ${props.chevronSlot ? "grid-cols-[auto_auto_minmax(0,1fr)]" : "grid-cols-[auto_minmax(0,1fr)]"}`
+              : "flex h-full gap-2"
+          } ${active ? "bg-transparent" : ""}`}
         >
           {props.chevronSlot ? (
             row.folder ? (
@@ -740,7 +747,7 @@ const HomeRow = memo(function HomeRow(props: {
           {/* The folder hint gives way before the name; the title holds the whole path. */}
           <span className="min-w-0 flex-auto truncate">{row.label}</span>
           {row.detail ? (
-            <span className={`min-w-0 truncate text-[12px] ${row.unavailable ? "shrink-0 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
+            <span className={`min-w-0 truncate text-[12px] ${cause ? "col-[-2/-1] row-start-2 -mt-1 leading-4 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
           ) : null}
           {app ? <AppMarks app={app} /> : null}
         </button>
