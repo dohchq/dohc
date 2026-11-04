@@ -35,6 +35,9 @@ export function documentChange(
   mapping: Mapping;
   range: { from: number; to: number; toBefore: number } | null;
 } {
+  // A selection-only update keeps its document, and comparing it would walk
+  // every block.
+  if (before === doc) return { textblocks: [], mapping: new Mapping(), range: null };
   const start = doc.content.findDiffStart(before.content);
   if (start === null) return { textblocks: [], mapping: new Mapping(), range: null };
   const ends = doc.content.findDiffEnd(before.content)!;
