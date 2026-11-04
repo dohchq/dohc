@@ -656,6 +656,7 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
+    fn request_pending(&self) -> bool { false }
     /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
@@ -805,7 +806,7 @@ enum Fetched {
     Hosted(Box<HostedFetch>),
 }
 
-/// One bounded network read. Only verified immutable blobs are durable before apply.
+/// One bounded network read under the token that keeps Collections work owed.
 #[derive(Debug)]
 pub struct PreparedOrdinaryPull {
     identity: crate::SyncIdentity,
@@ -815,6 +816,18 @@ pub struct PreparedOrdinaryPull {
     has_more: bool,
     repairs: BaseRepairAnswers,
     started_pull_token: Option<String>,
+}
+
+impl PreparedOrdinaryPull {
+    pub fn pull_token(&self) -> &str {
+        self.started_pull_token.as_deref().expect("fetch started the pull")
+    }
+}
+
+fn ordinary_pull_token(store: &EngineStore, workspace_id: &str) -> Result<Option<String>, RelayError> {
+    store.read_with(|conn| conn.query_row(
+        "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1", [workspace_id],
+        |row| row.get(0))).map_err(|error| local(SyncError::corrupt(error)))
 }
 
 // Keep validated decisions instead of full envelopes, including for wide base groups.
@@ -2350,14 +2363,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Fetch a bounded page and its immutable dependencies without beginning a durable pull.
+    /// Fetch a bounded page while Collections work waits for the terminal commit.
     pub fn fetch_pull(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<PreparedOrdinaryPull, RelayError> {
-        self.fetch_pull_inner(store, workspace_id, faults, false)
+        let result = self.fetch_pull_inner(store, workspace_id, faults, false);
+        if result.is_err() && !self.transport.request_pending() {
+            crate::cursor::abandon_ordinary_pull(store, workspace_id, faults).map_err(local)?;
+        }
+        result
     }
 
     fn fetch_pull_inner(
@@ -2387,6 +2404,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
+        let started_pull_token = Some(match ordinary_pull_token(store, workspace_id)? {
+            Some(token) => token,
+            None => match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+                TxnOutcome::Committed(token) => token,
+                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+            },
+        });
         let mut cursor = current.as_ref().map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
         let mut pages = 0_usize;
@@ -2436,15 +2460,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
                 .cloned(),
         );
-        let started_pull_token = if immediate_repairs {
+        if immediate_repairs {
             preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
-            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-                TxnOutcome::Committed(token) => Some(token),
-                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
-            }
-        } else {
-            None
-        };
+        }
         let mut repairs = BaseRepairAnswers::default();
         self.repair_base_orders(
             store,
@@ -2517,15 +2535,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
             })
             .map_err(local)?;
-        let pull_token = match &prepared.started_pull_token {
-            Some(token) => token.clone(),
-            None => {
-                match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-                    TxnOutcome::Committed(token) => token,
-                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
-                }
-            }
-        };
+        let pull_token = prepared.pull_token().to_owned();
         let ordered = merge_by_origin(ops);
         let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
         Ok((
@@ -2560,6 +2570,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .as_ref()
             != Some(&prepared.identity)
             || crate::read_relay_cursor(store, workspace_id).map_err(local)? != prepared.current
+            || ordinary_pull_token(store, workspace_id)?.as_deref() != Some(prepared.pull_token())
         {
             return Err(RelayError::InvalidResponse);
         }

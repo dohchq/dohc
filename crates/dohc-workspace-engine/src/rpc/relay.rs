@@ -1097,6 +1097,18 @@ impl EngineService {
         answer
     }
 
+    async fn abandon_fetched_pull(&self, open: &OpenWorkspace, token: Option<String>) -> Result<(), WireError> {
+        let held = open.actor.ordinary_pull_unfinished(open.workspace_id.clone()).await.unwrap_or(true);
+        let answer = self.wake_after_abandoned_pull(&RequestContext::unbounded(), open, async {
+            match token {
+                Some(token) => open.actor.abandon_prepared_pull(open.workspace_id.clone(), token).await,
+                None => open.actor.abandon_ordinary_pull(open.workspace_id.clone()).await,
+            }.map(|_| ()).map_err(map_runtime)
+        }).await;
+        if !held { self.collections_changed(&RequestContext::unbounded(), open).await; }
+        answer
+    }
+
     pub(super) async fn sync_push(
         &self,
         ctx: &RequestContext,
@@ -1258,7 +1270,10 @@ impl EngineService {
             () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.fetchPull")),
             guard = open.pending_pull.lock() => guard,
         };
-        *pending = None;
+        if let Some(previous) = pending.take() {
+            self.abandon_fetched_pull(&open, Some(previous.page.pull_token().to_owned())).await?;
+        }
+        let answer = async {
         let outcome = self
             .relay_execute(
                 ctx,
@@ -1286,6 +1301,11 @@ impl EngineService {
             page,
         });
         Ok(json!({ "pageToken": token }))
+        }.await;
+        if answer.is_err() {
+            self.abandon_fetched_pull(&open, None).await?;
+        }
+        answer
     }
 
     pub(super) async fn sync_apply_pull(
@@ -1313,6 +1333,8 @@ impl EngineService {
             ));
         }
         let page = pending.take().expect("validated pull page").page;
+        let pull_token = page.pull_token().to_owned();
+        let answer = async {
         // A Collections update already admitted under the gate runs before
         // this pull places a page, and none is admitted until the pull is
         // between pages or done. Fetching does not enter this gate.
@@ -1422,6 +1444,11 @@ impl EngineService {
             self.collections_changed(ctx, &open).await;
         }
         Ok(result)
+        }.await;
+        if answer.is_err() {
+            self.abandon_fetched_pull(&open, Some(pull_token)).await?;
+        }
+        answer
     }
 
     /// A pull parks every Y.Doc update for a document an editor holds open,
@@ -4330,14 +4357,60 @@ mod tests {
         state
     }
 
-    /// A Collections update is admitted under the capture gate while a pull
-    /// fetches its first page, which removes a relation's target that the
-    /// second page brings back. Fetching takes neither the gate nor the
-    /// pull's token, so the update runs first, on the state from before the
-    /// pull, and page one waits for the gate. An update owed between the
-    /// pages stays owed while the pull's token stands. No update sees half
-    /// the pull, and the Collections end as they do when the update runs
-    /// only after the whole pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_relation_written_during_fetch_keeps_its_page_two_target() {
+        let (relay, f) = half_pull_fixture("relation-during-fetch", true).await;
+        f.write("tasks/source.md", &record(SOURCE, None)).await.expect("clear relation");
+        f.pulled_removal("tasks/target.md").await;
+        lock(&relay.ops)[0] = PagedRelay::row(f.workspace_id, 0, "workspace.init", json!({}));
+        let page_one = tokio::spawn(pull(&f));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !relay.started.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
+        }).await.expect("fetch started");
+        f.write("tasks/source.md", &record(SOURCE, Some(TARGET))).await.expect("local relation");
+        assert!(f.pull_token().is_some());
+        assert!(f.owed(), "the local update waits for the target's page");
+        let source = f.open.actor.versioned_text_read(f.workspace_id.into(), "main".into(),
+            "tasks/source.md".into(), dohc_engine_runtime::CancellationToken::new()).await.unwrap().unwrap();
+        assert!(source.text.contains(TARGET));
+        relay.release();
+        let first = page_one.await.unwrap().unwrap();
+        commit_page(&f, &first).await.unwrap();
+        let second = pull(&f).await.unwrap();
+        commit_page(&f, &second).await.unwrap();
+        let after = f.open.actor.versioned_text_read(f.workspace_id.into(), "main".into(),
+            "tasks/source.md".into(), dohc_engine_runtime::CancellationToken::new()).await.unwrap().unwrap();
+        assert_eq!(after.text, source.text);
+        assert_eq!(after.latest_moment_id, source.latest_moment_id, "no cleanup wrote a removal");
+        assert_eq!(f.edges(), 1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_fetch_releases_the_pull_and_runs_owed_collections() {
+        let (relay, f) = half_pull_fixture("failed-fetch-collections", true).await;
+        let ctx = RequestContext::unbounded();
+        let service = Arc::clone(&f.service);
+        let handle = f.handle.clone();
+        let cancel = ctx.cancel.clone();
+        let fetch = tokio::spawn(async move {
+            service.sync_fetch_pull(&ctx, Some(handle), json!({"workspaceId": "failed-fetch-collections"})).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !relay.started.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
+        }).await.expect("fetch started");
+        assert!(f.pull_token().is_some());
+        f.service.collections_changed(&RequestContext::unbounded(), &f.open).await;
+        assert!(f.owed());
+        cancel.cancel();
+        assert!(fetch.await.unwrap().is_err());
+        assert_eq!(f.pull_token(), None);
+        assert!(!f.owed(), "failed fetch wakes the owed update");
+        relay.release();
+        f.close().await;
+    }
+
+    /// Collections work admitted during fetch waits for the terminal commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_admitted_collections_update_never_sees_half_a_pull() {
         let ctx = RequestContext::unbounded();
@@ -4368,7 +4441,7 @@ mod tests {
         assert_eq!(page_one["hasMore"], json!(true));
         drop(update);
         assert_eq!(f.edges(), 1, "the update did not see page one alone");
-        assert!(!f.owed(), "the update ran before the pull placed page one");
+        assert!(f.owed(), "the update waits from the start of fetch");
         commit_page(&f, &page_one).await.expect("commit page one");
         // Between the pages the pull's token stands, so an owed update waits.
         f.open.collections_owed.store(true, Ordering::SeqCst);
@@ -4410,10 +4483,8 @@ mod tests {
         );
     }
 
-    /// A Collections update is admitted under the capture gate before a pull
-    /// starts. The pull registers only once the update lets the gate go, so
-    /// the update reconciles the relation before page one removes its
-    /// target, and the page leaves that relation alone.
+    /// An admitted Collections update releases the gate when fetch starts,
+    /// and leaves its work owed until the terminal commit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_pull_waits_for_an_admitted_collections_update() {
         let ctx = RequestContext::unbounded();
@@ -4437,10 +4508,10 @@ mod tests {
         relay.release();
         drop(hold);
         update.await;
-        assert!(!f.owed(), "the update ran");
+        assert!(f.owed(), "the fetch token keeps the update owed");
         let page_one = page_one.await.expect("join").expect("page one lands");
         assert_eq!(page_one["hasMore"], json!(true));
-        assert_eq!(f.edges(), 1, "the update reconciled before page one landed");
+        assert_eq!(f.edges(), 0, "the update waits for the whole pull");
         assert!(
             f.open
                 .actor

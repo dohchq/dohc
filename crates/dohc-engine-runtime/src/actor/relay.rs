@@ -559,6 +559,9 @@ macro_rules! relay_transport_method {
 }
 
 impl RelayTransport for DeferredRelayTransport {
+    fn request_pending(&self) -> bool {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending.is_some()
+    }
     fn publishes_native_settlements(&self) -> bool {
         self.native_settlements
     }
@@ -2145,6 +2148,19 @@ impl ActorHandle {
             }
         })
         .await
+    }
+
+    pub async fn abandon_prepared_pull(&self, workspace_id: String, token: String) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            match store.write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE sync_identity SET ordinary_pull_token=NULL WHERE workspace_id=?1 AND ordinary_pull_token=?2",
+                    rusqlite::params![workspace_id, token])
+                    .map(|changed| changed > 0).map_err(SyncError::persist)
+            })? {
+                TxnOutcome::Committed(abandoned) => Ok(abandoned),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        }).await
     }
 
     /// Collections updates wait for an unfinished ordinary pull.

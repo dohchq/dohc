@@ -129,7 +129,7 @@ fn prepared_pull_restart_replays_before_apply_during_apply_and_before_cursor_com
         let client = RelaySyncClient::new(prepared_file_relay());
         let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
         assert_eq!(prepared_counts(&engine), (0, 0));
-        assert_eq!(pull_token(&engine), None);
+        assert_eq!(pull_token(&engine).as_deref(), Some(page.pull_token()));
         assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
         let expected = match boundary {
             "before apply" => 0,
@@ -304,6 +304,25 @@ fn prepared_pull_refuses_a_changed_identity_or_cursor() {
 }
 
 #[test]
+fn prepared_fetch_reuses_its_token_and_refuses_apply_after_release() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let client = RelaySyncClient::new(padded_relay(1));
+    let first = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+    assert_eq!(pull_token(&engine).as_deref(), Some(first.pull_token()));
+    let retry = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+    assert_eq!(first.pull_token(), retry.pull_token());
+    abandon_ordinary_pull(&mut engine, "ws", &NoFaults).unwrap();
+    assert!(matches!(client.apply_pull(&mut engine, &mut Default::default(), "ws", &retry,
+        &NoFaults, &NoLiveLeases, 2_000), Err(RelayError::InvalidResponse)));
+    assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
+    let next = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+    assert_ne!(next.pull_token(), first.pull_token());
+    assert!(client.apply_pull(&mut engine, &mut Default::default(), "ws", &next,
+        &NoFaults, &NoLiveLeases, 2_000).is_ok());
+}
+
+#[test]
 fn prepared_pull_preserves_work_written_after_fetch() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
@@ -377,7 +396,7 @@ fn prepared_pull_keeps_operation_page_and_payload_limits() {
         )]));
         let page = client.fetch_pull(&mut engine, "ws", &NoFaults);
         assert_eq!(page.is_ok(), count == 500);
-        assert_eq!(pull_token(&engine), None);
+        assert_eq!(pull_token(&engine).is_some(), count == 500);
         assert_eq!(*client.transport().pulls.lock().unwrap(), [(0, 500)]);
         if let Ok(page) = page {
             let offline = RelaySyncClient::new(PagedRelay::new([]));
@@ -407,7 +426,7 @@ fn prepared_pull_keeps_operation_page_and_payload_limits() {
     let client = RelaySyncClient::new(padded_relay(17));
     let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
     assert_eq!(client.transport().pulls.lock().unwrap().len(), 16);
-    assert_eq!(pull_token(&engine), None);
+    assert_eq!(pull_token(&engine).as_deref(), Some(page.pull_token()));
     let offline = RelaySyncClient::new(PagedRelay::new([]));
     let result = offline
         .apply_pull(
@@ -448,7 +467,7 @@ fn prepared_pull_keeps_operation_page_and_payload_limits() {
             client.fetch_pull(&mut engine, "ws", &NoFaults).is_ok(),
             payload_bytes == crate::model::MAX_PAYLOAD_JSON_BYTES
         );
-        assert_eq!(pull_token(&engine), None);
+        assert_eq!(pull_token(&engine).is_some(), payload_bytes == crate::model::MAX_PAYLOAD_JSON_BYTES);
     }
 }
 
@@ -513,7 +532,7 @@ fn a_pull_owns_its_progress_across_reopening_until_its_terminal_commit() {
     let (has_more, last) = pass(&client, &mut engine);
     assert!(!has_more);
     assert!(completion(&last).terminal);
-    assert_ne!(completion(&last).token, completion(&first).token);
+    assert_eq!(completion(&last).token, completion(&first).token);
     assert_eq!(pull_token(&engine).as_ref(), Some(&completion(&last).token));
     commit(&client, &mut engine, &last);
     assert_eq!(pull_token(&engine), None);
@@ -794,7 +813,7 @@ fn a_pass_that_fails_after_applying_an_envelope_stays_unfinished_across_reopenin
     assert_eq!(pull_token(&engine).as_ref(), Some(&token));
     let (has_more, retry) = pass(&client, &mut engine);
     assert!(!has_more);
-    assert_ne!(completion(&retry).token, token);
+    assert_eq!(completion(&retry).token, token);
     commit(&client, &mut engine, &retry);
     assert_eq!(pull_token(&engine), None);
     assert_eq!(
