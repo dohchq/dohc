@@ -22,7 +22,9 @@ it.each([
   await expect(namedRequest(path, new AbortController().signal, {})).rejects.toBeInstanceOf(LiveAuthorityUnavailableError);
 });
 
-it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("preserves the verified link refusal %s", async code => {
+// app_collection_missing comes only from an app's routes, never from a live link.
+const liveLinkRefusals = (Object.keys(LINK_REFUSALS) as LinkRefusalCode[]).filter(code => code !== "app_collection_missing");
+it.each(liveLinkRefusals)("preserves the verified link refusal %s", async code => {
   vi.stubGlobal("fetch", vi.fn(async () => Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status})));
   await expect(namedRequest("/api/live/link-document", new AbortController().signal)).rejects.toThrow(LINK_REFUSALS[code].error);
 });
