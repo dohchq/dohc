@@ -348,6 +348,7 @@ describe("local approved dataset apps", () => {
     db.close();
     const reopened = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
     expect(reopened.describe(id(1)).name).toBe("Registrations");
+    reopened.archive({ datasetId: id(1) });
     const preview = reopened.deletePreview({ datasetId: id(1) });
     await reopened.deleteDataset({ datasetId: id(1), expected: preview.cursor, reviewToken: preview.reviewToken, acknowledge: true });
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/local/datasets/state.sqlite"));

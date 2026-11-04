@@ -1296,7 +1296,7 @@ Returns `{ kind: "delete-preview", archived, generation, reason, apps: { appId, 
 
 Permanently delete a Collection and all its data.
 
-Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
+Set `expected` to `cursor` from `deletePreview`. Set `reviewToken` to `reviewToken` from `deletePreview`. Archive the Collection before you run deletePreview. This removes the Collection's private data and history. Set acknowledge to true. Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.

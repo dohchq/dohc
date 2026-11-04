@@ -227,6 +227,7 @@ describe("local dataset owner adapter", () => {
     secondSources.files.set("items/dataset.json",JSON.stringify({...definition,datasetId:id(20),name:"Other items"}));
     const second = await activate(first.host,secondSources);
     await first.host.action({datasetId:id(20),revision:1,revisionSha256:second.revision.revisionSha256,operationId:id(6),idempotencyKey:"other",input:{name:"Keep"}});
+    first.host.archive({datasetId:id(1)});
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     await first.host.close();
@@ -248,6 +249,7 @@ describe("local dataset owner adapter", () => {
     await first.host.action(call(approved,id(6),"delete-write",{name:"Saved",fileId:uploaded.file.fileId}));
     const archive = await first.host.prepareExport(id(1)), backupPath = join(first.workspaceRoot,"saved.dohc-recovery");
     await writeDatasetRecoveryExport({ workspaceRoots: [], path:backupPath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
+    first.host.archive({datasetId:id(1)});
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     expect(first.host.list({includeArchived:true}).datasets).toEqual([]);

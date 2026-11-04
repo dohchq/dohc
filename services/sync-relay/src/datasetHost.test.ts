@@ -87,6 +87,7 @@ it("keeps its workers and recovery staging in the folder it was given", async ()
 it("permanently deletes at the owner authority and releases private storage without deleting source publications", async () => {
   const f = await fixture(); await f.activate(); const publicationId = f.publish(), link = f.link("friend");
   await f.invoke(link,id(5),{name:"Deleted"},publicationId);
+  f.host.archiveDataset(owner,scope);
   const preview = f.host.deletePreview(owner,scope);
   const request = {...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
   await expect(f.host.deleteDataset(link,request)).rejects.toThrow();
