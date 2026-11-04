@@ -671,9 +671,9 @@ export const FileInspector = memo(function FileInspector(
       : undefined;
   // An engine document that BOUND does not need the file read: the canonical
   // Y.Doc is the content, and main holds the live session. Without this, a
-  // read that failed before a successful retry left the user at "Couldn't
-  // read this file." with no document and no way back, while the session it
-  // describes was live.
+  // read that failed before a successful retry left the user at "dohc could
+  // not read this file." with no document, while the session it describes
+  // was live.
   const engineDocBound = engine.available && engine.doc !== null;
   // Consume the jump after the child view's own effects applied it (child
   // effects run before this parent effect). Text views wait for the loaded

@@ -1,7 +1,7 @@
 import { engineSaveState } from "../workspaces/engineYDocSaveState";
 // @vitest-environment jsdom
 import { useEffect } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   declareSceneRoots,
@@ -1189,7 +1189,10 @@ describe("FileInspector Excalidraw view", () => {
       "dohc could not verify this drawing's images.",
     );
     expect(screen.getByText("dohc could not read this file.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    // Reading again is the read failure's way back. The image check has no
+    // retry of its own.
+    expect(screen.getByTestId("file-read-retry")).toBeTruthy();
+    expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Open externally" }));
     expect(bridge.openFileExternally).toHaveBeenCalledWith({
