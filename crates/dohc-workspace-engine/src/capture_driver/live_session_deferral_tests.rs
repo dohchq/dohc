@@ -1223,8 +1223,10 @@ fn switch_write_status(db: &Path, path: &str) -> String {
 }
 
 // dohc#2360. A switch to a version whose only file it fails to place leaves
-// that file's write pending. A later release offers the path and the scan
-// finds no file, but the head waits for its write instead of retiring.
+// that file's write pending. A restart's seed leaves that head out while the
+// write has no file to replace (dohc#3104), so a later release doesn't offer it.
+// Offered anyway, the scan finds no file, but the head waits for its write
+// instead of retiring.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_switch_target_head_waiting_for_placement_survives_a_release() {
     let harness = Harness::new();
@@ -1322,9 +1324,23 @@ async fn a_switch_target_head_waiting_for_placement_survives_a_release() {
         &files.handle(),
     )
     .await;
+    let seed = harness
+        .actor
+        .capture_manifest_seed(WORKSPACE_ID.to_owned(), "feature".to_owned())
+        .await
+        .expect("seed");
+    assert!(
+        seed.iter().all(|entry| entry.path != NEW_FILE),
+        "the release has no unplaced path to offer"
+    );
+    files
+        .handle()
+        .offer_retire_candidates(vec![NEW_FILE.to_owned()])
+        .await
+        .expect("offer the unplaced path");
     assert!(
         files.handle().stats().await.expect("stats").dirty,
-        "the release offers the unplaced path"
+        "the offer asks for a scan"
     );
     harness.capture(&files.handle()).await;
     assert_eq!(
