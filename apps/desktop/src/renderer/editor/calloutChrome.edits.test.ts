@@ -82,6 +82,24 @@ describe("makeCalloutChromePlugin — edits", () => {
     expect(headers(state, plugin)).toEqual([{ ...first!, pos: pos + 1 }]);
   });
 
+  it("keeps a header's owner through one edit on both sides of it, and through a remote update", () => {
+    const plugin = makeCalloutChromePlugin();
+    let state = EditorState.create({
+      doc: doc(paragraph("lead"), callout("note", "Title"), paragraph("after")),
+      plugins: [plugin],
+    });
+    const owners = headers(state, plugin).map(({ owner }) => owner);
+
+    const tr = state.tr.insertText("x", 1);
+    state = state.apply(tr.insertText("y", tr.doc.content.size - 1));
+    expect(headers(state, plugin).map(({ owner }) => owner)).toEqual(owners);
+
+    const remote = doc(paragraph("lead, edited"), callout("note", "Title"), paragraph("after, edited"));
+    state = state.apply(state.tr.replaceWith(0, state.doc.content.size, remote.content));
+    expect(headers(state, plugin).map(({ owner }) => owner)).toEqual(owners);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
   it("makes no header again when typing in a note with 2,000 callouts", () => {
     const plugin = makeCalloutChromePlugin();
     let state = EditorState.create({

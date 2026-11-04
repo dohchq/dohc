@@ -54,6 +54,24 @@ describe("makeCodeBlockChromePlugin — edits", () => {
     expect(toolbars(state, plugin)[0]!.owner).toBe(before!.owner);
   });
 
+  it("keeps a toolbar's owner through one edit on both sides of it, and through a remote update", () => {
+    const plugin = makeCodeBlockChromePlugin();
+    let state = EditorState.create({
+      doc: doc(paragraph("lead"), codeBlock("x", "go"), paragraph("after")),
+      plugins: [plugin],
+    });
+    const owners = toolbars(state, plugin).map(({ owner }) => owner);
+
+    const tr = state.tr.insertText("x", 1);
+    state = state.apply(tr.insertText("y", tr.doc.content.size - 1));
+    expect(toolbars(state, plugin).map(({ owner }) => owner)).toEqual(owners);
+
+    const remote = doc(paragraph("lead, edited"), codeBlock("x", "go"), paragraph("after, edited"));
+    state = state.apply(state.tr.replaceWith(0, state.doc.content.size, remote.content));
+    expect(toolbars(state, plugin).map(({ owner }) => owner)).toEqual(owners);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
   it("makes no toolbar again when typing in a note with 2,000 code blocks", () => {
     const blocks = Array.from({ length: 2000 }, (_, i) => codeBlock(`value${i}`, "typescript"));
     const plugin = makeCodeBlockChromePlugin();
