@@ -1,6 +1,6 @@
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { mapWidgetOwners } from "./widgetOwnership";
-import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
+import { documentChange, stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import { CODE_LANGUAGE_OPTIONS, cleanCodeLanguage } from "./codeLanguages";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
@@ -177,145 +177,144 @@ function buildCodeLanguageDecorations(
   // A textblock holds only inline content, so the walk never enters one.
   doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return !node.isTextblock;
-    const ownerKey = owners.get(pos) ?? nextOwnerKey();
-
-    const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
-    decorations.push(
-      Decoration.node(pos, pos + node.nodeSize, {
-        class: "dohc-code-block",
-      }),
-    );
-    decorations.push(
-      Decoration.widget(
-        pos,
-        (view, getPos) => {
-          const toolbar = document.createElement("div");
-          toolbar.className = "dohc-code-block-toolbar";
-          toolbar.setAttribute("contenteditable", "false");
-
-          const left = document.createElement("div");
-          left.className = "dohc-code-block-toolbar-left";
-
-          const select = document.createElement("select");
-          select.className = "dohc-code-language-select";
-          select.setAttribute("aria-label", "Code language");
-          select.disabled = view.editable === false;
-
-          const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
-            (option) => option.value === language,
-          );
-          const options = hasKnownLanguage
-            ? CODE_LANGUAGE_OPTIONS
-            : [{ value: language, label: language }, ...CODE_LANGUAGE_OPTIONS];
-          for (const option of options) {
-            const el = document.createElement("option");
-            el.value = option.value;
-            el.textContent = option.label;
-            select.appendChild(el);
-          }
-          select.value = language;
-
-          const commit = () => {
-            if (view.editable === false) return;
-            const blockPos = getPos();
-            if (blockPos === undefined) return;
-            const current = view.state.doc.nodeAt(blockPos);
-            if (!current || !isCodeBlockNode(current)) return;
-
-            const nextLanguage = cleanCodeLanguage(select.value);
-            const currentLanguage = cleanCodeLanguage(
-              String(current.attrs.language ?? ""),
-            );
-            select.value = nextLanguage;
-            if (nextLanguage === currentLanguage) return;
-
-            view.dispatch(
-              view.state.tr
-                .setNodeMarkup(blockPos, undefined, {
-                  ...current.attrs,
-                  language: nextLanguage,
-                })
-                .scrollIntoView(),
-            );
-          };
-
-          select.addEventListener("mousedown", (event) => event.stopPropagation());
-          select.addEventListener("click", (event) => event.stopPropagation());
-          select.addEventListener("keydown", (event) => {
-            event.stopPropagation();
-            if (event.key === "Escape") {
-              event.preventDefault();
-              select.value = language;
-              view.focus();
-            }
-          });
-          select.addEventListener("change", commit);
-
-          // The shared copy tile, drawn here because React does not render
-          // this toolbar. Its name stays "Copy code".
-          const copy = document.createElement("button");
-          copy.type = "button";
-          copy.setAttribute("aria-label", "Copy code");
-          const status = document.createElement("span");
-          status.setAttribute("role", "status");
-          status.setAttribute("aria-live", "polite");
-          status.className = "sr-only";
-          let announce: ReturnType<typeof setTimeout> | null = null;
-          const draw = (feedback: CopyFeedback | null) => {
-            copy.className = `dohc-code-copy-btn ${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}`;
-            copy.title = feedback ? COPY_WORDS[feedback] : "Copy code";
-            copy.replaceChildren(copyIcon(feedback));
-            status.textContent = "";
-            if (announce !== null) clearTimeout(announce);
-            announce = feedback
-              ? setTimeout(() => {
-                  status.textContent = COPY_WORDS[feedback];
-                }, 0)
-              : null;
-          };
-          const action = createCopy({
-            // The widget key uses block ownership and language, not code
-            // text, so ProseMirror reuses this DOM (and its captured `node`)
-            // across pure text edits. Read the live node at click time so
-            // the copy never writes pre-edit content.
-            getText: () => {
-              const blockPos = getPos();
-              const current = blockPos === undefined ? null : view.state.doc.nodeAt(blockPos);
-              return current && isCodeBlockNode(current) ? current.textContent : node.textContent;
-            },
-            report,
-            show: draw,
-          });
-          draw(null);
-          copy.addEventListener("mousedown", stopEditorMouseEvent);
-          copy.addEventListener("click", (event) => {
-            stopEditorMouseEvent(event);
-            void action.copy();
-          });
-
-          left.append(select);
-          toolbar.append(left, copy, status);
-          disposeToolbar.set(toolbar, () => {
-            action.dispose();
-            if (announce !== null) clearTimeout(announce);
-          });
-          return toolbar;
-        },
-        {
-          side: -1,
-          // Prose edits before this block preserve its toolbar and live getPos.
-          key: `code-lang-${ownerKey}-${language}`,
-          ownerKey,
-          ignoreSelection: true,
-          stopEvent: () => true,
-          destroy: (toolbar) => disposeToolbar.get(toolbar)?.(),
-        },
-      ),
-    );
+    decorations.push(codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report));
     return false;
   });
-
   return DecorationSet.create(doc, decorations);
+}
+
+function codeBlockToolbar(
+  node: ProseMirrorNode,
+  pos: number,
+  ownerKey: string,
+  report: ErrorReporter,
+): Decoration {
+  const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
+  return Decoration.widget(
+    pos,
+    (view, getPos) => {
+      const toolbar = document.createElement("div");
+      toolbar.className = "dohc-code-block-toolbar";
+      toolbar.setAttribute("contenteditable", "false");
+
+      const left = document.createElement("div");
+      left.className = "dohc-code-block-toolbar-left";
+
+      const select = document.createElement("select");
+      select.className = "dohc-code-language-select";
+      select.setAttribute("aria-label", "Code language");
+      select.disabled = view.editable === false;
+
+      const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
+        (option) => option.value === language,
+      );
+      const options = hasKnownLanguage
+        ? CODE_LANGUAGE_OPTIONS
+        : [{ value: language, label: language }, ...CODE_LANGUAGE_OPTIONS];
+      for (const option of options) {
+        const el = document.createElement("option");
+        el.value = option.value;
+        el.textContent = option.label;
+        select.appendChild(el);
+      }
+      select.value = language;
+
+      const commit = () => {
+        if (view.editable === false) return;
+        const blockPos = getPos();
+        if (blockPos === undefined) return;
+        const current = view.state.doc.nodeAt(blockPos);
+        if (!current || !isCodeBlockNode(current)) return;
+
+        const nextLanguage = cleanCodeLanguage(select.value);
+        const currentLanguage = cleanCodeLanguage(
+          String(current.attrs.language ?? ""),
+        );
+        select.value = nextLanguage;
+        if (nextLanguage === currentLanguage) return;
+
+        view.dispatch(
+          view.state.tr
+            .setNodeMarkup(blockPos, undefined, {
+              ...current.attrs,
+              language: nextLanguage,
+            })
+            .scrollIntoView(),
+        );
+      };
+
+      select.addEventListener("mousedown", (event) => event.stopPropagation());
+      select.addEventListener("click", (event) => event.stopPropagation());
+      select.addEventListener("keydown", (event) => {
+        event.stopPropagation();
+        if (event.key === "Escape") {
+          event.preventDefault();
+          select.value = language;
+          view.focus();
+        }
+      });
+      select.addEventListener("change", commit);
+
+      // The shared copy tile, drawn here because React does not render
+      // this toolbar. Its name stays "Copy code".
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.setAttribute("aria-label", "Copy code");
+      const status = document.createElement("span");
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      status.className = "sr-only";
+      let announce: ReturnType<typeof setTimeout> | null = null;
+      const draw = (feedback: CopyFeedback | null) => {
+        copy.className = `dohc-code-copy-btn ${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}`;
+        copy.title = feedback ? COPY_WORDS[feedback] : "Copy code";
+        copy.replaceChildren(copyIcon(feedback));
+        status.textContent = "";
+        if (announce !== null) clearTimeout(announce);
+        announce = feedback
+          ? setTimeout(() => {
+              status.textContent = COPY_WORDS[feedback];
+            }, 0)
+          : null;
+      };
+      const action = createCopy({
+        // The widget key uses block ownership and language, not code
+        // text, so ProseMirror reuses this DOM (and its captured `node`)
+        // across pure text edits. Read the live node at click time so
+        // the copy never writes pre-edit content.
+        getText: () => {
+          const blockPos = getPos();
+          const current = blockPos === undefined ? null : view.state.doc.nodeAt(blockPos);
+          return current && isCodeBlockNode(current) ? current.textContent : node.textContent;
+        },
+        report,
+        show: draw,
+      });
+      draw(null);
+      copy.addEventListener("mousedown", stopEditorMouseEvent);
+      copy.addEventListener("click", (event) => {
+        stopEditorMouseEvent(event);
+        void action.copy();
+      });
+
+      left.append(select);
+      toolbar.append(left, copy, status);
+      disposeToolbar.set(toolbar, () => {
+        action.dispose();
+        if (announce !== null) clearTimeout(announce);
+      });
+      return toolbar;
+    },
+    {
+      side: -1,
+      // Prose edits before this block preserve its toolbar and live getPos.
+      key: `code-lang-${ownerKey}-${language}`,
+      ownerKey,
+      ignoreSelection: true,
+      stopEvent: () => true,
+      destroy: (toolbar) => disposeToolbar.get(toolbar)?.(),
+    },
+  );
 }
 
 // `report` reaches the shell's error hook, for a copy the clipboard refused.
@@ -328,11 +327,23 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
       init(_, instance) {
         return buildCodeLanguageDecorations(instance.doc, new Map(), nextOwnerKey, report);
       },
+      // Only the code blocks that start inside the changed range get their
+      // toolbar again; the rest move with the edit and keep their DOM.
       apply(tr, old) {
-        if (!tr.docChanged && !tr.getMeta(codeLanguageKey)) {
-          return old.map(tr.mapping, tr.doc);
-        }
-        return buildCodeLanguageDecorations(tr.doc, mapWidgetOwners(old, tr.mapping), nextOwnerKey, report);
+        if (!tr.docChanged) return old;
+        const { range, mapping } = documentChange(tr.before, tr.doc);
+        const decorations = old.map(mapping, tr.doc);
+        if (!range) return decorations;
+        // A toolbar sits before its block, so content inserted at a block's
+        // start leaves its toolbar at the start of the range.
+        const owners = mapWidgetOwners(old.find(range.from, range.toBefore), mapping);
+        const toolbars: Decoration[] = [];
+        tr.doc.nodesBetween(range.from, Math.min(range.to + 1, tr.doc.content.size), (node, pos) => {
+          if (!isCodeBlockNode(node)) return !node.isTextblock;
+          if (pos >= range.from) toolbars.push(codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report));
+          return false;
+        });
+        return decorations.remove(decorations.find(range.from, range.to)).add(tr.doc, toolbars);
       },
     },
     view(view) {

@@ -1,12 +1,12 @@
 import type { Mappable } from "@tiptap/pm/transform";
-import type { DecorationSet } from "@tiptap/pm/view";
+import type { Decoration } from "@tiptap/pm/view";
 
 export function mapWidgetOwners(
-  decorations: DecorationSet,
+  decorations: readonly Decoration[],
   mapping: Mappable,
 ): Map<number, string> {
   const owners = new Map<number, string>();
-  for (const decoration of decorations.find()) {
+  for (const decoration of decorations) {
     const ownerKey = decoration.spec.ownerKey;
     if (typeof ownerKey !== "string") continue;
     // Attach to the following block when content is inserted at its boundary.

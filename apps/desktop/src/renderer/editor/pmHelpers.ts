@@ -24,13 +24,19 @@ export function isCodeMark(mark: { type: { name: string; spec?: { code?: boolean
  *  touched, in document order with their positions, and every textblock
  *  between the first and the last is among them. `mapping` moves every
  *  position outside them. A plugin that decorates text rescans those blocks
- *  and maps the rest. */
+ *  and maps the rest. `range` is the changed span itself: `from` and `to` in
+ *  `doc`, and `toBefore` where it ended in `before`; null when nothing
+ *  changed. */
 export function documentChange(
   before: ProseMirrorNode,
   doc: ProseMirrorNode,
-): { textblocks: Array<{ node: ProseMirrorNode; pos: number }>; mapping: Mapping } {
+): {
+  textblocks: Array<{ node: ProseMirrorNode; pos: number }>;
+  mapping: Mapping;
+  range: { from: number; to: number; toBefore: number } | null;
+} {
   const start = doc.content.findDiffStart(before.content);
-  if (start === null) return { textblocks: [], mapping: new Mapping() };
+  if (start === null) return { textblocks: [], mapping: new Mapping(), range: null };
   const ends = doc.content.findDiffEnd(before.content)!;
   // A repeated character can make the common prefix and suffix overlap; the
   // suffix shrinks until both ends sit at or after the start.
@@ -43,7 +49,11 @@ export function documentChange(
     textblocks.push({ node, pos });
     return false;
   });
-  return { textblocks, mapping: new Mapping([new StepMap([start, endBefore - start, end - start])]) };
+  return {
+    textblocks,
+    mapping: new Mapping([new StepMap([start, endBefore - start, end - start])]),
+    range: { from: start, to: end, toBefore: endBefore },
+  };
 }
 
 export function normalizeLanguage(value: unknown): string {
