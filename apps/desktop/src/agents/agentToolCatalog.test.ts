@@ -47,6 +47,18 @@ describe("agent launch profiles", () => {
     expect(claude.filter((arg) => arg === "opus")).toHaveLength(1);
     expect(claude.indexOf("--model")).toBeLessThan(claude.indexOf("--mcp-config"));
   });
+  it("leaves the person's own flags out of a reply-only run, and keeps them in the owner's", () => {
+    const run = ["--config", "mcp_servers.dohc.required=true"];
+    const codexFlags = ["--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "--enable", "shell_tool"];
+    const codex = { tool: "codex", executable: "/bin/codex", arguments: codexFlags } as const;
+    expect(agentProfileArguments(codex, run, true)).toEqual(agentProfileArguments({ tool: "codex", executable: "/bin/codex" }, run, true));
+    expect(agentProfileArguments(codex, run)).toEqual(["exec", ...codexFlags, ...agentProfileArguments({ tool: "codex", executable: "/bin/codex" }, run).slice(1)]);
+    const claudeFlags = ["--allowedTools", "Bash", "--model", "opus"];
+    const claude = { tool: "claude", executable: "/bin/claude", arguments: claudeFlags } as const;
+    const mcp = ["--mcp-config", "/x.json"];
+    expect(agentProfileArguments(claude, mcp, true)).toEqual(agentProfileArguments({ tool: "claude", executable: "/bin/claude" }, mcp, true));
+    expect(agentProfileArguments(claude, mcp)).toEqual(["-p", ...claudeFlags, ...agentProfileArguments({ tool: "claude", executable: "/bin/claude" }, mcp).slice(1)]);
+  });
   it("starts a chosen tool over a typed command, and needs one of them", () => {
     const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
     expect(launchFrom(profile, "node agent.mjs")).toEqual(profile);
