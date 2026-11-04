@@ -695,7 +695,7 @@ describe("DocumentMenu", () => {
       expect(screen.queryByRole("menu"), "leave the previous timer running -> it closes the menu on behalf of an attempt that is over, while this one is still waiting on the clipboard.").not.toBeNull();
       expect(
         screen.getByTestId("document-menu-item-copy-markdown").textContent,
-      ).toBe("Copy as Markdown");
+      ).toBe("Copying…");
 
       await act(async () => {
         retry.resolve();

@@ -310,9 +310,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
   });
 
   it('Copy uses canonical output within 2 s when the source proof is stuck', async () => {
-    const doc = markdownToYDoc('Body
-
-'); engineDocState.doc = doc;
+    const doc = markdownToYDoc('Body\n\n'); engineDocState.doc = doc;
     for (const key of ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256']) doc.getMap('meta').set(key, 'plain');
     // A stuck proof worker answers only when its own 15 s limit rejects it.
     vi.mocked(projectArtifactSource).mockImplementation(() => new Promise((_, reject) => {
