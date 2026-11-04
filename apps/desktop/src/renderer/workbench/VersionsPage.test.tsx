@@ -224,8 +224,13 @@ describe("VersionsPage", () => {
   it("reaches every row while Main's history keeps growing during the counts", async () => {
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT, NESTED, FRESH], activeVersionId: "main" });
     const nested = deferred<{ count: number }>();
-    bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) =>
-      versionId === "nested" ? nested.promise : { count: 0 });
+    const nestedAgain = deferred<{ count: number }>();
+    let nestedCounts = 0;
+    bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) => {
+      if (versionId !== "nested") return { count: 0 };
+      nestedCounts += 1;
+      return nestedCounts === 1 ? nested.promise : nestedAgain.promise;
+    });
     const { rerender } = render(<Page historyKey="0" />);
     await waitFor(() => expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledTimes(2));
     // History grows while Draft two counts, as a count's own capture can make it.
@@ -235,7 +240,10 @@ describe("VersionsPage", () => {
     // Fresh gets its turn before the rows marked again start over.
     expect(bridgeMock.countWorkspaceVersionChanges.mock.calls.map(([payload]) => payload.versionId))
       .toEqual(["draft", "nested", "fresh", "draft", "nested"]);
+    // The count marked again still shows while its next count waits.
     await waitFor(() => expect(details("nested")).toContain("4 files differ from Main"));
+    nestedAgain.resolve({ count: 6 });
+    await waitFor(() => expect(details("nested")).toContain("6 files differ from Main"));
   });
 
   it("shows Try again in place of a count that failed, and counts that version again", async () => {
