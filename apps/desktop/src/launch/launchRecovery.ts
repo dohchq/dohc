@@ -21,6 +21,8 @@ export async function checkForUpdateBeforeMain(failure: LaunchFailure): Promise<
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),
     stateDir: app.getPath("userData"),
+    quit: () => app.quit(),
+    onQuit: (handler) => app.on("quit", (_event, exitCode) => handler(exitCode)),
   });
   // Declining a downloaded update quits: on Windows and macOS, relaunching
   // this build would race the install that runs on quit.

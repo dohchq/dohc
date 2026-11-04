@@ -5182,12 +5182,11 @@ function startUpdates(): Promise<AutoUpdateController | null> {
   autoUpdateStartup ??= startAutoUpdates({
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),
-    // A restart already staged has no install left to make — quitAndInstall
-    // started its own quit on the first call and has none left to start.
-    // Main makes it, so the fact lives here and not in a renderer module a
-    // reload would reset. The quit is already approved:
-    // the IPC handler approves before asking the controller.
-    quitForStagedRestart: () => app.quit(),
+    // The IPC handler approves the quit before asking the controller, and
+    // main keeps the staged restart, so a renderer reload cannot reset it.
+    quit: () => app.quit(),
+    onQuit: (handler) => app.on("quit", (_event, exitCode) => handler(exitCode)),
+    restartApproved: () => exitRounds.approvedExit() === "update",
     stateDir: stateDir(),
     onState: (_state, state) => {
       broadcastUpdateState(state);
