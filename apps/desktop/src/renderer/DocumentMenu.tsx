@@ -46,7 +46,15 @@ function writeClipboard(markdown: string): Promise<void> {
 // is stated below the items.
 const REFUSAL_LABEL = "Document not open";
 
-export function DocumentMenu(props: {
+type CopiedNote = { workspaceId: string; documentKey?: string; name: string };
+
+class NoteNotOpen extends Error {
+  constructor() {
+    super(REFUSAL_LABEL);
+  }
+}
+
+type DocumentMenuProps = {
   workspaceId: string;
   documentKey?: string;
   // Filename stem (no extension) — becomes the export dialog's suggested
@@ -67,8 +75,19 @@ export function DocumentMenu(props: {
   // The document will not open here, such as after a failed read: the
   // trigger keeps its place and does nothing.
   disabled?: boolean;
-}) {
+};
+
+export function DocumentMenu(props: DocumentMenuProps) {
   const customize = useContext(CustomizeContext)?.customize;
+  // The props of the note showing now, or null once the menu is gone, for a
+  // Try again that outlives the render that filed it.
+  const latest = useRef<DocumentMenuProps | null>(props);
+  useEffect(() => {
+    latest.current = props;
+  });
+  useEffect(() => () => {
+    latest.current = null;
+  }, []);
   const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
   const [open, setOpen] = useState(false);
   // The transient half: an item's label swaps for 1.2s to say what happened.
@@ -211,27 +230,42 @@ export function DocumentMenu(props: {
     if (failure && actions.isCurrent(action)) reportCopyFailure(failure);
   }
 
-  function reportCopyFailure(failure: unknown): void {
-    props.reportError?.("dohc could not copy this document.", failure, copyAgain);
+  // A notice outlives the menu and the document shown beside it, so it names
+  // its note, and its Try again acts on that note only.
+  function reportCopyFailure(failure: unknown, note: CopiedNote = currentNote()): void {
+    const message = failure instanceof NoteNotOpen
+      ? `dohc could not copy ${note.name}, because it is not open.`
+      : `dohc could not copy ${note.name}.`;
+    props.reportError?.(message, failure, () => copyAgain(note));
   }
 
-  // Try again on the toast or the Notices row: the same copy, from the
-  // document as it is now, with no menu to answer on. Only a failure speaks,
-  // and not after a later action or the document's view has moved on.
-  function copyAgain(): void {
+  function currentNote(): CopiedNote {
+    return { workspaceId: props.workspaceId, documentKey: props.documentKey, name: props.suggestedName };
+  }
+
+  // Try again on the toast or the Notices row: the named note's text as it is
+  // now, with no menu to answer on. When another note is showing, or none,
+  // it copies nothing and says so. Only a failure speaks, and not after a
+  // later action.
+  function copyAgain(note: CopiedNote): void {
     const action = actions.next();
     void (async () => {
       let failure: unknown;
       try {
-        const markdown = await props.getMarkdown();
+        const current = latest.current;
+        const open = current !== null
+          && current.workspaceId === note.workspaceId
+          && current.documentKey === note.documentKey
+          && current.suggestedName === note.name;
+        const markdown = open ? await current.getMarkdown() : null;
         if (!actions.isCurrent(action)) return;
-        if (markdown === null) throw new Error(REFUSAL_LABEL);
+        if (markdown === null) throw new NoteNotOpen();
         await writeClipboard(markdown);
         return;
       } catch (error) {
         failure = error ?? new Error("clipboard write failed");
       }
-      if (actions.isCurrent(action)) reportCopyFailure(failure);
+      if (actions.isCurrent(action)) reportCopyFailure(failure, note);
     })();
   }
 
