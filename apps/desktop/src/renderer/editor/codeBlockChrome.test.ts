@@ -65,6 +65,14 @@ describe("makeCodeBlockChromePlugin — edits", () => {
     expect(original!.owner).toBe(before!.owner);
     expect(copy!.owner).not.toBe(before!.owner);
     expect(shown(state, plugin)).toEqual(expected(state.doc));
+
+    // The same insert at the note's start, with a paragraph added at its end.
+    const first = EditorState.create({ doc: doc(block, paragraph("tail")), plugins: [plugin] });
+    const [firstBefore] = toolbars(first, plugin);
+    const tr = first.tr.insert(0, block);
+    const both = first.apply(tr.insert(tr.doc.content.size, paragraph("end")));
+    expect(toolbars(both, plugin).map(({ owner }) => owner === firstBefore!.owner)).toEqual([false, true]);
+    expect(shown(both, plugin)).toEqual(expected(both.doc));
   });
 
   it("keeps a toolbar's owner through one edit on both sides of it, and through a remote update", () => {

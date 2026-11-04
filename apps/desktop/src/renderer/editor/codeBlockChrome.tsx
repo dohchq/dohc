@@ -1,5 +1,5 @@
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
-import { ownersInRange, withSteps } from "./widgetOwnership";
+import { mapWidgetOwners, ownersByPlace, replacesDocument, withSteps } from "./widgetOwnership";
 import { documentChange, stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import { CODE_LANGUAGE_OPTIONS, cleanCodeLanguage } from "./codeLanguages";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -334,7 +334,10 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
         const { range: changed, mapping } = documentChange(tr.before, tr.doc);
         const decorations = old.map(mapping, tr.doc);
         if (!changed) return decorations;
-        const range = withSteps(changed, tr.mapping, tr.doc.content.size, tr.before.content.size);
+        // A remote update places nothing by its steps, so its toolbars keep
+        // their owners by place, as callout headers do.
+        const remote = replacesDocument(tr);
+        const range = remote ? changed : withSteps(changed, tr);
         // A toolbar sits before its block, so content inserted at a block's
         // start leaves its toolbar at the start of the range.
         const blocks: Array<{ node: ProseMirrorNode; pos: number }> = [];
@@ -343,11 +346,10 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
           if (pos >= range.from) blocks.push({ node, pos });
           return false;
         });
-        const owners = ownersInRange(
-          old.find(range.from, range.toBefore),
-          blocks.map(({ pos }) => pos),
-          tr.mapping,
-        );
+        const previous = old.find(range.from, range.toBefore);
+        const owners = remote
+          ? ownersByPlace(previous, blocks.map(({ pos }) => pos))
+          : mapWidgetOwners(previous, tr.mapping);
         const toolbars = blocks.map(({ node, pos }) =>
           codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report),
         );

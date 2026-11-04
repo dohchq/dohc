@@ -1,4 +1,4 @@
-import type { Mappable, MapResult, Mapping } from "@tiptap/pm/transform";
+import { ReplaceStep, type Mappable, type MapResult, type Transform } from "@tiptap/pm/transform";
 import type { Decoration } from "@tiptap/pm/view";
 
 export function mapWidgetOwners(
@@ -27,16 +27,23 @@ export function throughEdit(steps: Mappable, range: Mappable): Mappable {
   return { mapResult, map: (pos, assoc) => mapResult(pos, assoc).pos };
 }
 
+/** Whether a step replaced the whole document, as a remote update or an undo
+ *  through y-tiptap does. Its steps then place nothing. */
+export function replacesDocument(tr: Transform): boolean {
+  return tr.steps.some(
+    (step, index) => step instanceof ReplaceStep && step.from === 0 && step.to === tr.docs[index]!.content.size,
+  );
+}
+
 export type ChangedRange = { from: number; to: number; toBefore: number };
 
 /** `range` widened to every position the edit's steps changed. Comparing the
  *  documents places a block inserted beside an identical one after it, where
- *  the steps put it before, and the widget between must follow the steps. A
- *  remote update replaces the whole document, so its steps add nothing. */
-export function withSteps(range: ChangedRange, steps: Mapping, size: number, sizeBefore: number): ChangedRange {
+ *  the steps put it before, and the widget between must follow the steps. */
+export function withSteps(range: ChangedRange, tr: Transform): ChangedRange {
   let start = Infinity;
   let end = -Infinity;
-  for (const map of steps.maps) {
+  for (const map of tr.mapping.maps) {
     if (start <= end) {
       start = map.map(start, -1);
       end = map.map(end, 1);
@@ -46,42 +53,21 @@ export function withSteps(range: ChangedRange, steps: Mapping, size: number, siz
       end = Math.max(end, newEnd);
     });
   }
-  if (start > end || (start <= 0 && end >= size)) return range;
+  if (start > end) return range;
   const to = Math.max(range.to, end);
   // Everything after the changes is the same in both documents.
-  return { from: Math.min(range.from, start), to, toBefore: to - size + sizeBefore };
+  return { from: Math.min(range.from, start), to, toBefore: to - tr.doc.content.size + tr.before.content.size };
 }
 
-/** The owners of the widgets an edit draws again, by their new position. A
- *  widget sits `inside` positions after its block's start, and keeps its owner
- *  where `steps` move that start. A widget the steps cannot place, as under a
- *  remote update or when the edit replaced its block's opening, keeps its owner
- *  if the block at its place among the range's widgets has none, as when every
- *  widget was keyed by its place among the blocks. */
-export function ownersInRange(
-  previous: readonly Decoration[],
-  positions: readonly number[],
-  steps: Mappable,
-  inside = 0,
-): Map<number, string> {
-  const wanted = new Set(positions);
+/** Gives each widget the owner of the widget that had its place among the
+ *  range's widgets, as when every widget was keyed by its place among the
+ *  blocks. The blocks before the range are the same, so their count is too. */
+export function ownersByPlace(previous: readonly Decoration[], positions: readonly number[]): Map<number, string> {
   const owners = new Map<number, string>();
-  const unplaced: Array<{ index: number; ownerKey: string }> = [];
   previous
     .filter((decoration) => typeof decoration.spec.ownerKey === "string")
     .sort((a, b) => a.from - b.from)
-    .forEach((decoration, index) => {
-      const ownerKey = decoration.spec.ownerKey as string;
-      // The block's start, not the widget's place inside it, so content added
-      // at the start of the block's body does not move it.
-      const mapped = steps.mapResult(decoration.from - inside, 1);
-      const pos = mapped.pos + inside;
-      if (!mapped.deleted && wanted.has(pos) && !owners.has(pos)) owners.set(pos, ownerKey);
-      else unplaced.push({ index, ownerKey });
-    });
-  for (const { index, ownerKey } of unplaced) {
-    const pos = positions[index];
-    if (pos !== undefined && !owners.has(pos)) owners.set(pos, ownerKey);
-  }
+    .slice(0, positions.length)
+    .forEach((decoration, index) => owners.set(positions[index]!, decoration.spec.ownerKey as string));
   return owners;
 }

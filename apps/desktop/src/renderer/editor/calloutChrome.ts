@@ -1,5 +1,5 @@
 import { documentChange, stopEditorMouseEvent } from "./pmHelpers";
-import { ownersInRange, withSteps } from "./widgetOwnership";
+import { ownersByPlace } from "./widgetOwnership";
 import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
@@ -407,22 +407,20 @@ export function makeCalloutChromePlugin() {
       },
       // Only callouts the edit changed get a new header. A changed callout's
       // range starts at the callout, so a header inside the edit is the only
-      // one to replace. It keeps its owner key when its callout survives.
+      // one to replace. Each keeps the owner of the header at its place among
+      // the callouts, as when every header was keyed by that place.
       apply(tr, old) {
         if (!tr.docChanged) return old;
-        const { range: changed, mapping } = documentChange(tr.before, tr.doc);
+        const { range, mapping } = documentChange(tr.before, tr.doc);
         const decorations = old.map(mapping, tr.doc);
-        if (!changed) return decorations;
-        const range = withSteps(changed, tr.mapping, tr.doc.content.size, tr.before.content.size);
+        if (!range) return decorations;
         const callouts: Array<{ node: Node; pos: number }> = [];
         calloutsBetween(tr.doc, range.from, range.to, (node, pos) => {
           if (pos + 1 >= range.from && pos + 1 <= range.to) callouts.push({ node, pos });
         });
-        const owners = ownersInRange(
+        const owners = ownersByPlace(
           old.find(range.from, range.toBefore),
           callouts.map(({ pos }) => pos + 1),
-          tr.mapping,
-          1,
         );
         const headers = callouts.map(({ node, pos }) =>
           calloutHeader(node, pos, owners.get(pos + 1) ?? nextOwnerKey()),
