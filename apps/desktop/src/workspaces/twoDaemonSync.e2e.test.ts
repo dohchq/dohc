@@ -1887,6 +1887,168 @@ describe.skipIf(engine.missing)("History while a pull waits on a server that doe
   );
 });
 
+// #2868: quit takes its whole budget when the sync server takes the connection
+// and never answers. The close follows the desktop quit (appLifecycle.ts and
+// main.ts's shutdown): beginEngineShutdown, then the workspace's activity close
+// (sync stop, live sessions, capture), then closeRelay and stopEngine.
+describe.skipIf(engine.missing)("Quit with a sync server that does not answer (#2868)", () => {
+  // `running` names the close steps still awaited.
+  function quitLikeTheDesktop(device: LiveDaemonCapture, sync?: CloudSyncEngine) {
+    const running = new Set<string>();
+    const step: CloseStep = (name, work) => {
+      running.add(name);
+      const done = () => { running.delete(name); };
+      work.then(done, done);
+      return work;
+    };
+    device.beginShutdown();
+    const done = (async () => {
+      if (sync) await step("sync.stop", sync.stop()).catch(() => undefined);
+      await step("capture.settleAndCloseAllLiveSessions", device.capture.settleAndCloseAllLiveSessions()).catch(() => undefined);
+      await device.close(step).catch(() => undefined);
+    })();
+    return { running, done };
+  }
+
+  // Resolves "closed", or names the steps still awaited at `limitMs`.
+  async function closedWithin(quit: ReturnType<typeof quitLikeTheDesktop>, limitMs: number): Promise<string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([quit.done.then(() => "closed"), new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve(`still waiting on ${[...quit.running].join(", ") || "an unlabelled step"}`), limitMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  it.each(["push", "pull"] as const)(
+    "closes within 1,000 ms during an unanswered %s and keeps the edit",
+    async (pass) => {
+      const workspaceId = `two-daemon-quit-unanswered-${pass}`;
+      const token = `test:${workspaceId}`;
+      const rootA = await createTestScratch("dohc-quit-unanswered-a-");
+      const rootB = await createTestScratch("dohc-quit-unanswered-b-");
+      const relayRoot = await createTestScratch("dohc-quit-unanswered-relay-");
+      const dbPath = join(relayRoot, "relay", "relay.sqlite");
+      let relay = await spawnSyncRelay({ dbPath, compiledMain: compiledRelayMain });
+      const port = relay.port;
+      const connection = { baseUrl: relay.baseUrl, token };
+      const held = new Set<Socket>();
+      const silent = createServer((socket) => {
+        held.add(socket);
+        socket.on("error", () => undefined);
+      });
+      const reached = once(silent, "connection") as Promise<[Socket]>;
+      let holding: Promise<void> | undefined;
+      const holdRelay = () => holding ??= (async () => {
+        await relay.stop();
+        silent.listen(port, "127.0.0.1");
+        await once(silent, "listening");
+      })();
+      let daemonA: LiveDaemonCapture | null = null;
+      let daemonB: LiveDaemonCapture | null = null;
+      let sync: CloudSyncEngine | undefined;
+      let quit: ReturnType<typeof quitLikeTheDesktop> | undefined;
+      let waiting: "push" | "pull" | undefined;
+      try {
+        daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+        await daemonA.relay.claim();
+        await daemonA.chats.ensureGeneralChannel({ workspaceId });
+        await pushUntilDrained(daemonA.relay);
+        await writeAndCapture(daemonA, rootA, "notes.md", "body\n");
+        const operations = daemonA.relay;
+        sync = createRelaySyncEngine({
+          rootDir: rootA, relay: connection, capture: daemonA.capture, onChange: () => undefined,
+          // The pass's claim reaches the working relay; only the held request meets the silent server.
+          operations: { ...operations, push: async () => {
+            if (pass === "push") {
+              await holdRelay();
+              waiting = "push";
+            }
+            const result = await operations.push();
+            if (pass === "pull") await holdRelay();
+            return result;
+          } },
+          pullStarting: () => {
+            if (pass === "pull") waiting = "pull";
+            return () => undefined;
+          },
+        });
+        void sync.start().catch(() => undefined);
+        const [socket] = await reached;
+        await once(socket, "data");
+        await vi.waitFor(() => expect(waiting).toBe(pass), { timeout: REAL_DAEMON_DEADLINE_MS });
+
+        const started = performance.now();
+        quit = quitLikeTheDesktop(daemonA, sync);
+        daemonA = null;
+        const outcome = await closedWithin(quit, 1_000);
+        expect(outcome, `Quit during an unanswered ${pass}, ${Math.round(performance.now() - started)} ms`).toBe("closed");
+
+        for (const socket of held) socket.destroy();
+        silent.close();
+        await once(silent, "close");
+        relay = await spawnSyncRelay({ dbPath, compiledMain: compiledRelayMain, port });
+        daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+        const resent = (await pushUntilDrained(daemonA.relay)).pushed;
+        if (pass === "push") expect(resent, "The next launch sends the unanswered push").toBeGreaterThan(0);
+        daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+        await pullAndExpect(daemonB, rootB, "notes.md", "body\n");
+      } finally {
+        daemonA?.beginShutdown();
+        for (const socket of held) socket.destroy();
+        if (silent.listening) silent.close();
+        await sync?.stop();
+        await quit?.done;
+        await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+        await relay.stop();
+      }
+    },
+    120_000,
+  );
+
+  // Quitting faster must never drop accepted work: a write the capture admitted
+  // before quit holds the close until it lands.
+  it("holds quit for a local write admitted before it, and keeps the write", async () => {
+    const workspaceId = "two-daemon-quit-held-write";
+    const root = await createTestScratch("dohc-quit-held-write-");
+    const relayRoot = await createTestScratch("dohc-quit-held-write-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
+    const person = { kind: "human", humanId: "local-person" } as const;
+    const admitted = deferred();
+    const release = deferred();
+    let daemon: LiveDaemonCapture | null = null;
+    let quit: ReturnType<typeof quitLikeTheDesktop> | undefined;
+    try {
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+      await daemon.relay.claim();
+      await daemon.chats.ensureGeneralChannel({ workspaceId });
+      const written = daemon.capture.writeAuthoredFile(join(root, "kept.md"), "kept\n", person, {
+        beforeWrite: async () => {
+          admitted.resolve();
+          await release.promise;
+        },
+      }).then(() => "written", (error: unknown) => error);
+      await admitted.promise;
+      quit = quitLikeTheDesktop(daemon);
+      daemon = null;
+      expect(await closedWithin(quit, 1_000), "Quit waits for the admitted write").toMatch(/^still waiting on /);
+      release.resolve();
+      expect(await written, "The admitted write lands during quit").toBe("written");
+      expect(await closedWithin(quit, REAL_DAEMON_DEADLINE_MS)).toBe("closed");
+
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+      await waitForPathMoments(daemon.capture, "kept.md", 1);
+      expect(await readFile(join(root, "kept.md"), "utf8")).toBe("kept\n");
+    } finally {
+      release.resolve();
+      await quit?.done;
+      await daemon?.close();
+      await relay.stop();
+    }
+  }, 120_000);
+});
+
 // A rename that changes only case reaches a peer as a delete of the old
 // spelling and a write of the new one. On a disk that ignores case, as macOS
 // and Windows do by default, writing `Notes.md` rewrites the existing
