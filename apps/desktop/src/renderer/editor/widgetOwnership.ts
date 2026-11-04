@@ -1,3 +1,4 @@
+import type { Node } from "@tiptap/pm/model";
 import type { Mappable, MapResult } from "@tiptap/pm/transform";
 import type { Decoration } from "@tiptap/pm/view";
 
@@ -27,18 +28,40 @@ export function throughEdit(steps: Mappable, range: Mappable): Mappable {
   return { mapResult, map: (pos, assoc) => mapResult(pos, assoc).pos };
 }
 
-/** The owners of the widgets an edit draws again, by their new position. When
- *  the edit's range holds as many as before, each keeps its owner in order, so
- *  a widget between two of the edit's changes, or under a remote update, keeps
- *  its DOM. Otherwise each keeps its owner where `mapping` moves it. */
+/** The owners of the widgets an edit draws again, by their new position. A
+ *  widget keeps its owner where `mapping` moves it. A remote update replaces
+ *  the whole document, so its steps place nothing: there a block keeps the
+ *  owner of the next unplaced block that was equal to it, in order. A block
+ *  that changed or is new gets no owner. */
 export function ownersInRange(
   previous: readonly Decoration[],
-  positions: readonly number[],
+  blocks: readonly { at: number; node: Node }[],
   mapping: Mappable,
+  blockBefore: (from: number) => Node | null,
 ): Map<number, string> {
   const owned = previous
     .filter((decoration) => typeof decoration.spec.ownerKey === "string")
     .sort((a, b) => a.from - b.from);
-  if (owned.length !== positions.length) return mapWidgetOwners(owned, mapping);
-  return new Map(positions.map((pos, index) => [pos, owned[index]!.spec.ownerKey as string]));
+  const wanted = new Set(blocks.map(({ at }) => at));
+  const owners = new Map<number, string>();
+  const unplaced: Decoration[] = [];
+  for (const decoration of owned) {
+    const mapped = mapping.mapResult(decoration.from, 1);
+    if (!mapped.deleted && wanted.has(mapped.pos) && !owners.has(mapped.pos)) {
+      owners.set(mapped.pos, decoration.spec.ownerKey as string);
+    } else {
+      unplaced.push(decoration);
+    }
+  }
+  let next = 0;
+  for (const { at, node } of blocks) {
+    if (owners.has(at)) continue;
+    for (let index = next; index < unplaced.length; index += 1) {
+      if (!blockBefore(unplaced[index]!.from)?.eq(node)) continue;
+      owners.set(at, unplaced[index]!.spec.ownerKey as string);
+      next = index + 1;
+      break;
+    }
+  }
+  return owners;
 }
