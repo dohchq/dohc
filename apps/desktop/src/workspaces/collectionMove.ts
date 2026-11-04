@@ -3,7 +3,7 @@ import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { LocalDatasetHost } from "./localDatasetHost";
 import type { DatasetTransferStatus } from "./localDatasetTransfer";
-import { createRemoteDatasetTransferTarget } from "./remoteDataset";
+import { createDatasetAuthorityRouter, createRemoteDatasetTransferTarget, type DatasetAuthorityRoute, type OwnerDatasetData } from "./remoteDataset";
 
 /** The transfer record of a Collection whose move to a server finished. */
 export type FinishedTransfer = DatasetTransferStatus & { state: "imported" };
@@ -82,6 +82,31 @@ export async function finishedTransfer(input: {
   const finished = input.local.transferStatus(input.datasetId);
   if (finished?.state !== "imported") throw new CollectionMoveUnfinishedError(host, { cause: null });
   return finished as FinishedTransfer;
+}
+
+/**
+ * A Collection's transfer record as a background read goes by it, as the
+ * Collections list does: the record once its move finished, or null while
+ * this computer still keeps the Collection's records. It never waits for an
+ * unfinished move or resumes a stopped one. It waits only while a finished
+ * move removes its archive.
+ */
+export function movedTransfer(input: Parameters<typeof finishedTransfer>[0]): Promise<FinishedTransfer | null> {
+  return input.local.transferStatus(input.datasetId)?.state === "imported" ? finishedTransfer(input) : Promise.resolve(null);
+}
+
+/**
+ * The Collections a background read sees, such as History's. It goes by
+ * `movedTransfer`, so a Collection whose move hasn't finished reads from this
+ * computer, and the read never waits for the move or resumes it.
+ */
+export function createBackgroundDatasetRouter(local: LocalDatasetHost, session: Omit<Parameters<typeof finishedTransfer>[0], "local" | "datasetId">,
+  remote: DatasetAuthorityRoute["remote"], assertCurrent: () => void): OwnerDatasetData {
+  return createDatasetAuthorityRouter(local, {
+    status: async datasetId => { assertCurrent(); return movedTransfer({ ...session, local, datasetId }); },
+    marker: datasetId => local.transferStatus(datasetId),
+    remote,
+  });
 }
 
 // Settles with the work, or rejects when the signal aborts. Aborting stops only the wait, not the work.

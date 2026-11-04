@@ -42,7 +42,7 @@ Some meaning still needs words or its own mark:
 ## Words
 
 Use as few words as possible in anything a person sees without a hover or a click.
-Put further detail behind a tooltip, a **More details** disclosure, or a **Learn more** link.
+Put further detail behind a tooltip, a **Details** disclosure, or a **Learn more** link.
 Link **Learn more** only to a page that exists.
 Keep an error and its next step in view.
 
@@ -80,6 +80,8 @@ Write up to three parts, in this order. Leave out any part you do not know.
 3. What to do next, as an instruction or a control.
 
 Never show a raw error code alone, blame the person, or apologize. `Sorry, something went wrong` says nothing.
+
+Write `could not` in an error, not `couldn't`.
 
 The sync strings show the standard: `A file changed on two machines`, `This machine doesn't have this file.`, and `One file has two copies.`
 
@@ -135,6 +137,78 @@ About's Access asks who has access, so it keeps `Connect your server to check wh
 Name a server only when dohc knows it, in the interface font: `Not connected to example.com`.
 `12 items` in the Explorer's delete dialog is correct, because a selection can mix files and folders.
 
+## Dialogs, forms and inputs
+
+A dialog asks about one action.
+Show what the action will change, and write only what the person needs to decide.
+
+### The card
+
+Use `ConfirmDialog` for a dialog with one action: a title, at most one short sentence of body, then the buttons. An action that loses work can take two sentences.
+The card's `p-6` and `gap-6` separate them, so add no dividers.
+A divider only separates a fixed header or footer from a list that scrolls.
+
+- The title names the action and its object: `Merge version-1 into Main`, `Delete 12 files from Research?`.
+- The body states the one fact the title and buttons leave out, such as what stays or what cannot come back. Most dialogs need none.
+- For an action that loses work, the body can say what the action reaches beyond the title, then how to get it back, as [Deletes](#deletes-and-other-actions-that-lose-work) asks.
+- If the fact is a set of things, show the names, the count, or the diff instead of a sentence about them.
+- Never explain how a feature works, what it cannot do in general, or its release stage.
+- If a limit changes what this action does, say what happens to the person's things: `2 files over 5 MB stay as they are.`
+
+### Buttons
+
+Put Cancel, then one primary, at the right.
+Name the primary with the title's verb: `Merge into Main`.
+Use `DangerButton` when the action deletes something or loses work.
+Never label a button `OK`, `Yes`, or `Confirm`.
+
+### Focus and keys
+
+- If the dialog has a field, the first field takes focus.
+- If it has none, the dialog panel takes focus. Give the panel `aria-labelledby` on its title and `aria-describedby` on its body, so a screen reader reads both. Tab then reaches Cancel first.
+- Enter in a single-line field runs the primary.
+- Escape and Cancel close the dialog, except where the Dialog recipe says only its own buttons close it.
+- When the dialog closes, focus goes back to the control that opened it.
+
+### While the action runs
+
+- The primary says what is happening, `Merging…`, and stays disabled. Add no status line.
+- If the person can see the result, close the dialog.
+- If they cannot, the title becomes the result, `Merged 4 files into Main`, above one `Done`.
+- A failure shows in the dialog, as [Where messages go](#where-messages-go) says.
+
+### Fields
+
+- Put a label above each field, with no colon. Mark an optional field `Optional` after its label.
+- A field edited in place, such as a rename in the tree, a page title or a property pill, uses its place as its label. It still needs an accessible name. For a required name, such as a file or folder, a blur with nothing typed cancels, and Enter with nothing typed shows the error. A page title or a property value can be left empty.
+- A placeholder shows an example value or nothing. It never holds the instruction or the label.
+- Check a field when focus leaves it or the person presses the primary. Never check on each key. A length limit can count down while they type.
+- Show the error under the field in `text-danger`, after a 12px `CircleAlert`. Say what is wrong and how to fix it: `Enter a name for the version.`
+- Give the field `aria-invalid`, and point its `aria-describedby` at the error.
+- Do not disable the primary to show that a field is empty or wrong. Pressing it shows the errors and focuses the first one.
+- A disabled control says why, beside it or on its second line.
+
+### Words in dialogs and explanations
+
+The Words rules apply, and these too:
+
+- Use no em or en dashes. End the sentence, or use a comma.
+- Cut `please`, `simply`, `just`, `note that`, `make sure`, `currently`, `for now`, and `at the moment`.
+- If dohc knows the answer, do not hedge with `may` or `might`.
+- Do not start a sentence with a name a person chose, such as a version or a file. Put it later: `You can keep working in version-1.`
+- Check every claim in the code before you write it. The merge dialog said versions cover only text files, but binary files merge too.
+
+### Before and after: the merge dialog
+
+| Before | After |
+| --- | --- |
+| `Everything version-1 changed will be brought into Main. version-1 stays as it is, so you can keep working in it. Your unsaved changes are saved first.` | `You can keep working in version-1.` The title already says Main gets the changes. |
+| A divider, then `Versions cover text files during the alpha — other files stay exactly as they are. If Main changed in ways that clash with version-1, you'll choose what to keep, file by file.`, then a divider | Nothing. The first claim was false, and the clash step shows itself when it comes. |
+| A `Merging version-1 into Main…` paragraph | The primary reads `Merging…` |
+
+The title, `Merge version-1 into Main`, and the buttons, Cancel and `Merge into Main`, stay.
+The after also drops the sentence about unsaved changes, because saving first is what a person expects.
+
 ## Where messages go
 
 | Situation | Where it goes |
@@ -153,13 +227,27 @@ Name a server only when dohc knows it, in the interface font: `Not connected to 
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
-- Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
+- A toast's worded actions sit in a row under its text, as on its Notices row. This keeps the text wide. Keep the toast's close × at the top right.
+- Put a copy control beside text a person might need to report. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
+- If the copy text is exactly what the message shows, such as a command, use a Copy icon beside it.
+- If it holds anything more, even the dohc version or the time, give the message a **Details** action instead, so a person sees what they copy. It comes last on the actions line, on the toast and the row.
+- **Details** is for text that reports something. A control that copies the person's own work, or something made to paste elsewhere, such as set-aside edits or an invitation, needs no Details. Its tooltip and accessible name say what it copies: `Copy edits`, `Copy invitation`.
+- **Details** opens the copy text under the message, selectable, scrolling past 240px. A Copy icon at its top right copies exactly that text.
+- While open, the action reads **Hide details** and holds the toast. It also lifts the clamp, so a message never offers both **Details** and **Show more**.
+- **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's Copy.
+- The block opens without animating its height. Only the chevron turns.
+- A full-height state uses the same **Details**, in place of **Technical details**.
+- A crash notice keeps **Send report** when the build has a report server. It comes before **Details**, on the toast and the row. Both show the same report text.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
 - A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
+- F6 moves focus to the first worded action, such as **Try again**, on the toast that appeared last. With no worded action, it lands on **Details**, and with neither, on the toast.
+- A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Server disconnected**, has no × and stays until it ends.
+- **Clear**, beside **Mark all read**, dismisses every row that has a ×, under **On this computer** and **Sent to you**, and shows only while such a row exists. Two kinds stay: a row that holds the only Undo for a change, and set-aside edits, whose Dismiss deletes the text for good.
+- Clear leaves one line at the top of the list, `Cleared 7 notices`, with **Undo**, and moves focus to Undo. The line stays until Notices closes. dohc dismisses the rows only then, so Undo brings back exactly what was cleared. Opening a dialog closes Notices too, which commits them. If dohc quits first, the cleared rows come back at the next start, because their Undo was still open. A dismissal that fails brings its row back.
 - A row keeps its title line for the icon controls, copy and dismiss. Its worded actions, such as **Try again**, sit on a line under its text.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - In a title, say what happened before any name. Put names last and cut them to fit, so the clamp cuts only a name.

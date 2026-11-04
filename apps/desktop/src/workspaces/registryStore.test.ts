@@ -26,6 +26,8 @@ import {
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
 import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
+import { caseFoldDisk } from "../testing/caseFoldDisk";
+import { folderIdentitySync } from "./workspaceRootIdentity";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -668,6 +670,59 @@ describe("registry store", () => {
     expect(() =>
       store.register({ ...personal, rootPath: "/home/sam/dohc/personal-copy" }),
     ).toThrow(/identity .* already attached|already attached .* identity/i);
+  });
+
+  describe("on a Linux folder that ignores capitals", () => {
+    // /home/sam/fold ignores capitals; /srv tells them apart.
+    const disk = caseFoldDisk({
+      "/home/sam/fold/Notes/a.md": "file",
+      "/home/sam/fold/Copy/a.md": "file",
+      "/srv/Notes/a.md": "file",
+      "/srv/notes/a.md": "file",
+    }, { foldsCase: (folder) => folder.startsWith("/home/sam/fold") });
+    const linuxStore = () => createRegistryStore(registryPath, {
+      folderIdentity: (rootPath) => folderIdentitySync(rootPath, disk.stat),
+    });
+    const entry = (workspaceId: string, rootPath: string) => ({ ...personal, workspaceId, rootPath });
+
+    it("refuses the same folder under other capitals, even under another workspace id", () => {
+      const linux = linuxStore();
+      linux.register(entry("ws-1", "/home/sam/fold/Notes"));
+      expect(() => linux.register(entry("ws-2", "/home/sam/fold/notes")))
+        .toThrow("Folder is already attached: /home/sam/fold/Notes");
+      expect(() => linux.register(entry("ws-1", "/home/sam/fold/NOTES")))
+        .toThrow("Folder is already attached: /home/sam/fold/Notes");
+      expect(linux.list().map((w) => w.workspaceId)).toEqual(["ws-1"]);
+    });
+
+    it("still refuses a copied folder that carries the same workspace id", () => {
+      const linux = linuxStore();
+      linux.register(entry("ws-1", "/home/sam/fold/Notes"));
+      expect(() => linux.register(entry("ws-1", "/home/sam/fold/Copy")))
+        .toThrow(/carries the identity of an already attached workspace/);
+    });
+
+    it("keeps Notes and notes apart on a disk that tells capitals apart", () => {
+      const linux = linuxStore();
+      linux.register(entry("ws-1", "/srv/Notes"));
+      linux.register(entry("ws-2", "/srv/notes"));
+      expect(linux.list().map((w) => w.rootPath)).toEqual(["/srv/Notes", "/srv/notes"]);
+    });
+
+    it("loads two saved spellings of one folder as they are, and a missing folder as it is", async () => {
+      await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [
+        entry("ws-1", "/home/sam/fold/Notes"),
+        entry("ws-2", "/home/sam/fold/notes"),
+        entry("ws-gone", "/home/sam/fold/gone"),
+      ] }));
+      const linux = linuxStore();
+      expect(linux.list().map((w) => [w.workspaceId, w.rootPath])).toEqual([
+        ["ws-1", "/home/sam/fold/Notes"],
+        ["ws-2", "/home/sam/fold/notes"],
+        ["ws-gone", "/home/sam/fold/gone"],
+      ]);
+      expect(() => linux.register(entry("ws-3", "/home/sam/fold/NOTES"))).toThrow("Folder is already attached");
+    });
   });
 
   it("reads an entry saved through a link under its folder's real path, and keeps a missing folder's path", async () => {

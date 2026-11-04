@@ -214,7 +214,26 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       account(scope, bytes) { account(scope.workspaceId, scope.datasetId, bytes); }});
     const recoveryFiles = createDatasetRecoveryFiles(storage, (scope, bytes) => account(scope.workspaceId, scope.datasetId, bytes), current);
     createRecoveryInstaller({db: storage.db, transaction, journal});
+    // An import that ended without its Collection leaves an empty usage row, which would refuse creating the Collection here.
+    const dropEmptyUsage = (workspaceId: string, datasetId: string) => storage.tx(() => {
+      storage.db.prepare(`DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=? AND storage_bytes=0
+        AND NOT EXISTS(SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?)
+        AND NOT EXISTS(SELECT 1 FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`)
+        .run(workspaceId, datasetId, workspaceId, datasetId, workspaceId, datasetId);
+    });
     if (options.startupExclusive) {
+      // An import the relay left when it stopped blocks every retry. This process holds the
+      // deployment writer lock and has no host to serve requests yet, so no import is running.
+      const stopped = createRecoveryInstaller<undefined>({db: storage.db, transaction, journal,
+        account(_context, allocation) { account(allocation.workspaceId, allocation.datasetId, allocation.bytes); },
+        discardAttachments(_context, input) { return recoveryFiles.discard(input); }});
+      for (;;) {
+        const row = storage.db.prepare("SELECT import_id,workspace_id,dataset_id FROM dohc_dataset_imports WHERE phase NOT IN ('installed','claimed') LIMIT 1").get();
+        if (!row) break;
+        const workspaceId = String(row.workspace_id), datasetId = String(row.dataset_id);
+        await stopped.discard(undefined, {workspaceId, datasetId, transferId: String(row.import_id), authorize: current});
+        dropEmptyUsage(workspaceId, datasetId);
+      }
       let stageCursor: string | undefined;
       do {
         stageCursor = journal.reclaimCheckpointStages({after: stageCursor, authorize: current,
@@ -330,12 +349,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       async importRecovery(auth: AppBackendAuth, input: Parameters<typeof host.importRecovery>[1]) {
         try {return await host.importRecovery(auth, input);}
         finally {
-          if (!storage.unavailable.aborted) storage.tx(() => {
-            storage.db.prepare(`DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=? AND storage_bytes=0
-              AND NOT EXISTS(SELECT 1 FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?)
-              AND NOT EXISTS(SELECT 1 FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=?)`)
-              .run(input.workspaceId, input.datasetId, input.workspaceId, input.datasetId, input.workspaceId, input.datasetId);
-          });
+          if (!storage.unavailable.aborted) dropEmptyUsage(input.workspaceId, input.datasetId);
         }
       },
       replicaCapture: host.replicaCapture, replicaPage: host.replicaPage, replicaBlob: host.replicaBlob,

@@ -365,6 +365,34 @@ describe("exit rounds", () => {
     expect(r.exits.answer(2, round.roundId, "cancel")).toBe(false);
   });
 
+  // On Windows the updater relaunches dohc after it quits only while the
+  // latest round still approves the update.
+  it("approves the exit of the latest round until a new round or a retraction", async () => {
+    vi.useFakeTimers();
+    const r = rounds({ confirmProceed: async () => true });
+    const update = r.exits.begin("update");
+    expect(r.exits.approvedExit()).toBeNull();
+    r.exits.answer(1, update.roundId, "clear");
+    r.exits.answer(2, update.roundId, "clear");
+    await expect(update.outcome).resolves.toBe("proceed");
+    expect(r.exits.approvedExit()).toBe("update");
+
+    // A quit asked afterwards takes the approval away, and a forced quit
+    // approves a quit, not the update.
+    const quit = r.exits.begin("quit");
+    expect(r.exits.approvedExit()).toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(quit.outcome).resolves.toBe("forced");
+    expect(r.exits.approvedExit()).toBe("quit");
+
+    const again = r.exits.begin("update");
+    r.exits.answer(1, again.roundId, "clear");
+    r.exits.answer(2, again.roundId, "clear");
+    await expect(again.outcome).resolves.toBe("proceed");
+    r.exits.answer(2, again.roundId, "cancel");
+    expect(r.exits.approvedExit()).toBeNull();
+  });
+
   // Wait is not authorization. It keeps the quit vetoed, asks nothing more,
   // and the next explicit quit decides afresh.
   it("does not re-prompt after Wait on a silent window, and a new quit asks again", async () => {

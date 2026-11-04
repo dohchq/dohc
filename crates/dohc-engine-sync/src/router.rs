@@ -228,6 +228,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
                     leases,
                     relay_namespace,
                     &tails,
+                    cache.reader_resolver.as_deref(),
                 )
             },
             |moment| RoutedApply {

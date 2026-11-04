@@ -15,7 +15,7 @@ import {
 } from "react";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { RetryRow } from "../ui/controls";
-import { isDeleteKey } from "../ui/keys";
+import { isContextMenuKey, isDeleteKey } from "../ui/keys";
 import { Menu, type MenuItem } from "../ui/Menu";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { AppMarks } from "./AppsSection";
@@ -63,7 +63,7 @@ export interface ExplorerHomeProps {
   onRename: (path: string, isFolder: boolean) => void;
   onDelete: (paths: string[]) => void;
   // Switches to Files, with this path selected when it has one.
-  onShowInFiles: (path: string | null) => void;
+  onShowInFiles: (paths: readonly string[] | null) => void;
   drag: {
     start: (path: string, event: DragEvent) => void;
     over: (path: string, event: DragEvent) => void;
@@ -379,8 +379,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       return;
     }
     if (row.open === null) {
-      // A pinned folder that is no Collection or app opens in Files.
-      if (row.menu) onShowInFiles(row.menu.path);
+      // A pinned folder that is no Collection or app opens in Files, and so do
+      // the files to fix of a Collection that can't open.
+      if (row.fix) onShowInFiles(row.fix);
+      else if (row.menu) onShowInFiles([row.menu.path]);
       return;
     }
     const tab = parseTab(row.open);
@@ -681,28 +683,41 @@ const HomeRow = memo(function HomeRow(props: {
     : active
       ? "bg-selected font-medium text-ink"
       : "text-muted hover:bg-hover hover:text-ink";
-  const trailing = (onSetPinned ? 1 : 0) + (row.menu ? 1 : 0);
+  const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
+  // How the menu of a Collection that can't open was opened, while it is open.
+  const [fixMenu, setFixMenu] = useState<"pointer" | "keyboard" | null>(null);
+  const rowButton = useRef<HTMLButtonElement | null>(null);
+  const rowBox = useRef<HTMLDivElement | null>(null);
   const dragPath = drag && path ? path : null;
+  // A cause takes its own line under the name, so the name never gives way to
+  // it. The first line keeps the row's 28px, so the mark and ••• stay on it.
+  const cause = row.unavailable ? row.detail : undefined;
   return (
     <li role="none" className="px-1">
       <div
+        ref={rowBox}
         onPointerEnter={reached ? undefined : () => setReached(true)}
-        className={`group relative flex h-7 items-center rounded-md transition-colors duration-75 ${fill}`}
+        className={`group relative flex items-center rounded-md transition-colors duration-75 ${cause ? "" : "h-7"} ${fill}`}
       >
         <button
           type="button"
-          ref={(element) => props.registerRef(row.key, element)}
+          ref={(element) => {
+            rowButton.current = element;
+            props.registerRef(row.key, element);
+          }}
           data-home-key={row.key}
           data-testid={props.testId ?? "home-row"}
           data-path={path}
           data-menu-kind={row.menu?.kind}
+          // The Explorer leaves the Menu key and Shift+F10 to a row with its own menu.
+          data-own-menu={row.fix ? "" : undefined}
           data-root={app?.root}
           data-section={row.section}
           aria-current={active ? "page" : undefined}
           {...(row.folder ? { "aria-expanded": row.expanded } : {})}
           title={row.unavailable ?? (app ? app.root : path)}
-          aria-disabled={row.unavailable ? true : undefined}
+          aria-disabled={row.unavailable && !row.fix ? true : undefined}
           tabIndex={props.tabbable ? 0 : -1}
           draggable={dragPath !== null ? true : undefined}
           onFocus={() => {
@@ -710,14 +725,30 @@ const HomeRow = memo(function HomeRow(props: {
             props.onFocus(row.key);
           }}
           onClick={() => props.onClick(row)}
-          onContextMenu={(event) => props.onContextMenu(row, event)}
+          onKeyDown={row.fix ? (event) => {
+            if (!isContextMenuKey(event)) return;
+            event.preventDefault();
+            setReached(true);
+            setFixMenu("keyboard");
+          } : undefined}
+          onContextMenu={(event) => {
+            props.onContextMenu(row, event);
+            if (!row.fix) return;
+            setReached(true);
+            // The browser's own event after the Menu key keeps the keyboard's open.
+            setFixMenu((current) => current ?? "pointer");
+          }}
           onDragStart={dragPath !== null ? (event) => drag!.start(dragPath, event) : undefined}
           onDragOver={dragPath !== null ? (event) => drag!.over(dragPath, event) : undefined}
           onDrop={dragPath !== null ? (event) => drag!.drop(dragPath, event) : undefined}
           onDragLeave={drag?.leave}
           onDragEnd={drag?.end}
           style={{ paddingLeft: 8 + (row.depth - 1) * 20, paddingRight: 8 + trailing * 24 }}
-          className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left text-[13px] ${active ? "bg-transparent" : ""}`}
+          className={`dohc-focus-row min-w-0 flex-1 items-center rounded-md text-left text-[13px] ${
+            cause
+              ? `grid grid-rows-[28px_auto] gap-x-2 pb-1 ${props.chevronSlot ? "grid-cols-[auto_auto_minmax(0,1fr)]" : "grid-cols-[auto_minmax(0,1fr)]"}`
+              : "flex h-full gap-2"
+          } ${active ? "bg-transparent" : ""}`}
         >
           {props.chevronSlot ? (
             row.folder ? (
@@ -729,10 +760,11 @@ const HomeRow = memo(function HomeRow(props: {
             )
           ) : null}
           <HomeGlyph row={row} active={active} />
-          {/* The folder hint gives way before the name; the title holds the whole path. */}
-          <span className="min-w-0 flex-auto truncate">{row.label}</span>
+          {/* The folder hint gives way before the name; the title holds the whole path.
+              A row with a cause keeps its sentence as the row's title, so its name has its own. */}
+          <span title={cause ? row.label : undefined} className="min-w-0 flex-auto truncate">{row.label}</span>
           {row.detail ? (
-            <span className={`min-w-0 truncate text-[12px] ${row.unavailable ? "shrink-0 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
+            <span className={`min-w-0 truncate text-[12px] ${cause ? "col-[-2/-1] row-start-2 -mt-1 leading-4 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
           ) : null}
           {app ? <AppMarks app={app} /> : null}
         </button>
@@ -765,6 +797,34 @@ const HomeRow = memo(function HomeRow(props: {
               >
                 <MoreHorizontal size={13} aria-hidden />
               </button>
+            ) : null}
+            {row.fix && reached ? (
+              <Menu
+                label={`More actions for ${row.label}`}
+                items={[{ id: "show-in-files", label: "Show in Files", testId: "home-row-show-in-files", onSelect: () => props.onClick(row) }]}
+                open={fixMenu !== null}
+                fromKeyboard={fixMenu === "keyboard"}
+                // Under the cause line, so the list never covers what it acts on.
+                anchor={cause ? rowBox : undefined}
+                // Focus goes back to the row, where Home's arrows and Enter work, not to the •••.
+                onOpenChange={(open) => {
+                  setFixMenu(open ? "pointer" : null);
+                  if (!open) rowButton.current?.focus();
+                }}
+                trigger={(trigger) => (
+                  <button
+                    {...trigger}
+                    type="button"
+                    data-testid="home-row-menu"
+                    aria-label={`More actions for ${row.label}`}
+                    title="More actions"
+                    tabIndex={-1}
+                    className="grid size-6 place-items-center rounded text-subtle opacity-0 hover:bg-hover hover:text-ink aria-expanded:opacity-100 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+                  >
+                    <MoreHorizontal size={13} aria-hidden />
+                  </button>
+                )}
+              />
             ) : null}
           </span>
         ) : null}

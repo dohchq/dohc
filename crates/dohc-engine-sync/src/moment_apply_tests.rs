@@ -5622,7 +5622,7 @@ fn fix1_remote_delete_releases_capture_hold() {
 }
 
 #[test]
-fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrite() {
+fn moment_append_live_lease_blocks_all_mutations_and_write_conflicts_after_close() {
     for (operation, after_path, after_text) in [
         ("write", "head.md", "changed"),
         ("rename", "renamed.md", "before"),
@@ -5775,22 +5775,26 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
             &leases,
         );
         if operation == "write" {
+            // The lineage is not a disposable seed, so the file meets it in a
+            // conflict instead of waiting for a rewrite its origin never makes.
             assert!(matches!(
                 closed,
-                Err(SyncError::RetryableState {
-                    reason: "ydoc-resulting-head-pending"
-                })
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Applied(ref applied),
+                    ..
+                }) if applied.conflicts_opened == 1
             ));
             assert_eq!(
                 read_replication_acked_seq(&store, "ws", &origin_id).expect("write ack"),
-                -1,
-                "the write must wait unacknowledged for its canonical Y.Doc rewrite"
+                0,
+                "the write must be acknowledged once its conflict opens"
             );
             assert_eq!(
                 snapshot(&store, &object_id).unwrap().3,
                 "local-head",
-                "the premature write must roll back"
+                "the conflict keeps the head"
             );
+            assert_eq!(conflict_ids(&store).len(), 1);
             continue;
         }
         assert!(matches!(

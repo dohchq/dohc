@@ -1,5 +1,6 @@
 import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
+import type { DatasetListRefusal } from "@dohc/cli/dataset";
 import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 
 // Electron hands a rejected handler's error to the renderer as one string,
@@ -46,12 +47,15 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
  * store file in it, or this computer's `.dohc/local` is a link, the wrong
  * kind of item, another user's, on a disk or system dohc can't check, or, on
- * Windows, has permissions dohc can't use. The message names the reason,
- * then the path from the workspace's root: one of the paths below, and
- * nothing else.
+ * Windows, has permissions dohc can't use. On Windows the refusal can also
+ * name any item in the engine folder or `.dohc/local`. The message names the
+ * reason, then the path from the workspace's root. The pattern below accepts
+ * only those folders and paths inside the last two.
  */
 const ENGINE_FOLDER_NOT_PRIVATE =
-  /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
+  /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/(?:engine|local)(?:\/[^/\\]+)*)?)$/;
+const PRIVATE_FOLDERS = new Set([".dohc", ".dohc/engine", ".dohc/local"]);
+const STORE_FILE = /^\.dohc\/engine\/engine\.db(?:-wal|-shm|-journal)?$/;
 // What is there, and the fix that keeps everything in it. Only an item dohc
 // never puts there can be moved without losing anything of dohc's.
 const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>([
@@ -66,16 +70,25 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.
 const OTHER_OWNER_FOLDER_FIX = "Make it and everything in it yours again, then try again.";
+// Any other item in those folders. Only an administrator can make it this
+// user's, or change permissions this user can't. Moving it out could lose
+// History, since the workspace's data key is one of them.
+const ITEM_FIXES = new Map([
+  ["other-owner", "Ask an administrator to make it yours, then try again."],
+  ["not-changeable", "Ask an administrator to give your account full control of it, then try again."],
+]);
 
 /** What keeps a workspace's History, or this computer's own data, from being private, and what to do. */
 function engineFolderNotPrivateWords(message: string): string | null {
-  const [, reason = "", path] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
+  const [, reason = "", path = ""] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
   const words = NOT_PRIVATE_WORDS.get(reason);
-  if (words === undefined) return null;
+  if (words === undefined || path.split("/").some((name) => name === "." || name === "..")) return null;
   const [fact, fix] = words;
-  const folder = path === ".dohc" || path === ".dohc/engine" || path === ".dohc/local";
-  const fixed = reason === "other-owner" && folder ? OTHER_OWNER_FOLDER_FIX : fix;
-  const kept = path === ".dohc/local" ? "this computer's own data" : "its History";
+  let fixed = ITEM_FIXES.get(reason) ?? fix;
+  if (PRIVATE_FOLDERS.has(path)) fixed = reason === "other-owner" ? OTHER_OWNER_FOLDER_FIX : fix;
+  // A store file another user owns keeps the words a Mac sends for it.
+  else if (STORE_FILE.test(path) && reason === "other-owner") fixed = fix;
+  const kept = path.startsWith(".dohc/local") ? "this computer's own data" : "its History";
   return `This workspace's ${path} ${fact}, so dohc can't keep ${kept} private. ${fixed}`;
 }
 
@@ -434,23 +447,6 @@ export function collectionsElsewhereWords(computer: { label: string; sameName: b
 export interface CollectionsElsewhere { computer: string | null; others: boolean; words: string }
 
 /**
- * The code of a Collections list this computer's server didn't give, where
- * another computer keeps the workspace's own Collections.
- */
-export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
-
-/**
- * main's words for that list: on the first line, where the workspace's
- * Collections are. After it, the server's error, which reads as it would alone.
- */
-export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; computer: string | null; failure: string } | null {
-  const { name, code, computer, message } = parse(error);
-  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
-  const [elsewhere = "", ...failure] = message.split("\n");
-  return elsewhere ? { elsewhere, computer, failure: failure.join("\n") } : null;
-}
-
-/**
  * main's refusal to use a workspace's Collections here, with its words.
  * Another computer's refusal names it, or null when the error named none.
  */
@@ -504,6 +500,13 @@ export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead |
   const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
   if (kind === "elsewhere") return { kind, words: message, computer };
   return kind === undefined ? null : { kind, words: message };
+}
+
+/** A list main refused, as the error a report reads it from. */
+export function collectionsRefusalError(refusal: DatasetListRefusal): Error {
+  if (refusal.kind === "server-unavailable") return Object.assign(new Error(`${refusal.words}\n${refusal.failure}`), { name: "ServerCollectionsUnavailableError" });
+  return Object.assign(new Error(refusal.words), { name: "CollectionsRefusalError", code: `${COLLECTIONS_REFUSAL_CODE}${refusal.kind}`,
+    computerLabel: refusal.kind === "elsewhere" ? refusal.computer : null });
 }
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */

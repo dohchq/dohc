@@ -1059,6 +1059,7 @@ mod markdown_write_hold;
 mod ordinary_pull_progress;
 mod outbound_authors;
 pub(crate) mod owner_publication;
+mod record_file_edit;
 mod recover;
 mod relay_pull;
 mod relay_pull_bench;

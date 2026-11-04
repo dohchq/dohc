@@ -1,16 +1,35 @@
-# dohc
+<a href="https://dohc.computer">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="social-assets/dohc-readme-banner-dark.png">
+    <img src="social-assets/dohc-social-banner.png" alt="dohc. Build and share small apps with your agents.">
+  </picture>
+</a>
 
-dohc is a local-first workspace for people and their agents. It brings files, documents, data, chat, and web apps together.
+<p align="center">
+  <a href="https://dohc.computer/#downloads"><img alt="Download for macOS, Windows, and Linux" src="https://img.shields.io/badge/download-macOS%20%7C%20Windows%20%7C%20Linux-2d342e?style=flat-square"></a>
+  <a href="#where-it-is-today"><img alt="Early alpha" src="https://img.shields.io/badge/status-early%20alpha-2d342e?style=flat-square"></a>
+  <a href="LICENSE"><img alt="License AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-2d342e?style=flat-square"></a>
+</p>
 
-The ambition is a work suite you can reshape with your own agents. dohc supplies sync, sharing, permissions, and history. You own the work.
+<p align="center">
+  <a href="https://dohc.computer">Website</a> |
+  <a href="https://dohc.computer/#downloads">Download</a> |
+  <a href="docs/README.md">Docs</a> |
+  <a href="docs/how-to/self-host.md">Self-host</a> |
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-[Download the newest nightly build](https://github.com/dohchq/dohc/releases) or [run it from source](#run-it-from-source).
+dohc is a free, open-source desktop app for building and sharing small apps with your agents. It's a local-first workspace for your files, documents, data, chat, and apps, with sync, sharing, permissions, and history built in.
+
+When an agent builds you a tool, dohc gives it a place for its data, a share link with the access you choose, and a chat where people and their agents keep working on it.
+
+[Download the newest nightly build](https://dohc.computer/#downloads) or [run it from source](#run-it-from-source).
 
 ## Why this exists
 
-Agents can build useful tools, but making those tools usable by a group still takes work. Someone must connect the data, set up access, share the result, and keep it working as needs change.
+Agents can build a small app really quickly. Then every app needs the same few things. It needs a place for its data, an interface people already know, a safe way for other people to use it, a way to work on it together, and a record of what each agent made.
 
-dohc is being built to provide those common parts in one workspace. You and your agents decide what to build, using familiar files, documents, and web apps.
+Developers can wire that up with git, MCP servers, Tailscale, Supabase, and Cloudflare. It's tedious, so most of these apps stay on one laptop, and most people don't build them at all. dohc puts that setup in one app.
 
 Agents now write much of the software people run, and few people read it. The more an agent builds for you, the more you depend on the layer underneath. dohc owns that layer. Sync, history, permissions, and app isolation work the same whether a person or an agent made the change, so you can let an agent build an app without reading its code to know what data it can reach.
 
@@ -22,9 +41,9 @@ dohc is agent agnostic. It does not provide an agent or prescribe how agents sho
 
 Workspace apps are web apps whose source lives in the workspace. Collaborators can inspect and edit the source with their own tools and agents. Apps receive only the workspace data and capabilities their owner exposes.
 
-Published apps can be opened through a share link by people who do not use dohc, subject to the owner's access settings. Publishing from the packaged desktop requires Windows x64 or an Apple silicon Mac running macOS 13.5 or later, and a self-hosted server with app publishing enabled. It is disabled in the default server bundle; see the [self-hosting guide](docs/how-to/self-host.md).
+Published apps can be opened through a share link by people who do not use dohc, subject to the owner's access settings. Publishing from the packaged desktop requires Windows x64, an Apple silicon Mac running macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled. It also requires a self-hosted server with app publishing enabled. It is disabled in the default server bundle; see the [self-hosting guide](docs/how-to/self-host.md).
 
-Apps can use approved Collection data through the operations their owner grants. Creating local Collection-backed apps requires Windows x64 or an Apple silicon Mac running macOS 13.5 or later. See the [app backend guide](docs/how-to/app-backend.md) for data, sharing, and current limits, and the [desktop capability requirements](docs/reference/desktop-capabilities.md) for platform and service limits.
+Apps can use approved Collection data through the operations their owner grants. Creating local Collection-backed apps requires Windows x64, an Apple silicon Mac running macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled. See the [app backend guide](docs/how-to/app-backend.md) for data, sharing, and current limits, and the [desktop capability requirements](docs/reference/desktop-capabilities.md) for platform and service limits.
 
 ## Where it is today
 
@@ -32,17 +51,21 @@ dohc is an early alpha, released as nightly builds. Download the newest one from
 
 The desktop app currently includes:
 
-- Local workspaces that open ordinary folders on your computer.
+- Workspace apps whose source lives in the workspace, with Collection data, forms, and share links.
+- Collections with table, board, and calendar views.
 - A rich Markdown editor with wikilinks, backlinks, and a graph view.
-- Search across workspace files and chats.
+- Drawings and diagrams that sit in the same folder as your docs.
+- Workspace chat that people and outside agents can use.
 - Version history with diffs and restore.
-- Workspace chat that humans and external agents can use.
+- Search across workspace files and chats.
+- A `dohc` CLI and an MCP server, so any agent can work in a workspace.
+- Local workspaces that open ordinary folders on your computer.
 - Local web project previews.
 - Optional self-hosted sync, sharing, presence, and live co-editing.
 
 Local work does not require an account or server. Sync and sharing use a server you operate.
 
-**dohc Drive is coming soon.** It will be the managed service, with a planned free tier. dohc will handle hosting, setup, and maintenance. Self-hosting provides the same collaboration capabilities; you operate the services and choose who can reach them.
+**dohc Drive is coming soon.** It will be the managed service, with a planned free tier. It will also host the apps you publish. dohc will handle hosting, setup, and maintenance. Self-hosting provides the same collaboration capabilities; you operate the services and choose who can reach them.
 
 Follow the [self-hosting guide](docs/how-to/self-host.md) to set up a server and connect the desktop app.
 

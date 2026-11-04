@@ -17,12 +17,12 @@ import { shortcutTitle } from "../shortcuts/shortcutRegistry";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
 import {
   applyFrontmatter,
-  FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEntries,
   frontmatterEntriesFromPairs,
   type FrontmatterEntry,
   listItems,
 } from "./markdown/frontmatter";
+import { type OpenExternallyTarget, ReadOnlyPropertiesFlag } from "./fileInspectorUi";
 import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
 
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
@@ -66,6 +66,8 @@ export type PropertiesPanelProps = (
   // The engine's ID for the record this note is. An `id` line with exactly
   // that value hides nothing, so it counts as shown.
   recordId?: string;
+  // The note's file, which read-only properties offer to open externally.
+  file?: OpenExternallyTarget;
 };
 
 function isReserved(key: string): boolean {
@@ -92,10 +94,15 @@ function duplicateKeySet(entries: FrontmatterEntry[]): Set<string> {
   );
 }
 
-// Whether another row saves under this name, whatever its case.
-function nameTaken(index: number, key: string, entries: FrontmatterEntry[]): boolean {
+// Whether another property has this name, whatever its case: another row, or
+// a key of the note as it is now that this row wasn't read as. The note can
+// hold a property another device added before the rows read it.
+function nameTaken(index: number, key: string, entries: FrontmatterEntry[], noteKeys: readonly string[]): boolean {
   const name = key.trim().toLowerCase();
-  return name !== "" && entries.some((entry, i) => i !== index && propertyKey(entry)?.trim().toLowerCase() === name);
+  if (name === "" || isReserved(name)) return false;
+  const same = (other: string | null | undefined) => other?.trim().toLowerCase() === name;
+  return entries.some((entry, i) => i !== index && same(propertyKey(entry)))
+    || noteKeys.some((noteKey) => noteKey !== entries[index]?.sourceKey && same(noteKey));
 }
 
 function shouldDeferKeyCommit(
@@ -118,22 +125,6 @@ function editableEntries(entries: FrontmatterEntry[]): FrontmatterEntry[] {
   return entries.filter((entry) => !isReserved(entry.key));
 }
 
-function buildProperties(
-  currentEntries: FrontmatterEntry[],
-  nextEntries: FrontmatterEntry[],
-): Record<string, unknown> {
-  // A property named `__proto__` stays a property.
-  const props = nullPrototypeRecord();
-  for (const entry of currentEntries) {
-    if (isReserved(entry.key)) props[entry.key] = entryValue(entry);
-  }
-  for (const entry of nextEntries) {
-    const key = propertyKey(entry);
-    if (key) props[key] = entryValue(entry);
-  }
-  return props;
-}
-
 function entryValue(entry: FrontmatterEntry): unknown {
   if (entry.sourceValue === entry.value && Object.hasOwn(entry, "rawValue")) {
     return entry.rawValue;
@@ -141,97 +132,95 @@ function entryValue(entry: FrontmatterEntry): unknown {
   return entry.list ? listItems(entry.value) : entry.value;
 }
 
-// A pill added here has no key until it saves, so it carries a number of its own.
-type Row = FrontmatterEntry & { added?: number };
+// A pill keeps its ID while its property is renamed or rows around it change,
+// so focus and typing stay on it. A pill added here has no `sourceKey` until
+// it saves.
+type Row = FrontmatterEntry & { id: number };
 
-function rowId(row: Row): string | number | undefined {
-  return row.sourceKey ?? row.added;
+let lastRowId = 0;
+function newRow(entry: FrontmatterEntry): Row {
+  lastRowId += 1;
+  return { ...entry, id: lastRowId };
 }
 
-// Rows read from storage, in the order they show. Each pill added here that
+// Rows read from storage, in the order they show. A row keeps its ID and a
+// name typed into it that isn't saved yet. A key renamed elsewhere takes the
+// place its old key left; other new keys follow. A pill added here that
 // storage doesn't hold yet keeps its place, so saving one pill never moves
 // another under the person typing.
-function withAdded(read: FrontmatterEntry[], shown: Row[]): Row[] {
-  const rows: Row[] = inShownOrder(read, shown);
+function withRead(read: FrontmatterEntry[], shown: Row[]): Row[] {
+  const shownAt = read.map((entry) => shown.findIndex((row) => row.sourceKey === entry.key));
+  const left = shown.flatMap((row, index) => (row.sourceKey === undefined || shownAt.includes(index) ? [] : [index]));
+  const added = shownAt.flatMap((index, entry) => (index === -1 ? [entry] : []));
+  const place = shownAt.map((index) => (index === -1 ? shown.length : index));
+  if (left.length === 1 && added.length === 1) place[added[0]!] = left[0]!;
+  const rows = read
+    .map((entry, index) => {
+      const row = shown[shownAt[index]!];
+      return { row: row ? { ...entry, id: row.id, key: row.key } : newRow(entry), place: place[index]! };
+    })
+    .sort((first, second) => first.place - second.place)
+    .map(({ row }) => row);
   shown.forEach((row, index) => {
-    if (row.sourceKey === undefined && !read.some((entry) => entry.sourceKey === propertyKey(row))) {
-      rows.splice(Math.min(index, rows.length), 0, row);
-    }
+    if (row.sourceKey === undefined) rows.splice(Math.min(index, rows.length), 0, row);
   });
   return rows;
 }
 
 // The key a row saves under. A name left as it was read keeps that exact key,
-// spaces included, and so does a name cleared or changed to a reserved one.
+// spaces included or empty, and so does a name cleared or changed to a
+// reserved one.
 function propertyKey(entry: FrontmatterEntry): string | null {
   const key = entry.key === entry.sourceKey ? entry.key : (editableKey(entry) ?? entry.sourceKey);
-  return key && !isReserved(key) ? key : null;
+  return key !== undefined && !isReserved(key) ? key : null;
 }
 
-function valuesByEditableKey(entries: FrontmatterEntry[]): Map<string, unknown> {
-  const values = new Map<string, unknown>();
-  for (const entry of entries) {
-    const key = propertyKey(entry);
-    if (key) values.set(key, entryValue(entry));
-  }
-  return values;
-}
-
-/** Each renamed property's old key and new key. */
-function renamedKeys(
-  previousEntries: FrontmatterEntry[],
-  nextEntries: FrontmatterEntry[],
-): Map<string, string> {
-  const previous = valuesByEditableKey(previousEntries);
-  const next = valuesByEditableKey(nextEntries);
-  const renamed = new Map<string, string>();
-  for (const entry of nextEntries) {
-    const to = propertyKey(entry);
-    if (entry.sourceKey !== undefined && to !== null && entry.sourceKey !== to
-      && previous.has(entry.sourceKey) && !next.has(entry.sourceKey)) {
-      renamed.set(entry.sourceKey, to);
-    }
-  }
-  return renamed;
-}
-
-// A live document's map adds a renamed key last, and a file adds a new key
-// last. Rows keep the order they show, so the row being named stays under the
-// person typing. A key renamed elsewhere takes the row its old key left; a
-// pill storage never held left no row. Other new keys follow.
-function inShownOrder(entries: FrontmatterEntry[], shown: FrontmatterEntry[]): FrontmatterEntry[] {
-  const rows = entries.map((entry) => {
-    const held = shown.findIndex((candidate) => candidate.sourceKey === entry.key);
-    return held === -1 ? shown.findIndex((candidate) => propertyKey(candidate) === entry.key) : held;
+// What saving `next` changes, measured from what each row was read as, so a
+// property the rows haven't read yet stays as it is. `saves` holds the key
+// each row saves under. A row given a name another property has keeps the
+// name it was read with, so it never writes over that property.
+function rowChanges(shown: Row[], next: Row[], noteKeys: readonly string[], readNote: () => readonly FrontmatterEntry[]) {
+  const saves = next.map((row, index) => {
+    const key = propertyKey(row);
+    return key !== null && key !== row.sourceKey && nameTaken(index, key, next, noteKeys) ? (row.sourceKey ?? null) : key;
   });
-  const left = shown.flatMap((candidate, row) => (rows.includes(row) || candidate.sourceKey === undefined ? [] : [row]));
-  const added = rows.flatMap((row, index) => (row === -1 ? [index] : []));
-  if (left.length === 1 && added.length === 1) rows[added[0]!] = left[0]!;
-  return entries
-    .map((entry, index) => ({ entry, row: rows[index] === -1 ? shown.length : rows[index]! }))
-    .sort((first, second) => first.row - second.row)
-    .map(({ entry }) => entry);
+  const values = new Map<string, unknown>();
+  const renamed = new Map<string, string>();
+  let note: readonly FrontmatterEntry[] | undefined;
+  saves.forEach((key, index) => {
+    const row = next[index]!;
+    if (key === null) return;
+    // A row the person left alone never writes, whatever a later read decoded for it.
+    if (key !== row.sourceKey || row.value !== row.sourceValue) {
+      // A rename that leaves the value as it was read moves the value the note
+      // holds now. Another device can have changed it since the rows read it.
+      const now = key !== row.sourceKey && row.value === row.sourceValue
+        ? (note ??= readNote()).find((entry) => entry.key === row.sourceKey)
+        : undefined;
+      values.set(key, entryValue(now ?? row));
+    }
+    if (row.sourceKey !== undefined && key !== row.sourceKey && !saves.includes(row.sourceKey)) {
+      renamed.set(row.sourceKey, key);
+    }
+  });
+  const remove = shown.flatMap((row) =>
+    row.sourceKey === undefined || saves.includes(row.sourceKey) ? [] : [row.sourceKey]);
+  return { saves, values, remove, renamed };
 }
 
-function applySharedFrontmatterPatch(
-  doc: Y.Doc,
-  previousEntries: FrontmatterEntry[],
-  nextEntries: FrontmatterEntry[],
-) {
-  const previous = valuesByEditableKey(previousEntries);
-  const next = valuesByEditableKey(nextEntries);
-
-  const remove = [...previous.keys()].filter(key => !next.has(key));
-  // A row holds the key and value it was read or written with. A row the
-  // person left alone never writes, whatever a later read decoded for it.
-  const values = new Map<string, unknown>();
-  for (const entry of nextEntries) {
-    const key = propertyKey(entry);
-    if (key !== null && (key !== entry.sourceKey || entry.value !== entry.sourceValue)) {
-      values.set(key, entryValue(entry));
-    }
-  }
-  patchFrontmatter(doc, values, remove, renamedKeys(previousEntries, nextEntries));
+// A file's properties with the rows' changes. Every other property, reserved
+// or not, stays as the file holds it now.
+function changedProperties(
+  read: FrontmatterEntry[],
+  values: ReadonlyMap<string, unknown>,
+  remove: readonly string[],
+): Record<string, unknown> {
+  // A property named `__proto__` stays a property.
+  const props = nullPrototypeRecord();
+  for (const entry of read) props[entry.key] = entryValue(entry);
+  for (const key of remove) delete props[key];
+  for (const [key, value] of values) props[key] = value;
+  return props;
 }
 
 // The map has no order of its own, so rows follow the kept text, as the file
@@ -320,8 +309,12 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     [body, ydoc, ydocRevision],
   );
   const [entries, setEntries] = useState<Row[]>(() =>
-    editableEntries(sourceEntries),
+    editableEntries(sourceEntries).map(newRow),
   );
+  // The file as this panel last wrote it, until the parent passes another
+  // body. The rows hold what they wrote, so the next save starts from it, and
+  // so does a refresh of the rows that lands after that save.
+  const written = useRef<{ from: string; to: string } | null>(null);
 
   useEffect(() => {
     if (!ydoc) return;
@@ -355,9 +348,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   useEffect(() => {
     // This can apply after the person's next keystroke has changed the
-    // document, so a live document's rows read the document as it is now.
+    // document, so the rows read the document as it is now: a live document,
+    // or the file as this panel last wrote it.
+    if (written.current?.from !== body) written.current = null;
     setEntries((shown) =>
-      withAdded(editableEntries(ydoc ? liveEntries(ydoc) : sourceEntries), shown),
+      withRead(editableEntries(ydoc ? liveEntries(ydoc) : fileEntries()), shown),
     );
     setEditRefused(false);
   }, [sourceEntries, ydoc]);
@@ -369,39 +364,52 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   const readOnly = props.readOnly ?? false;
   const refused = locked || opening || readOnly;
 
-  function commit(next: FrontmatterEntry[]) {
+  function fileText(): string | null {
+    return written.current?.from === body ? written.current.to : null;
+  }
+  function fileEntries(): FrontmatterEntry[] {
+    const file = fileText();
+    return file === null ? sourceEntries : frontmatterEntries(file);
+  }
+
+  // The note's keys as it is now. A live note's map can hold a key its update
+  // hasn't brought to the rows yet.
+  function noteKeys(): string[] {
+    return ydoc ? Array.from(ydoc.getMap(FRONTMATTER_FIELD).keys()) : fileEntries().map((entry) => entry.key);
+  }
+
+  function commit(next: Row[]) {
     if (refused) return;
-    const previous = editableEntries(sourceEntries);
-    setEntries(next);
+    const { saves, values, remove, renamed } = rowChanges(entries, next, noteKeys(), () => (ydoc ? liveEntries(ydoc) : fileEntries()));
     try {
-      if (ydoc) {
-        applySharedFrontmatterPatch(ydoc, previous, next);
-        // Each row now holds the key and value it wrote. The document's update
-        // reaches the rows later, and a keystroke before then edits from here.
-        setEntries(next.map((entry) => {
-          const key = propertyKey(entry);
-          return key === null
-            ? entry
-            : { ...entry, sourceKey: key, sourceValue: entry.value, rawValue: entryValue(entry) };
-        }));
-      } else {
-        props.onChange?.(
-          applyFrontmatter(body, buildProperties(sourceEntries, next), renamedKeys(previous, next)),
-        );
+      if (values.size > 0 || remove.length > 0) {
+        if (ydoc) patchFrontmatter(ydoc, values, remove, renamed);
+        else {
+          const to = applyFrontmatter(fileText() ?? body, changedProperties(fileEntries(), values, remove), renamed);
+          props.onChange?.(to);
+          written.current = { from: body, to };
+        }
       }
-      setEditRefused(false);
     } catch {
-      setEntries(withAdded(previous, entries));
+      // The rows stay as they were before this edit.
       setEditRefused(true);
+      return;
     }
+    // Each row now holds the key and value it wrote. The document's update
+    // reaches the rows later, and a keystroke before then edits from here.
+    setEntries(next.map((row, index) => {
+      const key = saves[index];
+      return key === null ? row : { ...row, sourceKey: key, sourceValue: row.value, rawValue: entryValue(row) };
+    }));
+    setEditRefused(false);
   }
 
   // A name another property has can't be saved. It stays on its pill, apart
   // from the rows that save, so every other property keeps saving as you type.
   // It goes once its pill goes or no other property has the name.
-  const [heldName, setHeldName] = useState<{ row: string | number | undefined; text: string } | null>(null);
+  const [heldName, setHeldName] = useState<{ row: number; text: string } | null>(null);
   const heldRow = heldName
-    ? entries.findIndex((entry, index) => rowId(entry) === heldName.row && nameTaken(index, heldName.text, entries))
+    ? entries.findIndex((entry, index) => entry.id === heldName.row && nameTaken(index, heldName.text, entries, noteKeys()))
     : -1;
   useLayoutEffect(() => {
     if (heldName && heldRow === -1) setHeldName(null);
@@ -409,8 +417,8 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   function setKey(index: number, key: string) {
     const entry = entries[index];
-    if (entry && nameTaken(index, key, entries)) {
-      setHeldName({ row: rowId(entry), text: key });
+    if (entry && nameTaken(index, key, entries, noteKeys())) {
+      setHeldName({ row: entry.id, text: key });
       // The row keeps the name it was read with until the new name is free.
       const read = entry.sourceKey ?? "";
       if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
@@ -425,21 +433,19 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(next);
   }
 
-  // The list being typed in: its row, the key it was read with, and the text
-  // so far. Each edit saves at once, as any other value does. The row shows
-  // the text as typed, such as a trailing comma, while it still reads as the
-  // list the document holds; once the document holds another list, the row
-  // shows that.
-  const [listDraft, setListDraft] = useState<{ index: number; key: string; text: string } | null>(null);
-  function draftText(index: number): string | undefined {
-    const entry = entries[index];
-    return entry?.list && listDraft?.index === index && listDraft.key === (entry.sourceKey ?? entry.key)
+  // The list being typed in: its row and the text so far. Each edit saves at
+  // once, as any other value does. The row shows the text as typed, such as a
+  // trailing comma, while it still reads as the list the document holds; once
+  // the document holds another list, the row shows that.
+  const [listDraft, setListDraft] = useState<{ row: number; text: string } | null>(null);
+  function draftText(entry: Row): string | undefined {
+    return entry.list && listDraft?.row === entry.id
       && sameFrontmatterValue(listItems(listDraft.text), entryValue(entry))
       ? listDraft.text
       : undefined;
   }
   useLayoutEffect(() => {
-    if (listDraft && draftText(listDraft.index) === undefined) setListDraft(null);
+    if (listDraft && !entries.some((entry) => draftText(entry) !== undefined)) setListDraft(null);
   });
 
   // A list edit that leaves the same items writes nothing, so the file keeps
@@ -447,7 +453,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   function setValue(index: number, value: string) {
     const entry = entries[index];
     if (entry?.list) {
-      setListDraft({ index, key: entry.sourceKey ?? entry.key, text: value });
+      setListDraft({ row: entry.id, text: value });
       if (sameFrontmatterValue(listItems(value), entryValue(entry))) return;
     }
     commit(entries.map((row, i) => (i === index ? { ...row, value } : row)));
@@ -466,11 +472,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     element?.focus();
   });
 
-  const added = useRef(0);
   function add() {
     focusNext.current = entries.length;
-    added.current += 1;
-    const row: Row = { key: "", value: "", added: added.current };
+    const row = newRow({ key: "", value: "" });
     setEntries((current) => [...current, row]);
   }
 
@@ -494,9 +498,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">
       <div ref={line} className={PROPERTIES_LINE}>
         {(locked || editRefused) && !readOnly ? (
-          <span data-testid="properties-locked" className={TOPMATTER_FLAG} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>
-            Edit in Source
-          </span>
+          <ReadOnlyPropertiesFlag testId="properties-locked" label="Properties are read-only" file={props.file} />
         ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
@@ -504,7 +506,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
           const duplicate = held !== undefined || duplicates.has(entry.key.trim().toLowerCase());
           const automations = props.fieldMarks?.get(entry.key.trim());
           return (
-            <div key={index} data-testid="property-row" className={PILL}>
+            <div key={entry.id} data-testid="property-row" className={PILL}>
               <input
                 data-testid="property-key"
                 aria-label={`Property ${index + 1} name`}
@@ -543,7 +545,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <input
                   data-testid="property-value"
                   aria-label={`Property ${entry.key || index + 1} value`}
-                  value={draftText(index) ?? entry.value}
+                  value={draftText(entry) ?? entry.value}
                   // A value longer than the pill ends in an ellipsis; its
                   // tooltip holds all of it.
                   title={entry.value || undefined}

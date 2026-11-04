@@ -2647,6 +2647,7 @@ impl DriverEnv for RealEnv {
         }
         let files = layer.files.handle();
         if offer_unrecorded_after_release(
+            &self.actor,
             &self.leases,
             &self.workspace_id,
             &mut self.lease_releases_seen,
@@ -3786,7 +3787,12 @@ async fn materialize_ydoc_recoveries(
 /// New files, deleted files, and outside writes wait for sessions. All need a
 /// rescan even when nothing on disk changes after the session ends. Also wake
 /// quarantined paths: once the WAL is reused in place, nothing else will.
+///
+/// A session can also settle a document whose file is deleted before capture
+/// records it, or one too large for capture to track. Offer every record a
+/// restart would seed, so a scan that finds its file gone retires it.
 async fn offer_unrecorded_after_release(
+    actor: &ActorHandle,
     leases: &LeaseRegistry,
     workspace_id: &str,
     releases_seen: &mut u64,
@@ -3800,7 +3806,26 @@ async fn offer_unrecorded_after_release(
     if matches!(files.stats().await, Ok(stats) if stats.deferred > 0 || stats.quarantined > 0) {
         files.request_rescan();
     }
+    if let Ok(version_id) = actor.active_version_id(workspace_id.to_owned()).await
+        && let Ok(seed) = actor
+            .capture_manifest_seed(workspace_id.to_owned(), version_id)
+            .await
+    {
+        let _ = files
+            .offer_retire_candidates(release_offer_paths(seed))
+            .await;
+    }
     true
+}
+
+/// The seed paths a release offers as retire candidates. Secret tips stay out:
+/// no document session settles them, and their retire does not wait for a
+/// version switch to place the file.
+fn release_offer_paths(seed: Vec<dohc_engine_domain::CaptureManifestSeedEntry>) -> Vec<String> {
+    seed.into_iter()
+        .filter(|entry| entry.sha256 != dohc_engine_domain::SECRET_SEED_SENTINEL_SHA)
+        .map(|entry| entry.path)
+        .collect()
 }
 
 /// Resolve a prepared plan whose apply never ran: acknowledge with every op

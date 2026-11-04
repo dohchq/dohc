@@ -367,6 +367,37 @@ describe('live property renames', () => {
     }
   })
 
+  it('refuses a rename onto a property another device added before the write', () => {
+    const doc = markdownToYDoc('---\nstatus: draft\n---\n\nBody')
+    const replica = new Y.Doc()
+    try {
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc))
+      const value = doc.getMap('frontmatter').get('status')
+      setFrontmatterValue(replica, 'state', 'remote')
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc)))
+      const before = Y.encodeStateAsUpdate(doc)
+
+      expect.soft(() => rename(doc, 'status', 'state', value)).toThrow()
+
+      expect(frontmatterMapValues(doc.getMap('frontmatter'))).toEqual({ status: 'draft', state: 'remote' })
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
+    } finally { replica.destroy(); doc.destroy() }
+  })
+
+  // The Properties panel counts names that differ only in case or the spaces
+  // around them as the same name, so the write refuses them too.
+  it('refuses a rename onto a name the document has in another case, and allows a change of case', () => {
+    const doc = markdownToYDoc('---\nstatus: draft\n" State ": remote\n---\n\nBody')
+    try {
+      const before = Y.encodeStateAsUpdate(doc)
+      expect(() => rename(doc, 'status', 'state')).toThrow(refusal)
+      expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
+
+      rename(doc, 'status', 'Status')
+      expect(frontmatterMapValues(doc.getMap('frontmatter'))).toEqual({ Status: 'draft', ' State ': 'remote' })
+    } finally { doc.destroy() }
+  })
+
   it('never brings back the comments of a deleted key', () => {
     const renamedOnto = markdownToYDoc(budget)
     const recreated = markdownToYDoc(budget)

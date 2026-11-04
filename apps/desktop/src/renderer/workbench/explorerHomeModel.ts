@@ -34,13 +34,19 @@ export type HomeRowModel = {
   expanded: boolean;
   // Muted text at the end of the row, such as an Other file's folder.
   detail?: string;
-  // Why the row cannot open, such as a Collection whose source is gone.
+  // Why the row cannot open, as the sentence that says what to fix. It is the
+  // row's tooltip and description.
   unavailable?: string;
+  // The files to fix, which the row's click and menu show in Files.
+  fix?: readonly string[];
 };
 
 export type DataCollection = {
   datasetId: string;
   datasetPath: string | null;
+  /** Why a Collection with no `datasetPath` can't open, and the dataset.json files to fix. */
+  datasetAddressStatus?: "available" | "missing" | "ambiguous" | "unreadable";
+  datasetPaths?: readonly string[];
   tableId: string;
   name: string;
   archived?: boolean;
@@ -249,6 +255,19 @@ export function recentRows(recent: readonly string[], lookup: HomeLookup): HomeR
   return out;
 }
 
+// A Collection that can't open shows its cause in place of its detail. One
+// whose dataset.json files are in this workspace shows them in Files.
+function unavailableWords(entry: DataCollection): Pick<HomeRowModel, "detail" | "unavailable" | "fix"> {
+  const fix = entry.datasetPaths ?? [];
+  if (entry.datasetAddressStatus === "ambiguous") {
+    return { detail: `${fix.length} dataset.json files`, unavailable: "Several dataset.json files name this Collection. Keep one and remove the others.", fix };
+  }
+  if (entry.datasetAddressStatus === "unreadable") {
+    return { detail: "Can't read dataset.json", unavailable: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.", fix };
+  }
+  return { detail: "Not in this share", unavailable: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." };
+}
+
 // The Collections rows: dataset Collections in the order the engine lists
 // them, then folder Collections by name.
 export function collectionRows(data: readonly DataCollection[], collectionFolders: ReadonlySet<string>): HomeRowModel[] {
@@ -260,9 +279,7 @@ export function collectionRows(data: readonly DataCollection[], collectionFolder
     glyph: { glyph: "collection", icon: undefined },
     open: entry.datasetPath === null ? null : transactionalCollectionTabPath(entry.datasetPath, entry.tableId),
     menu: entry.datasetPath === null ? null : datasetMenu(entry.datasetPath),
-    ...(entry.datasetPath === null
-      ? { detail: "Source unavailable", unavailable: "Collection source unavailable. Restore dataset.json from History or remove duplicate copies." }
-      : entry.archived ? { detail: "Archived" } : {}),
+    ...(entry.datasetPath === null ? unavailableWords(entry) : entry.archived ? { detail: "Archived" } : {}),
   }));
   const folders = [...collectionFolders].sort((a, b) => collator.compare(basenameOf(a), basenameOf(b)));
   for (const folder of folders) rows.push(collectionRow({ ...base, key: `collections:${folder}/` }, folder));

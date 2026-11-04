@@ -111,6 +111,7 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { isInside } from "../security/pathContainment";
+import { deepestRoot, pathUnderRoot } from "../workspaces/workspaceRootIdentity";
 import type { ChatWrites, PersonWriter } from "../workspaces/chatWrites";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import type { AutomationRunRetry } from "../automations/automationNotices";
@@ -485,19 +486,17 @@ export async function resolveCliWorkspace(
 ): Promise<CliRegistryWorkspace | null> {
   const absoluteCwd = await realpath(resolve(cwd)).catch(() => null);
   if (absoluteCwd === null) return null;
-  const candidates = (
+  const roots = (
     await Promise.all(
       workspaces.map(async (workspace) => {
         const root = await realpath(resolve(workspace.rootPath)).catch(() => null);
-        return root === null ? null : { workspace, root };
+        return root === null ? [] : [{ entry: workspace, path: root }];
       }),
     )
-  )
-    .filter((candidate): candidate is { workspace: CliRegistryWorkspace; root: string } =>
-      candidate !== null && isInside(candidate.root, absoluteCwd)
-    )
-    .sort((left, right) => right.root.length - left.root.length);
-  return candidates[0]?.workspace ?? null;
+  ).flat();
+  // The deepest root among the cwd's folders, matched on disk when Linux
+  // keeps another spelling of a folder that ignores capitals.
+  return (await deepestRoot(absoluteCwd, roots))?.entry ?? null;
 }
 
 function tokenMatches(expected: string, supplied: string): boolean {
@@ -1347,17 +1346,18 @@ async function workspaceRelativePath(
   const root = await realpath(resolve(context.rootPath));
   let canonical: string;
   try {
-    canonical = await realpath(absolute);
-    if (!isInside(root, canonical)) {
+    const placed = await pathUnderRoot(root, await realpath(absolute));
+    if (placed === null) {
       throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
+    canonical = placed;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    const realParent = await realpath(dirname(absolute)).catch(() => {
+    const realParent = await pathUnderRoot(root, await realpath(dirname(absolute)).catch(() => {
       throw new CliCommandError(`${noun} is not a tracked workspace file: ${path}`);
-    });
-    if (!isInside(root, realParent)) {
+    }));
+    if (realParent === null) {
       throw new CliCommandError(`${noun} is outside this workspace: ${path}`);
     }
     const suppliedName = basename(path);
@@ -2304,8 +2304,9 @@ type CliPathMode = "read" | "write" | "materialize";
 // Validate the caller spelling before rebasing, then validate workspace authority.
 async function callerPaths(context: CliWorkspaceContext, cwd: string) {
   const root = await realpath(context.rootPath);
-  const folder = await realpath(cwd);
-  if (!isInside(root, folder)) throw new CliCommandError("not inside a dohc workspace");
+  // The cwd under the workspace's own spelling, so every rebased path is too.
+  const folder = await pathUnderRoot(root, await realpath(cwd));
+  if (folder === null) throw new CliCommandError("not inside a dohc workspace");
   const known = new Map<string, string>();
   const workspacePath = (path: string) => isInside(root, resolve(root, path));
   const callerPath = (path: string) => workspacePath(path) ? relative(folder, resolve(root, path)).split(sep).join("/") || "." : path;
@@ -2339,7 +2340,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
     },
     result(value: unknown, changeSnapshots = false): unknown {
       const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath", "copyPath", "packagePath", "folder"]);
-      const lists = new Set(["paths", "sourcePaths", "created", "written", "deleted", "withoutHistory"]);
+      const lists = new Set(["paths", "sourcePaths", "datasetPaths", "created", "written", "deleted", "withoutHistory"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "definitions", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       if (changeSnapshots) { data.delete("before"); data.delete("after"); }
       const collect = (entry: unknown, key = ""): void => {

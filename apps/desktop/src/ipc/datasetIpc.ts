@@ -1,8 +1,9 @@
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
-import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted, type DatasetListElsewhere, type DatasetPlace } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted, type DatasetListElsewhere, type DatasetListRefusal, type DatasetPlace } from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetAgent, LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -10,7 +11,7 @@ import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifac
 import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import type { OwnerDatasetData } from "../workspaces/remoteDataset";
+import { ServerCollectionsUnavailableError, type OwnerDatasetData } from "../workspaces/remoteDataset";
 import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalDatasetMigrationPreparation } from "../workspaces/localDatasetMigration";
 import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryRestore";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
@@ -28,6 +29,17 @@ type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope
  * signed-in server, and where the others are.
  */
 export interface ServerCollections { data: OwnerDatasetData; elsewhere: DatasetListElsewhere }
+
+// Why this computer can't list the Collections, or null for any other error.
+function listRefusalOf(error: unknown): DatasetListRefusal | null {
+  if (error instanceof ServerCollectionsUnavailableError) {
+    const { elsewhere, failure } = error;
+    return { kind: "server-unavailable", words: elsewhere.message, computer: elsewhere.computerLabel, failure: failure.slice(0, 4096) };
+  }
+  if (!(error instanceof CollectionsRefusalError)) return null;
+  const { refusal, message: words } = error;
+  return refusal.kind === "elsewhere" ? { kind: "elsewhere", words, computer: refusal.computer.label } : { kind: refusal.kind, words };
+}
 
 class DatasetScopeError extends Error {
   constructor(cause: unknown) {
@@ -126,8 +138,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         const { datasetPath: _, expectedDatasetId: _expected, ...fields } = request;
         input = { ...fields, datasetId };
       } else input = request;
-      const addressPage = async (page: { datasets: import("@dohc/security-contract/dataset").DatasetDescription[]; nextCursor: string | null }) => {
-        const datasets = await withSourceAdapter(adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal));
+      const addressPage = async <T extends import("@dohc/security-contract/dataset").DatasetDescription>(page: { datasets: T[]; nextCursor: string | null }, approvedFolder?: (datasetId: string) => Promise<string>) => {
+        const datasets = await withSourceAdapter(adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal, approvedFolder));
         current();
         return { ...page, datasets };
       };
@@ -214,7 +226,22 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       // Creating, approving and recovering stay with the computer that keeps the Collections.
       const server = readsData && dependencies.serverCollectionsFor ? await dependencies.serverCollectionsFor(operation.workspace, operation.signal) : null;
       current();
-      const data = server?.data ?? (readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : await localHost());
+      const openData = async () => server?.data ?? (readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : await localHost());
+      if (input.action === "list") {
+        try {
+          const data = await openData(); current();
+          const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current();
+          const approvedFolder = async (datasetId: string) => datasetBaseFolder((await data.approvedArtifacts(datasetId)).revision.definition);
+          return { kind: "list" as const, ...await addressPage(result, approvedFolder), ...(server ? { elsewhere: server.elsewhere } : {}) };
+        } catch (error) {
+          current();
+          const refusal = listRefusalOf(error);
+          if (refusal === null) throw error;
+          // The Explorer lists after every change. A refusal thrown here would reach Electron's log each time.
+          return { kind: "collections-refused" as const, refusal };
+        }
+      }
+      const data = await openData();
       current();
       const credentialGeneration = dependencies.currentCredentialGeneration?.();
       const migrationAuthority = {
@@ -350,10 +377,6 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }
         if (!("setGrant" in data) || !data.setGrant) throw new Error("Collection access is unavailable on this computer.");
         await data.setGrant(input); current(); return { kind: "grant-updated" as const };
-      }
-      if (input.action === "list") {
-        const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current();
-        return { kind: "list" as const, ...await addressPage(result), ...(server ? { elsewhere: server.elsewhere } : {}) };
       }
       if (input.action === "describe") {
         const result = "inspect" in data && data.inspect ? await data.inspect(input.datasetId, { includeArchived: input.includeArchived }) : { dataset: await data.describe(input.datasetId, { includeArchived: input.includeArchived }) };

@@ -37,6 +37,7 @@ import {
 } from "./recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collectionLineageGate";
 import { serializeCollectionSchema } from "./schemaAuthoring";
+import { PROPERTIES_READ_ONLY_REASON } from "../markdown/frontmatter";
 
 const docMock = vi.hoisted(() => ({
   current: null as UseEngineDoc | ((input: unknown) => UseEngineDoc) | null,
@@ -283,6 +284,33 @@ describe("retained failures", () => {
       expect(yDocToMarkdown(doc)).toBe(markdown);
       host.unmount();
     } finally { doc.destroy(); }
+  });
+
+  it("offers to open a refused record's file externally on its failure row only", () => {
+    const doc = markdownToYDoc("---\n{id: rec-1, status: draft}\n---\n\nBody");
+    try {
+      docMock.current = engineDocState({ available: true, doc });
+      const host = render(<CollectionFieldWriteHost />);
+      enqueue();
+      const row = screen.getByTestId("collection-write-failure");
+      expect(row.textContent).toContain(PROPERTIES_READ_ONLY_REASON);
+      const open = screen.getByTestId("collection-write-open-externally");
+      expect(open.textContent).toBe("Open externally");
+      expect(row.contains(open)).toBe(true);
+      expect(screen.queryByTestId("lossy-note-open-externally")).toBeNull();
+      // The row's own controls keep their names.
+      expect(screen.getByTestId("collection-write-retry").textContent).toBe("Retry");
+      expect(screen.getByLabelText("Unsaved collection value")).toBeTruthy();
+      host.unmount();
+    } finally { doc.destroy(); }
+  });
+
+  it("offers no Open externally on a failure row that is not a refused edit", () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    expect(screen.getByTestId("collection-write-failure")).toBeTruthy();
+    expect(screen.queryByTestId("collection-write-open-externally")).toBeNull();
   });
 
   const LOSSY_RECORD =

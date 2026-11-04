@@ -36,6 +36,9 @@ describe("dataset CLI", () => {
     expect(refused.success).toBe(false);
     expect(refused.error?.issues[0]?.message).toBe("This Collection sits outside the MCP folder. Run the MCP server from the workspace root or a folder containing the Collection.");
     expect(DatasetResult.safeParse({ kind: "description", dataset: { ...dataset, datasetPath: "../equipment/../dataset.json" } }).success).toBe(false);
+    const unreadable = { ...dataset, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["../equipment/dataset.json"] };
+    expect(DatasetResult.parse({ kind: "list", datasets: [unreadable], nextCursor: null })).toEqual({ kind: "list", datasets: [unreadable], nextCursor: null });
+    expect(DatasetResult.safeParse({ kind: "list", datasets: [{ ...unreadable, datasetPaths: ["../equipment/../dataset.json"] }], nextCursor: null }).success).toBe(false);
     const revision = { datasetId: id(1), revision: 1, revisionSha256: "d".repeat(64), definition: { ...definition, schemaPath: "../equipment/schema.sql", operationsPath: "../equipment/actions.ts" }, definitionSha256: "a".repeat(64), schemaSha256: "b".repeat(64), operationsSha256: "c".repeat(64) };
     expect(DatasetResult.parse({ kind: "approved", revision })).toEqual({ kind: "approved", revision });
   });
@@ -57,6 +60,26 @@ describe("dataset CLI", () => {
     expect(JSON.parse(empty.stdout)).toMatchObject({ datasets: [], elsewhere });
     const failed = await list(async () => { throw new Error("dohc could not reach the server."); });
     expect(failed).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: dohc could not reach the server.\n" });
+  });
+  it.each([false, true])("fails a Collections list this computer can't give (JSON: %s)", async json => {
+    const list = (refusal: unknown) => executeCli({ argv: ["dataset", "list", JSON.stringify({ workspaceId: "workspace" }), ...(json ? ["--json"] : [])],
+      env: {}, request: async () => ({ kind: "collections-refused", refusal }) });
+    const words = "Choose which computer keeps this workspace's Collections.";
+    expect(await list({ kind: "unclaimed", words })).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${words}\n` });
+    expect(await list({ kind: "server-unavailable", words: "These Collections are on Laptop.", computer: "Laptop", failure: "TypeError: fetch failed" }))
+      .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: These Collections are on Laptop. TypeError: fetch failed\n" });
+  });
+  it("counts a computer's name in characters, as its record does, and takes a refusal's words at any length", () => {
+    // 64 characters outside the BMP: 128 UTF-16 units.
+    const name = "🐢".repeat(64), longer = `${name}🐢`;
+    const listed = (label: string) => ({ kind: "list", datasets: [], nextCursor: null, elsewhere: { server: "https://relay.example", computer: { label, sameName: false } } });
+    const refused = (computer: string) => ({ kind: "collections-refused", refusal: { kind: "server-unavailable", words: `These Collections are on ${computer}.`, computer, failure: "TypeError: fetch failed" } });
+    expect(DatasetResult.safeParse(listed(name)).success).toBe(true);
+    expect(DatasetResult.safeParse(refused(name)).success).toBe(true);
+    expect(DatasetResult.safeParse(listed(longer)).success).toBe(false);
+    expect(DatasetResult.safeParse(refused(longer)).success).toBe(false);
+    const words = `EACCES: permission denied, realpath '${"C:\\Users\\person\\".repeat(200)}'`;
+    expect(DatasetResult.safeParse({ kind: "collections-refused", refusal: { kind: "unreadable", words } }).success).toBe(true);
   });
   it.each([false, true])("exits nonzero and preserves partial form facts (JSON: %s)", async json => {
     const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",

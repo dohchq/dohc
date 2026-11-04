@@ -3,7 +3,7 @@
   "license": "AGPL-3.0-only",
   "private": true,
   "version": "0.1.0",
-  "description": "A local-first workspace for files, documents, data, chat, and apps.",
+  "description": "Build and share small apps with your agents, next to your files, documents, data, and chat.",
   "homepage": "https://dohc.computer",
   "desktopName": "dohc.desktop",
   "type": "module",

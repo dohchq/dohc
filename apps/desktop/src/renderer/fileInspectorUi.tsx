@@ -14,6 +14,8 @@ import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { useTabRowActionsSlot } from "./workbench/tabRowActions";
 import { useShownAfter } from "./ui/useShownAfter";
+import { PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
+import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
 
 // A file view's actions, at the right end of its editor group's tab row: the
 // tab already names the file, so no header repeats it above the page. They
@@ -233,8 +235,12 @@ export function OpenExternallyControl(props: {
   );
 }
 
-// Opens a read-only note in the system's app for the file.
-export function OpenExternallyLink(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
+// The file Open externally opens, and where a failed open is reported.
+export type OpenExternallyTarget = { workspaceId: string; path: string; onError?: ReportButtonError };
+
+// Opens a read-only note in the system's app for the file. A surface that can
+// show beside a lossy note's notice gives the link its own test ID.
+export function OpenExternallyLink(props: OpenExternallyTarget & { testId?: string }) {
   const openExternally = () => {
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
@@ -247,15 +253,41 @@ export function OpenExternallyLink(props: { workspaceId: string; path: string; o
       {(describedBy) => (
         <button
           type="button"
-          data-testid="lossy-note-open-externally"
+          data-testid={props.testId ?? "lossy-note-open-externally"}
           aria-describedby={describedBy}
           onClick={openExternally}
-          className="whitespace-nowrap text-subtle hover:text-ink"
+          className="whitespace-nowrap text-muted hover:text-ink"
         >
           Open externally
         </button>
       )}
     </OpenExternallyControl>
+  );
+}
+
+// Properties above a note that dohc can show but not save one at a time,
+// with the lossy note's way forward: the system's app for the file.
+export function ReadOnlyPropertiesFlag(props: {
+  label: string;
+  file?: OpenExternallyTarget;
+  testId?: string;
+  role?: "status";
+  className?: string;
+}) {
+  return (
+    <span
+      data-testid={props.testId}
+      role={props.role}
+      className={`flex min-w-0 max-w-full items-center gap-2 text-[11px] ${props.className ?? ""}`}
+    >
+      <span className="flex min-w-0 items-center gap-1">
+        <Lock aria-hidden size={12} className="shrink-0 text-warning" />
+        <span className={TOPMATTER_READ_ONLY_FLAG} title={PROPERTIES_READ_ONLY_REASON}>
+          {props.label}
+        </span>
+      </span>
+      {props.file ? <OpenExternallyLink {...props.file} /> : null}
+    </span>
   );
 }
 

@@ -14,7 +14,7 @@
 use crate::bounds::ScanBounds;
 use crate::error::FilesError;
 use crate::scan::{FileEntry, ScanListing};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One entry in a prior scan generation's manifest: what a file's size and hash
 /// were when it was last reconciled.
@@ -208,13 +208,7 @@ where
             // Still on disk, only unread (over the cap or evicted) → retain,
             // never remove.
             retained_unread.push(path.clone());
-        } else if failed_paths.iter().any(|failed| {
-            failed.is_empty()
-                || path == failed
-                || path
-                    .strip_prefix(failed)
-                    .is_some_and(|remainder| remainder.starts_with('/'))
-        }) {
+        } else if under_failed(&failed_paths, path) {
             // A directory read failure taints every descendant; a file-level
             // failure protects that exact path. Fail safe toward retention.
             unconfirmed_removed.push(path.clone());
@@ -239,6 +233,50 @@ where
         retained_unread,
         unconfirmed_removed,
     })
+}
+
+/// Whether `path` is, or lies below, a path the scan failed to read.
+fn under_failed(failed_paths: &[&str], path: &str) -> bool {
+    failed_paths.iter().any(|failed| {
+        failed.is_empty()
+            || path == *failed
+            || path
+                .strip_prefix(failed)
+                .is_some_and(|remainder| remainder.starts_with('/'))
+    })
+}
+
+/// The `candidates` the manifest does not track that `current` shows gone:
+/// neither listed nor skipped, and under no path the scan failed to read.
+pub(crate) fn gone_untracked<'a>(
+    prior: &ScanManifest,
+    current: &ScanListing,
+    candidates: impl IntoIterator<Item = &'a String>,
+) -> Vec<String> {
+    let mut candidates = candidates
+        .into_iter()
+        .filter(|path| prior.get(path.as_str()).is_none())
+        .peekable();
+    if candidates.peek().is_none() {
+        return Vec::new();
+    }
+    let present: BTreeSet<&str> = current
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(current.skipped.iter().map(|skipped| skipped.path.as_str()))
+        .collect();
+    let failed_paths: Vec<&str> = current
+        .failed
+        .iter()
+        .map(|failed| failed.path.as_str())
+        .collect();
+    candidates
+        .filter(|path| {
+            !present.contains(path.as_str()) && !under_failed(&failed_paths, path.as_str())
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

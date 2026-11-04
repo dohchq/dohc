@@ -254,7 +254,7 @@ export function Menu(props: {
   trigger?: (trigger: MenuTriggerProps) => ReactNode;
   /** Where a context menu opens, in window coordinates. No trigger is drawn. */
   at?: { x: number; y: number };
-  /** A context menu the keyboard opened marks the row it opens on at once. A trigger's own keys mark it themselves. */
+  /** A menu the keyboard opened away from its trigger, such as a context menu, marks the row it opens on at once. A trigger's own keys mark it themselves. */
   fromKeyboard?: boolean;
   /** The default trigger's test id. */
   testId?: string;
@@ -264,6 +264,8 @@ export function Menu(props: {
   width?: number;
   /** The list lines up with the trigger's right edge, or with its left at "start". */
   align?: "start" | "end";
+  /** The list opens under or over this box instead of the trigger, still lined up with the trigger. */
+  anchor?: RefObject<HTMLElement | null>;
   closeOnPick?: boolean;
   /** The list opens over the page, for a trigger inside a box that clips it, such as a chat row. */
   topLayer?: boolean;
@@ -305,19 +307,21 @@ export function Menu(props: {
     if (fromKeyboard) setMarked(true);
     if (props.topLayer) list.current?.showPopover?.();
     const box = at ? { left: at.x, right: at.x, top: at.y, bottom: at.y } : trigger.current?.getBoundingClientRect();
+    // A context menu places at its point; a trigger's list opens under or over its anchor when it has one.
+    const edge = at ? box : props.anchor?.current?.getBoundingClientRect() ?? box;
     const gap = at ? 0 : GAP_PX;
     const height = list.current?.offsetHeight ?? 0;
-    if (box) {
+    if (box && edge) {
       // A context menu's list starts at its point, as a trigger's does at "start".
       const left = at || props.align === "start"
         ? Math.max(EDGE_PX, Math.min(box.left, window.innerWidth - EDGE_PX - width))
         : Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
-      const below = window.innerHeight - box.bottom - gap - EDGE_PX;
-      const above = box.top - gap - EDGE_PX;
+      const below = window.innerHeight - edge.bottom - gap - EDGE_PX;
+      const above = edge.top - gap - EDGE_PX;
       setPlace(
         height > below && above > below
-          ? { left, bottom: window.innerHeight - box.top + gap, maxHeight: above, above: true }
-          : { left, top: box.bottom + gap, maxHeight: below, above: false },
+          ? { left, bottom: window.innerHeight - edge.top + gap, maxHeight: above, above: true }
+          : { left, top: edge.bottom + gap, maxHeight: below, above: false },
       );
     }
     // A field that took focus as it mounted keeps it.
@@ -327,7 +331,7 @@ export function Menu(props: {
       setPointerMoved(false);
       setMarked(false);
     };
-  }, [open, width, at?.x, at?.y, fromKeyboard, props.align, props.topLayer]);
+  }, [open, width, at?.x, at?.y, fromKeyboard, props.align, props.anchor, props.topLayer]);
 
   // Placed, a list shorter than its rows shows its top, so it scrolls to the
   // row focus opened on.

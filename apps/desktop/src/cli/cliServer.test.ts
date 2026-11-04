@@ -7,9 +7,9 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "..
 import { listChanges, readChange, readOperation, undoOperation } from "@dohc/mcp/tools";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
@@ -70,6 +70,37 @@ import {
 } from "./cliServer";
 import { agentWriteAuthor } from "./desktopCliServer";
 import { openedLocalState } from "../testing/preparedLocalState";
+
+// Another spelling of one real folder, as Linux keeps it for a folder that
+// ignores capitals: a lookup through `spelled` reaches `stored`, stat gives
+// the same folder, and realpath returns the capitals it was given. Without an
+// alias every call passes straight through.
+const folderAlias = vi.hoisted(() => ({ current: null as { spelled: string; stored: string } | null }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const { sep } = await import("node:path");
+  const under = (path: string, folder: string) => path === folder || path.startsWith(folder + sep);
+  const lookup = (path: unknown) => {
+    const alias = folderAlias.current;
+    return alias && typeof path === "string" && under(path, alias.spelled)
+      ? alias.stored + path.slice(alias.spelled.length)
+      : null;
+  };
+  return {
+    ...actual,
+    realpath: async (...args: Parameters<typeof actual.realpath>) => {
+      const stored = lookup(args[0]);
+      const alias = folderAlias.current;
+      if (stored === null || alias === null) return actual.realpath(...args);
+      const real = await actual.realpath(stored);
+      return under(real, alias.stored) ? alias.spelled + real.slice(alias.stored.length) : real;
+    },
+    stat: (...args: Parameters<typeof actual.stat>) => {
+      const stored = lookup(args[0]);
+      return stored === null ? actual.stat(...args) : actual.stat(stored, args[1]);
+    },
+  };
+});
 
 const WORKSPACE_ID = "workspace-cli-server";
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -1280,6 +1311,59 @@ describe("CLI socket server", () => {
       "file is outside this workspace: ../outside.md",
     );
     expect(listed).toHaveLength(2);
+  });
+
+  it("finds the workspace and its files from a cwd that spells its folder in other capitals", async () => {
+    const stored = await realpath(workspaceRoot);
+    const spelled = join(dirname(stored), basename(stored).toUpperCase());
+    const listed: Array<{ limit: number; objectId?: string }> = [];
+    const moments = momentFixtures(WORKSPACE_ID, "primary", SERVER_NOW_MS);
+    context.listMoments = async (input) => {
+      listed.push(input);
+      return [moments.summary];
+    };
+    await mkdir(join(workspaceRoot, "notes"), { recursive: true });
+    folderAlias.current = { spelled, stored };
+    try {
+      // Selection, the cwd's place in the workspace, and the file's path all
+      // land on the registered folder.
+      await expect(invoke("moments", { cwd: join(spelled, "notes"), actor: "human", path: "../tracked.md" }))
+        .resolves.toMatchObject({ count: 1 });
+      await expect(invoke("moments", { cwd: spelled, actor: "human", path: "tracked.md" }))
+        .resolves.toMatchObject({ count: 1 });
+      expect(listed).toEqual([
+        { limit: 500, objectId: "object_tracked" },
+        { limit: 500, objectId: "object_tracked" },
+      ]);
+      await expect(invoke("moments", { cwd: join(spelled, "notes"), actor: "human", path: "../../outside.md" }))
+        .rejects.toThrow("file is outside this workspace: ../../outside.md");
+    } finally {
+      folderAlias.current = null;
+    }
+    expect(listed).toHaveLength(2);
+  });
+
+  it("rejects a cwd in the workspace folder reached under another name, as through a bind mount", async () => {
+    // A mount inside either name could put another file at the same place
+    // below it, so the workspace is found only under its own name or capitals.
+    const stored = await realpath(workspaceRoot);
+    const spelled = join(dirname(stored), `${basename(stored)}-mounted`);
+    folderAlias.current = { spelled, stored };
+    try {
+      await expect(rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "moments",
+        args: { cwd: spelled, actor: "human", path: "tracked.md" },
+      })).resolves.toEqual({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: false,
+        error: "dohc: not inside a dohc workspace",
+      });
+    } finally {
+      folderAlias.current = null;
+    }
+    expect(calls.openWorkspace).toBe(0);
   });
 
   it("returns MCP-shaped history and chats with engine ids that post and reply accept", async () => {
@@ -2576,6 +2660,10 @@ describe("CLI socket server", () => {
     await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "export", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", savePath: "../export.zip" } })).resolves.toMatchObject({ kind: "refused", message: expect.stringContaining("../export.zip") });
     await invoke("dataset", { cwd, actor: "agent", request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: "backup.dohc-recovery" } });
     expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ sourcePath: join(cwd, "backup.dohc-recovery") }), { depth: 0 });
+    const unreadable = { datasetId: "00000000-0000-4000-8000-000000000001", name: "Equipment", revision: 1, revisionSha256: "a".repeat(64), tables: [], operations: [],
+      datasetPath: null, datasetAddressStatus: "unreadable" as const, datasetPaths: ["app/data/dataset.json"] };
+    context.dataset = vi.fn(async () => ({ kind: "list" as const, datasets: [unreadable], nextCursor: null }));
+    await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "list", workspaceId: WORKSPACE_ID } })).resolves.toMatchObject({ kind: "list", datasets: [{ datasetAddressStatus: "unreadable", datasetPaths: ["data/dataset.json"] }] });
     context.dataset = vi.fn(async () => ({ kind: "form-created" as const, appRoot: "app/form", paths: ["app/form/index.html", "app/form/app.json"] }));
     await expect(invoke("dataset", { cwd, actor: "agent", request: { action: "createForm", workspaceId: WORKSPACE_ID, datasetPath: "data/dataset.json", revision: 1, revisionSha256: "a".repeat(64), tableId: "00000000-0000-4000-8000-000000000001", createOperationId: "00000000-0000-4000-8000-000000000002", appRoot: "form", fieldIds: ["00000000-0000-4000-8000-000000000003"] } })).resolves.toEqual({ kind: "form-created", appRoot: "form", paths: ["form/index.html", "form/app.json"] });
     expect(context.dataset).toHaveBeenLastCalledWith(expect.objectContaining({ appRoot: "app/form" }), { depth: 0 });
@@ -5760,6 +5848,61 @@ describe("resolveCliWorkspace", () => {
     try {
       await expect(resolveCliWorkspace(sibling, [workspace])).resolves.toBeNull();
     } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Notes and notes apart on a disk that tells capitals apart", async (ctx) => {
+    const scratch = await createTestScratch("dohc-cli-capitals-");
+    try {
+      const upper: CliRegistryWorkspace = { workspaceId: "ws-upper", rootPath: join(scratch, "Notes") };
+      await mkdir(upper.rootPath);
+      const lower = join(scratch, "notes");
+      const second = await mkdir(lower).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === "EEXIST") return false;
+        throw error;
+      });
+      // A disk that ignores capitals has only one folder here.
+      if (!second) ctx.skip();
+      await expect(resolveCliWorkspace(lower, [upper])).resolves.toBeNull();
+      await expect(resolveCliWorkspace(upper.rootPath, [upper])).resolves.toBe(upper);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("finds the deepest workspace through other capitals of its folder", async () => {
+    const scratch = await realpath(await createTestScratch("dohc-cli-alias-"));
+    const outer: CliRegistryWorkspace = { workspaceId: "ws-outer", rootPath: join(scratch, "Notes") };
+    const inner: CliRegistryWorkspace = { workspaceId: "ws-inner", rootPath: join(outer.rootPath, "Trip") };
+    await mkdir(join(inner.rootPath, "day-1"), { recursive: true });
+    folderAlias.current = { spelled: join(outer.rootPath, "TRIP"), stored: inner.rootPath };
+    try {
+      await expect(resolveCliWorkspace(join(outer.rootPath, "TRIP", "day-1"), [outer, inner])).resolves.toBe(inner);
+    } finally {
+      folderAlias.current = null;
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("does not find a workspace through a second folder entry in other capitals, as a mount of its folder is", async (ctx) => {
+    const scratch = await realpath(await createTestScratch("dohc-cli-mounted-"));
+    try {
+      const notes: CliRegistryWorkspace = { workspaceId: "ws-notes", rootPath: join(scratch, "Notes") };
+      await mkdir(join(notes.rootPath, "docs"), { recursive: true });
+      const mounted = join(scratch, "notes");
+      const second = await mkdir(mounted).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === "EEXIST") return false;
+        throw error;
+      });
+      // A disk that ignores capitals has only one folder here.
+      if (!second) ctx.skip();
+      // notes is Notes on disk, but the scratch folder lists both names, and a
+      // mount inside one of them may be missing in the other.
+      folderAlias.current = { spelled: mounted, stored: notes.rootPath };
+      await expect(resolveCliWorkspace(join(mounted, "docs"), [notes])).resolves.toBeNull();
+    } finally {
+      folderAlias.current = null;
       await rm(scratch, { recursive: true, force: true });
     }
   });

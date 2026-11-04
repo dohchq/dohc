@@ -1,4 +1,5 @@
 import type { createWorkspaceAuthorityOwner, WorkspaceAuthorityBinding } from "./workspaceAuthorityOwner";
+import type { WorkspaceTrust } from "./workspaceTrust";
 
 export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: string; rootPath: string}>(dependencies: {
   retireBinding: ReturnType<typeof createWorkspaceAuthorityOwner<Workspace, unknown>>["retireBinding"];
@@ -11,8 +12,11 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
   return async function removePhysicalWorkspace(
     binding: WorkspaceAuthorityBinding<Workspace>,
     beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
+    // Runs once the person has agreed, before the workspace closes.
+    confirmed: () => void | Promise<void> = () => undefined,
   ): Promise<boolean> {
     if (dependencies.confirmDraftRemoval && !(await dependencies.confirmDraftRemoval(binding.workspaceId))) return false;
+    await confirmed();
     await dependencies.retireBinding(binding, {
       finalize: beforeRegistryRemoval,
       removeBinding: () => {
@@ -32,13 +36,26 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
   };
 }
 
-export function createWorkspaceForget(dependencies: {
-  remove(workspaceId: string): Promise<void | boolean>;
+export function createWorkspaceForget<Workspace extends {workspaceId: string; rootPath: string}>(dependencies: {
+  currentBinding(workspaceId: string): WorkspaceAuthorityBinding<Workspace>;
+  removePhysicalWorkspace: ReturnType<typeof createPhysicalWorkspaceRemoval<Workspace>>;
+  trust: Pick<WorkspaceTrust, "restrict">;
   clearNotices(workspaceId: string): void;
   notifyRenderer(): void;
 }) {
   return async function forgetWorkspace(workspaceId: string): Promise<void> {
-    if(await dependencies.remove(workspaceId) === false) return;
+    const restrict = () => dependencies.trust.restrict(workspaceId);
+    // A forgotten workspace opened again is an existing folder: it starts in
+    // Restricted Mode. The grant goes once the person agrees and before the
+    // workspace closes, so a failed write leaves the workspace listed, not
+    // forgotten with a grant that returns. Going back keeps the grant. Forget
+    // restricts again once the workspace has closed, before its row goes.
+    const removed = await dependencies.removePhysicalWorkspace(
+      dependencies.currentBinding(workspaceId),
+      restrict,
+      restrict,
+    );
+    if (!removed) return;
     dependencies.clearNotices(workspaceId);
     dependencies.notifyRenderer();
   };

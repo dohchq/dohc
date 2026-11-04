@@ -1093,24 +1093,25 @@ mod tests {
         assert!(!sddl(&scratch, &reach).contains("BU"));
     }
 
-    /// An item in `.dohc/local` this user can't change, as one another
-    /// account owns, refuses the open, in words the desktop shows.
+    /// An item in `.dohc/local` this user owns but can't change refuses the
+    /// open by the item's path, in words the desktop shows.
     #[cfg(windows)]
     #[test]
     fn an_item_this_user_cannot_change_in_this_computers_folder_refuses_the_open() {
         let scratch = ScratchDir::new().expect("scratch");
         let (root, reach) = shared_workspace(&scratch);
         // Owner rights limited to reading, and a denied right to change the
-        // DACL, stand in for a file another account owns. The denial goes
-        // first: once owner rights are limited, only an entry for this user
-        // could still let the DACL change, and the folder above may have none.
+        // DACL, leave this user unable to change the file it owns. The denial
+        // goes first: once owner rights are limited, only an entry for this
+        // user could still let the DACL change, and the folder above may have
+        // none.
         let deny = format!("{}:(WDAC)", std::env::var("USERNAME").expect("user"));
         icacls(&reach, &["/deny".as_ref(), deny.as_ref()]);
         icacls(&reach, &["/grant".as_ref(), "*S-1-3-4:(R)".as_ref()]);
         let refused = prepare_local_state(&root).err().expect("refused");
         assert_eq!(
             refused.to_string(),
-            "engine-folder-not-private: other-owner .dohc/local"
+            "engine-folder-not-private: not-changeable .dohc/local/automations/reach.json"
         );
     }
 }

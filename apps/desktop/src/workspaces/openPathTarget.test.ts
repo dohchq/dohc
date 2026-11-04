@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { deferred, type Deferred } from "../testing/deferred";
+import { caseFoldDisk } from "../testing/caseFoldDisk";
 import { confirmOpenPathWorkspace, createOpenPathOpener, resolveOpenPathTarget, type OpenPathFileSystem } from "./openPathTarget";
+import { folderIdentitySync } from "./workspaceRootIdentity";
 
 const home = "/Users/sam";
 const notes = { workspaceId: "ws-notes", rootPath: "/Users/sam/dohc/notes" };
@@ -14,11 +16,49 @@ function disk(
   aliases: Record<string, string> = {},
 ): OpenPathFileSystem {
   const canonical = new Map(Object.keys(entries).map((path) => [path.toLowerCase(), path]));
+  const inodes = new Map(Object.keys(entries).map((path, index) => [path, BigInt(index + 1)]));
   return {
     realPath: (path) => canonical.get((aliases[path] ?? path).toLowerCase()) ?? null,
     kindOf: (path) => entries[path] ?? null,
     hasManifest: (folder) => manifests.includes(folder),
+    folderIdentity: (path) => entries[path] === "folder" ? { dev: 1n, ino: inodes.get(path) ?? 0n } : null,
+    // realPath answers with stored names, so routing never lists a folder.
+    folderNames: () => null,
   };
+}
+
+// /home ignores capitals, as an ext4 casefold folder does, and Linux realpath
+// keeps the capitals it was given. /srv tells capitals apart.
+function linuxDisk(entries: Record<string, "file" | "folder">, manifests: string[] = [], knowsInodes = true): OpenPathFileSystem {
+  const disk = caseFoldDisk(entries, { foldsCase: (folder) => folder === "/home" || folder.startsWith("/home/") });
+  return {
+    realPath: disk.realPath,
+    kindOf: disk.kindOf,
+    hasManifest: (folder) => manifests.some((manifest) => disk.stored(manifest) === disk.stored(folder)),
+    folderIdentity: (path) => knowsInodes ? folderIdentitySync(path, disk.stat) : null,
+    folderNames: disk.names,
+  };
+}
+
+const linuxHome = "/home/sam";
+const linuxNotes = { workspaceId: "ws-notes", rootPath: "/home/sam/Notes" };
+const linuxTrip = { workspaceId: "ws-trip", rootPath: "/home/sam/Notes/Trip" };
+const linuxEntries = {
+  "/home/sam/Notes/plans/q3.md": "file",
+  "/home/sam/Notes/Trip/day-1.md": "file",
+  "/home/sam/Notes-old/a.md": "file",
+  "/srv/Notes/a.md": "file",
+  "/srv/notes/a.md": "file",
+} as const;
+
+function resolveOnLinux(
+  path: string,
+  options: { workspaces?: { workspaceId: string; rootPath: string }[]; manifests?: string[]; knowsInodes?: boolean } = {},
+) {
+  return resolveOpenPathTarget(path, {
+    workspaces: options.workspaces ?? [linuxNotes, linuxTrip], home: linuxHome, platform: "linux",
+    fs: linuxDisk(linuxEntries, options.manifests, options.knowsInodes),
+  });
 }
 
 const base = {
@@ -86,6 +126,59 @@ describe("resolveOpenPathTarget", () => {
   });
 });
 
+describe("resolveOpenPathTarget on a Linux folder that ignores capitals", () => {
+  it("opens a file through other capitals of a registered folder in that workspace", () => {
+    const opened = { kind: "workspace", workspace: linuxNotes, file: "plans/q3.md" };
+    expect(resolveOnLinux("/home/sam/NOTES/plans/q3.md")).toEqual(opened);
+    expect(resolveOnLinux("/home/SAM/notes/plans/q3.md")).toEqual(opened);
+    expect(resolveOnLinux("/home/sam/notes")).toEqual({ kind: "workspace", workspace: linuxNotes, file: null });
+  });
+
+  it("picks the deepest workspace, even when only the outer folder is spelled as registered", () => {
+    const opened = { kind: "workspace", workspace: linuxTrip, file: "day-1.md" };
+    expect(resolveOnLinux("/home/sam/notes/trip/day-1.md")).toEqual(opened);
+    expect(resolveOnLinux("/home/sam/Notes/TRIP/day-1.md")).toEqual(opened);
+  });
+
+  it("keeps a sibling whose name starts like the root outside it", () => {
+    expect(resolveOnLinux("/home/sam/NOTES-old/a.md"))
+      .toEqual({ kind: "folder", rootPath: "/home/sam/NOTES-old", hasManifest: false, file: "a.md" });
+  });
+
+  it("keeps Notes and notes apart on a disk that tells capitals apart", () => {
+    const srv = { workspaceId: "ws-srv", rootPath: "/srv/Notes" };
+    expect(resolveOnLinux("/srv/Notes/a.md", { workspaces: [srv] }))
+      .toEqual({ kind: "workspace", workspace: srv, file: "a.md" });
+    expect(resolveOnLinux("/srv/notes/a.md", { workspaces: [srv] }))
+      .toEqual({ kind: "folder", rootPath: "/srv/notes", hasManifest: false, file: "a.md" });
+  });
+
+  it("does not route through a folder whose identity the disk cannot give", () => {
+    expect(resolveOnLinux("/home/sam/NOTES/plans/q3.md", { manifests: ["/home/sam/Notes"], knowsInodes: false }))
+      .toEqual({ kind: "folder", rootPath: "/home/sam/NOTES", hasManifest: true, file: "plans/q3.md" });
+  });
+
+  it("does not route through a workspace folder reached under another name, as through a bind mount", () => {
+    // /view/notes is /data/Notes mounted again, and a mount inside either one
+    // could put another a.md at docs/a.md.
+    const mounted = caseFoldDisk({ "/data/Notes/docs/a.md": "file", "/view/notes/docs/a.md": "file" }, {
+      foldsCase: () => false,
+      identities: { "/data/Notes": { dev: 5n, ino: 5n }, "/view/notes": { dev: 5n, ino: 5n } },
+    });
+    const data = { workspaceId: "ws-data", rootPath: "/data/Notes" };
+    expect(resolveOpenPathTarget("/view/notes/docs/a.md", {
+      workspaces: [data], home: linuxHome, platform: "linux",
+      fs: {
+        realPath: mounted.realPath,
+        kindOf: mounted.kindOf,
+        hasManifest: () => false,
+        folderIdentity: (path) => folderIdentitySync(path, mounted.stat),
+        folderNames: mounted.names,
+      },
+    })).toEqual({ kind: "folder", rootPath: "/view/notes/docs", hasManifest: false, file: "a.md" });
+  });
+});
+
 function opener(entries: Record<string, "file" | "folder">, manifests: string[] = []) {
   const workspaces: { workspaceId: string; rootPath: string }[] = [notes];
   const answers: Deferred<boolean>[] = [];
@@ -141,6 +234,20 @@ describe("createOpenPathOpener", () => {
     await expect(h.open("/Users/sam/dohc/notes/a.md")).resolves.toEqual(notes);
     expect(h.confirm).not.toHaveBeenCalled();
     expect(h.activate).toHaveBeenCalledWith(notes, "a.md", undefined);
+  });
+
+  it("opens a registered Linux workspace through other capitals without asking or registering", async () => {
+    const confirm = vi.fn(async () => true);
+    const register = vi.fn(async (rootPath: string) => ({ workspaceId: "ws-new", rootPath }));
+    const activate = vi.fn(async () => undefined);
+    const open = createOpenPathOpener<{ workspaceId: string; rootPath: string }, string>({
+      workspaces: () => [linuxNotes], home: () => linuxHome, platform: "linux",
+      fs: linuxDisk(linuxEntries, ["/home/sam/Notes"]), confirm, register, activate,
+    });
+    await expect(open("/home/sam/notes/plans/q3.md", "window")).resolves.toBe(linuxNotes);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(register).not.toHaveBeenCalled();
+    expect(activate).toHaveBeenCalledWith(linuxNotes, "plans/q3.md", "window");
   });
 });
 

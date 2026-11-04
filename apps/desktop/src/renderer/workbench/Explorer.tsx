@@ -71,6 +71,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import type { ExplorerApps } from "./AppsSection";
 import { ExplorerHome } from "./ExplorerHome";
+import type { DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
@@ -159,7 +160,7 @@ export interface ExplorerProps {
   // The workspace's apps, for Home's Apps section. Without it Home has no
   // Apps section.
   apps?: ExplorerApps;
-  dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
+  dataCollections?: readonly DataCollection[];
   includeArchivedCollections?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
@@ -1339,11 +1340,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, [fileByPath, focusRow, home, isFolderPath, onModeChange, onRevealed, renderIndexByPath, reveal]);
 
   const showInFiles = useCallback(
-    (path: string | null) => {
+    (paths: readonly string[] | null) => {
       onModeChange("files");
-      if (path === null) return;
-      for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
-      setHomeReveal([path]);
+      if (paths === null) return;
+      for (const path of paths) for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
+      setHomeReveal(paths);
     },
     [onModeChange, onSetFolderExpanded],
   );
@@ -1575,6 +1576,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         target instanceof HTMLElement
           ? target.closest<HTMLElement>('[data-testid="tree-row"], [data-home-key]')
           : null;
+      // A Home row with its own menu, such as a Collection that can't open, opens it itself.
+      if (row?.dataset.ownMenu !== undefined) return;
       const path = row?.dataset.path;
       if (row && path !== undefined) {
         const box = row.getBoundingClientRect();

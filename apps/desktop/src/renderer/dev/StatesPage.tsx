@@ -1459,6 +1459,8 @@ function TopmatterSpecimen(props: { children: ReactNode }) {
 const PILLS = "---\nowner: Sam\nrelease: September launch\nstatus: In progress\n---\n";
 // An ID and a comment have no pill.
 const UNSHOWN = "---\nid: 01JD8K2V7QX4\nstatus: Draft\nowner: Sam\n# Times are local (JST)\n---\n";
+// The file a locked specimen offers to open externally.
+const STATES_NOTE = { workspaceId: "states", path: "product-plan.md" };
 const LONG_PILL = "---\nowner: Sam\nbrief: https://example.com/plans/2026/q3/product-plan-with-every-goal-and-owner\n---\n";
 
 // A reserved name shows only while a person types it, so the specimen types
@@ -3008,7 +3010,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <TopmatterSpecimen>
             {/* Written on one line, the block cannot change one property
                 without rewriting the others. */}
-            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} />
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} file={STATES_NOTE} />
           </TopmatterSpecimen>
         </Specimen>
         <Specimen label="set by an automation">
@@ -3051,7 +3053,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="locked, every line a pill: no <>">
           <TopmatterSpecimen>
-            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} onShowSource={noop} />
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} onShowSource={noop} file={STATES_NOTE} />
           </TopmatterSpecimen>
         </Specimen>
         <Specimen label="a note you can only view: no + or ×, and <>">

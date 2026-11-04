@@ -1,3 +1,5 @@
+import { folderIdentityKey, type FolderIdentity } from "./workspaceRootIdentity";
+
 export interface WorkspaceAuthorityBinding<Workspace> {
   readonly attachmentId: symbol;
   readonly workspaceId: string;
@@ -36,6 +38,10 @@ export interface WorkspaceAuthorityOwnerOptions<
 > {
   findWorkspace(workspaceId: string): Workspace | null;
   canonicalizeRoot(rootPath: string): string;
+  // Which folder a canonical root is on disk. Two spellings of one folder,
+  // as Linux keeps for a folder that ignores capitals, then share one owner.
+  // Without it, or when it returns null, the root's path is its key.
+  rootIdentity?(canonicalRootPath: string): FolderIdentity | null;
   createState(binding: WorkspaceAuthorityBinding<Workspace>): State;
   disposeState?(
     state: State,
@@ -46,6 +52,7 @@ export interface WorkspaceAuthorityOwnerOptions<
 
 interface AuthorityRecord<Workspace, State> {
   readonly binding: WorkspaceAuthorityBinding<Workspace>;
+  readonly rootKeys: readonly string[];
   readonly initialWorkspace: Readonly<Workspace>;
   readonly state: State;
   held: number;
@@ -73,19 +80,27 @@ interface WorkspaceBindingRetirement {
   removeBinding(): void | Promise<void>;
 }
 
+// A root as the owner keys it: its canonical path, and the keys a record,
+// reservation or cleanup block for that folder holds.
+interface AuthorityRoot {
+  readonly canonicalRootPath: string;
+  readonly rootKeys: readonly string[];
+}
+
 interface PreparedWorkspaceBindingRegistration<Workspace, State> {
   readonly workspace: Workspace;
   readonly slot: AuthoritySlot<Workspace, State>;
-  readonly canonicalRootPath: string;
+  readonly root: AuthorityRoot;
   readonly reservation?: WorkspaceAuthorityReservation;
 }
 
 interface PreparedWorkspaceIdentity<Workspace, State> {
   readonly slot: AuthoritySlot<Workspace, State>;
-  readonly canonicalRootPath: string;
+  readonly root: AuthorityRoot;
 }
 
 interface WorkspaceAuthorityReservationState {
+  readonly rootKeys: readonly string[];
   readonly settled: Promise<void>;
   resolve(): void;
   reject(error: unknown): void;
@@ -112,8 +127,8 @@ export function createWorkspaceAuthorityOwner<
   State,
 >(options: WorkspaceAuthorityOwnerOptions<Workspace, State>) {
   const slots = new Map<string, AuthoritySlot<Workspace, State>>();
-  const recordsByCanonicalRoot = new Map<string, AuthorityRecord<Workspace, State>>();
-  const blockedCanonicalRoots = new Map<string, WorkspaceAuthorityReservation>();
+  const recordsByRootKey = new Map<string, AuthorityRecord<Workspace, State>>();
+  const blockedRootKeys = new Map<string, WorkspaceAuthorityReservation>();
   const reservationStates = new Map<
     WorkspaceAuthorityReservation,
     WorkspaceAuthorityReservationState
@@ -127,7 +142,40 @@ export function createWorkspaceAuthorityOwner<
     }
   }
 
-  function createReservationState(): WorkspaceAuthorityReservationState {
+  // The path always keys a root, and so does its folder on disk when a fresh
+  // stat knows it. A match on any key refuses, so neither another spelling nor
+  // a stat that fails one time and works the next gets past a record or block.
+  function rootKeys(canonicalRootPath: string): string[] {
+    const identity = options.rootIdentity?.(canonicalRootPath) ?? null;
+    const path = `path:${canonicalRootPath}`;
+    return identity ? [path, `folder:${folderIdentityKey(identity)}`] : [path];
+  }
+
+  function authorityRoot(rootPath: string): AuthorityRoot {
+    const canonicalRootPath = options.canonicalizeRoot(rootPath);
+    return { canonicalRootPath, rootKeys: rootKeys(canonicalRootPath) };
+  }
+
+  function ownerOf(keys: readonly string[]): AuthorityRecord<Workspace, State> | undefined {
+    return keys.map((key) => recordsByRootKey.get(key)).find((record) => record !== undefined);
+  }
+
+  function blockerOf(
+    keys: readonly string[],
+    allowed?: WorkspaceAuthorityReservation,
+  ): WorkspaceAuthorityReservation | undefined {
+    return keys
+      .map((key) => blockedRootKeys.get(key))
+      .find((reservation) => reservation !== undefined && reservation !== allowed);
+  }
+
+  function release<Holder>(holders: Map<string, Holder>, keys: readonly string[], holder: Holder): void {
+    for (const key of keys) {
+      if (holders.get(key) === holder) holders.delete(key);
+    }
+  }
+
+  function createReservationState(keys: readonly string[]): WorkspaceAuthorityReservationState {
     let resolve!: () => void;
     let reject!: (error: unknown) => void;
     const settled = new Promise<void>((resolvePromise, rejectPromise) => {
@@ -135,7 +183,7 @@ export function createWorkspaceAuthorityOwner<
       reject = rejectPromise;
     });
     void settled.catch(() => undefined);
-    return { settled, resolve, reject, cleanup: null };
+    return { rootKeys: keys, settled, resolve, reject, cleanup: null };
   }
 
   function slotFor(workspaceId: string): AuthoritySlot<Workspace, State> {
@@ -179,17 +227,18 @@ export function createWorkspaceAuthorityOwner<
 
   function createRecord(
     workspace: Workspace,
-    canonicalRootPath = options.canonicalizeRoot(workspace.rootPath),
+    root: AuthorityRoot = authorityRoot(workspace.rootPath),
     allowedReservation?: WorkspaceAuthorityReservation,
   ): AuthorityRecord<Workspace, State> {
-    const rootOwner = recordsByCanonicalRoot.get(canonicalRootPath);
+    const { canonicalRootPath, rootKeys: keys } = root;
+    const rootOwner = ownerOf(keys);
     if (rootOwner) {
       throw new Error(
         `This folder is already attached as workspace ${rootOwner.binding.workspaceId}.`,
       );
     }
-    const blockedReservation = blockedCanonicalRoots.get(canonicalRootPath);
-    if (blockedReservation && blockedReservation !== allowedReservation) {
+    const blockedReservation = blockerOf(keys, allowedReservation);
+    if (blockedReservation) {
       throw new Error(
         `This folder is blocked by failed cleanup for workspace ${blockedReservation.workspaceId}.`,
       );
@@ -208,6 +257,7 @@ export function createWorkspaceAuthorityOwner<
     });
     const record = {
       binding,
+      rootKeys: keys,
       initialWorkspace: Object.freeze({ ...workspace }),
       state: undefined as State,
       held: 0,
@@ -219,7 +269,7 @@ export function createWorkspaceAuthorityOwner<
       rejectDrained,
     };
     record.state = options.createState(binding);
-    recordsByCanonicalRoot.set(canonicalRootPath, record);
+    for (const key of keys) recordsByRootKey.set(key, record);
     return record;
   }
 
@@ -343,21 +393,21 @@ export function createWorkspaceAuthorityOwner<
         `Workspace ${workspace.workspaceId} is already registered.`,
       );
     }
-    const canonicalRootPath = options.canonicalizeRoot(workspace.rootPath);
-    const rootOwner = recordsByCanonicalRoot.get(canonicalRootPath);
+    const root = authorityRoot(workspace.rootPath);
+    const rootOwner = ownerOf(root.rootKeys);
     if (rootOwner) {
       throw new Error(
         `This folder is already attached as workspace ${rootOwner.binding.workspaceId}.`,
       );
     }
-    const blockedReservation = blockedCanonicalRoots.get(canonicalRootPath);
+    const blockedReservation = blockerOf(root.rootKeys);
     if (blockedReservation) {
       throw new Error(
         `This folder is blocked by failed cleanup for workspace ${blockedReservation.workspaceId}.`,
       );
     }
     slot.registrationBlocked = true;
-    return { slot, canonicalRootPath };
+    return { slot, root };
   }
 
   function prepareRegistration(
@@ -371,7 +421,7 @@ export function createWorkspaceAuthorityOwner<
     registration: WorkspaceBindingRegistration,
     retainBlockOnFailure: boolean,
   ): WorkspaceAuthorityBinding<Workspace> {
-    const { workspace, slot, canonicalRootPath } = prepared;
+    const { workspace, slot, root } = prepared;
     try {
       registration.persist();
       const persisted = options.findWorkspace(workspace.workspaceId);
@@ -388,7 +438,7 @@ export function createWorkspaceAuthorityOwner<
       }
       const created = createRecord(
         persisted,
-        canonicalRootPath,
+        root,
         prepared.reservation,
       );
       slot.current = created;
@@ -439,11 +489,11 @@ export function createWorkspaceAuthorityOwner<
         reservationId: Symbol(`workspace-reservation:${workspace.workspaceId}`),
         workspaceId: workspace.workspaceId,
         registeredRootPath: workspace.rootPath,
-        canonicalRootPath: prepared.canonicalRootPath,
+        canonicalRootPath: prepared.root.canonicalRootPath,
       });
       prepared.slot.reservation = reservation;
-      blockedCanonicalRoots.set(prepared.canonicalRootPath, reservation);
-      reservationStates.set(reservation, createReservationState());
+      for (const key of prepared.root.rootKeys) blockedRootKeys.set(key, reservation);
+      reservationStates.set(reservation, createReservationState(prepared.root.rootKeys));
       return reservation;
     },
 
@@ -485,18 +535,19 @@ export function createWorkspaceAuthorityOwner<
         {
           workspace,
           slot,
-          canonicalRootPath: reservation.canonicalRootPath,
+          // The folder may have become known since the reservation, so read
+          // its keys again and keep the reservation's own.
+          root: {
+            canonicalRootPath: reservation.canonicalRootPath,
+            rootKeys: [...new Set([...reservationState.rootKeys, ...rootKeys(reservation.canonicalRootPath)])],
+          },
           reservation,
         },
         registration,
         true,
       );
       slot.reservation = null;
-      if (
-        blockedCanonicalRoots.get(reservation.canonicalRootPath) === reservation
-      ) {
-        blockedCanonicalRoots.delete(reservation.canonicalRootPath);
-      }
+      release(blockedRootKeys, reservationState.rootKeys, reservation);
       reservationState.resolve();
       reservationStates.delete(reservation);
       return binding;
@@ -532,11 +583,7 @@ export function createWorkspaceAuthorityOwner<
         }
         slot.reservation = null;
         slot.registrationBlocked = false;
-        if (
-          blockedCanonicalRoots.get(reservation.canonicalRootPath) === reservation
-        ) {
-          blockedCanonicalRoots.delete(reservation.canonicalRootPath);
-        }
+        release(blockedRootKeys, reservationState.rootKeys, reservation);
       });
       reservationState.cleanup = cleanupOperation;
       void cleanupOperation.then(
@@ -646,9 +693,7 @@ export function createWorkspaceAuthorityOwner<
       await retirement.removeBinding();
       const slot = slots.get(binding.workspaceId);
       if (slot?.current === record) slot.current = null;
-      if (recordsByCanonicalRoot.get(binding.canonicalRootPath) === record) {
-        recordsByCanonicalRoot.delete(binding.canonicalRootPath);
-      }
+      release(recordsByRootKey, record.rootKeys, record);
     },
 
     async invalidate(workspaceId: string): Promise<void> {
@@ -658,9 +703,7 @@ export function createWorkspaceAuthorityOwner<
       if (!current) return;
       await current.drained;
       if (slot.current === current) slot.current = null;
-      if (recordsByCanonicalRoot.get(current.binding.canonicalRootPath) === current) {
-        recordsByCanonicalRoot.delete(current.binding.canonicalRootPath);
-      }
+      release(recordsByRootKey, current.rootKeys, current);
     },
 
     close(): Promise<void> {
@@ -685,8 +728,8 @@ export function createWorkspaceAuthorityOwner<
         );
         if (failed) throw failed.reason;
         slots.clear();
-        recordsByCanonicalRoot.clear();
-        blockedCanonicalRoots.clear();
+        recordsByRootKey.clear();
+        blockedRootKeys.clear();
         reservationStates.clear();
       });
       return closeOperation;
