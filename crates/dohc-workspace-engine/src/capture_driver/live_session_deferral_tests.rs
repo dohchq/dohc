@@ -179,6 +179,7 @@ fn apply_context<'a>(
         events: EngineEvents::default(),
         apply_probe: None,
         import_priority: None,
+        layer_rules: None,
     }
 }
 

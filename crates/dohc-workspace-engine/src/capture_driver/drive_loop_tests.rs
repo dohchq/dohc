@@ -461,18 +461,6 @@ async fn a_rapidly_rewritten_policy_file_does_not_rebuild_every_tick() {
     );
 }
 
-#[test]
-fn a_pass_waits_for_a_rule_change_but_not_forever() {
-    let mut waits = 0;
-    assert!(!rules_wait(Some(1), Some(1), &mut waits));
-    assert!(!rules_wait(None, Some(1), &mut waits));
-    for _ in 0..RULE_CHANGE_WAITS {
-        assert!(rules_wait(Some(2), Some(1), &mut waits));
-    }
-    assert!(!rules_wait(Some(2), Some(1), &mut waits));
-    assert!(rules_wait(Some(3), Some(1), &mut waits));
-}
-
 #[tokio::test(start_paused = true)]
 async fn a_settled_policy_edit_does_rebuild_exactly_once() {
     // One healthy tick on the base policy, then the edit appears and

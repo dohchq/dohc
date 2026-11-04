@@ -91,14 +91,15 @@ pub struct CaptureProvenance {
     /// The correlation id of the workspace's unfinished first import. A path
     /// capture has never recorded joins it instead of this pass.
     pub first_import: Option<String>,
-    /// A rescan that ended before it captured every path it found. Those
-    /// paths keep its label instead of this pass's.
-    pub unsettled: Option<Arc<UnsettledPass>>,
+    /// A rescan's paths that no pass has recorded yet. They keep its label
+    /// instead of this pass's.
+    pub carried: Option<Arc<CarriedPass>>,
 }
 
-/// The label and group of a rescan that never settled, and the paths its
-/// last attempt still had to capture.
-pub struct UnsettledPass {
+/// The label and group of a rescan, and the paths it found that no pass has
+/// recorded yet.
+#[derive(Clone)]
+pub struct CarriedPass {
     pub summary: Option<String>,
     pub correlation_id: Option<String>,
     pub paths: BTreeSet<String>,
@@ -109,12 +110,12 @@ pub(crate) const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
 impl CaptureProvenance {
     /// The pass whose label a capture of `path` records.
     fn for_path(&self, path: &str) -> Self {
-        match self.unsettled.as_deref() {
+        match self.carried.as_deref() {
             Some(pass) if pass.paths.contains(path) => Self {
                 summary: pass.summary.clone(),
                 correlation_id: pass.correlation_id.clone(),
                 first_import: self.first_import.clone(),
-                unsettled: None,
+                carried: None,
             },
             _ => self.clone(),
         }
@@ -130,13 +131,13 @@ impl CaptureProvenance {
                 summary: Some(FIRST_IMPORT_SUMMARY.to_owned()),
                 correlation_id: Some(import.clone()),
                 first_import: None,
-                unsettled: None,
+                carried: None,
             },
             _ => Self {
                 summary: self.summary.clone(),
                 correlation_id: self.correlation_id.clone(),
                 first_import: None,
-                unsettled: None,
+                carried: None,
             },
         }
     }
@@ -600,6 +601,11 @@ impl StoreCaptureSink {
     /// Whether any op this run was held on an unavailable policy.
     pub fn policy_held(&self) -> bool {
         self.policy_held.get()
+    }
+
+    /// The provenance this sink records with.
+    pub(crate) fn provenance_mut(&mut self) -> &mut CaptureProvenance {
+        &mut self.provenance
     }
 
     /// Take paths whose committed observations need a placement drain.

@@ -101,6 +101,7 @@ impl Fixture {
             events: EngineEvents::default(),
             apply_probe: probe,
             import_priority: None,
+            layer_rules: None,
         }
     }
 

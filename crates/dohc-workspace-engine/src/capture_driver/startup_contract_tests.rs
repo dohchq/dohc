@@ -102,69 +102,6 @@ async fn tick_waiting_on_apply_gate_leaves_link_drain_running() {
     assert_gate_wait_leaves_link_drain_running(true).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pass_after_a_rule_change_waits_for_the_rebuild() {
-    use dohc_engine_testkit::ScratchDir;
-    use std::sync::atomic::AtomicU64;
-
-    let scratch = ScratchDir::new().unwrap();
-    let db = scratch.path().join(".dohc/engine/engine.db");
-    let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let events = EngineEvents::default();
-    let (open_ready_tx, _) = tokio::sync::watch::channel(true);
-    let status = Arc::new(DriverStatus::default());
-    status.mark_initial_ready();
-    let mut env = RealEnv {
-        observation: crate::file_observation::FileObservation::new(events.clone(), "ws".into()),
-        root: scratch.path().to_owned(),
-        initial_links_hold: None,
-        actor,
-        lease_releases_seen: 0,
-        workspace_id: "ws".into(),
-        leases: LeaseRegistry::new(),
-        status,
-        author_json: Arc::new(Mutex::new(None)),
-        self_writes: SelfWriteSuppression::default(),
-        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
-        store_freshly_created: false,
-        open_ready_tx,
-        refresh_epoch: Arc::new(AtomicU64::new(0)),
-        events,
-        apply_probe: None,
-        scan: ScanGauge::default(),
-        import_priority: Arc::new(ImportPriority::new(|| {})),
-        no_atomic_placement_announced: false,
-        first_import: None,
-        unsettled: None,
-        rule_waits: 0,
-    };
-    let cancel = CancellationToken::new();
-    env.observation.start(env.root.clone()).unwrap();
-    let layer = FilesLayer::start_with_fingerprint(
-        &env.root,
-        &cancel,
-        None,
-        policy_fingerprint(&env.root),
-        0,
-        &env.scan,
-        &env.observation,
-    )
-    .await
-    .unwrap()
-    .0;
-    std::fs::create_dir_all(env.root.join(".dohc")).unwrap();
-    std::fs::write(
-        env.root.join(".dohc/files.toml"),
-        "[[rule]]\npath = \"private/**\"\ntracked = false\n",
-    )
-    .unwrap();
-    for _ in 0..RULE_CHANGE_WAITS {
-        assert_eq!(env.tick(&layer, &cancel).await, TickIo::AwaitingRebuild);
-    }
-    assert_ne!(env.tick(&layer, &cancel).await, TickIo::AwaitingRebuild);
-}
-
 async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
     use dohc_engine_storage::EngineStore;
     use dohc_engine_testkit::ScratchDir;
@@ -203,8 +140,7 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
         import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
         first_import: None,
-        unsettled: None,
-        rule_waits: 0,
+        carried: None,
     };
     let cancel = CancellationToken::new();
     env.observation.start(env.root.clone()).unwrap();
@@ -347,8 +283,7 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
         import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
         first_import: None,
-        unsettled: None,
-        rule_waits: 0,
+        carried: None,
     };
     assert!(env.start_layer(&CancellationToken::new()).await.is_err());
     assert_eq!(env.status.snapshot().phase, CapturePhase::Degraded);
@@ -369,4 +304,60 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
         .await
         .unwrap()
         .unwrap();
+}
+
+fn unreadable(paths: &[&str]) -> ReconcileRun {
+    let mut run = plan_with_ops(Vec::new());
+    if let ReconcileRun::Completed(plan) = &mut run {
+        plan.degraded = true;
+        plan.degraded_paths = paths.iter().map(|path| (*path).to_owned()).collect();
+    }
+    run
+}
+
+fn paths(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// A rescan whose last attempt records one file and fails another carries
+/// only the file it failed, so a later edit of the recorded file keeps the
+/// ordinary label.
+#[test]
+fn a_rescan_stops_carrying_a_file_it_recorded() {
+    let mut left = BTreeSet::new();
+    note_found(&mut left, &added_plan(2));
+    note_recorded(&mut left, &["note-0.md".to_owned()]);
+    let mut carried = carry(&startup_provenance(false, false, None), left);
+    assert_eq!(
+        carried.as_ref().map(|pass| pass.paths.clone()),
+        Some(paths(&["note-1.md"]))
+    );
+    carry_past(&mut carried, &["note-1.md".to_owned()]);
+    assert!(carried.is_none(), "a later pass recorded the last file");
+}
+
+/// A file the rescan planned stays carried when a retry cannot read it.
+#[test]
+fn a_rescan_keeps_carrying_a_file_a_retry_could_not_read() {
+    let mut left = BTreeSet::new();
+    note_found(&mut left, &added_plan(1));
+    note_recorded(&mut left, &[]);
+    note_found(&mut left, &unreadable(&["note-0.md"]));
+    note_recorded(&mut left, &[]);
+    assert_eq!(left, paths(&["note-0.md"]));
+}
+
+/// Quarantine can converge a rescan's retries around a file that keeps
+/// failing, so the rescan settles. It still carries that file.
+#[test]
+fn a_rescan_that_converges_around_a_quarantined_file_carries_it() {
+    let mut left = BTreeSet::new();
+    note_found(&mut left, &added_plan(1));
+    note_recorded(&mut left, &[]);
+    note_found(&mut left, &ReconcileRun::Converged);
+    note_recorded(&mut left, &[]);
+    let pass = carry(&startup_provenance(false, false, None), left)
+        .expect("the quarantined file stays carried");
+    assert_eq!(pass.paths, paths(&["note-0.md"]));
+    assert_eq!(pass.summary.as_deref(), Some(RESCAN_SUMMARY));
 }
