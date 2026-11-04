@@ -184,9 +184,10 @@ export const DatasetHistoryPage = z.object({ datasetId: identity, name: z.string
 export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;
 const description = z.unknown().transform((value, context) => {
   try {
-    const { datasetPath: path, datasetAddressStatus, ...metadata } = value as Record<string, unknown>;
-    const status = z.enum(["available", "missing", "ambiguous"]).optional().parse(datasetAddressStatus);
-    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : resultDatasetPath.parse(path), ...(status ? { datasetAddressStatus: status } : {}) };
+    const { datasetPath: path, datasetAddressStatus, datasetPaths, ...metadata } = value as Record<string, unknown>;
+    const status = z.enum(["available", "missing", "ambiguous", "unreadable"]).optional().parse(datasetAddressStatus);
+    const paths = z.array(resultDatasetPath).min(1).optional().parse(datasetPaths);
+    return { ...parseDatasetDescription(metadata), datasetPath: path === null ? null : resultDatasetPath.parse(path), ...(status ? { datasetAddressStatus: status } : {}), ...(paths ? { datasetPaths: paths } : {}) };
   }
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });

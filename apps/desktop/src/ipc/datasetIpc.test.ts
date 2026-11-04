@@ -10,7 +10,7 @@ import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler, type ServerCollections } from "./datasetIpc";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { ServerCollectionsUnavailableError, type OwnerDatasetData } from "../workspaces/remoteDataset";
 import { DatasetResult, type DatasetPlace } from "@dohc/cli/dataset";
@@ -73,6 +73,20 @@ it("uses owner authority before disclosing standalone Collections", async () => 
   await expect(f.handler("window", { action: "list", workspaceId: "elsewhere" })).rejects.toThrow("wrong workspace");
   expect(f.host.list).not.toHaveBeenCalled();
   expect(await f.handler("window", { action: "list", workspaceId: "workspace" })).toEqual({ kind: "list", datasets: [], nextCursor: null });
+});
+
+it("lists an owner's Collection only while its dataset.json is there, and names the file to fix when it can't be read", async () => {
+  const f = fixture();
+  f.host.list.mockReturnValue({ datasets: [describeApprovedDataset(f.revision, f.revision.definition.operations)] as never[], nextCursor: null });
+  const list = () => { invalidateDatasetAddresses({ workspaceId: "workspace" }); return f.handler("window", { action: "list", workspaceId: "workspace" }); };
+  expect(await list()).toMatchObject({ kind: "list", datasets: [{ datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }] });
+  const descriptor = f.sources.get("data/dataset.json")!;
+  f.sources.delete("data/dataset.json");
+  expect(await list()).toEqual({ kind: "list", datasets: [], nextCursor: null });
+  f.sources.set("data/dataset.json", "{");
+  expect(await list()).toMatchObject({ datasets: [{ datasetId, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["data/dataset.json"] }] });
+  f.sources.set("data/dataset.json", descriptor);
+  expect(await list()).toMatchObject({ datasets: [{ datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }] });
 });
 
 it("resolves request paths through the engine and sends only the ID to the current host", async () => {

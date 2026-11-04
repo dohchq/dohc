@@ -2340,7 +2340,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
     },
     result(value: unknown, changeSnapshots = false): unknown {
       const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath", "copyPath", "packagePath", "folder"]);
-      const lists = new Set(["paths", "sourcePaths", "created", "written", "deleted", "withoutHistory"]);
+      const lists = new Set(["paths", "sourcePaths", "datasetPaths", "created", "written", "deleted", "withoutHistory"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "definitions", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       if (changeSnapshots) { data.delete("before"); data.delete("after"); }
       const collect = (entry: unknown, key = ""): void => {

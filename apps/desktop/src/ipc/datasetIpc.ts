@@ -138,8 +138,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         const { datasetPath: _, expectedDatasetId: _expected, ...fields } = request;
         input = { ...fields, datasetId };
       } else input = request;
-      const addressPage = async (page: { datasets: import("@dohc/security-contract/dataset").DatasetDescription[]; nextCursor: string | null }) => {
-        const datasets = await withSourceAdapter(adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal));
+      const addressPage = async <T extends import("@dohc/security-contract/dataset").DatasetDescription>(page: { datasets: T[]; nextCursor: string | null }, approvedFolder?: (datasetId: string) => Promise<string>) => {
+        const datasets = await withSourceAdapter(adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal, approvedFolder));
         current();
         return { ...page, datasets };
       };
@@ -231,7 +231,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         try {
           const data = await openData(); current();
           const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current();
-          return { kind: "list" as const, ...await addressPage(result), ...(server ? { elsewhere: server.elsewhere } : {}) };
+          const approvedFolder = async (datasetId: string) => datasetBaseFolder((await data.approvedArtifacts(datasetId)).revision.definition);
+          return { kind: "list" as const, ...await addressPage(result, approvedFolder), ...(server ? { elsewhere: server.elsewhere } : {}) };
         } catch (error) {
           current();
           const refusal = listRefusalOf(error);

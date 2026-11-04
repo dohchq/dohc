@@ -76,15 +76,72 @@ describe("Explorer collection folders", () => {
     view.rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
     expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
   });
-  it("shows a Collection whose source is gone as unavailable, with how to recover it", () => {
+  it("names why a Collection can't open, and shows the files to fix in Files", () => {
     const onOpenDataCollection = vi.fn();
-    render(<Explorer {...explorerProps({ mode: "home", onOpenDataCollection,
-      dataCollections: [{ datasetId: "d1", datasetPath: null, tableId: "00000000-0000-4000-8000-000000000002", name: "Guests" }] })} />);
-    const row = screen.getByTitle("Collection source unavailable. Restore dataset.json from History or remove duplicate copies.");
-    expect(row.getAttribute("aria-disabled")).toBe("true");
-    expect(row.textContent).toContain("Source unavailable");
-    fireEvent.click(row);
-    expect(onOpenDataCollection).not.toHaveBeenCalled();
+    const showExplorerMenu = vi.fn(async (_input: unknown) => null);
+    vi.stubGlobal("dohcDesktop", { showExplorerMenu });
+    const tableId = "00000000-0000-4000-8000-000000000002";
+    const props = explorerProps({ mode: "home", onOpenDataCollection, dataCollections: [
+      { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
+      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId, name: "Rooms" },
+      { datasetId: "d3", datasetPath: null, datasetAddressStatus: "missing", tableId, name: "Volunteers" },
+    ] });
+    const view = render(<Explorer {...props} />);
+    try {
+      const unreadable = screen.getByRole("button", { description: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." });
+      expect(unreadable.textContent).toContain("Can't read dataset.json");
+      expect(unreadable.hasAttribute("aria-disabled")).toBe(false);
+      fireEvent.click(unreadable);
+      expect(onOpenDataCollection).not.toHaveBeenCalled();
+      expect(props.onModeChange).toHaveBeenLastCalledWith("files");
+      expect(props.onSetFolderExpanded).toHaveBeenCalledWith("guests", true);
+
+      const share = screen.getByRole("button", { description: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." });
+      expect(share.textContent).toContain("Not in this share");
+      expect(share.getAttribute("aria-disabled")).toBe("true");
+      vi.mocked(props.onModeChange).mockClear();
+      fireEvent.click(share);
+      fireEvent.contextMenu(share);
+      expect(props.onModeChange).not.toHaveBeenCalled();
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      const ambiguous = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      expect(ambiguous.textContent).toContain("2 dataset.json files");
+      fireEvent.contextMenu(ambiguous);
+      fireEvent.click(screen.getByRole("menuitem", { name: "Show in Files" }));
+      expect(showExplorerMenu).not.toHaveBeenCalled();
+      expect(props.onModeChange).toHaveBeenLastCalledWith("files");
+      view.rerender(<Explorer {...props} mode="files" expandedFolders={["copy", "rooms"]} folders={[...props.folders, "copy", "rooms"]}
+        files={[...props.files, { path: "copy/dataset.json", kind: "file" }, { path: "rooms/dataset.json", kind: "file" }]} />);
+      expect(treeRow("copy/dataset.json").getAttribute("aria-selected")).toBe("true");
+      expect(treeRow("rooms/dataset.json").getAttribute("aria-selected")).toBe("true");
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("gives focus back to the row when its menu closes, so the arrows and Enter still work", () => {
+    vi.stubGlobal("dohcDesktop", { showExplorerMenu: vi.fn(async (_input: unknown) => null) });
+    const tableId = "00000000-0000-4000-8000-000000000002";
+    const props = explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
+      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId, name: "Rooms" },
+    ] });
+    render(<Explorer {...props} />);
+    try {
+      const guests = screen.getByRole("button", { description: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." });
+      const rooms = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      rooms.focus();
+      fireEvent.contextMenu(rooms);
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Show in Files" }));
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(document.activeElement).toBe(rooms);
+      fireEvent.keyDown(rooms, { key: "ArrowUp" });
+      expect(document.activeElement).toBe(guests);
+      fireEvent.keyDown(guests, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(rooms);
+      fireEvent.keyDown(rooms, { key: "Enter" });
+      expect(props.onModeChange).toHaveBeenLastCalledWith("files");
+      expect(props.onSetFolderExpanded).toHaveBeenCalledWith("rooms", true);
+    } finally { vi.unstubAllGlobals(); }
   });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();

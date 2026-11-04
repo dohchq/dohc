@@ -2,11 +2,11 @@ import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
 import { expect, test, type Locator } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openExplorerHome, openWorkspaceFromFirstRun, showExplorerFiles } from "./helpers/workspace";
 
 async function openManagement(collection: Locator): Promise<void> {
   const trigger = collection.getByLabel("Manage Collection", { exact: true });
@@ -201,6 +201,78 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     const remaining = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list", includeArchived: true }), workspaceId);
     expect(remaining).toMatchObject({ kind: "list", datasets: [] });
     expect((await readFile(savePath)).byteLength).toBeGreaterThan(4096);
+    assertDesktopEngineHealthy(desktop.logs);
+    expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
+  } finally { await cleanupDesktopWorkspace(desktop, workspace); }
+});
+
+test("@dataset-collection a deleted Collection leaves every list, and its files coming back from the trash bring back every record", async () => {
+  test.setTimeout(180_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace });
+    const { page } = desktop;
+    const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
+    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
+    const create = page.getByTestId("new-collection-dialog");
+    await create.getByLabel("Collection name").fill("Registration");
+    await create.getByTestId("new-collection-create").click();
+    await expect(create).toBeHidden();
+    const collection = page.getByRole("region", { name: "Registration", exact: true });
+    for (const name of ["Ada", "Grace"]) {
+      await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+      await collection.getByRole("row", { name: "New record" }).getByLabel("Name", { exact: true }).fill(name);
+      await collection.getByRole("button", { name: "Create record", exact: true }).click();
+      await expect(collection.getByRole("button", { name: /^Edit Name for record / }).filter({ hasText: name })).toBeVisible();
+    }
+    const listed = async () => {
+      const result = await page.evaluate(async workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
+      if (result.kind !== "list") throw Error("Expected the Collections list.");
+      return result.datasets;
+    };
+    const cliListed = async () => JSON.stringify(await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "dataset",
+      args: { cwd: workspace.rootPath, actor: "agent", request: { action: "list", workspaceId } } }, { stateDir: workspace.homeDir }));
+    const [dataset] = await listed();
+    if (!dataset?.datasetPath) throw Error("Expected the new Collection to have its dataset.json.");
+    const folder = dirname(dataset.datasetPath);
+    expect(folder).not.toBe(".");
+    expect(await cliListed()).toContain(dataset.datasetId);
+    const home = page.getByTestId("explorer-home").getByRole("region", { name: "Collections" });
+    await openExplorerHome(page);
+    await expect(home.getByText("Registration", { exact: true })).toBeVisible();
+
+    // What the trash keeps: every file in the Collection's folder.
+    const saved = new Map<string, Buffer>();
+    for (const entry of await readdir(join(workspace.rootPath, folder), { recursive: true, withFileTypes: true })) {
+      if (entry.isFile()) saved.set(join(entry.parentPath, entry.name), await readFile(join(entry.parentPath, entry.name)));
+    }
+    await showExplorerFiles(page);
+    await explorerRow(page, folder).click();
+    await explorerRow(page, folder).press("Delete");
+    await page.getByTestId("confirm-delete").click();
+    await expect(explorerRow(page, folder)).toHaveCount(0);
+    await openExplorerHome(page);
+    await expect(home.getByText("Registration", { exact: true })).toHaveCount(0);
+    await expect.poll(async () => (await listed()).length).toBe(0);
+    const cliAfterDelete = await cliListed();
+    expect(cliAfterDelete).toContain('"kind":"list"');
+    expect(cliAfterDelete).not.toContain(dataset.datasetId);
+
+    // Putting the files back is what restoring them from the trash does.
+    for (const [path, bytes] of saved) {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, bytes);
+    }
+    await expect.poll(async () => (await listed()).map(entry => entry.datasetPath)).toEqual([dataset.datasetPath]);
+    await expect(home.getByText("Registration", { exact: true })).toBeVisible();
+    expect(await cliListed()).toContain(dataset.datasetId);
+    const operationId = dataset.operations.find(operation => operation.kind === "read")?.operationId;
+    if (!operationId) throw Error("Expected the Collection to have a read action.");
+    const read = await page.evaluate(async request => window.dohcDesktop!.dataset(request), { action: "invoke" as const, workspaceId, datasetPath: dataset.datasetPath,
+      revision: dataset.revision, revisionSha256: dataset.revisionSha256, operationId, input: { limit: 50 }, idempotencyKey: "read-after-restore" });
+    expect(JSON.stringify(read)).toContain("Ada");
+    expect(JSON.stringify(read)).toContain("Grace");
     assertDesktopEngineHealthy(desktop.logs);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
   } finally { await cleanupDesktopWorkspace(desktop, workspace); }

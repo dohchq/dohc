@@ -116,3 +116,35 @@ it("excludes live documents before capture even when their content hash is cache
   expect(capture).toHaveBeenCalledTimes(1);
   expect(capture.mock.calls[0]![0].paths).toEqual(["plain/dataset.json"]);
 });
+
+it("leaves out a Collection whose dataset.json is gone, keeps one whose file can't be read, and lists it again once the file is back", async () => {
+  const sources = new Map([["data/dataset.json", JSON.stringify(definition)], ["other/dataset.json", JSON.stringify({ datasetId: id(9) })]]);
+  const adapter = sourceCaptureAdapter(sources);
+  const description = describeApprovedDataset(describeDatasetRevision({ definition, revision: 1, schemaSql: "schema", operationSource: "actions" }), definition.operations);
+  const approvedFolder = vi.fn(async (_datasetId: string) => "data");
+  const list = () => { invalidateDatasetAddresses({ workspaceId: "w" }); return addressDatasets(adapter, "w", [description], signal, approvedFolder); };
+  const available = { ...description, datasetPath: "data/dataset.json", datasetAddressStatus: "available" };
+  expect(await list()).toEqual([available]);
+  sources.delete("data/dataset.json");
+  expect(await list()).toEqual([]);
+  // With every dataset.json readable, nothing in the workspace can be its unreadable file.
+  expect(approvedFolder).not.toHaveBeenCalled();
+  sources.set("data/dataset.json", "{ \"datasetId\": ");
+  expect(await list()).toEqual([{ ...description, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["data/dataset.json"] }]);
+  expect(approvedFolder).toHaveBeenCalledWith(id(1));
+  sources.delete("data/dataset.json");
+  sources.set("elsewhere/dataset.json", "{ \"datasetId\": ");
+  expect(await list()).toEqual([]);
+  approvedFolder.mockRejectedValueOnce(new Error("The server didn't answer."));
+  sources.set("data/dataset.json", "{ \"datasetId\": ");
+  expect(await list()).toEqual([]);
+  sources.set("data/dataset.json", JSON.stringify(definition));
+  expect(await list()).toEqual([available]);
+  sources.set("copy/dataset.json", JSON.stringify(definition));
+  expect(await list()).toEqual([{ ...description, datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "data/dataset.json"] }]);
+  // A share's list has no approved folder to check, so it keeps the Collection and says it's missing.
+  sources.delete("copy/dataset.json");
+  sources.delete("data/dataset.json");
+  invalidateDatasetAddresses({ workspaceId: "w" });
+  expect(await addressDatasets(adapter, "w", [description], signal)).toEqual([{ ...description, datasetPath: null, datasetAddressStatus: "missing" }]);
+});
