@@ -308,7 +308,7 @@ describe("VersionsPage", () => {
     const empty = await waitFor(() => screen.getByTestId("versions-page-empty"));
     expect(empty.textContent).toContain("Make a version to try changes without touching Main.");
     expect(screen.getByTestId("versions-page-same").textContent)
-      .toBe("Chats, text files over 10 MB, other files over 5 MB and files History doesn't track stay the same in every version.");
+      .toBe("Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.");
     // One New version, the empty state's. The header's shows once a version exists.
     expect(screen.getAllByTestId("versions-page-new")).toHaveLength(1);
     expect(within(empty).getByTestId("versions-page-new")).toBeTruthy();

@@ -210,7 +210,7 @@ describe("VersionMenu", () => {
   });
 
   it("says before the first version what every version leaves alone, in the Versions page's words", async () => {
-    const same = "Chats, text files over 10 MB, other files over 5 MB and files History doesn't track stay the same in every version.";
+    const same = "Chats, text files over 10\u00a0MB, other files over 5\u00a0MB and files History doesn't track stay the same in every version.";
     bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
     const user = userEvent.setup();
     renderMenu();

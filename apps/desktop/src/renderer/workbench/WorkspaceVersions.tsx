@@ -768,7 +768,8 @@ export function VersionMenu(props: {
   );
 }
 
-const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
+// A no-break space keeps each number on the same line as its unit.
+const megabytes = (bytes: number) => `${bytes / (1024 * 1024)}\u00a0MB`;
 // What a version leaves alone. The sizes are the engine's capture caps:
 // larger files stay as they are on disk.
 export const SAME_IN_EVERY_VERSION =
