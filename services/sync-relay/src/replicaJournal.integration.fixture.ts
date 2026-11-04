@@ -256,7 +256,7 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       }
       if (mode === "device") {
         let page; do {
-          page = await rpc("sync.applyPull", {...{workspaceId: "workspace"}, pageToken: (await rpc("sync.fetchPull", {workspaceId: "workspace"})).pageToken});
+          page = await rpc("sync.applyPull", {workspaceId: "workspace", pageToken: (await rpc("sync.fetchPull", {workspaceId: "workspace"})).pageToken});
           assert.equal(page.refused, 0, JSON.stringify(page));
           await rpc("sync.commitCursor", {workspaceId: "workspace", pendingCursor: page.pendingCursor});
         } while (page.hasMore);

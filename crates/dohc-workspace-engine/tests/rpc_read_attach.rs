@@ -232,6 +232,7 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
         "versionedText.rollback",
         "versions.ensureMain",
         "versions.setActive",
+        "sync.fetchPull",
         "sync.applyPull",
         "secrets.write",
     ]

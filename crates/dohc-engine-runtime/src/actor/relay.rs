@@ -951,15 +951,20 @@ mod deferred_relay_tests {
 
     #[test]
     fn base_repair_probe_is_sent_once_across_pull_replays_without_cursor_advance() {
-        base_repair_probe_across_replays(false);
+        base_repair_probe_across_replays(false, false);
     }
 
     #[test]
     fn base_repair_push_between_pull_replays_keeps_stale_probe_safe() {
-        base_repair_probe_across_replays(true);
+        base_repair_probe_across_replays(true, false);
     }
 
-    fn base_repair_probe_across_replays(push_between_replays: bool) {
+    #[test]
+    fn fetched_pull_defers_coordinate_repairs_until_offline_apply() {
+        base_repair_probe_across_replays(false, true);
+    }
+
+    fn base_repair_probe_across_replays(push_between_replays: bool, prepared: bool) {
         use dohc_engine_sync::{ReplicationEnvelope, SyncError};
         use rusqlite::params;
         let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
@@ -1010,9 +1015,10 @@ mod deferred_relay_tests {
         };
         let transport = DeferredRelayTransport::default();
         let mut cache = WriterDocCache::new();
-        let operation = RelayOperation::Pull {
-            workspace_id: "ws".into(),
-            now_ms: 1200,
+        let operation = if prepared {
+            RelayOperation::FetchPull { workspace_id: "ws".into() }
+        } else {
+            RelayOperation::Pull { workspace_id: "ws".into(), now_ms: 1200 }
         };
         let mut probes = 0;
         let mut lookups = 0;
@@ -1033,6 +1039,23 @@ mod deferred_relay_tests {
                 &mut crate::actor::live_application::Registry::default(),
             ) {
                 Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
+                Ok(RelayOperationOutcome::PullFetched(page)) => {
+                    let state: (Option<i64>, Option<String>) = store.read_with(|conn| {
+                        conn.query_row("SELECT base_relay_seq,ordinary_pull_token FROM ydoc_docs JOIN sync_identity USING (workspace_id) WHERE object_id='doc'", [],
+                            |row| Ok((row.get(0)?, row.get(1)?)))
+                    }).unwrap();
+                    assert_eq!(state, (None, None));
+                    let offline = DeferredRelayTransport::default();
+                    let applied = execute_relay_operation(
+                        &mut store, &mut cache, offline.clone(),
+                        RelayOperation::ApplyPull { workspace_id: "ws".into(), page, now_ms: 1200 },
+                        &LeaseRegistry::default(), &ClaimAnnouncer::default(),
+                        &mut crate::actor::live_application::Registry::default(),
+                    );
+                    assert!(matches!(applied, Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. }))), "{applied:?}");
+                    assert!(offline.take_pending().is_none());
+                    break;
+                }
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
                     if reason == RELAY_IO_PENDING =>
                 {

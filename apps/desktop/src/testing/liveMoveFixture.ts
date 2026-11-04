@@ -239,12 +239,12 @@ export async function openLiveMoveFixture(input: {
         claim: () => relay.claim(),
         push: () => relay.push(),
         recoverOrigin: () => relay.recoverOrigin(),
-        async pull(materializePage) {
+        async pull(runBatch) {
           const into = catchingUp ?? background;
           const started = performance.now();
           pullsRunning++;
           try {
-            const result = await relay.pull(materializePage);
+            const result = await relay.pull(runBatch);
             into.push({ result: "succeeded", elapsedMs: performance.now() - started });
             return result;
           } catch (error) {

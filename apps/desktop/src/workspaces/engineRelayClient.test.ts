@@ -265,6 +265,53 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 }
 
 describe("EngineRelayClient", () => {
+  it("fetches off the capture chain and completes each batch before fetching another", async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let held = false;
+    let pages = 0;
+    const events: string[] = [];
+    const daemon = new MockDaemon(request => {
+      if (request.method === "sync.applyPull") {
+        expect(held).toBe(true);
+        events.push("apply");
+        pages += 1;
+        return {status: "complete", refused: 0, fetched: 1, applied: 1, skipped: 0,
+          conflictsOpened: 0, hasMore: pages === 1, nextCursor: pages,
+          pendingCursor: {kind: "relay", token: `cursor-${pages}`}, sharingDeclined: [], refusals: [], changedPaths: []};
+      }
+      if (request.method === "sync.commitCursor") {
+        expect(held).toBe(true);
+        events.push("commit");
+      }
+      return undefined;
+    });
+    const send = daemon.sendRequest.bind(daemon);
+    vi.spyOn(daemon, "sendRequest").mockImplementation(async request => {
+      if (request.method === "sync.fetchPull") {
+        expect(held).toBe(false);
+        events.push("fetch");
+        entered.resolve();
+        await release.promise;
+      }
+      return send(request);
+    });
+    const {client, sessions} = await harness(daemon);
+    const pulling = client.pull(async apply => {
+      held = true;
+      try {
+        return await apply(async () => { expect(held).toBe(true); events.push("project"); });
+      } finally { held = false; }
+    });
+    await entered.promise;
+    expect(held).toBe(false);
+    expect(events).toEqual(["fetch"]);
+    release.resolve();
+    await pulling;
+    expect(events).toEqual(["fetch", "apply", "project", "commit", "fetch", "apply", "project", "commit"]);
+    await sessions.closeAll();
+  });
+
   it("commits engine-owned refusals before notifying Notices", async () => {
     const refusal = { workspaceId: "workspace-a", originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
     const daemon = new MockDaemon(request => request.method === "sync.applyPull" ? {

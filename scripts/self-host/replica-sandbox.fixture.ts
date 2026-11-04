@@ -238,7 +238,7 @@ async function measure() {
         workspace = String((await rpc("workspace.open", {rootDir: store, workspaceId: "w", storeMode: "passive", captureMode: "none", recoverRunningDispatches: false,
           relay: {socketPath: socket.socketPath, bearerToken: lease.bearer}})).workspace);
         await rpc("sync.adoptJoinIdentity", {workspaceId: "w", ...storage.getWorkspaceIdentity("w")!});
-        const start = performance.now(), page = await rpc("sync.applyPull", {...{workspaceId: "w"}, pageToken: (await rpc("sync.fetchPull", {workspaceId: "w"})).pageToken});
+        const start = performance.now(), page = await rpc("sync.applyPull", {workspaceId: "w", pageToken: (await rpc("sync.fetchPull", {workspaceId: "w"})).pageToken});
         await rpc("sync.commitCursor", {workspaceId: "w", pendingCursor: page.pendingCursor});
         const pull = performance.now() - start, cutStart = performance.now();
         const cut = decodeReplicaCurrentView(await rpc("replica.cut", {selectors, incarnation: lease.incarnation, knownTextShas: "", position: null, cursor: null}));

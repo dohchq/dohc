@@ -1115,7 +1115,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         page: &[ReplicationEnvelope],
     ) -> Result<(), RelayError> {
-        self.repair_base_orders(store, workspace_id, identity, faults, page, BaseRepairPhase::Immediate)
+        self.repair_base_orders(
+            store,
+            workspace_id,
+            identity,
+            faults,
+            page,
+            BaseRepairPhase::Immediate,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1383,9 +1390,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // A group wider than one batch retains its answers across replay and commits whole.
             if let BaseRepairPhase::Apply(answers) = &phase {
                 // New coordinates wait for the next fetch. Never infer absence from a missing answer.
-                if requests.iter().any(|request| !answers.coordinates.contains_key(
-                    &(request.origin_id.clone(), request.origin_seq),
-                )) {
+                if requests.iter().any(|request| {
+                    !answers
+                        .coordinates
+                        .contains_key(&(request.origin_id.clone(), request.origin_seq))
+                }) {
                     continue;
                 }
                 for request in &requests {
@@ -2049,7 +2058,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             _ => {
                 let prepared = self.fetch_pull(store, workspace_id, faults)?;
                 self.begin_prepared_pull(store, workspace_id, &prepared, faults)?
-            },
+            }
         };
         let pass = match self.apply_pulled(
             store,
@@ -2250,12 +2259,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         );
         let mut repairs = BaseRepairAnswers::default();
         self.repair_base_orders(
-            store, workspace_id, &identity, faults, &ops[..fetched_op_count],
+            store,
+            workspace_id,
+            &identity,
+            faults,
+            &ops[..fetched_op_count],
             BaseRepairPhase::Fetch(&mut repairs),
         )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         ops.truncate(fetched_op_count);
-        Ok(PreparedOrdinaryPull { identity, current, ops, cursor, has_more, repairs })
+        Ok(PreparedOrdinaryPull {
+            identity,
+            current,
+            ops,
+            cursor,
+            has_more,
+            repairs,
+        })
     }
 
     fn begin_prepared_pull(
@@ -2265,40 +2285,65 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         prepared: &PreparedOrdinaryPull,
         faults: &dyn FaultInjector,
     ) -> Result<(Box<OrdinaryFetch>, ApplyProgress), RelayError> {
-        let identity = read_sync_identity(store, workspace_id).map_err(local)?
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
         if identity != prepared.identity
             || crate::read_relay_cursor(store, workspace_id).map_err(local)? != prepared.current
-            || store.read_with(|conn| crate::hosted::is_hosted(conn, workspace_id)).map_err(local)?
+            || store
+                .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+                .map_err(local)?
         {
             return Err(RelayError::InvalidResponse);
         }
         let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
         crate::deferred::check_redelivery(store, &prepared.ops)?;
-        let fetched_coordinates: BTreeSet<_> = prepared.ops.iter()
-            .map(|op| (op.origin_id.clone(), op.origin_seq)).collect();
+        let fetched_coordinates: BTreeSet<_> = prepared
+            .ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
         let mut ops = prepared.ops.clone();
-        ops.extend(queued.iter().filter(|op| {
-            !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq))
-        }).cloned());
+        ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
         self.repair_base_orders(
-            store, workspace_id, &identity, faults, &prepared.ops,
+            store,
+            workspace_id,
+            &identity,
+            faults,
+            &prepared.ops,
             BaseRepairPhase::Apply(&prepared.repairs),
         )?;
-        let bootstrap_complete = store.read_with(|conn| {
-            crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
-        }).map_err(local)?;
-        let pull_token = match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-            TxnOutcome::Committed(token) => token,
-            TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
-        };
+        let bootstrap_complete = store
+            .read_with(|conn| {
+                crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
+            })
+            .map_err(local)?;
+        let pull_token =
+            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+                TxnOutcome::Committed(token) => token,
+                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+            };
         let ordered = merge_by_origin(ops);
         let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
-        Ok((Box::new(OrdinaryFetch {
-            identity, queued, ordered, cursor: prepared.cursor, fetched: prepared.ops.len(),
-            has_more: prepared.has_more, bootstrap_complete, pull_token,
-        }), progress))
+        Ok((
+            Box::new(OrdinaryFetch {
+                identity,
+                queued,
+                ordered,
+                cursor: prepared.cursor,
+                fetched: prepared.ops.len(),
+                has_more: prepared.has_more,
+                bootstrap_complete,
+                pull_token,
+            }),
+            progress,
+        ))
     }
 
     /// Apply one fetched page. Mutable local state is read only after entering the writer.
@@ -2313,14 +2358,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
-        if read_sync_identity(store, workspace_id).map_err(local)?.as_ref() != Some(&prepared.identity)
+        if read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .as_ref()
+            != Some(&prepared.identity)
             || crate::read_relay_cursor(store, workspace_id).map_err(local)? != prepared.current
         {
             return Err(RelayError::InvalidResponse);
         }
-        if self.continuation.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none() {
+        if self
+            .continuation
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
             let (fetch, progress) = self.begin_prepared_pull(store, workspace_id, prepared, faults)?;
-            self.continuation.keep(workspace_id, Fetched::Ordinary(fetch), progress);
+            self.continuation
+                .keep(workspace_id, Fetched::Ordinary(fetch), progress);
         }
         self.pull_chat_workspace(store, cache, workspace_id, faults, leases, now_ms)
     }

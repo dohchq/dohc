@@ -15,6 +15,13 @@ const pull = { ...push, fetched: 2, applied: 1, refused: 1, nextCursor: 9, pendi
   ownerAdmissionPending: [], changedPaths: [change], refusals: [refusal] };
 
 describe("ordinary native sync contract", () => {
+  it("accepts only a nonempty fetched page token", () => {
+    expect(decodeOrdinarySyncResult("sync.fetchPull", {pageToken: "batch", ignored: true})).toEqual({pageToken: "batch"});
+    for (const value of [{}, {pageToken: ""}, {pageToken: 1}, {pendingCursor: pull.pendingCursor}]) {
+      expect(() => decodeOrdinarySyncResult("sync.fetchPull", value)).toThrow(ProtocolShapeError);
+    }
+  });
+
   it("projects native push without requiring its null pull cursor fields", () => {
     expect(decodeOrdinarySyncResult("sync.push", push)).toEqual({ status: "complete", pushed: 0, hasMore: false,
       ownerAdmissionPending: [admission], sharingDeclined: [decline] });

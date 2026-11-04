@@ -41,11 +41,13 @@ fn pass<T: RelayTransport>(
     client: &RelaySyncClient<T>,
     engine: &mut EngineStore,
 ) -> (bool, RelayCursor) {
+    let page = client.fetch_pull(engine, "ws", &NoFaults).unwrap();
     match client
-        .pull_chat_workspace(
+        .apply_pull(
             engine,
             &mut Default::default(),
             "ws",
+            &page,
             &NoFaults,
             &NoLiveLeases,
             2_000,
@@ -59,6 +61,175 @@ fn pass<T: RelayTransport>(
         } => (has_more, cursor),
         other => panic!("{other:?}"),
     }
+}
+
+fn prepared_file_relay() -> PagedRelay {
+    let mut blobs = BTreeMap::new();
+    let ops = (0..2).map(|seq| {
+        let path = format!("prepared-{seq}.txt");
+        let text = format!("remote {seq}\n");
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        blobs.insert(sha.clone(), text.into_bytes());
+        envelope("prepared-peer", seq, "moment.append", json!({
+            "momentId": format!("prepared-moment-{seq}"), "versionId": "main",
+            "objectId": format!("prepared-object-{seq}"), "objectCreatedAtMs": 1,
+            "path": path, "recordedAtMs": 2_000, "operation": "write",
+            "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha, "payloadAfterPath": path,
+            "payloadAfterContentKind": "text", "metadata": {"origin": "sync"},
+            "beforePresent": "absent",
+        }))
+    }).collect();
+    let mut relay = PagedRelay::new([(0, PullResponse { ops, next_cursor: 2, has_more: false })]);
+    relay.blobs = blobs;
+    relay
+}
+
+fn prepared_counts(engine: &EngineStore) -> (i64, i64) {
+    engine.read_with(|conn| Ok::<_, rusqlite::Error>((
+        conn.query_row("SELECT COUNT(*) FROM replication_log WHERE origin_id='prepared-peer'", [], |r| r.get(0))?,
+        conn.query_row("SELECT COUNT(*) FROM moments WHERE moment_id LIKE 'prepared-moment-%'", [], |r| r.get(0))?,
+    ))).unwrap()
+}
+
+#[test]
+fn prepared_pull_restart_replays_before_apply_during_apply_and_before_cursor_commit() {
+    for boundary in ["before apply", "partial apply", "after apply"] {
+        let (scratch, path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        VersionedTextStore::new(&mut engine).ensure_main_version("ws", "main", 1_000, &NoFaults).unwrap();
+        let client = RelaySyncClient::new(prepared_file_relay());
+        let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+        assert_eq!(prepared_counts(&engine), (0, 0));
+        assert_eq!(pull_token(&engine), None);
+        assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
+        let expected = match boundary {
+            "before apply" => 0,
+            "partial apply" => {
+                let fault = CrashAt { point: FaultPoint::SyncBeforeApplyCommit, nth: 1, seen: AtomicUsize::new(0) };
+                assert!(client.apply_pull(&mut engine, &mut Default::default(), "ws", &page,
+                    &fault, &NoLiveLeases, 2_000).is_err());
+                assert_eq!(fault.seen.load(Ordering::SeqCst), 2);
+                1
+            }
+            _ => {
+                let fault = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
+                assert!(matches!(client.apply_pull(&mut engine, &mut Default::default(), "ws", &page,
+                    fault.as_ref(), &NoLiveLeases, 2_000).unwrap(), SyncPassOutcome::CrashedAfterApply { applied: 2, .. }));
+                assert!(fault.fired());
+                2
+            }
+        };
+        assert_eq!(prepared_counts(&engine), (expected, expected));
+        drop(page);
+        drop(client);
+        drop(engine);
+
+        let mut engine = EngineStore::open(&path, 3_000).unwrap();
+        assert_eq!(prepared_counts(&engine), (expected, expected));
+        assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
+        for seq in 0..2 {
+            assert!(!scratch.path().join(format!("prepared-{seq}.txt")).exists());
+        }
+        let client = RelaySyncClient::new(prepared_file_relay());
+        let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+        // Applying succeeds with a transport that has no pages or blobs to serve.
+        let offline = RelaySyncClient::new(PagedRelay::new([]));
+        let result = offline.apply_pull(&mut engine, &mut Default::default(), "ws", &page,
+            &NoFaults, &NoLiveLeases, 3_000).unwrap();
+        let SyncPassOutcome::Complete { applied, skipped, refused, pending_cursor: Some(cursor), changed_paths, .. } = result else {
+            panic!("unexpected replay: {result:?}");
+        };
+        assert_eq!((applied, skipped, refused), (2 - expected as usize, expected as usize, 0));
+        assert_eq!(changed_paths.len(), 2, "replay keeps every unprojected path");
+        assert_eq!(prepared_counts(&engine), (2, 2));
+        assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
+        let jobs = dohc_engine_files::run_pending_jobs(&mut engine, scratch.path(), &MaterializeOptions {
+            holds: None, policy: dohc_engine_files::DurabilityPolicy::per_os(),
+            replacer: &dohc_engine_files::StdReplacer, backoff: &dohc_engine_files::NoBackoff,
+            now_ms: 3_000, faults: &NoFaults,
+        }).unwrap();
+        assert!(!jobs.is_empty());
+        assert!(jobs.iter().all(|job| matches!(job.outcome, dohc_engine_files::JobOutcome::Completed)));
+        for seq in 0..2 {
+            assert_eq!(std::fs::read_to_string(scratch.path().join(format!("prepared-{seq}.txt"))).unwrap(), format!("remote {seq}\n"));
+        }
+        assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
+        commit(&offline, &mut engine, &cursor);
+        drop(engine);
+        let engine = EngineStore::open(&path, 4_000).unwrap();
+        assert_eq!(prepared_counts(&engine), (2, 2));
+        assert_eq!(read_relay_cursor(&engine, "ws").unwrap().unwrap().cursor, 2);
+        assert!(offline.transport().pulls.lock().unwrap().is_empty());
+        assert!(offline.transport().download_batches.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn prepared_pull_refuses_a_changed_identity_or_cursor() {
+    for field in ["origin_id", "replication_epoch", "stream_identity", "cursor"] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        let client = RelaySyncClient::new(padded_relay(1));
+        let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+        if field == "cursor" {
+            let (_, cursor) = pass(&client, &mut engine);
+            commit(&client, &mut engine, &cursor);
+        } else {
+            engine.write_with(&NoFaults, |tx| {
+                tx.execute(&format!("UPDATE sync_identity SET {field}='changed' WHERE workspace_id='ws'"), [])
+                    .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            }).unwrap();
+        }
+        assert!(matches!(client.apply_pull(&mut engine, &mut Default::default(), "ws", &page,
+            &NoFaults, &NoLiveLeases, 2_000), Err(RelayError::InvalidResponse)), "{field}");
+    }
+}
+
+#[test]
+fn prepared_pull_preserves_work_written_after_fetch() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine).ensure_main_version("ws", "main", 1_000, &NoFaults).unwrap();
+    let client = RelaySyncClient::new(prepared_file_relay());
+    let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+    VersionedTextStore::new(&mut engine).write_text(&dohc_engine_domain::WriteText {
+        workspace_id: "ws".into(), version_id: "main".into(), object_id: "local-object".into(),
+        path: "prepared-0.txt".into(), text: "local work\n".into(), moment_id: "local-moment".into(),
+        metadata_origin: "user".into(), metadata_summary: None, metadata_correlation_id: None,
+        author_json: None, now_ms: 2_100, request_id: None,
+    }, &NoFaults).unwrap();
+    let result = client.apply_pull(&mut engine, &mut Default::default(), "ws", &page,
+        &NoFaults, &NoLiveLeases, 2_200).unwrap();
+    assert!(matches!(result, SyncPassOutcome::Complete { conflicts_opened: 1, .. }), "{result:?}");
+    let current = VersionedTextStore::new(&mut engine).read_text("ws", "main", "prepared-0.txt").unwrap().unwrap();
+    assert_eq!(current.text, "local work\n");
+}
+
+#[test]
+fn prepared_pull_keeps_operation_page_and_payload_limits() {
+    for count in [500, 501] {
+        let (_scratch, _path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        let ops = (0..count).map(|seq| envelope("limit-peer", seq, "probe.padding", json!({}))).collect();
+        let client = RelaySyncClient::new(PagedRelay::new([(0, PullResponse { ops, next_cursor: count, has_more: true })]));
+        assert_eq!(client.fetch_pull(&mut engine, "ws", &NoFaults).is_ok(), count == 500);
+        assert_eq!(pull_token(&engine), None);
+        assert_eq!(*client.transport().pulls.lock().unwrap(), [(0, 500)]);
+    }
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let client = RelaySyncClient::new(padded_relay(17));
+    client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+    assert_eq!(client.transport().pulls.lock().unwrap().len(), 16);
+    assert_eq!(pull_token(&engine), None);
+    let client = RelaySyncClient::new(PagedRelay::new([(0, PullResponse {
+        ops: vec![envelope("limit-peer", 0, "probe.padding", json!({"data": "x".repeat(crate::model::MAX_PAYLOAD_JSON_BYTES)}))],
+        next_cursor: 1, has_more: false,
+    })]));
+    assert!(matches!(client.fetch_pull(&mut engine, "ws", &NoFaults), Err(RelayError::InvalidResponse)));
+    assert_eq!(pull_token(&engine), None);
 }
 
 fn commit<T: RelayTransport>(

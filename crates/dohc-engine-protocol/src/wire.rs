@@ -3,7 +3,7 @@
 //!
 //! These structs are the in-process transport's native currency (portability
 //! guardrail 3: an embedded engine never serializes to itself); the framed
-//! transport encodes them as JSON control frames in protocol v2.
+//! transport encodes them as JSON control frames in protocol v3.
 
 use crate::error::{EnvelopeDecodeError, LimitKind, LimitViolation, WireError};
 use crate::limits::{MAX_WIRE_INTEGER, WireLimits};

@@ -52,6 +52,7 @@ async fn replica_refuses_every_other_rpc_before_dispatch() {
         "engine.ping",
         "workspace.open",
         "sync.adoptJoinIdentity",
+        "sync.fetchPull",
         "sync.applyPull",
         "sync.commitCursor",
         "replica.frontiers",

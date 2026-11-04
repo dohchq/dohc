@@ -999,7 +999,7 @@ describe("the automation replicas", () => {
     await replica.sync();
     expect(calls).toEqual(["refresh", "refresh"]);
     expect(errors).toEqual([failure, failure]);
-    expect(engine.sent.slice(before).map(request => request.method).slice(0, 2)).toEqual(["sync.push", "sync.applyPull"]);
+    expect(engine.sent.slice(before).map(request => request.method).slice(0, 3)).toEqual(["sync.push", "sync.fetchPull", "sync.applyPull"]);
     expect(running.failedSyncs().size).toBe(0);
   });
 

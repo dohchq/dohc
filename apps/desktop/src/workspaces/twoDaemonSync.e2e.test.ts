@@ -1795,12 +1795,10 @@ describe.skipIf(engine.missing)("Quit while a save is in progress", () => {
   }, 120_000);
 });
 
-// #2709: a pull runs on the capture chain, network wait included, so History
-// waits for a server that does not answer. A join's first pass only pulls; an
-// ordinary pass pulls after its push.
+// Local work remains available while either kind of pull waits for the server.
 describe.skipIf(engine.missing)("History while a pull waits on a server that does not answer (#2709)", () => {
   it.each(["bootstrap pull", "pull after a push"] as const)(
-    "lists History while the %s waits",
+    "writes, opens a document, and lists History while the %s waits",
     async (pass) => {
       const workspaceId = `two-daemon-held-pull-${pass.replaceAll(" ", "-")}`;
       const token = `test:${workspaceId}`;
@@ -1874,6 +1872,22 @@ describe.skipIf(engine.missing)("History while a pull waits on a server that doe
         expect(pulling, "The pull ended before History was checked").toBe(true);
         expect(outcome, "History waited on the pending pull").toBe("listed");
         expect(waited, "History waited on the pending pull").toBeLessThan(2_000);
+        clearTimeout(timer);
+        const localWork = (async () => {
+          await device.capture.writeAuthoredFile(join(root, "local.txt"), "local work\n",
+            { kind: "human", humanId: "local-person" });
+          const session = await device.capture.openYDocSession({
+            path: "local.txt", contentKind: "plaintext", onRemoteUpdate: () => undefined,
+          });
+          await session.close();
+          expect(await readFile(join(root, "local.txt"), "utf8")).toBe("local work\n");
+          expect((await device.capture.listMoments({ limit: 20 })).moments.some(moment => moment.path === "local.txt")).toBe(true);
+        })().then(() => "completed", (error: unknown) => error);
+        const localOutcome = await Promise.race([localWork, new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve("still waiting"), 2_000);
+        })]);
+        expect(localOutcome, "Local work waited on the pending fetch").toBe("completed");
+        expect(pulling).toBe(true);
       } finally {
         clearTimeout(timer);
         // Shutdown rejects the held pull, so the pass and the chain end.
@@ -3199,7 +3213,7 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
     await hosted.settleNow();
     await pushUntilDrained(relay);
     peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection, holdEditorResync: true });
-    await peer.capture.runRelaySync(materialize => peer!.relay.pull(materialize));
+    await peer!.relay.pull(apply => peer.capture.runRelaySync(apply));
     const lease = await peer.capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
     expect(lease.objectId).toBe(binding.objectId);
     expect(lease.lineageClaimId).toBe(binding.lineageClaimId);
@@ -3218,9 +3232,9 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
         });
         expect(applied.result).toMatchObject({ status: "applied" });
       }
-      await capture.runRelaySync(materialize => relay.pull(materialize));
+      await relay.pull(apply => capture.runRelaySync(apply));
       await pushUntilDrained(relay);
-      await peer.relay.pull(async () => undefined);
+      await peer.relay.pull(async (apply) => apply(async () => undefined));
       const parked = new DatabaseSync(join(rootB, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
       try {
         expect((parked.prepare("SELECT count(*) AS n FROM ydoc_deferred_updates").get() as { n: number }).n,

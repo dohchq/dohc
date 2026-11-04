@@ -95,7 +95,7 @@ it.skipIf(engineBinary.missing || process.platform !== "linux")("supervised repl
   };
   const push = async (engine: typeof engines[number]) => { let page; do { page = await rpc(engine, "sync.push", { workspaceId }); } while (page.hasMore); };
   const pull = async (engine: typeof engines[number]) => { let page; do {
-    page = await rpc(engine, "sync.applyPull", {...{ workspaceId }, pageToken: (await rpc(engine, "sync.fetchPull", { workspaceId })).pageToken});
+    page = await rpc(engine, "sync.applyPull", { workspaceId , pageToken: (await rpc(engine, "sync.fetchPull", { workspaceId })).pageToken});
     await rpc(engine, "sync.materializePendingCursor", { workspaceId, pendingCursor: page.pendingCursor });
     await rpc(engine, "sync.commitCursor", { workspaceId, pendingCursor: page.pendingCursor });
   } while (page.hasMore); };
@@ -166,7 +166,7 @@ it.skipIf(engineBinary.missing || process.platform !== "linux")("supervised repl
       restoreBeforeMomentId: deleted.moment.momentId, origin: "restore", publish: true });
     await push(a); await pull(b); await drain();
     expect(Buffer.from(String(stored("renamed.txt")), "utf8")).toEqual(readFileSync(join(a.dir, "renamed.txt")));
-    const pullWithView=await rpc(b, "sync.applyPull", {...{workspaceId}, pageToken: (await rpc(b, "sync.fetchPull", {workspaceId})).pageToken});expect(pullWithView.applied).toBe(0);
+    const pullWithView=await rpc(b, "sync.applyPull", {workspaceId, pageToken: (await rpc(b, "sync.fetchPull", {workspaceId})).pageToken});expect(pullWithView.applied).toBe(0);
     await rpc(b,"sync.materializePendingCursor",{workspaceId,pendingCursor:pullWithView.pendingCursor});await rpc(b,"sync.commitCursor",{workspaceId,pendingCursor:pullWithView.pendingCursor});
     await supervisor.close();
     expect(Number(relayDb.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_files WHERE workspace_id=?").get(workspaceId)!.n)).toBeGreaterThan(0);

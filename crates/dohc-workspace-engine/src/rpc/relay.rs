@@ -1298,7 +1298,7 @@ impl EngineService {
         let page = pending.take().expect("validated pull page").page;
         // A Collections update already admitted under the gate runs before
         // this pull places a page, and none is admitted until the pull is
-        // between pages or done. The gate is not held across the relay's I/O.
+        // between pages or done. Fetching does not enter this gate.
         let pulling = if self.reconciles_collections_itself(&open) {
             let cancellation = OperationCancellation::new(ctx);
             let _apply = tokio::select! {
