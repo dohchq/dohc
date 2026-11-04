@@ -209,6 +209,17 @@ describe("VersionMenu", () => {
     expect(screen.getByTestId("version-new").textContent).toBe("New version");
   });
 
+  it("says before the first version what every version leaves alone, in the Versions page's words", async () => {
+    const same = "Chats, text files over 10 MB, other files over 5 MB and files History doesn't track stay the same in every version.";
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN], activeVersionId: "main" });
+    const user = userEvent.setup();
+    renderMenu();
+    await openOn(user, "Main");
+    await user.click(screen.getByTestId("version-new"));
+    expect(descriptionOf(screen.getByTestId("version-new-input"))).toBe(`Starts from Main ${same}`);
+    expect(screen.getByTestId("version-new-same").textContent).toBe(same);
+  });
+
   it("shows the chip's dot beside each version's name, and keeps its space on Main", async () => {
     renderMenu();
     await openOn(userEvent.setup(), "Draft");

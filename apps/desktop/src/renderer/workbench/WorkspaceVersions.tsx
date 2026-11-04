@@ -20,6 +20,10 @@ import type {
   WorkspaceVersionRecord,
 } from "../../ipc/bridgeContract";
 import {
+  MAX_ENGINE_CAPTURE_BINARY_BYTES,
+  MAX_ENGINE_CAPTURE_TEXT_BYTES,
+} from "../../workspaces/workspaceEngineCaptureLimits";
+import {
   exceedsUtf8Bytes,
   utf8ByteLength,
 } from "../../workspaces/workspaceTextLimits";
@@ -668,7 +672,7 @@ export function VersionMenu(props: {
             busy: busy === "create",
             error: nameError,
             errorTestId: "version-menu-error",
-            hint: busy === "create" ? "Creating…" : <NewVersionHint versions={props.versions} />,
+            hint: busy === "create" ? "Creating…" : <NewVersionHint versions={props.versions} first={snapshot.versions.length === 1} />,
             testId: "version-new-input",
           },
         },
@@ -764,11 +768,25 @@ export function VersionMenu(props: {
   );
 }
 
-// Where a new version starts: it forks from the version you're in.
-export function NewVersionHint(props: { versions: Pick<WorkspaceVersions, "active" | "onMain"> }) {
-  return props.versions.onMain
+const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
+// What a version leaves alone. The sizes are the engine's capture caps:
+// larger files stay as they are on disk.
+export const SAME_IN_EVERY_VERSION =
+  `Chats, text files over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}, other files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} and files History doesn't track stay the same in every version.`;
+
+// Where a new version starts: it forks from the version you're in. Before the
+// first version, a second line says what every version leaves alone.
+export function NewVersionHint(props: { versions: Pick<WorkspaceVersions, "active" | "onMain">; first?: boolean }) {
+  const start = props.versions.onMain
     ? <>Starts from Main</>
     : <>Starts from <span className="font-medium">{props.versions.active?.name ?? "Main"}</span>, so it can't merge into Main.</>;
+  if (!props.first) return start;
+  return (
+    <>
+      {start}{" "}
+      <span data-testid="version-new-same" className="block text-muted">{SAME_IN_EVERY_VERSION}</span>
+    </>
+  );
 }
 
 

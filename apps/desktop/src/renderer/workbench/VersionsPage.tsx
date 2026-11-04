@@ -1,17 +1,13 @@
 import { Check, Layers, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
-import {
-  MAX_ENGINE_CAPTURE_BINARY_BYTES,
-  MAX_ENGINE_CAPTURE_TEXT_BYTES,
-} from "../../workspaces/workspaceEngineCaptureLimits";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { EmptyState, IconButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { versionDotClass } from "./versionHue";
-import { NewVersionHint, type VersionNameField, type WorkspaceVersions } from "./WorkspaceVersions";
+import { NewVersionHint, SAME_IN_EVERY_VERSION, type VersionNameField, type WorkspaceVersions } from "./WorkspaceVersions";
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
@@ -20,11 +16,6 @@ interface ConflictCount { count: number; more: boolean }
 // Conflict counts read the open conflicts a page at a time. Past this many pages
 // a count shows as a lower bound.
 const CONFLICT_PAGES_MAX = 5;
-const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
-// What a version leaves alone. The sizes are the engine's capture caps:
-// larger files stay as they are on disk.
-const SAME_IN_EVERY_VERSION =
-  `Chats, text files over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}, other files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} and files History doesn't track stay the same in every version.`;
 
 // The Versions tab: every version in the workspace, the one you're in, how
 // each differs from Main, and the actions the titlebar menu offers for the

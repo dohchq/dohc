@@ -102,6 +102,7 @@ import { MERGE_RETRY_AFTER_CLOSE } from "../shell/useVersionMergeNotices";
 import { DismissConfirm, RecoveryList } from "../RecoveryList";
 import type { OrphanedDraftRow } from "../orphanedDrafts";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
+import { NewVersionHint } from "../workbench/WorkspaceVersions";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -1333,6 +1334,22 @@ const fieldMenuItems: MenuEntry[] = [
     },
   },
 ];
+// The versions menu before the first version, as only Main shows it: the
+// field says where the version starts, then what every version leaves alone.
+const firstVersionMenuItems: MenuEntry[] = [
+  { id: "main", label: "Main", checked: true, description: "Try changes without touching Main.", onSelect: noop },
+  {
+    id: "new",
+    field: {
+      label: "New version name",
+      value: "Draft",
+      onChange: noop,
+      onSubmit: noop,
+      onCancel: noop,
+      hint: <NewVersionHint versions={{ onMain: true, active: null }} first />,
+    },
+  },
+];
 const overflowMenuItems: MenuEntry[] = [
   { id: "plan", label: "plan.md", current: true, onSelect: noop },
   { id: "long", label: "quarterly-planning-notes-for-the-whole-team.md", onSelect: noop },
@@ -1856,6 +1873,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="field: focus, Enter at its end, hint">
           <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={256} testId={`states-menu-field-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-first-version" title="Menu before the first version">
+        <Specimen label="only Main: field focus, hint, what versions leave alone">
+          <div className="flex h-64 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+            <MenuSpecimen label="Versions" items={firstVersionMenuItems} width={256} testId={`states-menu-first-version-${theme}`} />
           </div>
         </Specimen>
       </Section>
