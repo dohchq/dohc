@@ -305,6 +305,49 @@ describe("ChatsView work and run links", () => {
     expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md", "scope");
   });
 
+  it("names a Collection change file by the Collection's current name, with its path in the tooltip", async () => {
+    const user = userEvent.setup();
+    const changeFile = "volunteers/changes/3f2a91c0-5b7d-4e2a-9c1f-2d8e6a4b7c90.json";
+    const proposal = {
+      kind: "dohc-collection-change", version: 1, datasetId: "dataset-1", name: "Helpers",
+      datasetPath: "volunteers/dataset.json", migrationPath: "volunteers/migrations/0002.sql",
+      base: { revision: 1, revisionSha256: "a".repeat(64) }, revisionSha256: "b".repeat(64), changeSha256: "c".repeat(64),
+      files: ["volunteers/dataset.json"], rows: [{ kind: "code-changed", key: "code" }], note: null,
+    };
+    const readWorkspaceText = vi.fn(async (input: { relativePath: string }) => {
+      if (input.relativePath !== changeFile) throw new Error("not found");
+      return { text: JSON.stringify(proposal), truncated: false };
+    });
+    const dataset = vi.fn(async () => ({ kind: "description", dataset: { name: "Volunteers" } }));
+    vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, readWorkspaceText, dataset });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.listChatThreadAttachments.mockResolvedValue({
+      attachments: [
+        {
+          attachmentId: "attachment-change",
+          threadId: "thread-1",
+          messageId: "message-1",
+          targetKind: "file",
+          objectId: "object-1",
+          pathHint: changeFile,
+          createdAtMs: NOW,
+        },
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { onOpenPath: vi.fn() });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const chip = await screen.findByRole("button", { name: "Change to Volunteers" });
+    expect(screen.getByTestId("chats-attachment-chip")).toBe(chip);
+    expect(chip.textContent).toBe("Change to Volunteers");
+    expect(chip.getAttribute("title")).toBe(changeFile);
+    expect(dataset).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", datasetPath: "volunteers/dataset.json", expectedDatasetId: "dataset-1", action: "describe",
+    });
+  });
+
   it("opens attachment paths and shows linked agent-run details", async () => {
     const user = userEvent.setup();
     const onOpenPath = vi.fn();

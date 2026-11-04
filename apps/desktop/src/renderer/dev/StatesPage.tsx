@@ -864,6 +864,7 @@ function ChatThreadSpecimen() {
   return (
     <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
+        workspaceId="states"
         nav={CHAT_THREAD_NAV}
         channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={CHAT_THREAD_MESSAGES}
@@ -906,6 +907,7 @@ function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryabl
   return (
     <div className="w-[560px]">
       <ThreadMessages
+        workspaceId="states"
         nav={CHAT_THREAD_NAV}
         channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
