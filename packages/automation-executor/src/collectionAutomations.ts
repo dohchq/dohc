@@ -4718,6 +4718,9 @@ export class CollectionAutomations {
       if (!this.relayReads.signal.aborted) this.options.onError("read the last automation host's reach verdicts", error);
       return false;
     }
+    // An answer that arrives after the workspace closed is not taken either:
+    // the next open reads again.
+    if (this.relayReads.signal.aborted) return false;
     await this.updateVerdicts(() => {
       this.reachPending = null;
       this.reachTakenAt = generation;
@@ -4884,6 +4887,7 @@ export class CollectionAutomations {
     if (reads.aborted) return;
     // Only a computer the relay names watches Groups.
     const generation = await this.options.groupHost();
+    if (reads.aborted) return;
     this.groupTriggersHere = generation !== null;
     const verdictsTaken = await this.takeHostVerdicts(generation);
     if (reads.aborted) return;

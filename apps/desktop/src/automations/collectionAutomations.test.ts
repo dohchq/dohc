@@ -6427,12 +6427,14 @@ describe("Collection automations that a Group message starts", () => {
     }
 
     // The close aborts the read, ends at once, and leaves the subscriptions
-    // and verdicts as the read found them, with nothing reported.
-    async function closeDuringRead(opened: Awaited<ReturnType<typeof hostAt3>>, reading: Promise<void>) {
+    // and verdicts as the read found them, with nothing reported. `answer`
+    // lets the read answer just as the close starts.
+    async function closeDuringRead(opened: Awaited<ReturnType<typeof hostAt3>>, reading: Promise<void>, answer?: () => void) {
       const { w, executor, changes } = opened;
       await reading;
       const before = changes.length;
       const saved = await w.baseStore.readReachVerdicts();
+      answer?.();
       await promptly(executor.dispose());
       expect(changes.slice(before)).toEqual([]);
       expect(subscribed(w), "the engine still watches Trip").toBe(true);
@@ -6502,6 +6504,31 @@ describe("Collection automations that a Group message starts", () => {
         },
       });
       await closeDuringRead(opened, reading.promise);
+    });
+
+    // A relay that answers just as the workspace closes, too late to take.
+    const answeredAtClose = <T>(value: T) => {
+      const reading = Promise.withResolvers<void>();
+      const answer = Promise.withResolvers<void>();
+      const read = async () => {
+        reading.resolve();
+        await answer.promise;
+        return value;
+      };
+      return { reading: reading.promise, answer: () => answer.resolve(), read };
+    };
+
+    it("takes no host generation that arrives as the workspace closes", async () => {
+      const host = answeredAtClose(3);
+      const opened = await hostAt3({ groupHost: host.read });
+      await closeDuringRead(opened, host.reading, host.answer);
+    });
+
+    it("takes no reach verdicts that arrive as the workspace closes", async () => {
+      const relay = answeredAtClose({ generation: 3, reach: null, everShared: false });
+      const opened = await hostAt3({ reachRelayRecord: relay.read });
+      const saved = await closeDuringRead(opened, relay.reading, relay.answer);
+      expect(saved, "the claims mark from before the read").toMatchObject({ pending: 3, taken: null, hostRecord: 0 });
     });
 
     it("still goes on as before when the reach verdicts read fails while the workspace stays open", async () => {

@@ -193,7 +193,7 @@ test("quits within its budget while a push and the automation host read wait on 
     console.log(`#2868 e2e push: ${exitedAtMs !== null ? `quit took ${quitMs} ms` : `app still running after ${quitMs} ms`}; ${quitLine}`);
     expect(exitedAtMs, "The app exits during an unanswered push").not.toBeNull();
     expect(read.closedAtMs, "The app stops the automation host read before it exits").not.toBeNull();
-    expect(read.closedAtMs!).toBeLessThan(exitedAtMs!);
+    expect(read.closedAtMs! - started, "The app stops the automation host read when the workspace closes, not when it exits").toBeLessThan(2_000);
     expect(quitLine, "Quit finishes within its budget").not.toContain("ran past its");
     expect(quitLine, "Closing the workspace waits for no relay read").not.toContain("closeWorkspaces");
     // Within the 6 s budget only: the engine's own exit wait is fixed separately.
