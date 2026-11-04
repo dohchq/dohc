@@ -1,5 +1,5 @@
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
-import { mapWidgetOwners } from "./widgetOwnership";
+import { ownersInRange, throughEdit } from "./widgetOwnership";
 import { documentChange, stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
@@ -365,13 +365,20 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
         if (!range) return decorations;
         // A toolbar sits before its block, so content inserted at a block's
         // start leaves its toolbar at the start of the range.
-        const owners = mapWidgetOwners(old.find(range.from, range.toBefore), mapping);
-        const toolbars: Decoration[] = [];
+        const blocks: Array<{ node: ProseMirrorNode; pos: number }> = [];
         tr.doc.nodesBetween(range.from, Math.min(range.to + 1, tr.doc.content.size), (node, pos) => {
           if (!isCodeBlockNode(node)) return !node.isTextblock;
-          if (pos >= range.from) toolbars.push(codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report));
+          if (pos >= range.from) blocks.push({ node, pos });
           return false;
         });
+        const owners = ownersInRange(
+          old.find(range.from, range.toBefore),
+          blocks.map(({ pos }) => pos),
+          throughEdit(tr.mapping, mapping),
+        );
+        const toolbars = blocks.map(({ node, pos }) =>
+          codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report),
+        );
         return decorations.remove(decorations.find(range.from, range.to)).add(tr.doc, toolbars);
       },
     },

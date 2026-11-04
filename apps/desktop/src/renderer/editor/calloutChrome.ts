@@ -1,4 +1,5 @@
 import { documentChange, stopEditorMouseEvent } from "./pmHelpers";
+import { ownersInRange, throughEdit } from "./widgetOwnership";
 import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
@@ -412,19 +413,18 @@ export function makeCalloutChromePlugin() {
         const { range, mapping } = documentChange(tr.before, tr.doc);
         const decorations = old.map(mapping, tr.doc);
         if (!range) return decorations;
-        // A callout that starts at or before the edit keeps its start, so a
-        // new title or content at the start of its body keeps its owner.
-        const owners = new Map<number, string>();
-        for (const header of old.find(range.from, range.toBefore)) {
-          const start = header.from - 1;
-          const ownerKey: unknown = header.spec.ownerKey;
-          if (start <= range.from && typeof ownerKey === "string") owners.set(start, ownerKey);
-        }
-        const headers: Decoration[] = [];
+        const callouts: Array<{ node: Node; pos: number }> = [];
         calloutsBetween(tr.doc, range.from, range.to, (node, pos) => {
-          if (pos + 1 < range.from || pos + 1 > range.to) return;
-          headers.push(calloutHeader(node, pos, owners.get(pos) ?? nextOwnerKey()));
+          if (pos + 1 >= range.from && pos + 1 <= range.to) callouts.push({ node, pos });
         });
+        const owners = ownersInRange(
+          old.find(range.from, range.toBefore),
+          callouts.map(({ pos }) => pos + 1),
+          throughEdit(tr.mapping, mapping),
+        );
+        const headers = callouts.map(({ node, pos }) =>
+          calloutHeader(node, pos, owners.get(pos + 1) ?? nextOwnerKey()),
+        );
         return decorations.remove(decorations.find(range.from, range.to)).add(tr.doc, headers);
       },
     },
