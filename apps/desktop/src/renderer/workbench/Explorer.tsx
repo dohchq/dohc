@@ -582,9 +582,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const dragSources = useRef<DragSource[] | null>(null);
   // Each refusal identity a change that went takes back, with the count of
   // changes gone when it went. A run's notice leaves out a refusal another
-  // run took back after it started.
+  // run took back after it started. Only a run in flight reads it, so it
+  // empties when the last run ends.
   const wentAt = useRef(new Map<string, number>());
   const changesWent = useRef(0);
+  const runsInFlight = useRef(0);
   // Keep the actual drag-origin element mounted while Chromium owns the
   // gesture. A virtualized source that disappears during auto-scroll does not
   // receive dragend, which can otherwise leave a stale internal move armed.
@@ -902,6 +904,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     ): Promise<void> {
       if (changes.length === 0) return;
       const started = changesWent.current;
+      runsInFlight.current += 1;
+      const end = () => {
+        runsInFlight.current -= 1;
+        if (runsInFlight.current === 0) wentAt.current.clear();
+      };
       const publish = (refused: readonly RefusedChange[], went: number) => {
         const left = refused.filter((refusal) => (wentAt.current.get(refusal.identity) ?? 0) <= started);
         if (left.length === 0) return;
@@ -932,6 +939,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
         // Nothing ran, so a batch's notice comes back as it was.
         if (batch) publish([...batch.carried, ...batch.rerun], batch.went);
+        end();
         return;
       } finally {
         afterBegin?.();
@@ -1005,6 +1013,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         // Cell edits resume only after the successful paths are projected,
         // so nothing can enqueue against a path this operation just changed.
         operation?.release();
+        end();
       }
     },
     [onBeginChanges, onChangeSucceeded, onChangesRefused, onError, onPathsChanged, onRefresh, workspaceId],
