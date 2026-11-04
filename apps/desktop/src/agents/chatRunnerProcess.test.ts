@@ -6,7 +6,6 @@ import { createTestScratch } from "../workspaces/testTemp";
 import {
   createChatRunnerProcess,
   readRunnerNodeAvailable,
-  tokenizeRunnerCommand,
   codexCheckWithTimeout,
   type ChatRunnerProcessOptions,
   type RunDohcTools,
@@ -318,13 +317,17 @@ describe("chat runner process", () => {
     expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "path", available: false });
   });
 
-  it("tokenizes quoted runner arguments and rejects an unterminated command", () => {
-    expect(
-      tokenizeRunnerCommand('claude -p --allowedTools "Bash(dohc chat:*)" --label "two words"'),
-    ).toEqual(["claude", "-p", "--allowedTools", "Bash(dohc chat:*)", "--label", "two words"]);
-    expect(() => tokenizeRunnerCommand('claude -p "unterminated')).toThrow(
-      "Runner command has an unterminated double quote.",
-    );
+  it.each(["claude", "codex"] as const)("passes the person's own %s flags once, before dohc's reply server", async (tool) => {
+    const { calls, spawn } = await runnerFixture("linux");
+    const profile = { tool, executable: `/opt/bin/${tool}`, arguments: ["--model", "own-model"] };
+    await spawn("", () => undefined, profile, "all");
+    expect(calls).toHaveLength(1);
+    const [owner] = calls;
+    expect(owner!.command).toBe(`/opt/bin/${tool}`);
+    expect(owner!.args.slice(0, 3)).toEqual([tool === "claude" ? "-p" : "exec", "--model", "own-model"]);
+    expect(owner!.args.filter((arg) => arg === "own-model")).toHaveLength(1);
+    const replyServer = owner!.args.indexOf(tool === "claude" ? "--mcp-config" : "mcp_servers.dohc.required=true");
+    expect(replyServer).toBeGreaterThan(owner!.args.indexOf("own-model"));
   });
 
   it("keeps the workspace folder out of the runner's program search", async () => {
