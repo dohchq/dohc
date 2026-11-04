@@ -106,20 +106,29 @@ describe("a typed command", () => {
       { tool: "claude", executable: "/usr/local/bin/claude", arguments: ["--add-dir", "/my notes/"] },
     ];
     for (const profile of profiles) {
-      expect(launchFromCommand(launchCommand(profile))).toEqual(profile);
+      expect(launchFromCommand(launchCommand(profile), profile)).toEqual(profile);
     }
   });
   it("adds the person's flags to the profile", () => {
-    expect(launchFromCommand("C:\\Tools\\claude.exe --model opus")).toEqual({ tool: "claude", executable: "C:\\Tools\\claude.exe", arguments: ["--model", "opus"] });
-    expect(launchFromCommand("/opt/bin/Codex --model o3")).toEqual({ tool: "codex", executable: "/opt/bin/Codex", arguments: ["--model", "o3"] });
-    expect(launchFromCommand('"C:\\npm\\codex.CMD"')).toEqual({ tool: "codex", executable: "C:\\npm\\codex.CMD" });
-    expect(launchFromCommand("C:\\Tools\\claude.bat -c")).toEqual({ tool: "claude", executable: "C:\\Tools\\claude.bat", arguments: ["-c"] });
+    const claude = { tool: "claude", executable: "C:\\Tools\\claude.exe" } as const;
+    expect(launchFromCommand("C:\\Tools\\claude.exe --model opus", claude)).toEqual({ ...claude, arguments: ["--model", "opus"] });
+    const codex = { tool: "codex", executable: "C:\\npm\\codex.CMD", arguments: ["--model", "o3"] } as const;
+    expect(launchFromCommand('"C:\\npm\\codex.CMD" -c', codex)).toEqual({ tool: "codex", executable: "C:\\npm\\codex.CMD", arguments: ["-c"] });
+    expect(launchFromCommand('"C:\\npm\\codex.CMD"', codex)).toEqual({ tool: "codex", executable: "C:\\npm\\codex.CMD" });
   });
   it("runs any other command as typed", () => {
     for (const command of ["claude --model opus", "node agent.mjs", "/usr/bin/claude-wrapper -p", "C:\\Tools\\codex.ps1", '"C:\\Tools\\claude.exe', "C:\\claude\\agent.exe"]) {
       expect(launchFromCommand(` ${command} `)).toEqual({ command });
     }
     expect(launchFromCommand("  ")).toBeNull();
+  });
+  it("runs a command as typed when it starts another program, even one with the tool's name", () => {
+    const current = { tool: "codex", executable: "C:\\Tools\\codex.exe" } as const;
+    for (const command of ["C:\\work\\tools\\codex.cmd --model o3", "C:\\Tools\\Codex.exe", "C:\\Tools\\claude.exe", "/usr/local/bin/codex"]) {
+      expect(launchFromCommand(command, current)).toEqual({ command });
+    }
+    // Without a tool to start from, even the tool's own program runs as typed.
+    expect(launchFromCommand("C:\\Tools\\codex.exe exec --full-auto")).toEqual({ command: "C:\\Tools\\codex.exe exec --full-auto" });
   });
   it("says what dohc adds for each kind of launch", () => {
     expect(launchCommandHint({ tool: "claude", executable: "/bin/claude" })).toBe("dohc adds its reply tool. The conversation arrives through stdin.");

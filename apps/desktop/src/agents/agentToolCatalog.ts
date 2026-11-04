@@ -26,16 +26,16 @@ export function launchProfile(launch: AgentLaunch): AgentLaunchProfile | undefin
 }
 
 /** The chosen tool, else the typed command, else null for neither. */
-export function launchFrom(profile: AgentLaunchProfile | undefined, command: string): AgentLaunch | null {
-  return profile ?? launchFromCommand(command);
+export function launchFrom(profile: AgentLaunchProfile | undefined, command: string, current?: AgentLaunchProfile): AgentLaunch | null {
+  return profile ?? launchFromCommand(command, current);
 }
 
 /**
- * What a typed command saves. A command that starts Claude Code or Codex by
- * its full path keeps that tool's profile, with the rest as the person's own
- * flags. Any other command runs as typed.
+ * What a typed command saves. Only detection picks a tool's program, so a
+ * command keeps the current profile only while it starts that same program.
+ * The rest are the person's own flags. Any other command runs as typed.
  */
-export function launchFromCommand(command: string): AgentLaunch | null {
+export function launchFromCommand(command: string, current?: AgentLaunchProfile): AgentLaunch | null {
   const trimmed = command.trim();
   if (!trimmed) return null;
   let tokens: string[];
@@ -45,8 +45,8 @@ export function launchFromCommand(command: string): AgentLaunch | null {
     return { command: trimmed };
   }
   const [executable = "", ...flags] = tokens;
-  const tool = /^(claude|codex)(?:\.(?:exe|cmd|bat))?$/iu.exec(executable.split(/[\\/]/u).pop() ?? "")?.[1]?.toLowerCase();
-  const profile = AgentLaunchProfile.safeParse({ tool, executable, ...(flags.length > 0 ? { arguments: flags } : {}) });
+  if (!current || executable !== current.executable) return { command: trimmed };
+  const profile = AgentLaunchProfile.safeParse({ tool: current.tool, executable, ...(flags.length > 0 ? { arguments: flags } : {}) });
   return profile.success ? profile.data : { command: trimmed };
 }
 
