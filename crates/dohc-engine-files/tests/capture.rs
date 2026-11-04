@@ -371,6 +371,104 @@ fn an_ingest_whose_held_file_is_gone_keeps_the_path_for_a_retire() {
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Retire { path }] if path == "open.md"));
 }
 
+// dohc#2360. A session settled a new document before capture recorded its
+// file, and the file was gone when the sink read it. The path has no entry to
+// keep, so it waits as a retire candidate, and the scan after release retires
+// the record.
+#[test]
+fn first_sight_deferred_delete_returns_as_a_retire() {
+    let ws = Scratch::new();
+    ws.write("open.md", b"settled");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    assert!(matches!(
+        plan.ops.as_slice(),
+        [CaptureOp::Ingest { path, reason: IngestReason::Added, .. }] if path == "open.md"
+    ));
+    let mut sink = IdempotentSink {
+        content: BTreeMap::from([("open.md".to_owned(), "settled".to_owned())]),
+        gone_and_held: BTreeSet::from(["open.md".to_owned()]),
+        ..IdempotentSink::default()
+    };
+    ws.remove("open.md");
+    let result = apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+
+    assert_eq!(result.deferred_retires, ["open.md"]);
+    assert!(!result.degraded, "a live session's path is not a failure");
+    assert_eq!(
+        controller.tracked_len(),
+        0,
+        "capture never recorded the file"
+    );
+    assert!(!controller.is_dirty());
+
+    sink.gone_and_held.clear();
+    controller.mark_dirty();
+    let retry = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retry prepare"),
+    );
+    assert!(matches!(retry.ops.as_slice(), [CaptureOp::Retire { path }] if path == "open.md"));
+    apply_then_ack(&mut controller, &retry, &mut sink, &NoFaults).expect("ack retry");
+    assert!(sink.content.is_empty(), "the record is retired");
+    assert!(controller.deferred_paths().is_empty());
+
+    controller.mark_dirty();
+    let after = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("later prepare"),
+    );
+    assert!(after.is_empty(), "a retired candidate is not offered again");
+}
+
+// dohc#2360. A session releases a tracked document, and the next scan finds it
+// grown past what capture tracks, so capture forgets the path. The offer came
+// while the path was still tracked, and it still retires the record once the
+// file is gone.
+#[test]
+fn a_path_offered_while_tracked_retires_after_capture_forgets_it() {
+    let ws = Scratch::new();
+    ws.write("big.md", b"small");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let mut sink = IdempotentSink::default();
+    let first = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    apply_then_ack(&mut controller, &first, &mut sink, &NoFaults).expect("ack");
+    assert_eq!(controller.tracked_len(), 1);
+
+    controller.offer_retire_candidates(["big.md".to_owned()]);
+    ws.write("big.md", b"grown past what capture tracks");
+    sink.not_owned.insert("big.md".to_owned());
+    controller.mark_dirty();
+    let grown = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("grown prepare"),
+    );
+    apply_then_ack(&mut controller, &grown, &mut sink, &NoFaults).expect("ack grown");
+    assert_eq!(controller.tracked_len(), 0, "capture forgot the path");
+
+    ws.remove("big.md");
+    controller.mark_dirty();
+    let gone = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("gone prepare"),
+    );
+    assert!(matches!(gone.ops.as_slice(), [CaptureOp::Retire { path }] if path == "big.md"));
+}
+
 #[test]
 fn uncertain_batch_prefix_stays_failed_and_the_suffix_continues() {
     let ws = Scratch::new();
