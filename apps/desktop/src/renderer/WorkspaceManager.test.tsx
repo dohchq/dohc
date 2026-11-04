@@ -266,7 +266,7 @@ describe("workspace manager", () => {
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toBe(message);
     expect(alert.id).toBe("new-workspace-name-error");
-    expect(alert.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    expect(alert.querySelector("svg")?.closest("[aria-hidden]")?.getAttribute("aria-hidden")).toBe("true");
     expect(alert.nextElementSibling?.contains(screen.getByTestId("new-workspace-location"))).toBe(true);
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(nameField().getAttribute("aria-describedby")).toBe(alert.id);
@@ -290,8 +290,8 @@ describe("workspace manager", () => {
   it.each([
     ["", "Enter a workspace name."],
     ["   ", "Enter a workspace name."],
-    [".", "Choose a name other than . or .."],
-    ["..", "Choose a name other than . or .."],
+    [".", 'Choose a name other than "." or "..".'],
+    ["..", 'Choose a name other than "." or "..".'],
     ["a/b", "Use a name without slashes."],
     ["a\\b", "Use a name without slashes."],
   ])("keeps Create on for %j, and pressing it says what to fix and focuses the name", async (typed, message) => {

@@ -1,6 +1,6 @@
 import { forwardRef } from "react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
-import { TriangleAlert, type LucideIcon } from "lucide-react";
+import { CircleAlert, TriangleAlert, type LucideIcon } from "lucide-react";
 import { DohcMark } from "@dohc/brand";
 
 // The dohc control primitives — the canonical implementations of the recipes
@@ -192,6 +192,20 @@ export function EmptyState({
       </div>
       {children}
     </div>
+  );
+}
+
+/** The error under a field: what is wrong and how to fix it. Give the field
+ * `aria-invalid` and point its `aria-describedby` at `id`. The icon sits on
+ * the first line, so a sentence that wraps keeps it beside its start. */
+export function FieldError(props: { id: string; children: ReactNode; className?: string }) {
+  return (
+    <p id={props.id} role="alert" className={cx("m-0 flex items-start gap-1 text-[12px] text-danger", props.className)}>
+      <span aria-hidden className="flex h-lh shrink-0 items-center">
+        <CircleAlert size={12} />
+      </span>
+      {props.children}
+    </p>
   );
 }
 

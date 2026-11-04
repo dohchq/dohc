@@ -1,12 +1,12 @@
 import { useTooltip } from "@dohc/collection-views/tooltip";
 import { workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
-import { CircleAlert, Folder, Pencil } from "lucide-react";
+import { Folder, Pencil } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { FolderSheets } from "./FolderSheets";
 import { ipcErrorMessage } from "./ipcError";
-import { GhostButton, PrimaryButton } from "./ui/controls";
+import { FieldError, GhostButton, PrimaryButton } from "./ui/controls";
 import { PathLine } from "./ui/PathLine";
 import { useRequestSequence } from "./useRequestSequence";
 
@@ -31,7 +31,7 @@ export function displayPath(path: string): string {
 function folderNameError(name: string, platform: string): string | null {
   const trimmed = name.trim();
   if (!trimmed) return "Enter a workspace name.";
-  if (trimmed === "." || trimmed === "..") return "Choose a name other than . or ..";
+  if (trimmed === "." || trimmed === "..") return 'Choose a name other than "." or "..".';
   if (/[\\/]/.test(trimmed)) return "Use a name without slashes.";
   return workspaceNameError(trimmed, platform);
 }
@@ -163,7 +163,7 @@ export function NewWorkspaceCard(props: {
         void createWorkspace();
       }}
     >
-      <label htmlFor="new-workspace-name" className="mb-2 w-fit text-[12px] font-medium text-muted">
+      <label htmlFor="new-workspace-name" className="mb-2 w-fit text-[12px] text-muted">
         Workspace name
       </label>
       <div className="relative isolate flex flex-col">
@@ -202,10 +202,9 @@ export function NewWorkspaceCard(props: {
         <div className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}>
           {/* The name's error sits right under its tab. */}
           {nameError ? (
-            <p id="new-workspace-name-error" role="alert" className="-mb-2 flex items-center gap-1 text-[12px] text-danger">
-              <CircleAlert size={12} aria-hidden className="shrink-0" />
+            <FieldError id="new-workspace-name-error" className="-mb-2">
               {nameError}
-            </p>
+            </FieldError>
           ) : null}
           <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
             <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
