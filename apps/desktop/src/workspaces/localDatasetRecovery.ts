@@ -22,7 +22,7 @@ export function createLocalDatasetRecovery(options: {
 }) {
   const pending = new Map<string, Prepared>();
   const claims = new Map<string, Promise<RecoveryImportReceipt>>();
-  // The Collections this host restores now. A copy of any other one is left from a restore dohc quit partway through.
+  // The Collections this host restores now. A copy of any other one is left from a restore that stopped: dohc quit, or an earlier host closed.
   const restoring = new Set<string>();
   const check = () => { options.signal.throwIfAborted(); options.assertCurrent(); };
   return {
