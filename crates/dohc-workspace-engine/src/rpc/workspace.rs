@@ -95,6 +95,7 @@ pub(crate) struct OpenWorkspace {
     pub(super) session_ops: Arc<tokio::sync::Mutex<()>>,
     /// One fetched batch, bound to this open handle and replaced by the next fetch.
     pub(super) pending_pull: tokio::sync::Mutex<Option<super::relay::PendingPull>>,
+    pub(super) pull_repair_retries: std::sync::atomic::AtomicUsize,
     /// How many pending cursors of each kind this handle has issued, counted
     /// under the pending-cursor lock. A commit that did not land restores its
     /// token only if no newer cursor of its kind was issued since.
@@ -164,6 +165,7 @@ impl OpenWorkspace {
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
             pending_pull: Default::default(),
+            pull_repair_retries: Default::default(),
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
             pulls_in_flight: Default::default(),
@@ -1374,6 +1376,7 @@ impl EngineService {
                 capture_holds: CaptureHolds::default(),
                 session_ops,
                 pending_pull: Default::default(),
+                pull_repair_retries: Default::default(),
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pulls_in_flight: Default::default(),

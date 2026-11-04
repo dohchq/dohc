@@ -475,7 +475,7 @@ impl RelayTransport for KeyConflictRelay {
 pub(super) struct PagedRelay {
     relay_seq_offset: i64,
     origin_max_probe_elapsed: Mutex<Vec<std::time::Duration>>,
-    pages: BTreeMap<i64, PullResponse>,
+    pub(super) pages: BTreeMap<i64, PullResponse>,
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,

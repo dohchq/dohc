@@ -706,6 +706,20 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("retries a repair wait without materializing or reporting an error", async () => {
+    let attempts = 0;
+    const daemon = new MockDaemon(request => {
+      if (request.method === "sync.applyPull" && ++attempts === 1) return {status: "retry"};
+      return undefined;
+    });
+    const {sessions, client} = await harness(daemon);
+    const materialize = vi.fn(async () => undefined);
+    await expect(client.pull(apply => apply(materialize))).resolves.toBeDefined();
+    expect(attempts).toBe(2);
+    expect(materialize).toHaveBeenCalledTimes(1);
+    await sessions.closeAll();
+  });
+
   it("rejects a workspace materialization path without its producing version", async () => {
     const daemon = new MockDaemon((request) => {
       if (request.method !== "sync.applyPull") return undefined;

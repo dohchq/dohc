@@ -59,6 +59,7 @@ pub enum RelayOperation {
     },
     FetchPull {
         workspace_id: String,
+        settle_repairs: bool,
     },
     ApplyPull {
         workspace_id: String,
@@ -194,7 +195,7 @@ impl RelayOperation {
         match self {
             Self::Push { workspace_id, .. }
             | Self::Pull { workspace_id, .. }
-            | Self::FetchPull { workspace_id }
+            | Self::FetchPull { workspace_id, .. }
             | Self::ApplyPull { workspace_id, .. }
             | Self::CommitCursor { workspace_id, .. }
             | Self::Probe { workspace_id }
@@ -1021,6 +1022,7 @@ mod deferred_relay_tests {
         let operation = if prepared {
             RelayOperation::FetchPull {
                 workspace_id: "ws".into(),
+                settle_repairs: false,
             }
         } else {
             RelayOperation::Pull {
@@ -1852,6 +1854,7 @@ mod deferred_relay_tests {
 pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
     PullFetched(Arc<dohc_engine_sync::PreparedOrdinaryPull>),
+    PullRetry,
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
         writer_cache_changed: bool,
@@ -2305,7 +2308,7 @@ impl ActorHandle {
                         &queued_operation,
                         RelayOperation::Pull { .. } | RelayOperation::ApplyPull { .. }
                     );
-                    let is_fetch = matches!(&queued_operation, RelayOperation::FetchPull { .. });
+                    let is_fetch = matches!(&queued_operation, RelayOperation::FetchPull { settle_repairs: false, .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -2840,15 +2843,16 @@ fn run_relay_operation(
             .pull_chat_workspace(store, doc_cache, &workspace_id, &NoFaults, leases, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
-        RelayOperation::FetchPull { workspace_id } => client
-            .fetch_pull(store, &workspace_id, &NoFaults)
+        RelayOperation::FetchPull { workspace_id, settle_repairs } => (if settle_repairs {
+            client.fetch_pull_settling_repairs(store, &workspace_id, &NoFaults)
+        } else { client.fetch_pull(store, &workspace_id, &NoFaults) })
             .map(|page| RelayOperationOutcome::PullFetched(Arc::new(page)))
             .map_err(RuntimeError::from),
         RelayOperation::ApplyPull {
             workspace_id,
             page,
             now_ms,
-        } => client
+        } => match client
             .apply_pull(
                 store,
                 doc_cache,
@@ -2858,8 +2862,11 @@ fn run_relay_operation(
                 leases,
                 now_ms,
             )
-            .map(RelayOperationOutcome::Sync)
-            .map_err(RuntimeError::from),
+        {
+            Ok(outcome) => Ok(RelayOperationOutcome::Sync(outcome)),
+            Err(RelayError::RepairPending) => Ok(RelayOperationOutcome::PullRetry),
+            Err(error) => Err(RuntimeError::from(error)),
+        },
         RelayOperation::CommitCursor {
             workspace_id,
             cursor,

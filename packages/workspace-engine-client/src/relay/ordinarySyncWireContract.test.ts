@@ -76,9 +76,15 @@ describe("ordinary native sync contract", () => {
   });
 
   it("accepts secret deletion and strips unrelated fields", () => {
-    expect(decodeOrdinarySyncResult("sync.applyPull", { ...pull,
-      changedPaths: [{ ...change, operation: "delete", contentKind: "secret", ignored: true }] }).changedPaths)
+    const result = decodeOrdinarySyncResult("sync.applyPull", { ...pull,
+      changedPaths: [{ ...change, operation: "delete", contentKind: "secret", ignored: true }] });
+    if (result.status !== "complete") throw new Error("Expected a complete page.");
+    expect(result.changedPaths)
       .toEqual([{ ...change, operation: "delete", contentKind: "secret" }]);
+  });
+
+  it("accepts a normal pull retry without a cursor", () => {
+    expect(decodeOrdinarySyncResult("sync.applyPull", {status: "retry"})).toEqual({status: "retry"});
   });
 
   it("requires positive acknowledgements and complete decline evidence", () => {

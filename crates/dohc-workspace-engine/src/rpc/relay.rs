@@ -66,6 +66,8 @@ pub(super) struct PendingPull {
     page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
 }
 
+const MAX_PULL_REPAIR_RETRIES: usize = 3;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApplyPullParams {
@@ -833,6 +835,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "morePending": outcome.more_pending,
         }),
         RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
+        RelayOperationOutcome::PullRetry => json!({ "status": "retry" }),
         // Only `sync.pullHosted` answers a pass, and `sync.commitCursor` a
         // hosted commit, each fit to its budget.
         RelayOperationOutcome::HostedPass { .. }
@@ -1281,6 +1284,7 @@ impl EngineService {
                 configuration,
                 RelayOperation::FetchPull {
                     workspace_id: open.workspace_id.clone(),
+                    settle_repairs: open.pull_repair_retries.load(Ordering::SeqCst) >= MAX_PULL_REPAIR_RETRIES,
                 },
                 "sync.fetchPull",
             )
@@ -1363,6 +1367,14 @@ impl EngineService {
                 "sync.applyPull",
             )
             .await?;
+        if matches!(&outcome, RelayOperationOutcome::PullRetry) {
+            drop(pulling);
+            open.pull_repair_retries.fetch_add(1, Ordering::SeqCst);
+            self.abandon_fetched_pull(&open, Some(pull_token.clone())).await?;
+            eprintln!("engine: sync pull retry: waiting for repairs");
+            return Ok(json!({"status": "retry"}));
+        }
+        open.pull_repair_retries.store(0, Ordering::SeqCst);
         let passive = open.mode == super::workspace::WorkspaceOpenMode::Passive;
         // Reconcile only once the terminal page's cursor commits, which ends
         // the pull's token. A relation target may be on a later page, and

@@ -60,7 +60,7 @@ export function parseServiceOrdinaryReplicationConfig(value: unknown): ServiceOr
   return Object.freeze({relay, identity, maxPagesPerPull});
 }
 
-type OrdinaryRefusal = OrdinarySyncMethodResultMap["sync.applyPull"]["refusals"][number];
+type OrdinaryRefusal = Extract<OrdinarySyncMethodResultMap["sync.applyPull"], {status: "complete"}>["refusals"][number];
 export interface ServiceOrdinaryPullPage {
   readonly nextCursor: number;
   readonly fetched: number; readonly applied: number; readonly refused: number; readonly skipped: number; readonly conflictsOpened: number;
@@ -111,9 +111,11 @@ export class ServiceOrdinaryReplication {
     return this.#run(callerSignal, async signal => {
       const pages: ServiceOrdinaryPullPage[] = [];
       let previous: number | undefined;
-      for (let index = 0; index < this.#config.maxPagesPerPull; index++) {
+      for (let index = 0; index < this.#config.maxPagesPerPull;) {
         const {pageToken} = decodeOrdinarySyncResult("sync.fetchPull", await this.#request("sync.fetchPull", {}, signal));
         const result = decodeOrdinarySyncResult("sync.applyPull", await this.#request("sync.applyPull", {pageToken}, signal));
+        if (result.status === "retry") continue;
+        index += 1;
         const {nextCursor, pendingCursor: cursor} = result;
         if (previous !== undefined && (nextCursor < previous || (result.hasMore && nextCursor === previous))) {
           throw new Error("Ordinary pull made no cursor progress.");
@@ -132,7 +134,7 @@ export class ServiceOrdinaryReplication {
         previous = nextCursor;
         if (!result.hasMore) return {nextCursor, hasMore: false, pages};
       }
-      return {nextCursor: previous!, hasMore: true, pages};
+      return {nextCursor: previous ?? 0, hasMore: true, pages};
     });
   }
   async #push(signal: AbortSignal) {

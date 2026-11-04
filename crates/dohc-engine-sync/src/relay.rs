@@ -830,6 +830,24 @@ fn ordinary_pull_token(store: &EngineStore, workspace_id: &str) -> Result<Option
         |row| row.get(0))).map_err(|error| local(SyncError::corrupt(error)))
 }
 
+fn pull_objects(page: &[ReplicationEnvelope]) -> BTreeSet<String> {
+    fn collect(value: &serde_json::Value, objects: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(object) = fields.get("objectId").and_then(|value| value.as_str()) {
+                    objects.insert(object.to_owned());
+                }
+                for value in fields.values() { collect(value, objects); }
+            }
+            serde_json::Value::Array(values) => for value in values { collect(value, objects); },
+            _ => {}
+        }
+    }
+    let mut objects = BTreeSet::new();
+    for op in page { collect(&op.payload, &mut objects); }
+    objects
+}
+
 // Keep validated decisions instead of full envelopes, including for wide base groups.
 // The encoded buffer bounds all repair answers retained between fetch and apply.
 // One answer holds a signature, four ids of at most 512 bytes and three integers: under 5 KB.
@@ -854,6 +872,7 @@ impl Default for BaseRepairAnswers {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum BaseRepairDecision {
+    Unchanged,
     Base {
         version_id: String,
         object_id: String,
@@ -937,6 +956,7 @@ impl BaseRepairDecision {
     ) -> Result<(), RelayError> {
         match store.write_with(faults, |tx| {
             match self {
+                Self::Unchanged => {}
                 Self::Base { version_id, object_id, lineage_claim_id, origin_id, origin_seq, relay_seq, recorded_at_ms } => {
                     let key = dohc_engine_collab::DocKey::new(workspace_id, version_id, object_id)
                         .map_err(base_repair_collab_error)?;
@@ -1163,6 +1183,7 @@ impl BaseRelayRepairChunk {
 }
 
 struct PendingDeferredRelayRepair {
+    object_id: String,
     origin_id: String,
     origin_seq: i64,
     op_kind: String,
@@ -1392,7 +1413,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 let mut statement = conn
                     .prepare(
                         "SELECT deferred.origin_id,deferred.origin_seq,log.op_kind,
-                                log.payload_json,log.recorded_at_ms
+                                log.payload_json,log.recorded_at_ms,deferred.object_id
                            FROM ydoc_deferred_updates AS deferred
                            JOIN replication_log AS log
                              ON log.workspace_id=deferred.workspace_id
@@ -1412,6 +1433,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
                         ))
                     })
                     .map_err(SyncError::corrupt)?;
@@ -1456,8 +1478,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let deferred = deferred
             .into_iter()
             .map(
-                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)| {
+                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, object_id)| {
                     Ok(PendingDeferredRelayRepair {
+                        object_id,
                         origin_id,
                         origin_seq,
                         op_kind,
@@ -1481,23 +1504,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         if let BaseRepairPhase::Apply(answers) = &phase {
             let decisions = answers.decode()?;
+            let touched = pull_objects(page);
+            let mut missing = false;
             for group in groups.values() {
                 let signature = base_repair_signature(local_pushed_seq, group.iter());
                 if let Some(decision) = decisions.get(&signature) {
                     decision.apply(store, workspace_id, faults)?;
+                } else if touched.contains(&group[0].key.object_id) {
+                    missing = true;
                 }
             }
             for repair in &deferred {
                 let signature = deferred_repair_signature(local_pushed_seq, repair);
                 if let Some(decision) = decisions.get(&signature) {
                     decision.apply(store, workspace_id, faults)?;
+                } else if touched.contains(&repair.object_id) {
+                    missing = true;
                 }
             }
-            return Ok(());
+            return if missing { Err(RelayError::RepairPending) } else { Ok(()) };
         }
+        let touched = pull_objects(page);
+        let mut groups: Vec<_> = groups.into_values().collect();
+        groups.sort_by_key(|group| !touched.contains(&group[0].key.object_id));
+        let mut deferred = deferred;
+        deferred.sort_by_key(|repair| !touched.contains(&repair.object_id));
         let mut chunks = Vec::new();
         let mut chunk = BaseRelayRepairChunk::default();
-        for group in groups.into_values() {
+        // Finish page dependencies before unrelated repair work.
+        let (priority, other): (Vec<_>, Vec<_>) = groups.into_iter()
+            .partition(|group| touched.contains(&group[0].key.object_id));
+        for group in priority {
             if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
                 chunks.push(std::mem::take(&mut chunk));
             }
@@ -1511,6 +1548,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 chunks.push(std::mem::take(&mut chunk));
             }
             chunk.deferred.push(repair);
+        }
+        for group in other {
+            if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
+                chunks.push(std::mem::take(&mut chunk));
+            }
+            chunk.repairs.extend(group);
+            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS { chunks.push(std::mem::take(&mut chunk)); }
         }
         if chunk.len() > 0 {
             chunks.push(chunk);
@@ -1608,6 +1652,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ));
                     }
                     deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
+                } else if matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                    prepared_deferred.push((deferred_repair_signature(local_pushed_seq, &repair), BaseRepairDecision::Unchanged));
                 }
             }
             let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
@@ -1656,13 +1702,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .push((repair, relay_seq, unresolved_local_coordinate));
             }
 
-            grouped.retain(|_, candidates| {
+            if !matches!(&phase, BaseRepairPhase::Fetch(_)) { grouped.retain(|_, candidates| {
                 candidates
                     .iter()
                     .any(|(_, relay_seq, _)| relay_seq.is_some())
                     || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
-            });
-            if grouped.is_empty() && deferred_repairs.is_empty() {
+            }); }
+            if grouped.is_empty() && deferred_repairs.is_empty() && prepared_deferred.is_empty() {
                 continue;
             }
             if let BaseRepairPhase::Fetch(answers) = &mut phase {
@@ -1679,6 +1725,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         Some((repair, seq)) => (repair, Some(seq)),
                         None => (&candidates[0].0, None),
                     };
+                    if relay_seq.is_none() && candidates.iter().any(|(_, _, unresolved)| *unresolved) {
+                        if !answers.keep(signature, BaseRepairDecision::Unchanged)? { return Ok(()); }
+                        continue;
+                    }
                     if !answers.keep(
                         signature,
                         BaseRepairDecision::Base {
@@ -2377,6 +2427,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         result
     }
 
+    pub fn fetch_pull_settling_repairs(
+        &self, store: &mut EngineStore, workspace_id: &str, faults: &dyn FaultInjector,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        let prepared = self.fetch_pull(store, workspace_id, faults)?;
+        // Finish validated repairs in this writer step, before another local
+        // write can change their candidates. Page operations still wait for apply.
+        match self.repair_base_orders(store, workspace_id, &prepared.identity, faults,
+            &prepared.ops, BaseRepairPhase::Apply(&prepared.repairs)) {
+            Ok(()) | Err(RelayError::RepairPending) => Ok(prepared),
+            Err(error) => Err(error),
+        }
+    }
+
     fn fetch_pull_inner(
         &self,
         store: &mut EngineStore,
@@ -2469,7 +2532,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             workspace_id,
             &identity,
             faults,
-            &ops[..fetched_op_count],
+            &ops,
             if immediate_repairs {
                 BaseRepairPhase::Immediate
             } else {
@@ -2527,7 +2590,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             workspace_id,
             &identity,
             faults,
-            &prepared.ops,
+            &ops,
             BaseRepairPhase::Apply(&prepared.repairs),
         )?;
         let bootstrap_complete = store
@@ -2581,8 +2644,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none()
         {
-            let (fetch, progress) =
-                self.begin_prepared_pull(store, workspace_id, prepared, faults)?;
+            let (fetch, progress) = match self.begin_prepared_pull(store, workspace_id, prepared, faults) {
+                Err(RelayError::RepairPending) => {
+                    crate::cursor::abandon_ordinary_pull(store, workspace_id, faults).map_err(local)?;
+                    return Err(RelayError::RepairPending);
+                }
+                answer => answer?,
+            };
             self.continuation
                 .keep(workspace_id, Fetched::Ordinary(fetch), progress);
         }

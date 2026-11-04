@@ -99,6 +99,17 @@ it("leaves failed native materialization uncommitted and retries the page", asyn
   expect(f.methods().filter(method => method === "sync.commitCursor")).toHaveLength(1);
 });
 
+it("retries a repair wait without publishing a page or materializing it", async () => {
+  const f = fixture(), original = f.sendRequest.getMockImplementation()!;
+  let retries = 0;
+  f.sendRequest.mockImplementation(async request => request.method === "sync.applyPull" && retries++ === 0
+    ? {result: {status: "retry"}} as never : original(request));
+  const onPage = vi.fn();
+  await expect(f.driver.pull(undefined, onPage)).resolves.toMatchObject({hasMore: false});
+  expect(onPage).toHaveBeenCalledTimes(1);
+  expect(f.methods().filter(method => method === "sync.materializePendingCursor")).toHaveLength(1);
+});
+
 it.each([false, undefined, "success"])("does not accept native materialization result %s as success", async materialized => {
   const f = fixture(), original = f.sendRequest.getMockImplementation()!;
   f.sendRequest.mockImplementation(async request => request.method === "sync.materializePendingCursor" ? {result: {materialized}} as never : original(request));

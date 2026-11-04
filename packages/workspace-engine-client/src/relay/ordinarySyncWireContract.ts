@@ -56,7 +56,7 @@ const OrdinarySyncResultSchemas = {
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
   "sync.fetchPull": mutableStruct({ pageToken: Text }),
-  "sync.applyPull": mutableStruct({
+  "sync.applyPull": Schema.Union([mutableStruct({status: Schema.Literal("retry")}), mutableStruct({
     status: Schema.Literal("complete"),
     fetched: Count,
     applied: Count,
@@ -69,7 +69,7 @@ const OrdinarySyncResultSchemas = {
     changedPaths: Schema.mutable(Schema.Array(ChangedPath)),
     refusals: Schema.mutable(Schema.Array(Refusal)),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
-  }),
+  })]),
   "sync.commitCursor": mutableStruct({
     committed: Schema.Literal(true),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),

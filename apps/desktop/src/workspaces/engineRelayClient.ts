@@ -835,6 +835,7 @@ export class EngineRelayClient {
             const page = decodeOrdinarySyncResult("sync.applyPull",
               await request("sync.applyPull", { workspaceId: workspace.workspaceId, pageToken }),
             );
+            if (page.status === "retry") return page;
             assertRelayPullProgress("sync.applyPull", previousCursor, page.nextCursor, page.hasMore);
             try {
               await materializePage(page.changedPaths);
@@ -844,6 +845,7 @@ export class EngineRelayClient {
             }
             return page;
           });
+          if (result.status === "retry") continue;
           const { nextCursor: pageCursor, hasMore } = result;
           previousCursor = pageCursor;
           nextCursor = pageCursor;

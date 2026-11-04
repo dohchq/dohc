@@ -571,7 +571,8 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
         | RelayError::ValidationPending(_)
-        | RelayError::Local(_) => ErrorCode::Internal,
+        | RelayError::Local(_)
+        | RelayError::RepairPending => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }

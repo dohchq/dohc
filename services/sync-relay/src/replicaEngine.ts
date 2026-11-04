@@ -89,16 +89,18 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
       const pullOrdinary = async () => {
         let page: Record<string, unknown>;
         let previous: number | undefined;
-        do {
+        for (;;) {
           const fetched = await request("sync.fetchPull", { workspaceId: lease.workspaceId });
           page = await request("sync.applyPull", { workspaceId: lease.workspaceId, pageToken: fetched.pageToken });
+          if (page.status === "retry") continue;
           if (page.status !== "complete" || !Number.isSafeInteger(page.nextCursor) || typeof page.nextCursor !== "number" ||
               !page.pendingCursor || (previous !== undefined && (page.nextCursor < previous || (page.hasMore && page.nextCursor === previous)))) {
             throw new Error("Replica pull did not produce a progressing cursor.");
           }
           await request("sync.commitCursor", { workspaceId: lease.workspaceId, pendingCursor: page.pendingCursor });
           previous = page.nextCursor;
-        } while (page.hasMore);
+          if (!page.hasMore) break;
+        }
       };
       return { pid: child.pid, exited: termination, close,
         async currentView(selectors,knownTextShas,position,cursor,since) {

@@ -107,6 +107,102 @@ fn remaining(store: &EngineStore) -> usize {
         .unwrap()
 }
 
+fn touching(mut relay: PagedRelay, object: &str) -> PagedRelay {
+    relay.pages.get_mut(&0).unwrap().ops[0].payload = json!({"objectId": object});
+    relay
+}
+
+#[test]
+fn prepared_repairs_prioritize_the_page_object_past_the_cap() {
+    let (_scratch, _path, mut store) = open_store();
+    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let mut objects = boundary_objects(0, &claim);
+    objects.push("zz-page".into());
+    let relay = touching(seed(&mut store, &objects, &claim), "zz-page");
+    let client = RelaySyncClient::new(relay);
+    let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+    assert!(page.repairs.decode().unwrap().values().any(|decision| matches!(decision,
+        BaseRepairDecision::Base {object_id, ..} if object_id == "zz-page")));
+    apply(&mut store, &page);
+    let unresolved: i64 = store.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM ydoc_base_relay_candidates WHERE object_id='zz-page'", [], |row| row.get(0))).unwrap();
+    assert_eq!(unresolved, 0);
+}
+
+#[test]
+fn prepared_page_waits_for_repairs_that_exceed_the_cap() {
+    let (_scratch, _path, mut store) = open_store();
+    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let objects: Vec<_> = (0..600).map(|index| format!("doc-{index:05}")).collect();
+    let mut relay = seed(&mut store, &objects, &claim);
+    relay.pages.get_mut(&0).unwrap().ops[0].payload = json!({"objects": objects.iter()
+        .map(|object| json!({"objectId": object})).collect::<Vec<_>>()});
+    let client = RelaySyncClient::new(relay);
+    let mut before = objects.len();
+    loop {
+        let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+        match client.apply_pull(&mut store, &mut Default::default(), "ws", &page,
+            &NoFaults, &crate::NoLiveLeases, 2_000) {
+            Err(RelayError::RepairPending) => {
+                let after = remaining(&store);
+                assert!(after > 0 && after < before);
+                assert_eq!(crate::read_relay_cursor(&store, "ws").unwrap(), None);
+                before = after;
+            }
+            Ok(_) => { assert_eq!(remaining(&store), 0); break; }
+            Err(error) => panic!("unexpected pull: {error:?}"),
+        }
+    }
+}
+
+#[test]
+fn prepared_page_retries_changed_repairs_once_then_applies() {
+    let (_scratch, _path, mut store) = open_store();
+    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let client = RelaySyncClient::new(touching(seed(&mut store, &["doc".into()], &claim), "doc"));
+    let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+    change_candidate(&mut store);
+    assert_repair_retry(&client, &mut store, &page);
+    let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+    apply(&mut store, &page);
+    assert_eq!(remaining(&store), 0);
+}
+
+fn change_candidate(store: &mut EngineStore) {
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET recorded_at_ms=recorded_at_ms+1 WHERE origin_id='peer'", []).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+}
+
+fn assert_repair_retry(client: &RelaySyncClient<PagedRelay>, store: &mut EngineStore, page: &PreparedOrdinaryPull) {
+    assert!(matches!(client.apply_pull(store, &mut Default::default(), "ws", page,
+        &NoFaults, &crate::NoLiveLeases, 2_000), Err(RelayError::RepairPending)));
+    assert_eq!(crate::read_relay_cursor(store, "ws").unwrap(), None);
+    let (token, applied): (Option<String>, i64) = store.read_with(|conn| Ok::<_, rusqlite::Error>((
+        conn.query_row("SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'", [], |row| row.get(0))?,
+        conn.query_row("SELECT COUNT(*) FROM replication_log WHERE origin_id='remote'", [], |row| row.get(0))?,
+    ))).unwrap();
+    assert_eq!(token, None);
+    assert_eq!(applied, 0);
+}
+
+#[test]
+fn repeated_repair_changes_finish_at_the_fetch_writer_boundary() {
+    let (_scratch, _path, mut store) = open_store();
+    let claim = dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let client = RelaySyncClient::new(touching(seed(&mut store, &["doc".into()], &claim), "doc"));
+    for _ in 0..3 {
+        let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+        change_candidate(&mut store);
+        assert_repair_retry(&client, &mut store, &page);
+    }
+    let page = client.fetch_pull_settling_repairs(&mut store, "ws", &NoFaults).unwrap();
+    assert_eq!(remaining(&store), 0);
+    change_candidate(&mut store);
+    apply(&mut store, &page);
+}
+
 fn apply(store: &mut EngineStore, page: &PreparedOrdinaryPull) {
     let offline = RelaySyncClient::new(PagedRelay::new([]));
     let result = offline
