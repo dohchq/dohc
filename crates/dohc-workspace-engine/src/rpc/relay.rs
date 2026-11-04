@@ -3308,6 +3308,27 @@ mod tests {
                     .expect("query");
                 rows.extend(found.map(|row| row.expect("row")));
             }
+            // The fixture sets SOURCE and TARGET. Any other record id is new
+            // in each workspace, so the rows name it by its file.
+            let mut statement = conn
+                .prepare(
+                    "SELECT record_id, file_path FROM collection_records \
+                     WHERE workspace_id = ?1",
+                )
+                .expect("prepare");
+            let minted: Vec<(String, String)> = statement
+                .query_map([self.workspace_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .expect("query")
+                .map(|row| row.expect("row"))
+                .filter(|(id, _)| id != SOURCE && id != TARGET)
+                .collect();
+            for row in &mut rows {
+                for (id, path) in &minted {
+                    *row = row.replace(id.as_str(), &format!("minted {path}"));
+                }
+            }
             rows.sort();
             rows
         }
@@ -4376,6 +4397,16 @@ mod tests {
         assert_eq!(
             state, after,
             "the update's order leaves the same Collections"
+        );
+        assert!(
+            state
+                .iter()
+                .any(|row| row.starts_with("record ") && row.contains(SOURCE)),
+            "the source keeps its record id"
+        );
+        assert!(
+            state.iter().any(|row| row.contains(TARGET)),
+            "the relation still names the target's record id"
         );
     }
 
