@@ -87,11 +87,13 @@ export function parseArgs(argv: string[]): ToolContext {
     else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
     else if (argv[i] === "--tool") tools.add(toolArg(argv[++i]));
   }
+  const runId = process.env.DOHC_RUN_ID?.trim();
   return {
     root,
     home,
     ...(shareAccess ? { shareAccess } : {}),
     ...(tools.size > 0 ? { tools } : {}),
+    ...(runId ? { runId } : {}),
   };
 }
 

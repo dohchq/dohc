@@ -141,6 +141,9 @@ export interface ToolContext {
   // level's. Absent offers all of the level's tools. A dohc agent run offers
   // only the reply tool.
   tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
+  // The local agent run this server works for, from DOHC_RUN_ID. A chat
+  // write that names no run names this one.
+  runId?: string;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
@@ -2052,9 +2055,10 @@ interface ChatWriteInput {
   runId?: string;
 }
 
-function chatWriteArgs(input: ChatWriteInput) {
+function chatWriteArgs(ctx: ToolContext, input: ChatWriteInput) {
+  const runId = input.runId ?? ctx.runId;
   return {
-    ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    ...(runId !== undefined ? { runId } : {}),
     attachments: input.attachments ?? [],
     needsDecision: Boolean(input.needsDecision || input.options?.length),
     ...(input.options !== undefined ? { options: input.options } : {}),
@@ -2072,7 +2076,7 @@ export async function startGroupChat(
   const result = await requestCli(ctx, "post", {
     group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(ctx, args),
   });
   if ("ok" in result) return result;
   return {
@@ -2106,7 +2110,7 @@ export async function replyToChat(
     ...(args.to !== undefined ? { to: args.to } : {}),
     ...(args.resolve !== undefined ? { resolve: args.resolve } : {}),
     ...(args.choose !== undefined ? { choose: args.choose } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(ctx, args),
   });
   if ("ok" in result) return result;
   return {
@@ -2433,8 +2437,10 @@ export async function startFileChat(
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  const runId = args.runId ?? ctx.runId;
   return requestCli(ctx, "fileChatStart", {
     ...args,
+    ...(runId !== undefined ? { runId } : {}),
     path: resolved.normalized,
     ...(agent === undefined ? {} : { agent }),
   });
