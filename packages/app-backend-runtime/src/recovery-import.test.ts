@@ -72,8 +72,10 @@ function target(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Paramet
   for (const table of ["catalog", "catalog_history", "bindings", "data_grants", "lifecycle"]) db.exec(String(f.db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(`dohc_dataset_${table}`)!.sql));
   db.exec("CREATE TABLE usage(bytes INTEGER); INSERT INTO usage VALUES(0)");
   const installer = createRecoveryInstaller({ db, transaction, journal, account(_context, allocation) { db.prepare("UPDATE usage SET bytes=bytes+?").run(allocation.bytes); }, ...options });
-  cleanups.push(async () => { db.close(); });
-  return { db, journal, installer, transaction };
+  let closed = false;
+  const close = () => { if (!closed) { db.close(); closed = true; } };
+  cleanups.push(async () => { close(); });
+  return { db, journal, installer, transaction, close };
 }
 
 it("installs validated histories and retry receipts inactive with a durable import receipt", async () => {
@@ -106,6 +108,73 @@ it("rolls back installation and releases every staging reservation on final quot
     expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n).toBe(0);
     expect(t.db.prepare("SELECT bytes FROM usage").get()!.bytes).toBe(0);
   } finally { await valid.dispose(); }
+});
+
+it("retries a fenced recovery import after the target store reopens mid-install (#2903)", async () => {
+  const f = await fixture(), fileId = "receipt_file_0001", first = f.add("first", [fileId]);
+  f.journal.fence({ expected: f.head(), authorize: f.authorize });
+  const valid = await validateDatasetRecovery({ staged: await f.stage({ fileId, bytes: Uint8Array.of(137, 80, 78, 71), revision: first.cursor.revision }), authorize: f.authorize });
+  let reachedAttachment!: () => void, releaseStoppedInstall!: () => void;
+  const atAttachment = new Promise<void>(resolve => { reachedAttachment = resolve; });
+  const stoppedUntilCleanup = new Promise<void>(resolve => { releaseStoppedInstall = resolve; });
+  let discards = 0;
+  const t = target(f, {
+    async installAttachment(_context, input) {
+      for await (const _bytes of input.stream) { /* Consume the validated attachment before stopping. */ }
+      reachedAttachment();
+      await stoppedUntilCleanup;
+    },
+    commitAttachments() {},
+    async discardAttachments() { discards++; },
+  });
+  const input = { transferId: "interrupted-transfer", manifestSha256: recoveryManifestSha256(valid.manifest, limits), recovery: valid, authorize: f.authorize };
+  const interrupted = t.installer.install({}, input);
+  const stopped = interrupted.then(() => undefined, () => undefined);
+  try {
+    // A process stop skips install's catch/discard. Wait for committed staging,
+    // then close its connection while its asynchronous work cannot continue.
+    await Promise.race([atAttachment, interrupted.then(() => { throw new Error("Import finished before the simulated stop."); })]);
+    expect(t.db.prepare("SELECT phase FROM dohc_dataset_imports WHERE import_id=?").get(input.transferId)).toMatchObject({ phase: "staging" });
+    expect(Number(t.db.prepare("SELECT count(*) n FROM dohc_dataset_import_records").get()!.n)).toBeGreaterThan(0);
+    expect(Number(t.db.prepare("SELECT count(*) n FROM dohc_dataset_import_checkpoints").get()!.n)).toBeGreaterThan(0);
+    expect(Number(t.db.prepare("SELECT bytes FROM usage").get()!.bytes)).toBeGreaterThan(0);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_journals").get()!.n).toBe(0);
+    t.close();
+
+    const db = new DatabaseSync(join(f.directory, "target.sqlite"));
+    cleanups.push(async () => { db.close(); });
+    expect(db.prepare("SELECT phase FROM dohc_dataset_imports WHERE import_id=?").get(input.transferId)).toMatchObject({ phase: "staging" });
+    const transaction = <T>(run: () => T) => { db.exec("BEGIN IMMEDIATE"); try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } };
+    const journal = createDatasetJournal({ db, transaction });
+    let restartDiscards = 0;
+    const restarted = createRecoveryInstaller({ db, transaction, journal,
+      account(_context, allocation) { db.prepare("UPDATE usage SET bytes=bytes+?").run(allocation.bytes); },
+      async installAttachment(_context, attachment) { for await (const _bytes of attachment.stream) { /* Consume the retry's validated attachment. */ } },
+      commitAttachments() {},
+      async discardAttachments() { restartDiscards++; },
+    });
+    // The relay's startup discards each import left before installation with this call.
+    await restarted.discard({}, { ...f.scope, transferId: input.transferId, authorize: f.authorize });
+    expect(discards).toBe(0);
+    expect(restartDiscards).toBe(1);
+    expect(db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n).toBe(0);
+    expect(db.prepare("SELECT bytes FROM usage").get()!.bytes).toBe(0);
+    expect(restarted.status({ ...f.scope, transferId: input.transferId, authorize: f.authorize })).toBeNull();
+    expect(f.journal.head(f.scope, f.authorize)).toMatchObject({ active: false, cursor: f.head() });
+
+    await expect(restarted.install({}, input)).resolves.toMatchObject({ transferId: input.transferId, manifestSha256: input.manifestSha256, sourceCursor: f.head() });
+    const claimed = restarted.claim({}, { ...f.scope, transferId: input.transferId, manifestSha256: input.manifestSha256, sourceCursor: f.head(), authorize: f.authorize });
+    expect(claimed.targetCursor!.hostEpoch).not.toBe(f.head().hostEpoch);
+    expect(journal.head(f.scope, f.authorize)).toMatchObject({ active: true, cursor: claimed.targetCursor });
+    expect(journal.receipt({ scope: f.scope, callerKey: "owner", idempotencyKey: "first", payloadSha256: hash("first"), authorize: f.authorize })).toMatchObject({ revision: 1 });
+  } finally {
+    // Release the old task only after its connection is closed. Its rejection
+    // is observed, and it cannot discard the reopened store's durable rows.
+    t.close();
+    releaseStoppedInstall();
+    await stopped;
+    await valid.dispose();
+  }
 });
 
 it("claims a fenced import once with a fresh epoch and preserves retries across installer restart", async () => {
