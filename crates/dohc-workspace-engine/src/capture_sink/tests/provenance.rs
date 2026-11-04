@@ -62,6 +62,7 @@ fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
             summary: Some("Reconciled offline edits".to_owned()),
             correlation_id: Some("reconcile-test-pass".to_owned()),
             first_import: None,
+            unsettled: None,
         },
         ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10)
     });
@@ -155,6 +156,27 @@ fn a_first_import_labels_its_secrets_and_an_edit_keeps_the_per_file_label() {
         ],
         "an imported secret joins the import; a later edit keeps its per-file label"
     );
+}
+
+#[test]
+fn only_the_paths_an_unsettled_rescan_left_keep_its_label() {
+    let provenance = CaptureProvenance {
+        unsettled: Some(Arc::new(UnsettledPass {
+            summary: Some("Found changes in the folder".to_owned()),
+            correlation_id: Some("reconcile-rebuild".to_owned()),
+            paths: BTreeSet::from(["left.md".to_owned()]),
+        })),
+        ..CaptureProvenance::default()
+    };
+    let left = provenance
+        .for_path("left.md")
+        .for_ingest(IngestReason::Added);
+    assert_eq!(left.summary.as_deref(), Some("Found changes in the folder"));
+    assert_eq!(left.correlation_id.as_deref(), Some("reconcile-rebuild"));
+    let other = provenance
+        .for_path("other.md")
+        .for_ingest(IngestReason::Changed);
+    assert_eq!((other.summary, other.correlation_id), (None, None));
 }
 
 #[test]

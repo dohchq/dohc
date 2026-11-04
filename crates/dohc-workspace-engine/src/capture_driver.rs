@@ -25,7 +25,7 @@
 
 use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, DeferredWrites, FIRST_IMPORT_SUMMARY, PolicyState,
-    SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams,
+    SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams, UnsettledPass,
 };
 use crate::{
     CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT,
@@ -1342,6 +1342,7 @@ impl CaptureDriver {
                 import_priority: drive_import_priority,
                 no_atomic_placement_announced: false,
                 first_import: None,
+                unsettled: None,
             };
             let run = drive_loop(
                 &mut env,
@@ -2319,6 +2320,9 @@ struct RealEnv {
     /// The correlation id of the workspace's unfinished first import, read
     /// at each layer start from a readable seed.
     first_import: Option<String>,
+    /// The startup baseline that ended unsettled, until a clean pass
+    /// captures what it left.
+    unsettled: Option<Arc<UnsettledPass>>,
 }
 
 impl RealEnv {
@@ -2346,10 +2350,12 @@ impl RealEnv {
 
     /// Context for a live watcher-batch apply: default provenance (per-file
     /// "Updated <basename>" summaries, no correlation id), except for a file
-    /// an unfinished first import has not recorded yet.
+    /// an unfinished first import has not recorded yet, or one an unsettled
+    /// baseline left uncaptured.
     fn apply_context(&self) -> ApplyRunContext<'_> {
         self.apply_context_with(CaptureProvenance {
             first_import: self.first_import.clone(),
+            unsettled: self.unsettled.clone(),
             ..CaptureProvenance::default()
         })
     }
@@ -2578,9 +2584,10 @@ impl DriverEnv for RealEnv {
                     .or(provenance.correlation_id.as_deref())
             ),
         );
-        let (mut settled, initial_settle_timed_out) = {
+        let ((mut settled, uncaptured), initial_settle_timed_out) = {
             let initial_cancel = cancel.child_token();
             let initial_settle = async {
+                let mut uncaptured = plan_paths(&initial).unwrap_or_default();
                 let mut settled = apply_run(
                     self.initial_apply_context(&provenance, early_import),
                     &fresh.files.handle(),
@@ -2624,6 +2631,9 @@ impl DriverEnv for RealEnv {
                     .await
                     {
                         Ok(run) => {
+                            if let Some(paths) = plan_paths(&run) {
+                                uncaptured = paths;
+                            }
                             apply_run(
                                 self.initial_apply_context(&provenance, early_import),
                                 &fresh.files.handle(),
@@ -2636,14 +2646,14 @@ impl DriverEnv for RealEnv {
                         Err(_) => false,
                     };
                 }
-                settled
+                (settled, uncaptured)
             };
             tokio::pin!(initial_settle);
             let initial_deadline = self.initial_settle_deadline();
             tokio::pin!(initial_deadline);
             tokio::select! {
                 biased;
-                settled = &mut initial_settle => (settled, false),
+                result = &mut initial_settle => (result, false),
                 () = &mut initial_deadline, if early_import => {
                     initial_cancel.cancel();
                     self.status.mark_initial_apply_timed_out();
@@ -2659,6 +2669,16 @@ impl DriverEnv for RealEnv {
         if initial_settle_timed_out {
             settled = false;
         }
+        // A baseline that never settles leaves its last attempt's paths to
+        // later passes, which keep its label for them.
+        self.unsettled =
+            (!settled && provenance.summary.is_some() && !uncaptured.is_empty()).then(|| {
+                Arc::new(UnsettledPass {
+                    summary: provenance.summary.clone(),
+                    correlation_id: provenance.correlation_id.clone(),
+                    paths: uncaptured,
+                })
+            });
         if settled && !cancel.is_cancelled() {
             finish_first_import(
                 &self.actor,
@@ -2846,6 +2866,9 @@ impl DriverEnv for RealEnv {
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
         };
+        if matches!(tick, TickIo::Converged | TickIo::Applied { clean: true }) {
+            self.unsettled = None;
+        }
         self.actor
             .retry_pending_link_rewrites(&self.workspace_id)
             .await;
@@ -3074,6 +3097,18 @@ fn startup_provenance(
         summary: Some(summary.to_owned()),
         correlation_id: Some(pass_correlation_id("reconcile")),
         first_import,
+        unsettled: None,
+    }
+}
+
+/// The paths a reconcile run still has to capture.
+fn plan_paths(run: &RootBoundRun) -> Option<std::collections::BTreeSet<String>> {
+    match &run.run {
+        ReconcileRun::Completed(plan) => {
+            Some(plan.ops.iter().map(|op| op.path().to_owned()).collect())
+        }
+        ReconcileRun::Converged => Some(std::collections::BTreeSet::new()),
+        ReconcileRun::Cancelled => None,
     }
 }
 
