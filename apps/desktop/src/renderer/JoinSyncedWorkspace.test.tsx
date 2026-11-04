@@ -106,6 +106,8 @@ describe("JoinSyncedWorkspace", () => {
     // The first folder holds the earlier attempt's files: Join asks for another.
     await user.type(passphrase, "{Enter}");
     expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledTimes(1);
+    // The Enter that moved focus to the chip does not also press it.
+    expect(bridgeMock.pickWorkspaceRoot).toHaveBeenCalledTimes(1);
     const chip = screen.getByTestId("join-choose-folder");
     expectFieldError(chip, "join-choose-folder-error", "Choose an empty folder.");
     expect(document.activeElement).toBe(chip);

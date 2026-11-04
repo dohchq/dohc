@@ -170,7 +170,11 @@ export function JoinSyncedWorkspace(props: {
   }
 
   function onEnter(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter" && !isComposingKey(event)) void join();
+    if (event.key !== "Enter" || isComposingKey(event)) return;
+    // Join may move focus to the folder chip; without this, the same Enter
+    // then presses the chip and opens the picker.
+    event.preventDefault();
+    void join();
   }
 
   const signedIn = gate.kind === "signed-in";
