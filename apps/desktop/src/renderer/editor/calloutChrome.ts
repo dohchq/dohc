@@ -1,4 +1,4 @@
-import { stopEditorMouseEvent } from "./pmHelpers";
+import { documentChange, stopEditorMouseEvent } from "./pmHelpers";
 import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
@@ -336,52 +336,52 @@ function buildCalloutHeader(
   return header;
 }
 
-function buildCalloutChromeDecorations(doc: Node): DecorationSet {
-  const decorations: Decoration[] = [];
-
-  // Ordinal (document order among callouts), not absolute pos, keys the widget.
-  // A collaborator/agent edit before a callout shifts its pos but not its
-  // ordinal, so keying on pos would remint the widget on every such edit —
-  // dropping a focused, uncommitted title input without a blur (the commit never
-  // fires). Ordinal stays stable through position mapping; only a change to the
-  // set/order of callouts remints, which is rare mid-title-edit.
-  let ordinal = 0;
-
-  // A textblock holds only inline content, so the walk never enters one.
-  doc.descendants((node, pos) => {
-    if (node.type.name !== "callout") return !node.isTextblock;
-    const index = ordinal++;
-    const type = String(node.attrs.calloutType ?? "note");
-    const fold = normalizeCalloutFoldAttr(node.attrs.fold);
-    const title = String(node.attrs.title ?? "");
-    // The key intentionally omits title: a title-only change reuses this widget
-    // DOM (no caret-dropping remint) and reconcileTitleInputs re-seeds the input
-    // value instead. type/fold DO alter the header chrome, so they stay in the key.
-    decorations.push(
-      Decoration.widget(
-        pos + 1,
-        (view, getPos) => buildCalloutHeader(view, getPos, { type, fold, title }),
-        {
-          side: -1,
-          key: `callout-${index}-${type}-${fold}`,
-          ignoreSelection: true,
-          stopEvent: () => true,
-        },
-      ),
-    );
-  });
-
-  return DecorationSet.create(doc, decorations);
+// An owner key, not the absolute pos, keys the widget. A collaborator or agent
+// edit before a callout shifts its pos, and keying on pos would remint the
+// widget on every such edit, dropping a focused, uncommitted title input
+// without a blur (the commit never fires). The key intentionally omits title:
+// a title-only change reuses this widget DOM (no caret-dropping remint) and
+// reconcileTitleInputs re-seeds the input value instead. type/fold DO alter
+// the header chrome, so they stay in the key.
+function calloutHeader(node: Node, pos: number, ownerKey: string): Decoration {
+  const type = String(node.attrs.calloutType ?? "note");
+  const fold = normalizeCalloutFoldAttr(node.attrs.fold);
+  const title = String(node.attrs.title ?? "");
+  return Decoration.widget(
+    pos + 1,
+    (view, getPos) => buildCalloutHeader(view, getPos, { type, fold, title }),
+    {
+      side: -1,
+      key: `callout-${ownerKey}-${type}-${fold}`,
+      ownerKey,
+      ignoreSelection: true,
+      stopEvent: () => true,
+    },
+  );
 }
 
-// After every view update, re-seed each callout title input from its live node
-// title so a remote/agent rename shows immediately (the decoration key omits
-// title, so the widget itself is reused rather than reminted). The input the
-// user is actively editing is skipped — deferring the sync until blur keeps the
-// caret from being yanked mid-edit.
-function reconcileTitleInputs(view: EditorView): void {
-  view.state.doc.descendants((node, pos) => {
+// Calls `visit` for each callout that overlaps from..to. A textblock holds
+// only inline content, so the walk never enters one.
+function calloutsBetween(
+  doc: Node,
+  from: number,
+  to: number,
+  visit: (node: Node, pos: number) => void,
+): void {
+  doc.nodesBetween(from, to, (node, pos) => {
     if (node.type.name !== "callout") return !node.isTextblock;
+    visit(node, pos);
+    return true;
+  });
+}
+
+// After a view update, re-seed each changed callout's title input from its
+// live node title so a remote/agent rename shows immediately (the decoration
+// key omits title, so the widget itself is reused rather than reminted). The
+// input the user is actively editing is skipped. Deferring the sync until blur
+// keeps the caret from being yanked mid-edit.
+function reconcileTitleInputs(view: EditorView, from: number, to: number): void {
+  calloutsBetween(view.state.doc, from, to, (node, pos) => {
     const dom = view.nodeDOM(pos);
     if (!(dom instanceof HTMLElement)) return;
     const input = dom.querySelector<HTMLInputElement>(".dohc-callout-title-input");
@@ -392,21 +392,47 @@ function reconcileTitleInputs(view: EditorView): void {
 }
 
 export function makeCalloutChromePlugin() {
+  let nextId = 0;
+  const nextOwnerKey = () => String(nextId++);
   return new Plugin<DecorationSet>({
     key: calloutChromeKey,
     state: {
       init(_, instance) {
-        return buildCalloutChromeDecorations(instance.doc);
+        const headers: Decoration[] = [];
+        calloutsBetween(instance.doc, 0, instance.doc.content.size, (node, pos) => {
+          headers.push(calloutHeader(node, pos, nextOwnerKey()));
+        });
+        return DecorationSet.create(instance.doc, headers);
       },
+      // Only callouts the edit changed get a new header. A changed callout's
+      // range starts at the callout, so a header inside the edit is the only
+      // one to replace. It keeps its owner key when its callout survives.
       apply(tr, old) {
-        if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
-        return buildCalloutChromeDecorations(tr.doc);
+        if (!tr.docChanged) return old;
+        const { range, mapping } = documentChange(tr.before, tr.doc);
+        const decorations = old.map(mapping, tr.doc);
+        if (!range) return decorations;
+        // A callout that starts at or before the edit keeps its start, so a
+        // new title or content at the start of its body keeps its owner.
+        const owners = new Map<number, string>();
+        for (const header of old.find(range.from, range.toBefore)) {
+          const start = header.from - 1;
+          const ownerKey: unknown = header.spec.ownerKey;
+          if (start <= range.from && typeof ownerKey === "string") owners.set(start, ownerKey);
+        }
+        const headers: Decoration[] = [];
+        calloutsBetween(tr.doc, range.from, range.to, (node, pos) => {
+          if (pos + 1 < range.from || pos + 1 > range.to) return;
+          headers.push(calloutHeader(node, pos, owners.get(pos) ?? nextOwnerKey()));
+        });
+        return decorations.remove(decorations.find(range.from, range.to)).add(tr.doc, headers);
       },
     },
     view() {
       return {
         update: (view, previous) => {
-          if (view.state.doc !== previous.doc) reconcileTitleInputs(view);
+          const { range } = documentChange(previous.doc, view.state.doc);
+          if (range) reconcileTitleInputs(view, range.from, range.to);
         },
       };
     },
