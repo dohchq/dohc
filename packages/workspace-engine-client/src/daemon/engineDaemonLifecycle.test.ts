@@ -958,9 +958,6 @@ describe("Rust engine daemon lifecycle", () => {
       monotonicNowMs: () => now,
       wallNowMs: () => now,
       launch: async (options) => {
-        // A loaded machine: each relaunch takes many real event-loop turns,
-        // as its smoke's real file work does under load.
-        if (clients.length > 0) for (let turn = 0; turn < 300; turn += 1) await realTurn();
         const arrivals: number[] = [];
         probeArrivals.push(arrivals);
         const client = new SelfExitingClient((request) => {
@@ -968,7 +965,12 @@ describe("Rust engine daemon lifecycle", () => {
           return silentPing(request);
         });
         client.exit = options.onExit;
+        // Recorded at the call, so a launch the terminal verdict should have
+        // prevented counts even while it is still starting.
         clients.push(client);
+        // A loaded machine: each relaunch takes many real event-loop turns,
+        // as its smoke's real file work does under load.
+        if (clients.length > 1) for (let turn = 0; turn < 300; turn += 1) await realTurn();
         return client;
       },
       onFailure: (error, terminal) => {
