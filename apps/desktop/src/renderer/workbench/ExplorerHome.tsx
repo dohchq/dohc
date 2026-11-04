@@ -744,8 +744,9 @@ const HomeRow = memo(function HomeRow(props: {
             )
           ) : null}
           <HomeGlyph row={row} active={active} />
-          {/* The folder hint gives way before the name; the title holds the whole path. */}
-          <span className="min-w-0 flex-auto truncate">{row.label}</span>
+          {/* The folder hint gives way before the name; the title holds the whole path.
+              A row with a cause keeps its sentence as the row's title, so its name has its own. */}
+          <span title={cause ? row.label : undefined} className="min-w-0 flex-auto truncate">{row.label}</span>
           {row.detail ? (
             <span className={`min-w-0 truncate text-[12px] ${cause ? "col-[-2/-1] row-start-2 -mt-1 leading-4 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
           ) : null}
