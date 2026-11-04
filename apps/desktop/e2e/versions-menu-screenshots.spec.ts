@@ -363,8 +363,8 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await shootWindow(page, "merge-closed-decide-notices");
     await page.getByTestId("notice-center-toggle").click();
 
-    // The Versions page with the conflict waiting, then the tooltip on its
-    // "1 to decide". The tab closes again, so the shots after it match.
+    // The Versions page with the conflict waiting, then its "1 to decide"
+    // under the pointer. The tab closes again, so the shots after it match.
     await openMenu(page);
     await page.getByTestId("version-all").click();
     const toDecide = page
