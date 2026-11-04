@@ -1613,6 +1613,40 @@ fn a_save_from_the_head_of_a_claimed_record_comes_in() {
     assert!(open_conflicts(&b).is_empty());
 }
 
+/// A claimed record that a device here applies live edits to keeps its lineage
+/// and meets a save from its head in a conflict.
+#[test]
+fn a_save_from_the_head_meets_a_record_bound_to_live_editing() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let claim = device_c_base(&mut b, &richdoc(&planned));
+    b.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO live_device_application_bindings VALUES \
+             ('relay','ws','main',?1,?2,?3,'[]',0,'host',1,'instance','connection',1,NULL)",
+            params![RECORD, claim, RECORD_PATH],
+        )
+        .map_err(SyncError::persist)
+    })
+    .expect("bind a device");
+
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+    assert_eq!(open_conflicts(&b), vec![(sha(&planned), sha(&flown))]);
+    assert_eq!(head_text(&b, RECORD), Some(planned));
+    assert_eq!(
+        count(
+            &b,
+            "SELECT COUNT(*) FROM ydoc_inactive_lineages WHERE object_id='apollo'"
+        ),
+        0,
+        "the bound lineage stays active"
+    );
+}
+
 /// A save from the flown file B discarded still meets the choice when A never
 /// received it.
 #[test]
