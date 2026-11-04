@@ -189,9 +189,9 @@ it("requires an exact deletion review and explicit acknowledgment before transpo
 
 it("tells an agent to archive a Collection before deleting it", async () => {
   const request = {workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected:cursor,reviewToken:"c".repeat(64),acknowledge:true};
-  const send = vi.fn(async () => { throw new DohcCliError("dohc: Archive this Collection before you delete it permanently."); });
+  const send = vi.fn(async () => { throw new DohcCliError("dohc: This Collection isn't archived. Archive it before you delete it permanently."); });
   expect(await executeCli({argv:["dataset","delete",JSON.stringify(request)],request:send}))
-    .toEqual({exitCode:1,stdout:"",stderr:"dohc: Archive this Collection before you delete it permanently.\n"});
+    .toEqual({exitCode:1,stdout:"",stderr:"dohc: This Collection isn't archived. Archive it before you delete it permanently.\n"});
 });
 
 it("accepts an expected Collection identity and derives migration source from its address", () => {

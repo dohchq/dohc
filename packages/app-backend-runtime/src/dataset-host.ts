@@ -412,7 +412,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       journal.destroy({ expected, authorize: () => { owner(context,key); }, cleanup() {
           revision(key);
           if (raw.reviewToken !== reviewToken(key,expected)) throw new DatasetHostError("conflict", "Collection access changed. Review deletion again.");
-          if (!lifecycle(key).archived) throw new DatasetHostError("conflict", "Archive this Collection before you delete it permanently.");
+          if (!lifecycle(key).archived) throw new DatasetHostError("conflict", "This Collection isn't archived. Archive it before you delete it permanently.");
           if (options.deleteResources) synchronous(() => options.deleteResources!(context,key));
           automations.forget(key);
           for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])

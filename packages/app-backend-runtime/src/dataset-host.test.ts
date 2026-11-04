@@ -106,7 +106,7 @@ it("requires an archived Collection and current owner review of both data and af
   await f.invoke("owner",id(6),{value:"changed"});
   await expect(f.host.deleteDataset("owner",{...request,expected:next.cursor,reviewToken:next.reviewToken})).rejects.toThrow("The Collection changed. Try again.");
   const live = f.host.deletePreview("owner",scope);
-  await expect(f.host.deleteDataset("owner",{...request,expected:live.cursor,reviewToken:live.reviewToken})).rejects.toThrow("Archive this Collection before you delete it permanently.");
+  await expect(f.host.deleteDataset("owner",{...request,expected:live.cursor,reviewToken:live.reviewToken})).rejects.toThrow("This Collection isn't archived. Archive it before you delete it permanently.");
   expect(f.host.deletionStatus("owner",scope)).toEqual({deleted:false});
   f.host.archiveDataset("owner",scope);
   const current = f.host.deletePreview("owner",scope);

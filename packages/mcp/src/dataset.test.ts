@@ -38,7 +38,7 @@ describe("dataset MCP transport", () => {
     expect(await dataset({...context,request:async () => ({...reply,extraAuthority:true})},request)).toMatchObject({ok:false});
   });
   it("tells an agent to archive a Collection before deleting it", async () => {
-    const reason = "dohc: Archive this Collection before you delete it permanently.";
+    const reason = "dohc: This Collection isn't archived. Archive it before you delete it permanently.";
     const send = vi.fn(async () => { throw new DohcCliError(reason); }), context:ToolContext = {root:"/workspace",home:"/home",request:send};
     const expected = {workspaceId:"workspace",datasetId:"00000000-0000-4000-8000-000000000001",hostEpoch:"epoch",approvedRevisionHash:"a".repeat(64),revision:0,digest:"b".repeat(64)};
     expect(await dataset(context,{action:"delete",workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected,reviewToken:"c".repeat(64),acknowledge:true})).toEqual({ok:false,reason});
