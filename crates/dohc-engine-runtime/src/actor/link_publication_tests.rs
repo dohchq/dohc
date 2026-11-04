@@ -111,8 +111,9 @@ impl Fixture {
         // costs a query over the whole operation, so it runs at most once a second.
         let quiet = Duration::from_secs(60);
         let (mut next, mut since, mut read_at) = (0, Instant::now(), None::<Instant>);
-        let mut seen: Option<(usize, Vec<String>)> = None;
+        let mut pending: Option<Vec<String>> = None;
         let stalled = loop {
+            let landed = next;
             while next < sources
                 && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
                     .ok()
@@ -124,17 +125,20 @@ impl Fixture {
             if next == sources {
                 break false;
             }
+            if next != landed {
+                since = Instant::now();
+            }
             if read_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
                 let read = self
                     .actor
                     .history_operation_pending_jobs(self.ws.clone(), OP.into());
-                let Ok(pending) = tokio::time::timeout(quiet, read).await else {
+                let Ok(jobs) = tokio::time::timeout(quiet, read).await else {
                     break true;
                 };
-                let now = (next, pending.unwrap());
+                let jobs = jobs.unwrap();
                 read_at = Some(Instant::now());
-                if seen.as_ref() != Some(&now) {
-                    (seen, since) = (Some(now), Instant::now());
+                if pending.as_ref() != Some(&jobs) {
+                    (pending, since) = (Some(jobs), Instant::now());
                 }
             }
             if since.elapsed() >= quiet {
@@ -148,7 +152,7 @@ impl Fixture {
         };
         if stalled {
             // The actor may be the thing that stopped, so report the last list it gave.
-            let pending = seen.map_or_else(|| "never read".into(), |(_, jobs)| format!("{jobs:?}"));
+            let pending = pending.map_or_else(|| "never read".into(), |jobs| format!("{jobs:?}"));
             let turns = placements()
                 .lock()
                 .unwrap()
@@ -168,7 +172,10 @@ impl Fixture {
                 turns.len()
             );
         }
-        self.actor.run(|_, _| Ok(())).await.unwrap();
+        tokio::time::timeout(quiet, self.actor.run(|_, _| Ok(())))
+            .await
+            .expect("the actor stopped answering after publication wrote every file")
+            .unwrap();
         for i in 0..sources {
             assert_eq!(
                 std::fs::read_to_string(self.root.join(format!("source-{i:04}.md"))).unwrap(),
