@@ -1134,10 +1134,13 @@ export function MarkdownView(props: {
     if (land()) return;
     // The editor's content can grow after its first frame, as its nodes and
     // images render. The position waits for it, unless the person moves first.
-    const moves = ["scroll", "wheel", "keydown", "pointerdown"] as const;
+    // Editor controls stop their own presses from bubbling, so presses and
+    // keys are caught on their way in.
+    const moves = ["wheel", "keydown", "pointerdown"] as const;
     const stop = () => {
       observer.disconnect();
-      for (const move of moves) pane.removeEventListener(move, stop);
+      pane.removeEventListener("scroll", stop);
+      for (const move of moves) pane.removeEventListener(move, stop, true);
     };
     const observer = new ResizeObserver(() => {
       if (land()) stop();
@@ -1147,7 +1150,8 @@ export function MarkdownView(props: {
     for (const content of [...Array.from(pane.children), pane.querySelector(".ProseMirror")]) {
       if (content) observer.observe(content);
     }
-    for (const move of moves) pane.addEventListener(move, stop);
+    pane.addEventListener("scroll", stop);
+    for (const move of moves) pane.addEventListener(move, stop, true);
     return stop;
   }, [engineShown, props.documentKey]);
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<

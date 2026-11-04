@@ -273,4 +273,25 @@ describe("a live note whose editor code loads after it opens", () => {
       restoreLayout();
     }
   });
+
+  it("leaves the editor in place after a press on a control that keeps the press to itself", async () => {
+    const layout = { tall: true };
+    const { resize, restoreLayout } = await openScrolledWithShortEditor(layout);
+    try {
+      const pane = screen.getByTestId("view-markdown");
+      // A control in the note, such as a table's resize handle, stops its
+      // press from reaching the pane.
+      const control = document.createElement("div");
+      control.addEventListener("pointerdown", (event) => event.stopPropagation());
+      pane.querySelector(".ProseMirror")?.appendChild(control);
+      act(() => {
+        control.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      });
+      layout.tall = true;
+      resize();
+      expect(pane.scrollTop).toBe(0);
+    } finally {
+      restoreLayout();
+    }
+  });
 });
