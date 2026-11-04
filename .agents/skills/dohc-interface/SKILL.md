@@ -209,6 +209,16 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 - Do not disable the primary to show that a field is empty or wrong. Pressing it shows the errors and focuses the first one.
 - A disabled control says why, beside it or on its second line.
 
+### Message boxes from main
+
+Main asks some questions in the system's message box, such as before a quit loses typing.
+
+- Show it with `showMessageBox` from `window/messageBox.ts`. It titles the box `dohc` and gives it push buttons, where Windows would draw command links.
+- List the action first and the safe choice last: `Quit anyway`, `Go back`. Windows shows them in that order, and macOS reverses it.
+- When the action loses work, make the safe choice the default and Escape's answer.
+- The safe choice reads **Go back** when the box warns that typing or kept work will be lost.
+- Windows draws the box light in both themes. Leave it as the system draws it.
+
 ### Words in dialogs and explanations
 
 The Words rules apply, and these too:
