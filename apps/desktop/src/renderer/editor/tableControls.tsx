@@ -1,4 +1,4 @@
-import { stopEditorMouseEvent, ownerWindow, shadowHost } from "./pmHelpers";
+import { documentChange, stopEditorMouseEvent, ownerWindow, shadowHost } from "./pmHelpers";
 import {
   MENU_ACTIVE_OPTION,
   MENU_ENTER,
@@ -1676,120 +1676,161 @@ function widgetDecoration(
   });
 }
 
+// Calls `visit` for each table that overlaps from..to. A textblock holds only
+// inline content, so the walk never enters one.
+function tablesBetween(
+  doc: PMNode,
+  from: number,
+  to: number,
+  visit: (node: PMNode, pos: number) => void,
+): void {
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!isTableNode(node)) return !node.isTextblock;
+    visit(node, pos);
+    return false;
+  });
+}
+
 function buildTableControlDecorations(
   doc: PMNode,
   runtime: TableControlsRuntime,
   rowResizeEnabled: boolean,
 ): DecorationSet {
   const decorations: Decoration[] = [];
+  tablesBetween(doc, 0, doc.content.size, (node, pos) => {
+    pushTableControls(decorations, node, pos, runtime, rowResizeEnabled);
+  });
+  return DecorationSet.create(doc, decorations);
+}
 
-  // A textblock holds only inline content, so the walk never enters one.
-  doc.descendants((node, pos) => {
-    if (!isTableNode(node)) return !node.isTextblock;
-
-    const map = TableMap.get(node);
-    const tableStart = pos + 1;
-
-    decorations.push(
-      Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }),
+// Only the tables an edit changed get their controls again. The others keep
+// theirs, moved by the edit's mapping.
+function updateTableControlDecorations(
+  old: DecorationSet,
+  before: PMNode,
+  doc: PMNode,
+  runtime: TableControlsRuntime,
+  rowResizeEnabled: boolean,
+): DecorationSet {
+  const { range, mapping } = documentChange(before, doc);
+  let decorations = old.map(mapping, doc);
+  if (!range) return decorations;
+  const added: Decoration[] = [];
+  tablesBetween(doc, range.from, range.to, (node, pos) => {
+    const end = pos + node.nodeSize;
+    decorations = decorations.remove(
+      decorations.find(pos, end).filter((decoration) => decoration.from >= pos && decoration.to <= end),
     );
+    pushTableControls(added, node, pos, runtime, rowResizeEnabled);
+  });
+  return decorations.add(doc, added);
+}
 
-    // Column grips: one per column, anchored inside that column's row-0
-    // cell. Dedup guards against pasted-in colspan cells (the editor never
-    // creates spans itself — no merge UI — but pasted HTML tables can).
-    let lastColCellPos = -1;
-    for (let col = 0; col < map.width; col += 1) {
-      const cellPos = tableStart + map.map[col];
-      if (cellPos === lastColCellPos) continue;
-      lastColCellPos = cellPos;
-      const colIndex = col;
+function pushTableControls(
+  decorations: Decoration[],
+  node: PMNode,
+  pos: number,
+  runtime: TableControlsRuntime,
+  rowResizeEnabled: boolean,
+): void {
+  const map = TableMap.get(node);
+  const tableStart = pos + 1;
+
+  decorations.push(
+    Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }),
+  );
+
+  // Column grips: one per column, anchored inside that column's row-0
+  // cell. Dedup guards against pasted-in colspan cells (the editor never
+  // creates spans itself — no merge UI — but pasted HTML tables can).
+  let lastColCellPos = -1;
+  for (let col = 0; col < map.width; col += 1) {
+    const cellPos = tableStart + map.map[col];
+    if (cellPos === lastColCellPos) continue;
+    lastColCellPos = cellPos;
+    const colIndex = col;
+    decorations.push(
+      widgetDecoration(
+        cellPos + 1,
+        cellPos,
+        (view, anchorPos) => buildColumnGrip(runtime, view, anchorPos, colIndex),
+        `dohc-table-col-${colIndex}`,
+      ),
+    );
+  }
+
+  // Table menu affordance: anchored inside the top-left cell (the
+  // spreadsheet "select-all corner"), floated into the top-left margin.
+  const topLeftCellPos = tableStart + map.map[0];
+  decorations.push(
+    widgetDecoration(
+      topLeftCellPos + 1,
+      topLeftCellPos,
+      (view, anchorPos) => buildTableMenuButton(runtime, view, anchorPos),
+      "dohc-table-menu",
+    ),
+  );
+
+  // Append-column "+": anchored inside the top-right cell, hugging the
+  // table's right edge.
+  const topRightCellPos = tableStart + map.map[map.width - 1];
+  decorations.push(
+    widgetDecoration(
+      topRightCellPos + 1,
+      topRightCellPos,
+      (view, anchorPos) => buildAppendColumnButton(view, anchorPos),
+      "dohc-table-append-col",
+    ),
+  );
+
+  // Row grips: one per row, anchored inside that row's col-0 cell.
+  let lastRowCellPos = -1;
+  let rowPos = tableStart;
+  for (let row = 0; row < map.height; row += 1) {
+    const rowNode = node.child(row);
+    const cellPos = tableStart + map.map[row * map.width];
+    const rowIndex = row;
+    if (cellPos !== lastRowCellPos) {
+      lastRowCellPos = cellPos;
       decorations.push(
         widgetDecoration(
           cellPos + 1,
           cellPos,
-          (view, anchorPos) => buildColumnGrip(runtime, view, anchorPos, colIndex),
-          `dohc-table-col-${colIndex}`,
+          (view, anchorPos) => buildRowGrip(runtime, view, anchorPos, rowIndex),
+          `dohc-table-row-${rowIndex}`,
         ),
       );
     }
-
-    // Table menu affordance: anchored inside the top-left cell (the
-    // spreadsheet "select-all corner"), floated into the top-left margin.
-    const topLeftCellPos = tableStart + map.map[0];
-    decorations.push(
-      widgetDecoration(
-        topLeftCellPos + 1,
-        topLeftCellPos,
-        (view, anchorPos) => buildTableMenuButton(runtime, view, anchorPos),
-        "dohc-table-menu",
-      ),
-    );
-
-    // Append-column "+": anchored inside the top-right cell, hugging the
-    // table's right edge.
-    const topRightCellPos = tableStart + map.map[map.width - 1];
-    decorations.push(
-      widgetDecoration(
-        topRightCellPos + 1,
-        topRightCellPos,
-        (view, anchorPos) => buildAppendColumnButton(view, anchorPos),
-        "dohc-table-append-col",
-      ),
-    );
-
-    // Row grips: one per row, anchored inside that row's col-0 cell.
-    let lastRowCellPos = -1;
-    let rowPos = tableStart;
-    for (let row = 0; row < map.height; row += 1) {
-      const rowNode = node.child(row);
-      const cellPos = tableStart + map.map[row * map.width];
-      const rowIndex = row;
-      if (cellPos !== lastRowCellPos) {
-        lastRowCellPos = cellPos;
-        decorations.push(
-          widgetDecoration(
-            cellPos + 1,
-            cellPos,
-            (view, anchorPos) => buildRowGrip(runtime, view, anchorPos, rowIndex),
-            `dohc-table-row-${rowIndex}`,
-          ),
-        );
-      }
-      // The resize bar is anchored in the row's first physical cell rather
-      // than TableMap's first logical slot. A rowspan from the row above can
-      // own that logical slot, but each editable row still needs its own
-      // height control and row node position.
-      if (rowResizeEnabled && rowNode.childCount > 0) {
-        const resizeCellPos = rowPos + 1;
-        decorations.push(
-          widgetDecoration(
-            resizeCellPos + 1,
-            rowPos,
-            (view, anchorPos) =>
-              buildRowResizeHandle(runtime, view, anchorPos, rowIndex),
-            `dohc-table-row-resize-${rowIndex}`,
-          ),
-        );
-      }
-      rowPos += rowNode.nodeSize;
+    // The resize bar is anchored in the row's first physical cell rather
+    // than TableMap's first logical slot. A rowspan from the row above can
+    // own that logical slot, but each editable row still needs its own
+    // height control and row node position.
+    if (rowResizeEnabled && rowNode.childCount > 0) {
+      const resizeCellPos = rowPos + 1;
+      decorations.push(
+        widgetDecoration(
+          resizeCellPos + 1,
+          rowPos,
+          (view, anchorPos) =>
+            buildRowResizeHandle(runtime, view, anchorPos, rowIndex),
+          `dohc-table-row-resize-${rowIndex}`,
+        ),
+      );
     }
+    rowPos += rowNode.nodeSize;
+  }
 
-    // Append-row "+": anchored inside the bottom-left cell, hugging the
-    // table's bottom edge.
-    const bottomLeftCellPos = tableStart + map.map[(map.height - 1) * map.width];
-    decorations.push(
-      widgetDecoration(
-        bottomLeftCellPos + 1,
-        bottomLeftCellPos,
-        (view, anchorPos) => buildAppendRowButton(view, anchorPos),
-        "dohc-table-append-row",
-      ),
-    );
-
-    return false;
-  });
-
-  return DecorationSet.create(doc, decorations);
+  // Append-row "+": anchored inside the bottom-left cell, hugging the
+  // table's bottom edge.
+  const bottomLeftCellPos = tableStart + map.map[(map.height - 1) * map.width];
+  decorations.push(
+    widgetDecoration(
+      bottomLeftCellPos + 1,
+      bottomLeftCellPos,
+      (view, anchorPos) => buildAppendRowButton(view, anchorPos),
+      "dohc-table-append-row",
+    ),
+  );
 }
 
 type AppendStripLayout = {
@@ -1853,6 +1894,18 @@ function sizeAllAppendStrips(view: EditorView): void {
       table.querySelector(".dohc-table-append"),
     ),
   );
+}
+
+// An edit can change the box of only the tables it touched.
+function sizeChangedAppendStrips(view: EditorView, from: number, to: number): void {
+  const tables: HTMLElement[] = [];
+  tablesBetween(view.state.doc, from, to, (_node, pos) => {
+    const dom = view.nodeDOM(pos);
+    if (!(dom instanceof HTMLElement)) return;
+    const table = dom.matches("table") ? dom : dom.querySelector<HTMLElement>("table");
+    if (table?.querySelector(".dohc-table-append")) tables.push(table);
+  });
+  sizeAppendStrips(tables);
 }
 
 type HoveredTable = { table: HTMLElement; col: number; row: number };
@@ -1980,8 +2033,8 @@ export function makeTableControlsPlugin(
         );
       },
       apply(tr, old) {
-        if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
-        return buildTableControlDecorations(tr.doc, runtime, rowResizeEnabled);
+        if (!tr.docChanged) return old;
+        return updateTableControlDecorations(old, tr.before, tr.doc, runtime, rowResizeEnabled);
       },
     },
     props: {
@@ -2018,7 +2071,8 @@ export function makeTableControlsPlugin(
         // detached overlay element, not a decoration, so it isn't rebuilt with
         // the grips; tear it down on any doc change instead.
         update(view, prevState) {
-          const docChanged = !view.state.doc.eq(prevState.doc);
+          const { range } = documentChange(prevState.doc, view.state.doc);
+          const docChanged = range !== null;
           const resize = columnResizingPluginKey.getState(view.state);
           if (
             docChanged && resize?.activeHandle === -1 &&
@@ -2032,10 +2086,10 @@ export function makeTableControlsPlugin(
             runtime.closeMenu = null;
           }
           // A change inside a table rebuilds its grips (dropping `is-active`)
-          // and can change its box (added/removed rows): re-stretch every
-          // strip and restore the hovered handles without waiting for the
+          // and can change its box (added/removed rows): re-stretch its
+          // strips and restore the hovered handles without waiting for the
           // next mousemove.
-          if (docChanged) sizeAllAppendStrips(view);
+          if (range) sizeChangedAppendStrips(view, range.from, range.to);
           if (hovered) {
             if (!hovered.table.isConnected) {
               hovered = null;
