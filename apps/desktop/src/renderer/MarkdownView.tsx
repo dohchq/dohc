@@ -1117,6 +1117,28 @@ export function MarkdownView(props: {
   // The engine branch's scroller. It holds the top-matter (title, properties)
   // above the editor, which is where a frontmatter search hit actually lives.
   const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
+  // Where the person is in the read view, as of its last scroll. The editor
+  // that replaces it opens at the same place.
+  const readScroll = useRef<{ key: string | undefined; top: number } | null>(null);
+  const engineShown = displayDoc !== null;
+  useLayoutEffect(() => {
+    const handover = readScroll.current;
+    readScroll.current = null;
+    const pane = engineDocPaneRef.current;
+    if (!engineShown || !pane || !handover || handover.key !== props.documentKey) return;
+    const land = () => {
+      if (pane.scrollHeight - pane.clientHeight < handover.top) return false;
+      pane.scrollTop = handover.top;
+      return true;
+    };
+    if (land()) return;
+    // The editor's content can arrive after its first frame.
+    const observer = new MutationObserver(() => {
+      if (land()) observer.disconnect();
+    });
+    observer.observe(pane, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [engineShown, props.documentKey]);
   const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
     number | null
   >(null);
@@ -2478,6 +2500,9 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          onScroll={(event) => {
+            readScroll.current = { key: props.documentKey, top: event.currentTarget.scrollTop };
+          }}
         >
           <div className="group/topmatter">
             {/* Title, icon and properties autosave through the same disk write

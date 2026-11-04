@@ -79,6 +79,22 @@ function heldOpenBridge() {
   return { bridge, bind: () => act(() => bind()) };
 }
 
+// The note's pane is tall once it shows the note's text, as the read view or
+// as the editor, and empty until then.
+function stubPaneLayout() {
+  const pane = (element: Element) => element.matches("[data-testid='view-markdown']");
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return pane(this) && this.textContent?.includes("Base paragraph.") ? 2_000 : 0;
+  });
+  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return pane(this) ? 200 : 0;
+  });
+  return () => {
+    scrollHeight.mockRestore();
+    clientHeight.mockRestore();
+  };
+}
+
 afterEach(async () => {
   cleanup();
   await settleAfterUnmount();
@@ -88,28 +104,37 @@ afterEach(async () => {
 });
 
 describe("a live note whose editor code loads after it opens", () => {
-  it("keeps its read-only text until the editor replaces it, with no loading rows between", async () => {
+  it("keeps its read-only text and its place until the editor replaces it, with no loading rows between", async () => {
     stubEditorGlobals();
     const { bridge, bind } = heldOpenBridge();
     vi.stubGlobal("dohcDesktop", bridge);
 
     // Every frame from the read view to the editor: the note's text, and
     // never the loading rows.
-    const frames: Array<{ text: boolean; rows: boolean }> = [];
+    const frames: Array<{ text: boolean; rows: boolean; editor: boolean; top: number }> = [];
     const observer = new MutationObserver(() => {
       const pane = document.querySelector("[data-testid='view-markdown']");
       frames.push({
         text: !!pane?.textContent?.includes("Base paragraph."),
         rows: !!document.body.textContent?.includes("Loading editor..."),
+        editor: !!pane?.querySelector("[data-testid='markdown-editor']"),
+        top: pane?.scrollTop ?? 0,
       });
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    const restoreLayout = stubPaneLayout();
     try {
       render(<FileInspector workspaceId="ws-1" path="a.md" />);
       await waitFor(() =>
         expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
       );
       await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
+      // The person reads partway down while the note opens.
+      act(() => {
+        const pane = screen.getByTestId("view-markdown");
+        pane.scrollTop = 600;
+        pane.dispatchEvent(new Event("scroll"));
+      });
 
       bind();
       await act(async () => {});
@@ -130,10 +155,13 @@ describe("a live note whose editor code loads after it opens", () => {
       );
     } finally {
       observer.disconnect();
+      restoreLayout();
     }
 
     const shown = frames.findIndex((frame) => frame.text);
     expect(shown).toBeGreaterThanOrEqual(0);
     expect(frames.slice(shown).filter((frame) => frame.rows || !frame.text)).toEqual([]);
+    // The editor's first frame opens where the person was reading.
+    expect(frames.find((frame) => frame.editor)?.top).toBe(600);
   });
 });
