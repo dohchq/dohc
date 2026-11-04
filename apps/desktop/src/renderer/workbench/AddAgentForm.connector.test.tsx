@@ -152,6 +152,21 @@ it.each([
   }) } }), f.props.settings));
 });
 
+it("saves a command that starts another program as typed, even when it has the tool's name", async () => {
+  const f = fixture();
+  render(<AddAgentForm {...f.props} />);
+  await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
+  await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
+  await userEvent.click(screen.getByText("Advanced"));
+  fireEvent.change(screen.getByLabelText("Runner command"), { target: { value: "C:\\work\\codex.cmd --model o3" } });
+  expect(screen.getByRole("button", { name: "Codex" }).getAttribute("aria-pressed")).toBe("false");
+  expect(screen.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
+  await userEvent.click(screen.getByTestId("chats-add-agent-submit"));
+  await waitFor(() => expect(f.props.onSave).toHaveBeenCalledWith(expect.objectContaining({ agents: { default: expect.objectContaining({
+    launch: { command: "C:\\work\\codex.cmd --model o3" },
+  }) } }), f.props.settings));
+});
+
 it("ignores detection and checks that finish after a workspace switch", async () => {
   const pending = deferred<AgentToolsResult>();
   const f = fixture(vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue({ workingDirectory: "/workspace-b", tools: [] }));

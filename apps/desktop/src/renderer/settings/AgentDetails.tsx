@@ -95,7 +95,7 @@ export function AgentDetails(props: {
   const command = agent.launch && (!profile || (profile.arguments?.length ?? 0) > 0) ? launchCommand(agent.launch) : null;
   const id = `agent-details-${agent.id}`;
   const saveCommand = (value: string) => {
-    const next = launchFromCommand(value);
+    const next = launchFromCommand(value, profile);
     if (next && value.trim() !== (agent.launch ? launchCommand(agent.launch) : "")) {
       onChange((current) => ({ ...current, launch: next }));
     }
@@ -141,7 +141,7 @@ export function AgentDetails(props: {
         <Term label="Command">
           {editing === "command" ? (
             <InlineField label={`Command that starts ${agent.name}`} initial={agent.launch ? launchCommand(agent.launch) : ""} className="w-full font-mono"
-              hint={(draft) => launchCommandHint(launchFromCommand(draft))}
+              hint={(draft) => launchCommandHint(launchFromCommand(draft, profile))}
               onDone={() => setEditing(null)} onCommit={saveCommand} />
           ) : command !== null ? <>
             <code className="min-w-0 truncate font-mono" title={command}>{command}</code>
