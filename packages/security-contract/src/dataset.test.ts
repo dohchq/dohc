@@ -152,6 +152,19 @@ describe("dataset publication binding", () => {
     expect(displayAppDatasetCapability(narrowed, approved).operations[0]!.display).toEqual({ kind: "create", label: "Submit", fields: [] });
   });
 
+  it("leaves the words out when they would pass the capability's byte bound", () => {
+    const approved = revision();
+    const table = approved.definition.tables[0]!;
+    // 128 fields with 128-byte names, each read by 20 operations, is about 330 KB of words.
+    table.fields = Array.from({ length: 128 }, (_, n): DatasetField => ({ fieldId: id(100 + n), name: `${String(n).padStart(3, "0")}${"x".repeat(125)}`, sqlColumn: `c${n}`, type: "text", required: false, unique: false }));
+    approved.definition.operations = Array.from({ length: 20 }, (_, n) => ({ operationId: id(300 + n), name: `read${n}`, label: `Read ${n}`, tableId: table.tableId,
+      kind: "read" as const, access: "helper" as const, readOnly: true, fieldIds: table.fields.map(field => field.fieldId) }));
+    const capability = parseAppDatasetCapability({ ...binding(approved), name: approved.definition.name,
+      operations: approved.definition.operations.map(({ operationId, name, access, readOnly }) => ({ operationId, name, access, readOnly })) });
+    expect(displayAppDatasetCapability(capability, approved)).toEqual(capability);
+    expect(displayAppDatasetCapability(capability, approved).operations.some(operation => operation.display)).toBe(false);
+  });
+
   it.each(["source", "schemaSql", "operations", "dataPath"])("refuses %s supplied by a consumer binding", key => {
     expect(() => parseDatasetBindingReference({ ...binding(), [key]: "replacement" })).toThrow();
   });
