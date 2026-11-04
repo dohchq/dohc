@@ -74,7 +74,7 @@ async function startRun(temp: TempWorkspace, pids: string): Promise<{ desktop: L
 }
 
 for (const launch of ["npm shim", "direct"] as const) {
-  test(`killing dohc outright ends a ${launch} agent's whole run`, async () => {
+  test(`killing dohc outright ends the whole run (${launch})`, async () => {
     const temp = await createTempWorkspace();
     let desktop: LaunchedDesktopApp | null = null;
     let tree: number[] = [];
