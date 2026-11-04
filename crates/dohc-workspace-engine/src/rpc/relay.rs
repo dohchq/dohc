@@ -3348,25 +3348,24 @@ mod tests {
                     .expect("query");
                 rows.extend(found.map(|row| row.expect("row")));
             }
-            // The fixture sets SOURCE and TARGET. Any other record id is new
-            // in each workspace, so the rows name it by its file.
+            // The engine mints the record id of the pulled tasks/moved.md, so
+            // it differs in each workspace. The rows name that one id by its
+            // file. Every other id stays as written.
             let mut statement = conn
                 .prepare(
-                    "SELECT record_id, file_path FROM collection_records \
-                     WHERE workspace_id = ?1",
+                    "SELECT record_id FROM collection_records \
+                     WHERE workspace_id = ?1 AND file_path = 'tasks/moved.md'",
                 )
                 .expect("prepare");
-            let minted: Vec<(String, String)> = statement
-                .query_map([self.workspace_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
+            let minted: Vec<String> = statement
+                .query_map([self.workspace_id], |row| row.get::<_, String>(0))
                 .expect("query")
                 .map(|row| row.expect("row"))
-                .filter(|(id, _)| id != SOURCE && id != TARGET)
+                .filter(|id| id != SOURCE && id != TARGET)
                 .collect();
             for row in &mut rows {
-                for (id, path) in &minted {
-                    *row = row.replace(id.as_str(), &format!("minted {path}"));
+                for id in &minted {
+                    *row = row.replace(id.as_str(), "minted tasks/moved.md");
                 }
             }
             rows.sort();
