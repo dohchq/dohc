@@ -148,7 +148,7 @@ describe("chat runner process", () => {
       expect(args).toContain("mcp_servers.dohc.default_tools_approval_mode='approve'");
       expect(args.some((arg) => arg.startsWith("mcp_servers.dohc.tools."))).toBe(false);
       const permissions = args.filter((arg) => arg.startsWith("permissions.") || arg.startsWith("default_permissions="));
-      if (readOnly) expect(permissions).toEqual(["default_permissions=':read-only'"]);
+      if (readOnly) expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{filesystem=\{':workspace_roots'='read'\}\}$/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
       else expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{extends=':workspace',/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
       expect(args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : [])).toEqual(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...REPLY_ONLY_DISABLED_FEATURES] : []);
       expect(args.includes("web_search='disabled'")).toBe(readOnly);
@@ -348,6 +348,23 @@ describe("chat runner process", () => {
     await expect(spawn("dohc-missing-runner --print")).rejects.toThrow(reason);
     expect(calls).toEqual([]);
     expect(readFileSync(join(root, "logs", "run.log"), "utf8")).toBe(`${reason}\n`);
+  });
+
+  it.each(["all", "reply"] as const)("refuses a Windows Codex run with %s dohc tools only when it is reply-only and the requirements rule out its sandbox", async (dohcTools) => {
+    const requirements = join(await createTestScratch("dohc-codex-requirements-"), "requirements.toml");
+    writeFileSync(requirements, "[windows]
+require_mxc = true
+");
+    const { calls, checks, spawn } = await runnerFixture("win32", false, "x64", { codexConfigFiles: () => ({ requirements: [requirements], config: [] }) });
+    const started = spawn("", undefined, { tool: "codex", executable: process.execPath }, dohcTools);
+    if (dohcTools === "all") {
+      await started;
+      expect(calls).toHaveLength(1);
+    } else {
+      await expect(started).rejects.toThrow("Your organization's Codex settings don't allow automations to start this agent.");
+      expect(calls).toEqual([]);
+      expect(checks).toEqual([]);
+    }
   });
 
   it("says a relative runner path that doesn't exist doesn't exist", async () => {

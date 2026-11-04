@@ -97,18 +97,19 @@ function tomlStrings(value) {
 // run's permissions profile and folder trust follow the server's entries, and
 // on Windows so does the unelevated sandbox when no config chose one
 // (codexRunConfig.ts). The profile is named for the run and keeps .dohc
-// read-only; a read-only run uses Codex's built-in read-only profile. Every
-// name Codex looks the workspace up by is untrusted.
+// read-only; a read-only run's profile only reads the workspace, and on
+// Windows always gets the unelevated sandbox without MXC. Every name Codex
+// looks the workspace up by is untrusted.
 function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
   const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
-  const readOnly = config.get("default_permissions") === "':read-only'";
+  const readOnly = config.get(`permissions.${profile}`) === "{filesystem={':workspace_roots'='read'}}";
   const disabled = args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : []);
   const replyOnly = tomlStrings(config.get("mcp_servers.dohc.args") ?? "").includes("--tool");
   const owners = [...config.keys()].filter((key) => /^mcp_servers\.[\w-]+\.enabled$/u.test(key));
   const tail = readOnly ? ["--ignore-rules", ...CODEX_TAIL] : CODEX_TAIL;
-  const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", ...(readOnly ? [] : [`permissions.${profile}`]), "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled"] : []), "projects", ...sandbox];
+  const sandbox = process.platform === "win32" && (readOnly || config.has("windows.sandbox")) ? ["windows.sandbox", ...(readOnly ? ["windows.allow_mxc"] : [])] : [];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled"] : []), "projects", ...sandbox];
   if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
     owners.some((key) => key === "mcp_servers.dohc.enabled" || config.get(key) !== "false") ||
     (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]" || config.get("agents.enabled") !== "false"))) {
@@ -121,11 +122,12 @@ function codexReplyServer(args) {
   const rootKey = process.platform === "win32" ? root.replace(/[A-Z]/gu, (letter) => letter.toLowerCase()) : root;
   if (args.length !== 1 + 2 * keys.length + 2 * disabled.length + tail.length ||
     !command || cwd !== dirname(command) ||
-    (!readOnly && (!/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(config.get(`permissions.${profile}`) ?? "") ||
-      config.get("default_permissions") !== `'${profile}'`)) ||
+    (!readOnly && !/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(config.get(`permissions.${profile}`) ?? "")) ||
+    config.get("default_permissions") !== `'${profile}'` ||
     config.get("projects") !== `{${trust.map(([entry]) => entry).join(",")}}` ||
     !tomlStrings(trust.map(([, key]) => key).join(",")).includes(rootKey) ||
     (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
+    (sandbox.length > 1 && config.get("windows.allow_mxc") !== "false") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
     JSON.stringify(args.slice(-tail.length)) !== JSON.stringify(tail) ||
