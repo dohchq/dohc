@@ -1243,7 +1243,7 @@ test("a service the supervisor could not record exits before the next one starts
   const abort = new AbortController();
   let reads = 0;
   const table = () => { if (reads++ === 0) throw new Error("ps timed out"); return processTable(); };
-  const supervising = supervise(root, { stopLast: async () => [], table, signal: abort.signal });
+  const supervising = supervise(root, { stopLast: async () => [], table, retryMs: 300, signal: abort.signal });
   t.after(async () => { abort.abort(); await supervising; for (const pid of logged(root, "spawned")) try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ } rmSync(root, { recursive: true, force: true }); });
   const [second] = await waitFor(() => logged(root, "services").length ? logged(root, "services") : null, "the next service starts");
   const [first, next] = logged(root, "spawned");
