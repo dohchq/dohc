@@ -1,5 +1,5 @@
 import { Check, FolderOpen } from "lucide-react";
-import type { ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 
 // One step in a short gated sequence (join a synced workspace, open a
 // share). A numbered marker, a title, and a body rendered only while the
@@ -11,8 +11,15 @@ export function Step(props: {
   state: "done" | "current" | "pending";
   summary?: string;
   last?: boolean;
+  // The id of the step's one field, so the title is that field's label.
+  labelFor?: string;
   children?: ReactNode;
 }) {
+  // A pending or done step shows no field, so only the current one labels.
+  const labelFor = props.state === "current" ? props.labelFor : undefined;
+  const titleClass = `text-[13px] leading-5 ${
+    props.state === "pending" ? "font-medium text-subtle" : "font-semibold text-ink"
+  }`;
   const marker =
     props.state === "done"
       ? "border-success bg-panel text-success"
@@ -31,13 +38,13 @@ export function Step(props: {
         {props.state === "done" ? <Check size={12} strokeWidth={2.4} /> : props.number}
       </span>
       <div className="flex min-w-0 flex-col gap-2 pt-0.5">
-        <span
-          className={`text-[13px] leading-5 ${
-            props.state === "pending" ? "font-medium text-subtle" : "font-semibold text-ink"
-          }`}
-        >
-          {props.title}
-        </span>
+        {labelFor ? (
+          <label htmlFor={labelFor} className={`w-fit ${titleClass}`}>
+            {props.title}
+          </label>
+        ) : (
+          <span className={titleClass}>{props.title}</span>
+        )}
         {props.state === "done" && props.summary ? (
           <span className="truncate font-mono text-[12px] text-muted">{props.summary}</span>
         ) : null}
@@ -50,19 +57,26 @@ export function Step(props: {
 // The folder picker chip shared by every step that needs an empty folder:
 // icon, the chosen path in the OS's own spelling, and a Browse or Change
 // affordance so it reads as a control at rest.
-export function FolderChip(props: {
+export const FolderChip = forwardRef<HTMLButtonElement, {
   folder: string | null;
   placeholder: string;
   testId?: string;
+  // The id of the FieldError under the chip while it shows one. A button
+  // takes no aria-invalid, so the error reaches it as its description.
+  errorId?: string;
   onClick: () => void;
-}) {
+}>(function FolderChip(props, ref) {
   return (
     <button
+      ref={ref}
       type="button"
       data-testid={props.testId}
       aria-label={props.folder ? "Change folder" : "Choose folder"}
+      aria-describedby={props.errorId}
       onClick={props.onClick}
-      className="group flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 text-left transition-colors hover:border-ink"
+      className={`group flex h-9 w-full items-center gap-2.5 rounded-md border bg-bg px-3 text-left transition-colors ${
+        props.errorId ? "border-danger" : "border-line hover:border-ink"
+      }`}
     >
       <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
       <code
@@ -77,4 +91,4 @@ export function FolderChip(props: {
       </span>
     </button>
   );
-}
+});

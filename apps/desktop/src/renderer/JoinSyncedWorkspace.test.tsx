@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
@@ -38,6 +38,15 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
 });
+
+function expectFieldError(field: HTMLElement, id: string, message: string) {
+  const alert = document.getElementById(id);
+  expect(alert?.getAttribute("role")).toBe("alert");
+  expect(alert?.textContent).toBe(message);
+  // A button takes no aria-invalid; the folder chip carries only the description.
+  if (field.tagName !== "BUTTON") expect(field.getAttribute("aria-invalid")).toBe("true");
+  expect(field.getAttribute("aria-describedby")).toBe(id);
+}
 
 async function fillJoinForm(user: ReturnType<typeof userEvent.setup>) {
   await user.type(
@@ -84,20 +93,22 @@ describe("JoinSyncedWorkspace", () => {
     await fillJoinForm(user);
 
     await user.click(screen.getByTestId("join-workspace-start"));
-    const passphrase = await screen.findByTestId("join-sync-passphrase");
-    expect(screen.getByTestId("join-error").textContent).toContain(
-      "Enter the protected-file passphrase",
-    );
-    expect((screen.getByTestId("join-workspace-start") as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    const passphrase = await screen.findByLabelText("Protected-file passphrase");
+    expect(passphrase).toBe(screen.getByTestId("join-sync-passphrase"));
+    await waitFor(() => expect(document.activeElement).toBe(passphrase));
+    expectFieldError(passphrase, "join-sync-passphrase-error", "Enter the protected-file passphrase.");
+    expect(screen.queryByTestId("join-error")).toBeNull();
+    expect(screen.getByTestId("join-used-folder").textContent).toBe("Files remain in /home/sam/dohc/notes.");
+    expect(screen.getByTestId("join-choose-folder").textContent).toContain("Choose another empty folder");
 
     await user.type(passphrase, "shared protected-files passphrase");
-    expect(screen.getByTestId("join-error").textContent).toContain("Files remain in /home/sam/dohc/notes.");
-    expect(screen.getByTestId("join-error").textContent).toContain("Choose another empty folder");
-    expect((screen.getByTestId("join-workspace-start") as HTMLButtonElement).disabled).toBe(true);
+    expect(passphrase.getAttribute("aria-invalid")).toBeNull();
+    // The first folder holds the earlier attempt's files: Join asks for another.
     await user.type(passphrase, "{Enter}");
     expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledTimes(1);
+    const chip = screen.getByTestId("join-choose-folder");
+    expectFieldError(chip, "join-choose-folder-error", "Choose an empty folder.");
+    expect(document.activeElement).toBe(chip);
     bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/retry");
     await user.click(screen.getByTestId("join-choose-folder"));
     await user.click(screen.getByTestId("join-workspace-start"));
@@ -143,17 +154,98 @@ describe("JoinSyncedWorkspace", () => {
     );
   });
 
-  it("stays disabled until both a code and a folder exist", async () => {
+  it("labels the code field with its step title", async () => {
+    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
+    expect(await screen.findByLabelText("Enter the code from your other machine")).toBe(
+      screen.getByTestId("join-sync-code"),
+    );
+  });
+
+  it("keeps Join on and shows what each empty field needs, focusing the first", async () => {
     const user = userEvent.setup();
     render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    const button = (await screen.findByTestId(
-      "join-workspace-start",
-    )) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
-    await user.type(screen.getByTestId("join-sync-code"), "dohc-sync:x:http://r.test");
-    expect(button.disabled).toBe(true);
+    const button = (await screen.findByTestId("join-workspace-start")) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+
+    await user.click(button);
+    const code = screen.getByTestId("join-sync-code");
+    expectFieldError(code, "join-sync-code-error", "Enter a workspace code.");
+    expectFieldError(screen.getByTestId("join-choose-folder"), "join-choose-folder-error", "Choose an empty folder.");
+    expect(document.activeElement).toBe(code);
+    expect(bridgeMock.cloudJoinWorkspace).not.toHaveBeenCalled();
+
+    // Typing clears the code's error; picking a folder clears the folder's.
+    await user.type(code, "dohc-sync:x:http://r.test");
+    expect(screen.queryByText("Enter a workspace code.")).toBeNull();
     await user.click(screen.getByTestId("join-choose-folder"));
-    await waitFor(() => expect(button.disabled).toBe(false));
+    await waitFor(() => expect(screen.queryByText("Choose an empty folder.")).toBeNull());
+    await user.click(button);
+    await waitFor(() => expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledTimes(1));
+  });
+
+  it("checks the code when focus leaves it, not on each key", async () => {
+    const user = userEvent.setup();
+    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
+    const code = await screen.findByTestId("join-sync-code");
+    await user.click(code);
+    await user.type(code, "x{Backspace}");
+    expect(screen.queryByText("Enter a workspace code.")).toBeNull();
+    await user.tab();
+    expectFieldError(code, "join-sync-code-error", "Enter a workspace code.");
+  });
+
+  it("says Joining… while the join runs", async () => {
+    const user = userEvent.setup();
+    bridgeMock.cloudJoinWorkspace.mockImplementationOnce(() => new Promise(() => {}));
+    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
+    await fillJoinForm(user);
+    const button = screen.getByTestId("join-workspace-start") as HTMLButtonElement;
+    await user.click(button);
+    await waitFor(() => expect(button.textContent).toBe("Joining…"));
+    expect(button.disabled).toBe(true);
+  });
+
+  it("keeps a failed connection check apart from signed out, with Try again", async () => {
+    const user = userEvent.setup();
+    const onConnectionError = vi.fn();
+    bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine down"));
+    render(
+      <JoinSyncedWorkspace
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        onConnectionError={onConnectionError}
+      />,
+    );
+    const failed = await screen.findByTestId("join-check-failed");
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    expect(onConnectionError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "dohc could not check your server connection.",
+        serverUrl: null,
+      }),
+    );
+
+    await user.click(within(failed).getByRole("button", { name: "Try again" }));
+    await screen.findByTestId("join-sync-code");
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets the notice's Try again run the check while the panel is open", async () => {
+    const onConnectionError = vi.fn();
+    bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine down"));
+    render(
+      <JoinSyncedWorkspace
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        onConnectionError={onConnectionError}
+      />,
+    );
+    await screen.findByTestId("join-check-failed");
+    const report = onConnectionError.mock.calls[0]?.[0] as { retry: () => boolean };
+    act(() => {
+      expect(report.retry()).toBe(true);
+    });
+    await screen.findByTestId("join-sync-code");
   });
 
   it("shows the handler's product-voiced error without the Electron wrapper", async () => {
