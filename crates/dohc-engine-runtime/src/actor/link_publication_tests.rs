@@ -106,17 +106,12 @@ fn pause(ws: &str) -> (Arc<tokio::sync::Notify>, Sender<()>) {
 impl Fixture {
     async fn wait_disk(&self, sources: usize) {
         // A busy machine slows publication down without stopping it, so only a
-        // minute with no new file and no new placement counts as a stall. A turn
-        // that finds nothing to place is not progress.
+        // minute in which no file lands and no pending job finishes counts as a
+        // stall. A retried attempt changes neither. Reading the pending jobs
+        // costs a query over the whole operation, so it runs at most once a second.
         let quiet = Duration::from_secs(60);
-        let placed = || {
-            placements()
-                .lock()
-                .unwrap()
-                .get(&self.ws)
-                .map_or(0, |p| p.turns.iter().map(|(n, _)| n).sum::<usize>())
-        };
-        let (mut next, mut progress, mut since) = (0, placed(), Instant::now());
+        let (mut next, mut since, mut read_at) = (0, Instant::now(), None::<Instant>);
+        let mut seen: Option<(usize, Vec<String>)> = None;
         let stalled = loop {
             while next < sources
                 && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
@@ -129,9 +124,20 @@ impl Fixture {
             if next == sources {
                 break false;
             }
-            if next + placed() != progress {
-                (progress, since) = (next + placed(), Instant::now());
-            } else if since.elapsed() >= quiet {
+            if read_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+                let read = self
+                    .actor
+                    .history_operation_pending_jobs(self.ws.clone(), OP.into());
+                let Ok(pending) = tokio::time::timeout(quiet, read).await else {
+                    break true;
+                };
+                let now = (next, pending.unwrap());
+                read_at = Some(Instant::now());
+                if seen.as_ref() != Some(&now) {
+                    (seen, since) = (Some(now), Instant::now());
+                }
+            }
+            if since.elapsed() >= quiet {
                 break true;
             }
             match tokio::time::timeout(quiet, self.actor.run(|_, _| Ok(()))).await {
@@ -141,11 +147,8 @@ impl Fixture {
             tokio::task::yield_now().await;
         };
         if stalled {
-            let pending = self
-                .actor
-                .history_operation_pending_jobs(self.ws.clone(), OP.into())
-                .await
-                .unwrap();
+            // The actor may be the thing that stopped, so report the last list it gave.
+            let pending = seen.map_or_else(|| "never read".into(), |(_, jobs)| format!("{jobs:?}"));
             let turns = placements()
                 .lock()
                 .unwrap()
@@ -161,7 +164,7 @@ impl Fixture {
                 })
                 .collect();
             panic!(
-                "automatic publication stalled: pending={pending:?}, remaining={remaining:?}, turns={}",
+                "automatic publication stalled: pending={pending}, remaining={remaining:?}, turns={}",
                 turns.len()
             );
         }
