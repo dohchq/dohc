@@ -1142,7 +1142,11 @@ export function MarkdownView(props: {
     const observer = new ResizeObserver(() => {
       if (land()) stop();
     });
-    for (const child of Array.from(pane.children)) observer.observe(child);
+    // The editor's wrapper fills the pane, so its document, which grows with
+    // the note, is watched as well.
+    for (const content of [...Array.from(pane.children), pane.querySelector(".ProseMirror")]) {
+      if (content) observer.observe(content);
+    }
     for (const move of moves) pane.addEventListener(move, stop);
     return stop;
   }, [engineShown, props.documentKey]);
