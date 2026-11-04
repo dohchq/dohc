@@ -496,6 +496,7 @@ pub struct StdBackoff;
 
 impl ReplaceBackoff for StdBackoff {
     fn wait_before_retry(&self, failed_attempt: u32) {
+        let _measure = dohc_engine_storage::capture_phase::Measure::new("save_retry_sleep");
         std::thread::sleep(backoff_delay(failed_attempt));
     }
 }
@@ -668,6 +669,7 @@ fn probe_projection_target_in(
     rel: &str,
     kind: ProjectionTargetKind,
 ) -> ProjectionTargetState {
+    let _measure = dohc_engine_storage::capture_phase::Measure::new("save_read_probe");
     let target = match resolve_target(canonical_root, rel) {
         Ok(target) => target,
         Err(_) => return ProjectionTargetState::UntrackedContent,
@@ -2492,6 +2494,7 @@ impl TargetReads {
         {
             return Ok(hash.clone());
         }
+        let _measure = dohc_engine_storage::capture_phase::Measure::new("save_read_target");
         let hash = match read_current_no_follow(target)? {
             CurrentTarget::Absent => TargetHash::Absent,
             CurrentTarget::Present(bytes) => TargetHash::Sha(hex_sha256(&bytes)),
@@ -2919,6 +2922,7 @@ fn inspect_displaced(
     expected: &str,
     content: Option<&str>,
 ) -> Result<Inspected, MaterializeError> {
+    let _measure = dohc_engine_storage::capture_phase::Measure::new("save_read_displaced");
     let file = match open_displaced(path) {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Inspected::Missing),
@@ -5761,6 +5765,7 @@ fn flush_temp_file(
     tmp: &Path,
     policy: DurabilityPolicy,
 ) -> Result<(), MaterializeError> {
+    let _measure = dohc_engine_storage::capture_phase::Measure::new("save_flush");
     if policy.fsync_file {
         store
             .flush_before_commits(file)

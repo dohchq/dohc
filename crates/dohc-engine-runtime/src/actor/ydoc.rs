@@ -2901,6 +2901,8 @@ pub(super) fn ydoc_settle_on_store(
     use_reader: bool,
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
+    // #1953: one line per settle with the save-path totals below.
+    let _phase = dohc_engine_storage::capture_phase::Phase::new("settle", None, 1, true);
     let result = ydoc_settle_attempt_on_store(
         store,
         doc_cache,
@@ -3788,6 +3790,7 @@ fn ydoc_settle_attempt_on_store(
         &write.snapshot.path,
         &write.snapshot.blob_sha256,
     );
+    let save_measure = dohc_engine_storage::capture_phase::Measure::new("save_materialize");
     let job_outcome = materialize_one(
         store,
         root_dir,
@@ -3801,6 +3804,7 @@ fn ydoc_settle_attempt_on_store(
             faults,
         },
     );
+    drop(save_measure);
     let job_outcome = match job_outcome {
         Ok(outcome) => outcome,
         Err(error) => {
