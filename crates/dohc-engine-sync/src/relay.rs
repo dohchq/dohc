@@ -819,6 +819,7 @@ pub struct PreparedOrdinaryPull {
 
 // Keep validated decisions instead of full envelopes, including for wide base groups.
 // The encoded buffer bounds all repair answers retained between fetch and apply.
+// One answer holds a signature, four ids of at most 512 bytes and three integers: under 5 KB.
 const MAX_PREPARED_BASE_REPAIR_BYTES: usize = 64 * 1024;
 
 #[cfg(test)]
