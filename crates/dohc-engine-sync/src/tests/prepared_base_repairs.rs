@@ -139,25 +139,26 @@ fn earliest_base_survives_later_copies(pending_dependencies: bool) {
         .put_binary_blob(&competing.encode_full_state())
         .unwrap();
     assert_ne!(local_claim, competing_claim);
-    let base = |origin: &str, claim: &str, relay_seq: i64, recorded_at_ms: i64| ReplicationEnvelope {
-        workspace_id: "ws".into(),
-        origin_id: origin.into(),
-        origin_seq: 0,
-        op_kind: "ydoc.update".into(),
-        payload: json!({
-            "versionId": "main",
-            "objectId": key.object_id,
-            "path": path,
-            "contentKind": "plaintext",
-            "lineageClaimId": claim,
-            "updateBlobSha256": claim,
-            "isBaseState": true
-        }),
-        recorded_at_ms,
-        relay_seq: Some(relay_seq),
-        settlement_admission: None,
-        admitted_author_snapshot: None,
-    };
+    let base =
+        |origin: &str, claim: &str, relay_seq: i64, recorded_at_ms: i64| ReplicationEnvelope {
+            workspace_id: "ws".into(),
+            origin_id: origin.into(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".into(),
+            payload: json!({
+                "versionId": "main",
+                "objectId": key.object_id,
+                "path": path,
+                "contentKind": "plaintext",
+                "lineageClaimId": claim,
+                "updateBlobSha256": claim,
+                "isBaseState": true
+            }),
+            recorded_at_ms,
+            relay_seq: Some(relay_seq),
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+        };
     let original = base("original-base", &local_claim, 5, 1_000);
     let duplicate = base("duplicate-base", &local_claim, 1_002, 1_200);
     let competing = base("competing-base", &competing_claim, 1_001, 1_300);
@@ -278,10 +279,7 @@ fn earliest_base_survives_later_copies(pending_dependencies: bool) {
         SyncPassOutcome::Complete {
             fetched: 2,
             refused: 0,
-            pending_cursor: Some(RelayCursor {
-                cursor: 1_002,
-                ..
-            }),
+            pending_cursor: Some(RelayCursor { cursor: 1_002, .. }),
             ..
         }
     ));
