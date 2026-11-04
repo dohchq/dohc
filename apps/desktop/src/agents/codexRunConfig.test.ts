@@ -242,6 +242,8 @@ describe("a dohc Codex run", () => {
       expect(refuses("[features]\nshell_tool = true\n", platform)).toBe(true);
       expect(refuses("[feature_requirements]\nview_image = true\n", platform)).toBe(true);
       expect(refuses("[features]\ncollab = true\n", platform)).toBe(true);
+      // Codex fetches more requirements from a config server.
+      expect(refuses("[config_server]\nurl = 'https://config.example'\n", platform)).toBe(true);
       // Codex swaps never for the first approval policy the list allows.
       expect(refuses("allowed_approval_policies = ['on-request', 'never']\n", platform)).toBe(false);
       expect(refuses("allowed_approval_policies = ['on-request']\n", platform)).toBe(true);
