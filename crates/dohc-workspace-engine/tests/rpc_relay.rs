@@ -631,7 +631,7 @@ async fn fetched_pull_restarts_without_applying_and_fetches_the_same_batch_again
     )
     .await;
     let assert_unapplied =
-        || {
+        |has_token: bool| {
             let db = Connection::open(engine_db_path(&scratch).unwrap()).unwrap();
             let applied: i64 = db.query_row(
             "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND origin_id='remote'",
@@ -653,14 +653,14 @@ async fn fetched_pull_restarts_without_applying_and_fetches_the_same_batch_again
                 .unwrap();
             assert_eq!(applied, 0);
             assert_eq!(cursor, None);
-            assert_eq!(token, None);
+            assert_eq!(token.is_some(), has_token);
         };
-    assert_unapplied();
+    assert_unapplied(true);
     close(&transport, &handle, &mut id).await;
     drop(transport);
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, &relay, id + 1, workspace_id).await;
-    assert_unapplied();
+    assert_unapplied(false);
     let stale = transport
         .call(
             RequestContext::unbounded(),
@@ -683,7 +683,7 @@ async fn fetched_pull_restarts_without_applying_and_fetches_the_same_batch_again
     )
     .await;
     assert_ne!(first["pageToken"], second["pageToken"]);
-    assert_unapplied();
+    assert_unapplied(true);
     let applied = call(
         &transport,
         &handle,

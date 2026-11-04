@@ -304,14 +304,14 @@ fn prepared_pull_refuses_a_changed_identity_or_cursor() {
 }
 
 #[test]
-fn prepared_fetch_reuses_its_token_and_refuses_apply_after_release() {
+fn a_second_fetch_gets_a_new_token_and_refuses_apply_after_release() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(padded_relay(1));
     let first = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
     assert_eq!(pull_token(&engine).as_deref(), Some(first.pull_token()));
     let retry = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
-    assert_eq!(first.pull_token(), retry.pull_token());
+    assert_ne!(retry.pull_token(), first.pull_token());
     abandon_ordinary_pull(&mut engine, "ws", &NoFaults).unwrap();
     assert!(matches!(
         client.apply_pull(
@@ -327,7 +327,7 @@ fn prepared_fetch_reuses_its_token_and_refuses_apply_after_release() {
     ));
     assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
     let next = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
-    assert_ne!(next.pull_token(), first.pull_token());
+    assert_ne!(next.pull_token(), retry.pull_token());
     assert!(
         client
             .apply_pull(
@@ -556,7 +556,7 @@ fn a_pull_owns_its_progress_across_reopening_until_its_terminal_commit() {
     let (has_more, last) = pass(&client, &mut engine);
     assert!(!has_more);
     assert!(completion(&last).terminal);
-    assert_eq!(completion(&last).token, completion(&first).token);
+    assert_ne!(completion(&last).token, completion(&first).token);
     assert_eq!(pull_token(&engine).as_ref(), Some(&completion(&last).token));
     commit(&client, &mut engine, &last);
     assert_eq!(pull_token(&engine), None);
@@ -837,7 +837,7 @@ fn a_pass_that_fails_after_applying_an_envelope_stays_unfinished_across_reopenin
     assert_eq!(pull_token(&engine).as_ref(), Some(&token));
     let (has_more, retry) = pass(&client, &mut engine);
     assert!(!has_more);
-    assert_eq!(completion(&retry).token, token);
+    assert_ne!(completion(&retry).token, token);
     commit(&client, &mut engine, &retry);
     assert_eq!(pull_token(&engine), None);
     assert_eq!(
