@@ -19,7 +19,7 @@ type PushedFile = {path: string; text: string};
 export function pushFile(storage: StorageContext, objectId: string, before: PushedFile | null, after: PushedFile | null): void {
   for (const file of [before, after]) if (file) storage.putBlob({workspaceId: "w", sha256: sha(file.text), content: Buffer.from(file.text), createdAtMs: 1});
   const last = storage.db.prepare("SELECT MAX(origin_seq) AS seq FROM sync_relay_log WHERE workspace_id='w' AND origin_id='desktop'").get();
-  const originSeq = Number(last?.seq ?? 0) + 1;
+  const originSeq = Number(last?.seq ?? -1) + 1;
   storage.appendLogBatch({workspaceId: "w", originId: "desktop", ops: [{originSeq, opKind: "moment.append", recordedAtMs: 1, payloadJson: JSON.stringify({
     momentId: `moment-${originSeq}`, versionId: "main", objectId, path: (after ?? before)!.path, recordedAtMs: 1,
     operation: !after ? "delete" : before && before.path !== after.path ? "rename" : "write",
