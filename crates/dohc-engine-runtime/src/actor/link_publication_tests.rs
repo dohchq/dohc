@@ -105,17 +105,18 @@ fn pause(ws: &str) -> (Arc<tokio::sync::Notify>, Sender<()>) {
 }
 impl Fixture {
     async fn wait_disk(&self, sources: usize) {
-        // A busy machine slows publication down without stopping it, so only
-        // 120 s with no new file and no finished turn counts as a stall.
-        let quiet = Duration::from_secs(120);
-        let turns = || {
+        // A busy machine slows publication down without stopping it, so only a
+        // minute with no new file and no new placement counts as a stall. A turn
+        // that finds nothing to place is not progress.
+        let quiet = Duration::from_secs(60);
+        let placed = || {
             placements()
                 .lock()
                 .unwrap()
                 .get(&self.ws)
-                .map_or(0, |p| p.turns.len())
+                .map_or(0, |p| p.turns.iter().map(|(n, _)| n).sum::<usize>())
         };
-        let (mut next, mut progress, mut since) = (0, turns(), Instant::now());
+        let (mut next, mut progress, mut since) = (0, placed(), Instant::now());
         let stalled = loop {
             while next < sources
                 && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
@@ -128,8 +129,8 @@ impl Fixture {
             if next == sources {
                 break false;
             }
-            if next + turns() != progress {
-                (progress, since) = (next + turns(), Instant::now());
+            if next + placed() != progress {
+                (progress, since) = (next + placed(), Instant::now());
             } else if since.elapsed() >= quiet {
                 break true;
             }
