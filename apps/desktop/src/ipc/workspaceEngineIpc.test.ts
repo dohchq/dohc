@@ -852,8 +852,50 @@ describe("workspace engine IPC registrations", () => {
       { versionId: "draft", lastChange: { atMs: 40, personName: "Someone you shared with" } },
       { versionId: "fresh", lastChange: null },
     ] });
-    expect(h.capture.listMoments).toHaveBeenCalledWith({ versionId: "draft", limit: 10 });
+    expect(h.capture.listMoments).toHaveBeenCalledWith({ versionId: "draft", limit: 50 });
     expect(h.prepareNamed).toHaveBeenCalledWith([{ kind: "human", humanId: "person-local" }, named]);
+  });
+
+  it("names no one for an agent's change or one several people made", async () => {
+    const h = await harness();
+    const version = (id: string, kind: "main" | "named") => ({ id, workspaceId: "workspace", kind, name: id, createdAtMs: 1,
+      ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+    h.capture.listVersions.mockResolvedValue({ versions: [version("main", "main"), version("draft", "named")], activeVersionId: "main" });
+    type Authors = NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>;
+    const change = (versionId: string, recordedAtMs: number, authors: Authors) => ({
+      ...historyDetail().moment, versionId, recordedAtMs, protected: false, momentOrder: recordedAtMs, authors });
+    const pages: Record<string, ReturnType<typeof change>[]> = {
+      main: [change("main", 30, [{ kind: "agent", agentId: "agent", agentRunId: "run-1", onBehalfOf: "person-local" }])],
+      draft: [change("draft", 40, [{ kind: "human", humanId: "person-local" }, { kind: "human", humanId: "person-other" }])],
+    };
+    h.capture.listMoments.mockImplementation(async (input) => ({ ...historyPage(), nextCursor: null, moments: pages[input?.versionId ?? ""] ?? [] }));
+    await expect(h.invoke(historyOperations.listVersionLastChanges.channel)).resolves.toEqual({ versions: [
+      { versionId: "main", lastChange: { atMs: 30 } },
+      { versionId: "draft", lastChange: { atMs: 40 } },
+    ] });
+  });
+
+  it("reads past a page of version markers to a version's own change, and stops at what it was made from", async () => {
+    const h = await harness();
+    const version = (id: string, kind: "main" | "named", createdAtMs: number) => ({ id, workspaceId: "workspace", kind, name: id, createdAtMs,
+      ...(kind === "named" ? { forkPoint: { versionId: "main" } } : {}) });
+    h.capture.listVersions.mockResolvedValue({ versions: [version("draft", "named", 20), version("fresh", "named", 35)], activeVersionId: "draft" });
+    const change = (versionId: string, recordedAtMs: number) => ({
+      ...historyDetail().moment, versionId, recordedAtMs, protected: false, momentOrder: recordedAtMs });
+    h.capture.listMoments.mockImplementation(async (input) => {
+      if (input?.versionId === "fresh") return { ...historyPage(), nextCursor: historyCursor(2), moments: [change("main", 30)] };
+      // Draft's first page is only the versions made from it.
+      return input?.cursor === undefined
+        ? { ...historyPage(), nextCursor: historyCursor(5), moments: [], versionMarkers: [version("idea", "named", 60)] }
+        : { ...historyPage(), nextCursor: null, moments: [change("draft", 40)] };
+    });
+    await expect(h.invoke(historyOperations.listVersionLastChanges.channel)).resolves.toEqual({ versions: [
+      { versionId: "draft", lastChange: { atMs: 40 } },
+      { versionId: "fresh", lastChange: null },
+    ] });
+    expect(h.capture.listMoments).toHaveBeenCalledWith({ versionId: "draft", limit: 50, cursor: historyCursor(5) });
+    // Fresh's page is older than Fresh, so nothing past it is Fresh's own.
+    expect(h.capture.listMoments.mock.calls.filter(([input]) => input?.versionId === "fresh")).toHaveLength(1);
   });
 
   it("reads a shared view's imported history from its registered share mount without a capture", async () => {

@@ -280,6 +280,14 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
     snapshotToken.current += 1;
     return operationToken.next();
   }, []);
+  // One switch or create at a time, whichever surface asks. A second would
+  // take the first's token, so the first could neither finish its update nor
+  // clear its busy state.
+  const runningOperation = useRef<number | null>(null);
+  const operationRunning = useCallback(
+    () => runningOperation.current !== null && operationToken.isCurrent(runningOperation.current),
+    [],
+  );
 
   const refresh = useCallback(async () => {
     const token = snapshotToken.current;
@@ -359,7 +367,9 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
 
   const performSwitch = useCallback(
     async (versionId: string) => {
+      if (operationRunning()) return;
       const token = beginOperation();
+      runningOperation.current = token;
       const before = activeVersionIdRef.current;
       // Did the switch IPC start? The failure path below keys on this, not
       // on whether the version moved: main settles and closes live Y.Doc
@@ -425,10 +435,11 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         );
       } finally {
         releaseOperation?.();
+        if (runningOperation.current === token) runningOperation.current = null;
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, refresh, workspaceId],
+    [beginOperation, operationRunning, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, refresh, workspaceId],
   );
 
   const requestSwitch = useCallback(
@@ -454,8 +465,10 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         field.refuse("Enter a name for the version.");
         return;
       }
+      if (operationRunning()) return;
       const identity = `version-create:${workspaceId}:${trimmed}`;
       const token = beginOperation();
+      runningOperation.current = token;
       setBusy("create");
       let releaseOperation: (() => void) | null = null;
       try {
@@ -486,10 +499,11 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         }, identity);
       } finally {
         releaseOperation?.();
+        if (runningOperation.current === token) runningOperation.current = null;
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
+    [beginOperation, operationRunning, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
   );
   const create = useCallback((name: string, field: VersionNameField) => void performCreate(name, field), [performCreate]);
 

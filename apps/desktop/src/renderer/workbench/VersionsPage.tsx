@@ -34,8 +34,8 @@ export function VersionsPage(props: {
   versions: WorkspaceVersions;
   // The workspace is not ready for a version change.
   disabled?: boolean;
-  // Bumped when history grows, so the last changes and the counts re-read.
-  historyKey: number;
+  // Changes when history grows, so the last changes and the counts re-read.
+  historyKey: string;
   // Bumped when version state changed, so everything re-reads.
   versionKey: number;
   onOpenCompare: (versionId: string) => void;
@@ -48,6 +48,8 @@ export function VersionsPage(props: {
   const [counts, setCounts] = useState<ReadonlyMap<string, Count>>(new Map());
   const [clashes, setClashes] = useState<ReadonlyMap<string, Clashes>>(new Map());
   const [countRetry, setCountRetry] = useState(0);
+  // The row that takes focus when the control in it that had focus goes away.
+  const [focusRow, setFocusRow] = useState<string | null>(null);
   // Relative times stay true while the tab is open.
   const [, setNow] = useState(0);
   useEffect(() => {
@@ -57,6 +59,9 @@ export function VersionsPage(props: {
 
   const versionIds = snapshot?.versions.map((version) => version.id).join("\n") ?? null;
 
+  // A read that keeps failing reports once, until it works again.
+  const lastChangesFailing = useRef(false);
+  const [lastChangesFailed, setLastChangesFailed] = useState(false);
   const lastChangeReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     if (versionIds === null) return;
@@ -64,56 +69,74 @@ export function VersionsPage(props: {
     bridge().listVersionLastChanges({ workspaceId }).then(
       (result) => {
         if (!lastChangeReads.isCurrent(token)) return;
+        lastChangesFailing.current = false;
+        setLastChangesFailed(false);
         setLastChanges(new Map(result.versions.map((entry) => [entry.versionId, entry.lastChange])));
       },
       (error: unknown) => {
         if (!lastChangeReads.isCurrent(token)) return;
         // The rows still show, sorted by when each version was made.
         setLastChanges((current) => current ?? new Map());
+        setLastChangesFailed(true);
+        if (lastChangesFailing.current) return;
+        lastChangesFailing.current = true;
         props.onError("dohc could not read when each version last changed.", error);
       },
     );
   }, [workspaceId, versionIds, props.historyKey, props.versionKey]);
 
-  // Versions whose count is out of date. A newer run takes over the ones an
-  // older run did not reach.
+  // Versions whose count is out of date, and the one run that counts them. It
+  // takes them in row order until none are left, so a change during the run
+  // adds to what it counts instead of starting it over.
   const staleCounts = useRef(new Set<string>());
-  const countedVersionKey = useRef<string | null>(null);
+  const countRun = useRef<number | null>(null);
+  const counted = useRef<{ versionKey: string; historyKey: string } | null>(null);
   const countReads = useRequestSequence([workspaceId]);
   const ordered = useMemo(() => orderVersions(snapshot?.versions ?? [], lastChanges), [snapshot, lastChanges]);
+  const countOrder = useRef<string[]>([]);
+  countOrder.current = ordered.filter((version) => version.kind !== "main").map((version) => version.id);
   const activeVersionId = snapshot?.activeVersionId ?? null;
   // Counting waits for the first listing, so it runs in the order the rows show.
   const listed = lastChanges !== null;
   useEffect(() => {
     if (versionIds === null || !listed) return;
-    const named = ordered.filter((version) => version.kind !== "main");
-    // A change in Main changes every count. A change in a version changes its own.
+    const named = countOrder.current;
+    // A change in Main changes every count. A change in a version changes its
+    // own. A Try again changes only the version it's on.
     const versionKey = `${props.versionKey}\n${versionIds}`;
-    const activeIsMain = named.every((version) => version.id !== activeVersionId);
-    if (countedVersionKey.current !== versionKey || activeIsMain) {
-      for (const version of named) staleCounts.current.add(version.id);
-    } else if (activeVersionId !== null) {
+    const last = counted.current;
+    const historyChanged = last !== null && last.historyKey !== props.historyKey;
+    if (last === null || last.versionKey !== versionKey || (historyChanged && !named.includes(activeVersionId ?? ""))) {
+      for (const versionId of named) staleCounts.current.add(versionId);
+    } else if (historyChanged && activeVersionId !== null) {
       staleCounts.current.add(activeVersionId);
     }
-    countedVersionKey.current = versionKey;
+    counted.current = { versionKey, historyKey: props.historyKey };
+    if (countRun.current !== null && countReads.isCurrent(countRun.current)) return;
     const token = countReads.next();
+    countRun.current = token;
     void (async () => {
       // One at a time: each count waits its turn behind the workspace's captures.
-      for (const version of named) {
-        if (!staleCounts.current.has(version.id)) continue;
+      for (;;) {
+        const versionId = countOrder.current.find((id) => staleCounts.current.has(id));
+        if (versionId === undefined) break;
+        staleCounts.current.delete(versionId);
         let count: Count;
         try {
-          count = (await bridge().countWorkspaceVersionChanges({ workspaceId, versionId: version.id })).count;
+          count = (await bridge().countWorkspaceVersionChanges({ workspaceId, versionId })).count;
         } catch {
           count = "failed";
         }
         if (!countReads.isCurrent(token)) return;
-        staleCounts.current.delete(version.id);
-        setCounts((current) => new Map(current).set(version.id, count));
+        // Marked again while it counted, so this count is already out of date.
+        if (staleCounts.current.has(versionId)) continue;
+        setCounts((current) => new Map(current).set(versionId, count));
       }
+      countRun.current = null;
     })();
   }, [workspaceId, versionIds, listed, props.historyKey, props.versionKey, countRetry]);
   const retryCount = (versionId: string) => {
+    setFocusRow(versionId);
     staleCounts.current.add(versionId);
     setCounts((current) => {
       const next = new Map(current);
@@ -123,6 +146,18 @@ export function VersionsPage(props: {
     setCountRetry((attempt) => attempt + 1);
   };
 
+  // A row's Switch goes once its switch lands, so its row takes the focus that
+  // went nowhere. Focus the person moved on stays where it is.
+  const switchedTo = useRef<string | null>(null);
+  useEffect(() => {
+    if (switchedTo.current === null || activeVersionId === null) return;
+    const focused = document.activeElement;
+    const lost = focused === null || focused === document.body || !focused.isConnected;
+    if (switchedTo.current === activeVersionId && lost) setFocusRow(activeVersionId);
+    switchedTo.current = null;
+  }, [activeVersionId]);
+
+  const clashesFailing = useRef(false);
   const clashReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     if (versionIds === null) return;
@@ -146,10 +181,12 @@ export function VersionsPage(props: {
           if (after === null) break;
         }
       } catch (error) {
-        if (!clashReads.isCurrent(token)) return;
+        if (!clashReads.isCurrent(token) || clashesFailing.current) return;
+        clashesFailing.current = true;
         props.onError("dohc could not read which merges have files to decide.", error);
         return;
       }
+      clashesFailing.current = false;
       // The pages ran out before the list did, so every count is a lower bound.
       if (after !== null) for (const [id, entry] of found) found.set(id, { ...entry, more: true });
       setClashes(found);
@@ -213,7 +250,8 @@ export function VersionsPage(props: {
         }}
         onKeyDown={(event) => {
           if (event.nativeEvent.isComposing) return;
-          if (event.key === "Enter" && !creating) {
+          // A switch from the menu locks the page too.
+          if (event.key === "Enter" && !locked) {
             event.preventDefault();
             setNameError(null);
             versions.create(newName, field);
@@ -267,10 +305,16 @@ export function VersionsPage(props: {
             active={version.id === snapshot.activeVersionId}
             madeFrom={version.madeFromVersionId === undefined ? undefined : names.get(version.madeFromVersionId)}
             lastChange={lastChanges.get(version.id) ?? null}
+            lastChangesFailed={lastChangesFailed}
             count={counts.get(version.id)}
             clashes={clashes.get(version.id)}
             locked={locked}
-            onSwitch={() => versions.requestSwitch(version.id)}
+            takeFocus={focusRow === version.id}
+            onFocused={() => setFocusRow(null)}
+            onSwitch={() => {
+              switchedTo.current = version.id;
+              versions.requestSwitch(version.id);
+            }}
             onCompare={() => props.onOpenCompare(version.id)}
             onMerge={() => versions.openMerge(version)}
             onRetryCount={() => retryCount(version.id)}
@@ -319,9 +363,13 @@ function VersionRow(props: {
   active: boolean;
   madeFrom: string | undefined;
   lastChange: LastChange;
+  // The last changes could not be read, so a missing one is not known.
+  lastChangesFailed: boolean;
   count: Count | undefined;
   clashes: Clashes | undefined;
   locked: boolean;
+  takeFocus: boolean;
+  onFocused: () => void;
   onSwitch: () => void;
   onCompare: () => void;
   onMerge: () => void;
@@ -337,13 +385,20 @@ function VersionRow(props: {
     "aria-disabled": props.locked || undefined,
     onClick: props.locked ? undefined : onClick,
   });
+  const row = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (!props.takeFocus) return;
+    row.current?.focus();
+    props.onFocused();
+  }, [props.takeFocus]);
   // Keyed by what each part is, so a part that arrives later, such as a
   // count, doesn't remount the parts after it and drop their focus.
   const parts: [key: string, part: ReactNode][] = [];
   if (!isMain) {
     const parent = props.madeFrom ?? "Main";
-    // With no change of its own, when it was made is its only time.
-    parts.push(["made", lastChange === null ? `Made from ${parent} ${relativeTime(version.createdAtMs)}` : `Made from ${parent}`]);
+    // With no change of its own, when it was made is its only time. Unread,
+    // the made time alone would claim it has none.
+    parts.push(["made", lastChange === null && !props.lastChangesFailed ? `Made from ${parent} ${relativeTime(version.createdAtMs)}` : `Made from ${parent}`]);
     if (props.count === "failed") {
       parts.push([
         "count-retry",
@@ -352,6 +407,7 @@ function VersionRow(props: {
             data-testid="versions-page-count-retry"
             aria-label="dohc could not count the differences. Try again."
             title="dohc could not count the differences. Try again."
+            aria-describedby={nameId}
             onClick={props.onRetryCount}
             className="size-4"
           >
@@ -379,6 +435,7 @@ function VersionRow(props: {
         // title is its tooltip and its description. The review it opens lists
         // every open clash, not only this version's.
         title="Open the clashes"
+        aria-describedby={nameId}
         onClick={props.onReviewConflicts}
         className="cursor-pointer text-warning hover:underline"
       >
@@ -389,10 +446,13 @@ function VersionRow(props: {
 
   return (
     <li
+      ref={row}
+      // Focusable only from code, for when its focused control goes away.
+      tabIndex={-1}
       data-testid="versions-page-row"
       data-version-id={version.id}
       aria-current={props.active || undefined}
-      className="group flex items-center gap-2 rounded-md px-2 py-2 hover:bg-hover"
+      className="dohc-focus-row group flex items-center gap-2 rounded-md px-2 py-2 hover:bg-hover"
     >
       <span className="flex h-5 w-4 shrink-0 items-center justify-center self-start">
         {props.active ? <Check size={14} aria-hidden className="text-accent" /> : null}

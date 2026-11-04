@@ -22,6 +22,7 @@ import {
   ABOUT_MAX_WIDTH,
   ABOUT_MIN_WIDTH,
   HISTORY_TAB_PATH,
+  VERSIONS_TAB_PATH,
   CHATS_TAB_PATH,
   chatTabPath,
   momentDiffTabPath,
@@ -31,6 +32,7 @@ import {
   newPageTabPath,
   openMomentDiff,
   openTab,
+  openTabOnce,
   parseUiState,
   pruneMissingRestoredTabs,
   serializeUiState,
@@ -347,6 +349,20 @@ describe("tabs", () => {
     const restored = parseUiState(serializeUiState(state));
     expect(allTabs(restored).map((tab) => tab.path)).toEqual(allTabs(state).map((tab) => tab.path));
     expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace", state: serializeUiState(state) }).success).toBe(true);
+  });
+
+  it("goes to the open Versions tab from another group instead of opening a second", () => {
+    let state = withTabs(VERSIONS_TAB_PATH, "a.md");
+    state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
+    expect(state.activeEditorGroup).toBe("right");
+    state = openTabOnce(state, VERSIONS_TAB_PATH);
+    expect(allTabs(state).filter((tab) => tab.path === VERSIONS_TAB_PATH)).toHaveLength(1);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(state.editorGroups[0].activeTab).toBe(VERSIONS_TAB_PATH);
+    // With none open, it opens in the focused group.
+    state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, VERSIONS_TAB_PATH);
+    state = openTabOnce(state, VERSIONS_TAB_PATH, "right");
+    expect(state.editorGroups.find((group) => group.id === "right")?.activeTab).toBe(VERSIONS_TAB_PATH);
   });
 
   it("keeps Chats in its existing editor group", () => {

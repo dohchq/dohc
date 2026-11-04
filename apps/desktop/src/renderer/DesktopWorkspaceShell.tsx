@@ -284,6 +284,7 @@ import {
   moveTab,
   moveTabToGroup,
   openTab,
+  openTabOnce,
   resizeEditorGroups,
   moveTabToNewGroup,
   newPageTabPath,
@@ -2882,11 +2883,11 @@ export function DesktopWorkspaceShell(props: {
     [openPathWithHeading],
   );
   const openVirtualTab = useCallback(
-    (path: string, recent = false) => {
+    (path: string, recent = false, once = false) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
       const current = wbRef.current;
-      const next = openTab(current, path, targetGroupId);
+      const next = (once ? openTabOnce : openTab)(current, path, targetGroupId);
       const targetAlreadyOwnsPath = current.editorGroups
         .find((group) => group.id === targetGroupId)
         ?.tabs.some((tab) => tab.path === path);
@@ -3085,8 +3086,9 @@ export function DesktopWorkspaceShell(props: {
   const openHistoryTab = useCallback(() => {
     openVirtualTab(HISTORY_TAB_PATH);
   }, [openVirtualTab]);
+  // One per workspace: opening it again goes to the open tab.
   const openVersionsTab = useCallback(() => {
-    openVirtualTab(VERSIONS_TAB_PATH);
+    openVirtualTab(VERSIONS_TAB_PATH, false, true);
   }, [openVirtualTab]);
   const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
   const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter((path) => parseTab(path).kind === "chat"), [wb.editorGroups]);
@@ -5338,6 +5340,10 @@ export function DesktopWorkspaceShell(props: {
     latestMomentOrder + 1,
   );
   const historyRefreshCounter = shareView ? 0 : historyRefreshFloor.current;
+  // The Versions page also re-reads on a protected file's change, which
+  // doesn't move the moment order the counter follows.
+  const newestHistoryFile = engineHistory?.entries.find((entry) => entry.kind === "file");
+  const versionsHistoryKey = `${historyRefreshCounter}\n${newestHistoryFile?.kind === "file" ? newestHistoryFile.moment.id : ""}`;
   const graphKey = shareView
     ? graphRefreshKey
     : `${graphRefreshKey}\0${latestMomentOrder}`;
@@ -6427,7 +6433,7 @@ export function DesktopWorkspaceShell(props: {
                   workspaceId={workspaceId}
                   versions={workspaceVersions}
                   disabled={!workspaceIsReady || storeUpdateRequired}
-                  historyKey={historyRefreshCounter}
+                  historyKey={versionsHistoryKey}
                   versionKey={versionEpoch}
                   onOpenCompare={openVersionCompareTab}
                   onReviewConflicts={() => setConflictReviewOpen(true)}

@@ -1,7 +1,7 @@
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
-import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { WorkspaceDaemonRequester, type HistoryCursor, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { z } from "zod";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -42,6 +42,10 @@ import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { readSyncHistory } from "../workspaces/syncHistory";
+
+// How far the Versions page reads back for each version's newest change.
+const LAST_CHANGE_PAGE_ROWS = 50;
+const LAST_CHANGE_PAGES_MAX = 4;
 
 type EngineStoreAuthorityState = {
   operationLanes: Map<string, Promise<void>>;
@@ -418,9 +422,22 @@ export function createWorkspaceEngineIpc<
         assertCurrent();
         const { versions } = await capture.listVersions();
         assertCurrent();
+        // A page also holds version markers and hidden paths, so reading goes on
+        // until an own shown moment, the end, or a page older than the version:
+        // a version records nothing before it was made. Past the last page read,
+        // the version shows no change of its own.
         const latest = await Promise.all(versions.map(async (version) => {
-          const page = await capture.listMoments({ versionId: version.id, limit: 10 });
-          return page.moments.find(moment => moment.versionId === version.id && (moment.protected || admitted(moment.path)));
+          let cursor: HistoryCursor | undefined;
+          for (let read = 0; read < LAST_CHANGE_PAGES_MAX; read += 1) {
+            const page = await capture.listMoments({ versionId: version.id, limit: LAST_CHANGE_PAGE_ROWS, ...(cursor ? { cursor } : {}) });
+            assertCurrent();
+            const own = page.moments.find(moment => moment.versionId === version.id && (moment.protected || admitted(moment.path)));
+            if (own !== undefined) return own;
+            const oldest = Math.min(...page.moments.map(moment => moment.recordedAtMs), ...page.versionMarkers.map(marker => marker.createdAtMs));
+            if (page.nextCursor === null || oldest < version.createdAtMs) return undefined;
+            cursor = page.nextCursor;
+          }
+          return undefined;
         }));
         assertCurrent();
         // Only person names are read here, so no presentations are drawn.

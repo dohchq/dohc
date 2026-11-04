@@ -656,6 +656,21 @@ export function focusEditorGroup(
   return { ...state, activeEditorGroup: groupId };
 }
 
+// Open a tab the workspace keeps one of, such as Versions. A copy open in any
+// group takes focus, and only a missing one opens in the requested group.
+export function openTabOnce(
+  state: WorkbenchState,
+  path: string,
+  targetGroupId: string = state.activeEditorGroup,
+): WorkbenchState {
+  const holds = (group: EditorGroup) => group.tabs.some((tab) => tab.path === path);
+  if (state.editorGroups.some((group) => group.id === targetGroupId && holds(group))) {
+    return openTab(state, path, targetGroupId);
+  }
+  const open = state.editorGroups.find(holds);
+  return open ? activateTab(state, open.id, path) : openTab(state, path, targetGroupId);
+}
+
 // Open or reactivate a tab in the requested group, or in the focused group.
 // A path is unique within a group and can be open in several groups.
 export function openTab(
