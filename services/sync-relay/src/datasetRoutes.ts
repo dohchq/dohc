@@ -2,7 +2,7 @@ import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance"
 import { readBoundedJson } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
-import { DatasetHostError, DatasetBindingPendingAttemptError } from "@dohc/app-backend-runtime/dataset-error";
+import { DatasetHostError, DatasetBindingPendingAttemptError, DatasetNotArchivedError } from "@dohc/app-backend-runtime/dataset-error";
 import { isDatasetReopenWaitError, isDatasetWorkerFailure } from "@dohc/app-backend-runtime/supervisor";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
@@ -53,7 +53,7 @@ async function response(run: () => unknown): Promise<Response> {
     if (isDatasetReopenWaitError(error) || isDatasetWorkerFailure(error)) return Response.json({code: error.code, message: error.message},
       {status: 503, headers: {...headers, ...(error.retryAfterMs ? {"retry-after": String(Math.ceil(error.retryAfterMs / 1000))} : {})}});
     if (error instanceof JournalError) throw relayError(error.code === "invalid" ? "bad_request" : "conflict");
-    if (error instanceof DatasetBindingPendingAttemptError) throw relayError("conflict", error.message);
+    if (error instanceof DatasetBindingPendingAttemptError || error instanceof DatasetNotArchivedError) throw relayError("conflict", error.message);
     if (error instanceof DatasetHostError) throw relayError(error.code === "not_authorized" ? "not_found" : error.code === "invalid" ? "bad_request" : "conflict");
     throw error;
   }
@@ -172,9 +172,7 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
           const expected = record(body.expected, ["workspaceId", "datasetId", "hostEpoch", "approvedRevisionHash", "revision", "digest"]);
           if (expected.workspaceId !== scope.workspaceId || expected.datasetId !== scope.datasetId || !Number.isSafeInteger(expected.revision) || Number(expected.revision) < 0) throw badRequest("Invalid dataset cursor.");
           return host.deleteDataset(auth, {...scope, acknowledge: true, reviewToken: digest(body.reviewToken), expected: {...scope, hostEpoch: text(expected.hostEpoch),
-            approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}})
-            // The owner hears why a delete was refused, such as a Collection that isn't archived yet.
-            .catch(error => { throw error instanceof DatasetHostError && error.code === "conflict" ? relayError("conflict", error.message) : error; });
+            approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}});
         }
         if (route.action === "archive" || route.action === "restore") {
           record(raw, []);
