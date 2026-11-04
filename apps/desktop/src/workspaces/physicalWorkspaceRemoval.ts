@@ -1,4 +1,5 @@
 import type { createWorkspaceAuthorityOwner, WorkspaceAuthorityBinding } from "./workspaceAuthorityOwner";
+import type { WorkspaceTrust } from "./workspaceTrust";
 
 export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: string; rootPath: string}>(dependencies: {
   retireBinding: ReturnType<typeof createWorkspaceAuthorityOwner<Workspace, unknown>>["retireBinding"];
@@ -35,18 +36,26 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
   };
 }
 
-export function createWorkspaceForget(dependencies: {
-  // False when the person goes back. `confirmed` runs before anything is removed.
-  remove(workspaceId: string, confirmed: () => Promise<void>): Promise<boolean>;
-  restrict(workspaceId: string): Promise<void>;
+export function createWorkspaceForget<Workspace extends {workspaceId: string; rootPath: string}>(dependencies: {
+  currentBinding(workspaceId: string): WorkspaceAuthorityBinding<Workspace>;
+  removePhysicalWorkspace: ReturnType<typeof createPhysicalWorkspaceRemoval<Workspace>>;
+  trust: Pick<WorkspaceTrust, "restrict" | "isRevoked">;
   clearNotices(workspaceId: string): void;
   notifyRenderer(): void;
 }) {
   return async function forgetWorkspace(workspaceId: string): Promise<void> {
+    const restrict = () => dependencies.trust.restrict(workspaceId);
     // A forgotten workspace opened again is an existing folder: it starts in
-    // Restricted Mode. The grant goes first, so a failed write cannot leave
-    // one that returns when the folder opens again. Going back keeps it.
-    if (!(await dependencies.remove(workspaceId, () => dependencies.restrict(workspaceId)))) return;
+    // Restricted Mode. The grant goes once the person agrees and before the
+    // workspace closes, so a failed write leaves the workspace listed, not
+    // forgotten with a grant that returns. Going back keeps the grant. Trust
+    // is checked again once the workspace has closed.
+    const removed = await dependencies.removePhysicalWorkspace(
+      dependencies.currentBinding(workspaceId),
+      async () => { if (!dependencies.trust.isRevoked(workspaceId)) await restrict(); },
+      restrict,
+    );
+    if (!removed) return;
     dependencies.clearNotices(workspaceId);
     dependencies.notifyRenderer();
   };

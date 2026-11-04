@@ -2110,9 +2110,9 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
 // registry row. The folder is untouched; opening it again re-adopts the
 // manifest and its identity.
 const forgetWorkspace = createWorkspaceForget({
-  remove: (workspaceId, confirmed) =>
-    removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId), undefined, confirmed),
-  restrict: workspaceId => workspaceTrust.restrict(workspaceId),
+  currentBinding: workspaceId => workspaceAuthorities.currentBinding(workspaceId),
+  removePhysicalWorkspace,
+  trust: workspaceTrust,
   clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
   notifyRenderer,
 });
