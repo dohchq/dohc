@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -10,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { posixMcpLauncher } from "../../scripts/mcp-launchers.mjs";
+import { bundledPosixLauncher, posixMcpLauncher } from "../../scripts/mcp-launchers.mjs";
 import {
   hasIntactStableCliBin,
   refreshLinuxStableCliBin,
@@ -19,6 +21,11 @@ import {
 
 const scratchDirs: string[] = [];
 let failLauncherPublish = false;
+const pinned = vi.hoisted(() => ({ sha256: "" }));
+
+vi.mock("../../scripts/pinned-node.mjs", () => ({
+  PINNED_NODE: { "linux-x64": { get sha256() { return pinned.sha256; } } },
+}));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -61,7 +68,7 @@ describe("syncLinuxStableCliBin", () => {
     mkdirSync(resourcesCliBinDir, { recursive: true });
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
 
-    await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir });
+    await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64" });
     const firstModule = referencedModuleName(targetDir);
     expect(firstModule).toMatch(/^dohc-mcp-[a-f0-9]{16}\.mjs$/);
     expect(readFileSync(join(targetDir, firstModule), "utf8")).toBe("module-v1");
@@ -73,7 +80,7 @@ describe("syncLinuxStableCliBin", () => {
     }
 
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
-    await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir });
+    await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64" });
     const secondModule = referencedModuleName(targetDir);
     expect(secondModule).not.toBe(firstModule);
     expect(readFileSync(join(targetDir, secondModule), "utf8")).toBe("module-v2");
@@ -89,7 +96,7 @@ describe("syncLinuxStableCliBin", () => {
     mkdirSync(resourcesCliBinDir, { recursive: true });
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
 
-    await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir });
+    await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64" });
     const firstLauncher = readFileSync(targetLauncher, "utf8");
     const firstModule = referencedModuleName(targetDir);
     const publishedMode = statSync(targetLauncher).mode & 0o777;
@@ -98,7 +105,7 @@ describe("syncLinuxStableCliBin", () => {
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
     failLauncherPublish = true;
 
-    await expect(syncLinuxStableCliBin({ resourcesCliBinDir, targetDir })).rejects.toThrow(
+    await expect(syncLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64" })).rejects.toThrow(
       "launcher publish failed",
     );
     const secondModule = publishedModuleNames(targetDir).find((name) => name !== firstModule);
@@ -111,6 +118,70 @@ describe("syncLinuxStableCliBin", () => {
     expect(readFileSync(join(targetDir, secondModule!), "utf8")).toBe("module-v2");
     expect(await hasIntactStableCliBin(targetDir)).toBe(true);
     expect(readdirSync(targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+});
+
+// A stand-in for dohc's Node.js that prints its arguments, so the launcher
+// can run with no Node.js on PATH.
+const RUNTIME = "#!/bin/sh\necho \"runtime $*\"\n";
+
+function x64Fixture(runtime = RUNTIME) {
+  const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
+  scratchDirs.push(root);
+  const resourcesCliBinDir = join(root, "resources", "cli-bin");
+  const targetDir = join(root, "state", "cli-bin");
+  mkdirSync(resourcesCliBinDir, { recursive: true });
+  mkdirSync(join(root, "resources", "app-compiler"));
+  writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
+  writeFileSync(join(root, "resources", "app-compiler", "node"), runtime, { mode: 0o755 });
+  pinned.sha256 = createHash("sha256").update(runtime).digest("hex");
+  return { resourcesCliBinDir, targetDir, arch: "x64", nodeFileName: `node-${pinned.sha256}` };
+}
+
+describe("syncLinuxStableCliBin on Linux x64", () => {
+  it("publishes dohc's Node.js beside the module, and the launcher runs it with no Node.js on PATH", async () => {
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    const moduleFileName = publishedModuleNames(f.targetDir)[0]!;
+    expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toBe(bundledPosixLauncher(moduleFileName, f.nodeFileName));
+    expect(readFileSync(join(f.targetDir, f.nodeFileName), "utf8")).toBe(RUNTIME);
+    expect(await hasIntactStableCliBin(f.targetDir)).toBe(true);
+    if (process.platform === "win32") return;
+    const run = spawnSync(join(f.targetDir, "dohc-mcp"), ["--workspace", "/w"], { env: { PATH: "" }, encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(`runtime ${join(f.targetDir, moduleFileName)} --workspace /w\n`);
+  });
+
+  it("copies dohc's Node.js once per release", async () => {
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    const published = statSync(join(f.targetDir, f.nodeFileName));
+    writeFileSync(join(f.resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
+    await syncLinuxStableCliBin(f);
+    expect(statSync(join(f.targetDir, f.nodeFileName)).ino).toBe(published.ino);
+    expect(publishedModuleNames(f.targetDir)).toHaveLength(2);
+  });
+
+  it("refuses a Node.js that doesn't match its pinned release, and keeps the previous launcher", async () => {
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    const launcher = readFileSync(join(f.targetDir, "dohc-mcp"), "utf8");
+    const changed = `${RUNTIME}# changed\n`;
+    writeFileSync(join(f.resourcesCliBinDir, "..", "app-compiler", "node"), changed);
+    pinned.sha256 = createHash("sha256").update("the pinned release").digest("hex");
+
+    await expect(syncLinuxStableCliBin(f)).rejects.toThrow("dohc's Node.js does not match its pinned release.");
+    expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toBe(launcher);
+    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([f.nodeFileName]);
+    expect(readdirSync(f.targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+    expect(await refreshLinuxStableCliBin({ ...f, onError: () => {} })).toBe(f.targetDir);
+  });
+
+  it("is not intact when the Node.js its launcher names is missing", async () => {
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    rmSync(join(f.targetDir, f.nodeFileName));
+    expect(await hasIntactStableCliBin(f.targetDir)).toBe(false);
   });
 });
 
@@ -177,7 +248,7 @@ describe("refreshLinuxStableCliBin", () => {
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
 
     const onError = vi.fn();
-    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, onError });
+    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64", onError });
     expect(result).toBe(targetDir);
     expect(onError).not.toHaveBeenCalled();
   });
@@ -193,7 +264,7 @@ describe("refreshLinuxStableCliBin", () => {
     const targetDir = join(root, "state", "cli-bin");
     mkdirSync(resourcesCliBinDir, { recursive: true });
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
-    await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir });
+    await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64" });
     const firstLauncher = readFileSync(join(targetDir, "dohc-mcp"), "utf8");
     const firstModule = referencedModuleName(targetDir);
 
@@ -201,7 +272,7 @@ describe("refreshLinuxStableCliBin", () => {
     failLauncherPublish = true;
 
     const onError = vi.fn();
-    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, onError });
+    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64", onError });
     expect(result).toBe(targetDir);
     expect(onError).toHaveBeenCalledOnce();
     const secondModule = publishedModuleNames(targetDir).find((name) => name !== firstModule);
@@ -222,7 +293,7 @@ describe("refreshLinuxStableCliBin", () => {
     const targetDir = join(root, "state", "cli-bin");
 
     const onError = vi.fn();
-    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, onError });
+    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64", onError });
     expect(result).toBeUndefined();
     expect(onError).toHaveBeenCalledOnce();
   });

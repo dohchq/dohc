@@ -109,7 +109,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     runnerSelfTest: vi.fn<ChatDispatchService["runnerSelfTest"]>(async () => { events.push("self-test"); return { ok: true, detail: "Ready" }; }),
   };
   const shareAccess = vi.fn((_view: unknown) => "view" as const);
-  const config = vi.fn((root: string, _access: unknown) => ({ command: "dohc-mcp", args: ["--workspace", root], workspacePath: root, home: rootPath }));
+  const config = vi.fn(async (root: string, _access: unknown) => ({ command: "dohc-mcp", args: ["--workspace", root], workspacePath: root, home: rootPath }));
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
   const detection = vi.fn(async (_root: string, _signal?: AbortSignal) => []);
   const registrations = createAgentRunsIpc({

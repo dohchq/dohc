@@ -88,7 +88,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     startEngine(): Promise<boolean>;
     loadSettings(): Promise<Settings>;
     applySettings(settings: Settings): void;
-    prepareCli(): Promise<void> | undefined;
+    prepareCli(): void;
     registerHandlers(): void;
     markFirstWindow(): void;
     reportFailure(error: unknown): void;
@@ -294,8 +294,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     bootstrap.markReady();
     const engineStartup = bootstrap.startEngine();
     const cachedSettingsRead = bootstrap.loadSettings();
-    const cliPreparation = bootstrap.prepareCli();
-    if (cliPreparation) await cliPreparation;
+    bootstrap.prepareCli();
     bootstrap.registerHandlers();
     // Apply persisted zoom before creating the first window; overlap its IO
     // and renderer load with the daemon handshake.

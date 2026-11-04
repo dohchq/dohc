@@ -899,7 +899,9 @@ const {
   collectionAutomationsOf: (state) => state.collectionAutomations,
 });
 
-let linuxStableCliBinDir: string | undefined;
+// The AppImage's stable MCP launcher. Startup doesn't wait for it, because its
+// first copy of dohc's Node.js is about 120 MB. A config request waits instead.
+let linuxStableCliBinDir: Promise<string | undefined> = Promise.resolve(undefined);
 
 const executeAppPreview = createAppPreviewExecution({
   get shareViewFiles() { return shareViewFiles; },
@@ -2206,14 +2208,14 @@ const MCP_LAUNCHER_UNAVAILABLE_MESSAGE =
 const MCP_TEMPORARY_COPY_MESSAGE =
   "dohc is running from a disk image or a temporary copy. Move dohc to Applications, then open it again.";
 
-function mcpConfigFor(
+async function mcpConfigFor(
   rootPath: string,
   shareAccess: ShareAccess | null,
-): McpConfigResult {
+): Promise<McpConfigResult> {
   const command = resolveDohcMcpCommand({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
-    linuxStableCliBinDir,
+    linuxStableCliBinDir: await linuxStableCliBinDir,
   });
   if (command === null) {
     return {
@@ -5921,7 +5923,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     prepareCli: () => {
       if (!app.isPackaged || process.platform !== "linux" || !isAppImageBoot()) return;
-      return refreshLinuxStableCliBin({
+      linuxStableCliBinDir = refreshLinuxStableCliBin({
         resourcesCliBinDir: resolveDohcCliBinDirectory({
           appRoot: desktopPackageRootInDev(),
           isPackaged: app.isPackaged,
@@ -5929,7 +5931,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         }),
         targetDir: join(stateDir(), "cli-bin"),
         onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
-      }).then((directory) => { linuxStableCliBinDir = directory; });
+      });
     },
     registerHandlers: () => {
       nativeTheme.on("updated", refreshTrayIcon);
