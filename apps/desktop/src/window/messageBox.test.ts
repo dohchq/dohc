@@ -17,8 +17,15 @@ describe("showMessageBox", () => {
     await showMessageBox({ message: "Do you trust the authors of the files in this workspace?" });
     expect(electron.dialog.showMessageBox).toHaveBeenCalledWith({
       title: "dohc",
+      noLink: true,
       message: "Do you trust the authors of the files in this workspace?",
     });
+  });
+
+  // Windows draws a label it doesn't know as a command link unless noLink is set.
+  it("gives every box push buttons", async () => {
+    await showMessageBox({ message: "dohc could not keep your typing on this computer.", buttons: ["Go back", "Quit anyway"] });
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ noLink: true }));
   });
 
   it("keeps a box's own title", async () => {
@@ -29,8 +36,8 @@ describe("showMessageBox", () => {
   it("opens over the window while it is open, and on its own once it closes", async () => {
     const open = window(false);
     await showMessageBox({ message: "dohc isn't responding." }, open);
-    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith(open, { title: "dohc", message: "dohc isn't responding." });
+    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith(open, { title: "dohc", noLink: true, message: "dohc isn't responding." });
     await showMessageBox({ message: "dohc isn't responding." }, window(true));
-    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith({ title: "dohc", message: "dohc isn't responding." });
+    expect(electron.dialog.showMessageBox).toHaveBeenLastCalledWith({ title: "dohc", noLink: true, message: "dohc isn't responding." });
   });
 });
