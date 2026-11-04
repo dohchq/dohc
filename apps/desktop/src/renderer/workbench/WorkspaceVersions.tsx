@@ -2123,8 +2123,8 @@ export function ConflictReviewDialog(props: {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const liveToken = useRequestSequence();
   // Same rule as the merge dialog: a "Show more" answer may only append to
-  // the window that asked, and every window replacement (the initial load,
-  // each resolution's remaining page) advances this.
+  // the window that asked, and every window change (the initial load, each
+  // resolution's remaining page, each reread, each append) advances this.
   const windowGeneration = useRef(0);
 
   useEffect(() => {
@@ -2184,6 +2184,7 @@ export function ConflictReviewDialog(props: {
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;
+    windowGeneration.current += 1;
     setState((current) =>
       current.status === "ready"
         ? {
@@ -2198,13 +2199,19 @@ export function ConflictReviewDialog(props: {
   // A sync pass can hold a newer version behind a conflict on screen. Each
   // pass signals without paths, so read the loaded window again then. Keys
   // stay the conflict ids, so the open card and its combined copy survive.
+  // A signal during the first load, or a window that changes during the
+  // reread, reads again once the window settles.
   const stateRef = useRef(state);
   stateRef.current = state;
   useEffect(() => {
     const refresh = createActivityCoalescer(() => {
       const shown = stateRef.current;
+      if (shown.status === "loading") {
+        refresh.schedule();
+        return;
+      }
       if (shown.status !== "ready") return;
-      const token = liveToken.next();
+      const token = liveToken.current();
       const generation = windowGeneration.current;
       void (async () => {
         const rows: WorkspaceVersionConflict[] = [];
@@ -2216,7 +2223,10 @@ export function ConflictReviewDialog(props: {
               ...(after === null ? {} : { afterConflictId: after }),
             });
             if (!liveToken.isCurrent(token)) return;
-            if (generation !== windowGeneration.current) return;
+            if (generation !== windowGeneration.current) {
+              refresh.schedule();
+              return;
+            }
             rows.push(...page.conflicts);
             after = page.nextAfterConflictId;
           } while (after !== null && rows.length < shown.conflicts.length);

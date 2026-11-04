@@ -1429,6 +1429,33 @@ describe("relaySyncEngine", () => {
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
   });
 
+  it("announces a quiet pull that fetched a change it could not apply yet", async () => {
+    const onChange = vi.fn();
+    const cap = capture();
+    const sync = engine({ capture: cap, onChange });
+    await sync.start();
+    onChange.mockClear();
+
+    // Another computer's newer save waits behind an open conflict: the pull
+    // fetches it and applies nothing, and an open review must still hear it.
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 1 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledOnce();
+
+    // The echo of this computer's own upload is skipped, and a pull that
+    // fetched nothing changes nothing: both stay quiet.
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 2, skipped: 2 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    expect(onChange).toHaveBeenCalledOnce();
+    await sync.stop();
+  });
+
   it("restarts the quiet interval after every pass and leaves a failed pull's retry to the backoff", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const cap = capture();

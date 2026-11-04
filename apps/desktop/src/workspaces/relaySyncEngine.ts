@@ -462,9 +462,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
-  // Resolves true when the workspace pull or the shared-channel pass applied
-  // ops. The shared-channel pass tells the renderer itself, and the renderer
-  // then reads `syncing`, so a quiet pass must announce that it ended.
+  // Resolves true when the workspace pull applied ops or held ones it fetched,
+  // or the shared-channel pass applied ops. A held op, such as a newer save
+  // behind an open conflict, changes what an open review shows though nothing
+  // applied. The echo of this computer's own upload is skipped, so it stays
+  // quiet. The shared-channel pass tells the renderer itself, and the
+  // renderer then reads `syncing`, so a quiet pass must announce that it ended.
   async function doPass(retryClaim: boolean, pushed?: { hasMore: boolean }, guard?: { signal: AbortSignal }): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const recovered = syncFailure !== null;
@@ -583,7 +586,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         void runPass(false);
       }, guard ? debounceMs : 0);
     }
-    return pullResult.applied > 0 || sharedChannelsApplied;
+    return pullResult.applied > 0 || pullResult.fetched > pullResult.skipped || sharedChannelsApplied;
   }
 
   // What the snapshot shows a person. `syncing` and `lastSyncedAtMs` move on
@@ -612,7 +615,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
 
   // A quiet pass serves queuePull. Each change event refreshes Chats, so a
   // quiet pass announces nothing at its start, and at its end only when it
-  // applied ops, changed what the snapshot shows, or something announced
+  // applied or held ops, changed what the snapshot shows, or something announced
   // `syncing` while it ran. An idle poll then costs one pass and wakes nothing.
   // `retry` marks a pass someone asked for with retryNow. `pushed` learns
   // whether the pass's push left more behind.
@@ -658,14 +661,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         if (!guard) retryQueued = false;
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
-        let applied = false;
+        let received = false;
         let failed = false;
         let statusChanged = false;
         syncing = true;
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
-          applied = await doPass(retryClaim, pushed, guard);
+          received = await doPass(retryClaim, pushed, guard);
         } catch (error) {
           failed = !(error instanceof EngineWorkspaceShuttingDownError);
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
@@ -674,7 +677,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           statusChanged = await afterPass(failed);
           syncing = false;
           retrying = false;
-          if (!quiet || applied || statusChanged || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
+          if (!quiet || received || statusChanged || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
             emitChange();
           }
         }
