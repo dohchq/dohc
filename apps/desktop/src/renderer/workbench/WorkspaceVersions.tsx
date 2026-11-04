@@ -2126,9 +2126,10 @@ export function ConflictReviewDialog(props: {
   // the window that asked, and every window change (the initial load, each
   // resolution's remaining page, each reread, each append) advances this.
   const windowGeneration = useRef(0);
-  // "Show more" requests in flight. A reread waits for them, so neither
-  // answer discards the other.
-  const pagesLoading = useRef(0);
+  // The window a "Show more" in flight belongs to. A reread of that window
+  // waits for it, so neither answer discards the other. A page that a
+  // resolution abandoned holds nothing up.
+  const pageWindow = useRef<number | null>(null);
 
   useEffect(() => {
     const token = liveToken.next();
@@ -2179,7 +2180,7 @@ export function ConflictReviewDialog(props: {
     if (state.status !== "ready" || state.nextAfterConflictId === null) return;
     const token = liveToken.current();
     const generation = windowGeneration.current;
-    pagesLoading.current += 1;
+    pageWindow.current = generation;
     try {
       const page = await bridge().listWorkspaceVersionConflicts({
         workspaceId,
@@ -2200,7 +2201,7 @@ export function ConflictReviewDialog(props: {
           : current,
       );
     } finally {
-      pagesLoading.current -= 1;
+      if (pageWindow.current === generation) pageWindow.current = null;
     }
   }, [state, workspaceId]);
 
@@ -2214,7 +2215,7 @@ export function ConflictReviewDialog(props: {
   useEffect(() => {
     const refresh = createActivityCoalescer(() => {
       const shown = stateRef.current;
-      if (shown.status === "loading" || pagesLoading.current > 0) {
+      if (shown.status === "loading" || pageWindow.current === windowGeneration.current) {
         refresh.schedule();
         return;
       }
@@ -2242,7 +2243,7 @@ export function ConflictReviewDialog(props: {
           // The window on screen stays; the next change reads it again.
           return;
         }
-        if (pagesLoading.current > 0) {
+        if (pageWindow.current === windowGeneration.current) {
           refresh.schedule();
           return;
         }

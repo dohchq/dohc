@@ -1103,6 +1103,34 @@ describe("ConflictReviewDialog waiting version", () => {
     expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
   });
 
+  it("reads again after a resolution while the Show more it abandoned still hangs", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
+      async (payload: { afterConflictId?: string }) => {
+        if (payload.afterConflictId === undefined) {
+          return { conflicts: [syncConflict("c-1"), syncConflict("c-2")], nextAfterConflictId: "c-2" };
+        }
+        return new Promise(() => {});
+      },
+    );
+    bridgeMock.resolveWorkspaceVersionConflict.mockResolvedValue({
+      conflicts: [syncConflict("c-2")],
+      nextAfterConflictId: null,
+    });
+    openReview();
+    await settle();
+    fireEvent.click(screen.getByTestId("conflict-list-show-more"));
+    fireEvent.click(screen.getAllByTestId("version-conflict-keep-current")[0]!);
+    await settle();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [waiting("c-2")],
+      nextAfterConflictId: null,
+    });
+    await signal();
+    expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
+  });
+
   it("reads again after the first load when sync signalled during it", async () => {
     let versionsAnswer!: (value: { versions: []; activeVersionId: string }) => void;
     bridgeMock.listWorkspaceVersions.mockReturnValueOnce(
