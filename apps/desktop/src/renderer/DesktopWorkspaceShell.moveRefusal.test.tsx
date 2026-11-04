@@ -139,15 +139,16 @@ it("a failed move's row goes on its confirming listing's answer, though a newer 
     .mockResolvedValueOnce(listing("renamed.md", "b.md", "c.md"))
     .mockImplementationOnce(() => confirm.promise)
     .mockResolvedValue(listing("renamed.md", "b.md", "d.md"));
+  const asked = bridge.listWorkspaceFiles.mock.calls.length;
   act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["a.md", "renamed.md"] }));
-  await waitFor(() => expect(allowedCache(bridge).slice(-2)).toEqual([true, false]));
+  await waitFor(() => expect(allowedCache(bridge).slice(asked)).toEqual([true, false]));
   act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["b.md", "d.md"] }));
   await waitFor(() => expect(listed("d.md")).toBe(true));
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
   await act(async () => confirm.resolve(listing("renamed.md", "b.md", "c.md")));
   await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   expect(await noticeRows(user)).toEqual([]);
-  expect(allowedCache(bridge).slice(-3)).toEqual([true, false, true]);
+  expect(allowedCache(bridge).slice(asked)).toEqual([true, false, true]);
 });
 
 it("a failed move's toast and Notices row stay when its file goes but nothing arrives where it was going", async () => {
@@ -246,6 +247,8 @@ it("after an agent overwrites the taken name, the failed move's Try again says t
   const row = () => shownRows().find((candidate) => [TAKEN_WORDS, GONE_WORDS].some((words) => candidate.textContent?.includes(words)));
   await user.click(within(row()!).getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
+  // A row's Try again closes Notices.
+  await user.click(screen.getByTestId("notice-center-toggle"));
   await waitFor(() => expect(row()?.textContent).toContain(`dohc could not change these files. ${GONE_WORDS}`));
   expect(shownRows().filter((candidate) => candidate.textContent?.includes(TAKEN_WORDS))).toEqual([]);
   await user.click(within(row()!).getByRole("button", { name: "Dismiss notice" }));
@@ -279,9 +282,10 @@ it("a move that failed onto a taken name loses its row when an agent makes the m
     .mockResolvedValueOnce(listing("a.md", "b.md", "d.md"))
     .mockImplementationOnce(() => confirm.promise)
     .mockResolvedValue(listing("renamed.md", "b.md", "e.md"));
+  const asked = bridge.listWorkspaceFiles.mock.calls.length;
   // renamed.md is deleted.
   act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["renamed.md"] }));
-  await waitFor(() => expect(allowedCache(bridge).slice(-2)).toEqual([true, false]));
+  await waitFor(() => expect(allowedCache(bridge).slice(asked)).toEqual([true, false]));
   // The agent moves a.md to renamed.md.
   act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["a.md", "renamed.md"] }));
   await waitFor(() => expect(listed("e.md")).toBe(true));
@@ -289,7 +293,7 @@ it("a move that failed onto a taken name loses its row when an agent makes the m
   await act(async () => confirm.resolve(listing("a.md", "b.md", "d.md")));
   await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   expect(await noticeRows(user, TAKEN_WORDS)).toEqual([]);
-  expect(allowedCache(bridge).slice(-4)).toEqual([true, false, true, false]);
+  expect(allowedCache(bridge).slice(asked)).toEqual([true, false, true, false]);
 });
 
 // After the person moves the file again from the tree, to any name, the
