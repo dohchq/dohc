@@ -4190,7 +4190,7 @@ const automationHosts = createAutomationHosts({
   installId: localInstallationId,
   label: () => computerLabel(hostname()),
   synced: (workspaceId) => findWorkspace(workspaceId)?.remote !== undefined,
-  send: async (workspaceId, request) => {
+  send: async (workspaceId, request, signal) => {
     const workspace = findWorkspace(workspaceId);
     if (!workspace) return null;
     let credentials: CloudSessionCredentials;
@@ -4208,7 +4208,9 @@ const automationHosts = createAutomationHosts({
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(request.body),
-        signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS)])
+          : AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
       },
     );
     return { status: response.status, body: await response.json().catch(() => undefined) };
@@ -4396,8 +4398,8 @@ const workspaceHosts = createWorkspaceHosts({
 // The relay's last release or take over, read at this host generation, as
 // the engine takes it: 0 for none, with the handover when a release left it
 // for this computer. The engine checks a handover again before it takes it.
-async function automationGroupRelayRecord(workspaceId: string, generation: number): Promise<AutomationGroupRelayRecord> {
-  const kept = await automationHandoverRecord(workspaceId, generation);
+async function automationGroupRelayRecord(workspaceId: string, generation: number, signal: AbortSignal): Promise<AutomationGroupRelayRecord> {
+  const kept = await automationHandoverRecord(workspaceId, generation, signal);
   if (kept === null) return { generation: 0, handover: null };
   return {
     generation: typeof kept.generation === "number" ? kept.generation : 0,
@@ -4407,8 +4409,8 @@ async function automationGroupRelayRecord(workspaceId: string, generation: numbe
 
 // The same record, as the executor takes the last host's reach verdicts:
 // verdicts it cannot read count as none, so it holds what it cannot prove.
-async function automationReachRelayRecord(workspaceId: string, generation: number): Promise<ReachRelayRecord> {
-  const kept = await automationHandoverRecord(workspaceId, generation);
+async function automationReachRelayRecord(workspaceId: string, generation: number, signal: AbortSignal): Promise<ReachRelayRecord> {
+  const kept = await automationHandoverRecord(workspaceId, generation, signal);
   if (kept === null) return { generation: 0, reach: null, everShared: false };
   if (typeof kept.everShared !== "boolean") throw new Error("The relay's Group handover read did not say whether the workspace was shared.");
   return {
@@ -4419,10 +4421,12 @@ async function automationReachRelayRecord(workspaceId: string, generation: numbe
 }
 
 // The relay's last release or take over at this host generation, or null
-// for a workspace that does not sync. Throws when the relay does not answer.
+// for a workspace that does not sync. Throws when the relay does not answer,
+// or when `signal` aborts.
 async function automationHandoverRecord(
   workspaceId: string,
   generation: number,
+  signal: AbortSignal,
 ): Promise<{ generation: unknown; groups: NonNullable<unknown> | null; reach: NonNullable<unknown> | null; everShared: unknown } | null> {
   const entry = findWorkspace(workspaceId);
   if (!entry?.remote) return null;
@@ -4430,7 +4434,7 @@ async function automationHandoverRecord(
   const response = await relayShareResponseWithCredentials(
     credentials,
     `/sync/${encodeURIComponent(workspaceId)}/automation-host/groups?generation=${generation}`,
-    { method: "GET", signal: AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS) },
+    { method: "GET", signal: AbortSignal.any([signal, AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS)]) },
   );
   const body: unknown = await response.json().catch(() => undefined);
   const kept = response.status === 200 && body && typeof body === "object" && (body as { ok?: unknown }).ok === true
@@ -4619,9 +4623,9 @@ function createCollectionAutomationsFor(
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
     groupHost: () => workspaceHosts.groupHost(workspaceId),
-    groupRelayRecord: (generation) => automationGroupRelayRecord(workspaceId, generation),
-    reachRelayRecord: (generation) => automationReachRelayRecord(workspaceId, generation),
-    requestHost: () => automationHosts.admit(workspaceId),
+    groupRelayRecord: (generation, signal) => automationGroupRelayRecord(workspaceId, generation, signal),
+    reachRelayRecord: (generation, signal) => automationReachRelayRecord(workspaceId, generation, signal),
+    requestHost: (signal) => automationHosts.admit(workspaceId, signal),
     groupMessagesSkipped: (reason, atMs) => noticeStore().postNotice(groupMessagesNotice({ workspaceId, reason, atMs })),
     readMessageBody: (messageId) => withWorkspaceAttachmentAsync(workspace, async (lease) =>
       (await linkedChatStoreFor(lease).getMessage({ workspaceId, messageId })).body),

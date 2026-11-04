@@ -49,7 +49,7 @@ const electronExecutable = require("electron") as string;
 const launchedApps = new WeakMap<Page, ElectronApplication>();
 
 /** Settles as `work` does, or with null once `ms` pass first. */
-async function within<T>(work: Promise<T>, ms: number): Promise<T | null> {
+export async function within<T>(work: Promise<T>, ms: number): Promise<T | null> {
   void work.catch(() => undefined);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), ms); });

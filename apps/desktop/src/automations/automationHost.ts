@@ -74,8 +74,8 @@ export interface AutomationHostsDependencies {
   label(): string;
   /** Whether the workspace syncs through a relay now. */
   synced(workspaceId: string): boolean;
-  /** Sends one owner request for the workspace. Throws when no answer arrives. */
-  send(workspaceId: string, request: HostRequest): Promise<HostAnswer>;
+  /** Sends one owner request for the workspace. Throws when no answer arrives, or when `signal` aborts. */
+  send(workspaceId: string, request: HostRequest, signal?: AbortSignal): Promise<HostAnswer>;
   /** The copy kept across restarts: absent before any read, null when the relay recorded no host. */
   stored(workspaceId: string): unknown;
   store(workspaceId: string, host: RelayAutomationHost | null): void;
@@ -390,14 +390,14 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     }, state.handoverDelayMs);
   }
 
-  async function read(workspaceId: string, state: HostState): Promise<void> {
+  async function read(workspaceId: string, state: HostState, signal?: AbortSignal): Promise<void> {
     for (;;) {
       const claim = state.claims;
       try {
         const answer = await dependencies.send(workspaceId, {
           action: "check-in",
           body: { installId: dependencies.installId(), label: dependencies.label(), claim },
-        });
+        }, signal);
         if (states.get(workspaceId) !== state) return;
         if (answer === null) {
           state.retry = true;
@@ -411,6 +411,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
         apply(workspaceId, state, host);
       } catch (error) {
         state.retry = true;
+        // The workspace closed: the next open reads again.
+        if (signal?.aborted) return;
         dependencies.logError(workspaceId, error);
         failedUnnamed(workspaceId, state);
         return;
@@ -432,8 +434,8 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
     dependencies.hostChanged(workspaceId);
   }
 
-  function refresh(workspaceId: string, state: HostState): Promise<void> {
-    state.reading ??= read(workspaceId, state).finally(() => {
+  function refresh(workspaceId: string, state: HostState, signal?: AbortSignal): Promise<void> {
+    state.reading ??= read(workspaceId, state, signal).finally(() => {
       state.reading = null;
     });
     return state.reading;
@@ -581,13 +583,23 @@ export function createAutomationHosts(dependencies: AutomationHostsDependencies)
      * has not learned one yet. After such a read failed it waits for
      * nothing: the next sync pull reads again. A workspace that does not
      * sync reads nothing, and claims the host at its first read once it syncs.
+     * Resolves at once when `signal` aborts, and a read it started stops.
      */
-    async admit(workspaceId: string): Promise<void> {
+    async admit(workspaceId: string, signal: AbortSignal): Promise<void> {
       const state = states.get(workspaceId);
-      if (!state?.open) return;
+      if (!state?.open || signal.aborted) return;
       state.claims = true;
-      if ((state.host ?? null) !== null || state.failedUnnamed) return;
-      if (dependencies.synced(workspaceId)) await refresh(workspaceId, state);
+      if ((state.host ?? null) !== null || state.failedUnnamed || !dependencies.synced(workspaceId)) return;
+      const reading = refresh(workspaceId, state, signal);
+      // A read another caller started does not stop, so admit stops waiting.
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          signal.removeEventListener("abort", done);
+          resolve();
+        };
+        signal.addEventListener("abort", done);
+        void reading.then(done);
+      });
     },
 
     /**

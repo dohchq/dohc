@@ -5583,7 +5583,7 @@ describe("Collection automations that a Group message starts", () => {
           everShared,
         };
       },
-      requestHost: () => hosts.admit("ws"),
+      requestHost: (signal) => hosts.admit("ws", signal),
     });
     hosts.open("ws");
     const armed = () => timers.filter((timer) => !timer.done);
@@ -6380,6 +6380,140 @@ describe("Collection automations that a Group message starts", () => {
 
     expect(claim).toMatchObject({ state: "failed", error: "bob@dohc.test cannot read Trip." });
     expect(added(w)).toEqual([]);
+  });
+
+  describe("when the workspace closes during a relay read", () => {
+    const watched = { automationId: "collection:Tasks#task", groupId: "trip", startsWith: "/task" };
+    // A relay that took the request and never answers: only the close ends it.
+    // Without a signal, as on main, it never ends.
+    const untilAborted = (signal: AbortSignal | undefined) =>
+      new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+    // Fails unless the close ends within 1 s. The relay requests' own limit is 15 s.
+    const promptly = async (closing: Promise<void>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([closing, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("The close waited for the relay.")), 1_000);
+        })]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    // The engine watches Trip from the last session. This computer opens as
+    // the host at generation 3, and `relay` answers its reads.
+    async function hostAt3(relay: Partial<CollectionAutomationsOptions>) {
+      const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+      w.subscriptions.set(watched.automationId, watched);
+      await w.baseStore.saveSubscriptions([watched]);
+      // Every change to the engine's subscriptions or the saved state.
+      const changes: string[] = [];
+      const { subscribeAutomation, unsubscribeAutomation, watchAutomationGroups, releaseAutomationGroups } = w.engine;
+      w.engine.subscribeAutomation = async (input) => { changes.push("subscribe"); return await subscribeAutomation(input); };
+      w.engine.unsubscribeAutomation = async (input) => { changes.push("unsubscribe"); return await unsubscribeAutomation(input); };
+      w.engine.watchAutomationGroups = async (input) => { changes.push("watch Groups"); return await watchAutomationGroups(input); };
+      w.engine.releaseAutomationGroups = async () => { changes.push("release Groups"); return await releaseAutomationGroups(); };
+      const executor = w.makeExecutor({
+        groupHost: async () => 3,
+        reachRelayRecord: async () => ({ generation: 3, reach: null, everShared: false }),
+        ...relay,
+        store: {
+          ...w.baseStore,
+          saveSubscriptions: async (saved) => { changes.push("save subscriptions"); await w.baseStore.saveSubscriptions(saved); },
+          saveReachVerdicts: async (reach) => { changes.push("save verdicts"); await w.baseStore.saveReachVerdicts(reach); },
+        },
+      });
+      const opening = executor.open();
+      return { w, executor, changes, opening };
+    }
+
+    // The close aborts the read, ends at once, and leaves the subscriptions
+    // and verdicts as the read found them, with nothing reported.
+    async function closeDuringRead(opened: Awaited<ReturnType<typeof hostAt3>>, reading: Promise<void>) {
+      const { w, executor, changes } = opened;
+      await reading;
+      const before = changes.length;
+      const saved = await w.baseStore.readReachVerdicts();
+      await promptly(executor.dispose());
+      expect(changes.slice(before)).toEqual([]);
+      expect(subscribed(w), "the engine still watches Trip").toBe(true);
+      expect(await w.baseStore.readSubscriptions()).toEqual([watched]);
+      expect(await w.baseStore.readReachVerdicts()).toEqual(saved);
+      expect(w.errors).toEqual([]);
+      return saved;
+    }
+
+    it("stops the reach verdicts read, then reads again at the next open", async () => {
+      const reading = Promise.withResolvers<void>();
+      const first = await hostAt3({
+        reachRelayRecord: async (_generation, signal) => {
+          reading.resolve();
+          await untilAborted(signal);
+          throw signal.reason;
+        },
+      });
+      const saved = await closeDuringRead(first, reading.promise);
+      expect(saved, "the claims mark from before the read").toMatchObject({ pending: 3, taken: null, hostRecord: 0 });
+
+      // The next start holds its claims until the read answers.
+      const { w } = first;
+      const asked: number[] = [];
+      const answer = Promise.withResolvers<void>();
+      const asking = Promise.withResolvers<void>();
+      const claim = messageClaim(w);
+      const again = w.makeExecutor({
+        groupHost: async () => 3,
+        reachRelayRecord: async (generation) => {
+          asked.push(generation);
+          asking.resolve();
+          await answer.promise;
+          return { generation: 3, reach: null, everShared: false };
+        },
+      });
+      void again.open();
+      await asking.promise;
+      expect(asked).toEqual([3]);
+      expect(claim.state).toBe("pending");
+      answer.resolve();
+      await w.settledClaim(claim);
+      expect(claim.state).toBe("done");
+      expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3, hostRecord: 3 });
+      await again.dispose();
+    });
+
+    it("stops the Group handover read", async () => {
+      const reading = Promise.withResolvers<void>();
+      const opened = await hostAt3({
+        groupRelayRecord: async (_generation, signal) => {
+          reading.resolve();
+          await untilAborted(signal);
+          throw signal.reason;
+        },
+      });
+      await closeDuringRead(opened, reading.promise);
+      expect(opened.w.relayRecords).toEqual([]);
+    });
+
+    it("stops the host check-in", async () => {
+      const reading = Promise.withResolvers<void>();
+      const opened = await hostAt3({
+        requestHost: async (signal) => {
+          reading.resolve();
+          await untilAborted(signal);
+        },
+      });
+      await closeDuringRead(opened, reading.promise);
+    });
+
+    it("still goes on as before when the reach verdicts read fails while the workspace stays open", async () => {
+      const { w, executor, changes, opening } = await hostAt3({
+        reachRelayRecord: async () => { throw new TypeError("fetch failed"); },
+      });
+      await opening;
+      expect(w.errors.map(({ context }) => context)).toContain("read the last automation host's reach verdicts");
+      expect(changes, "off the host until it takes the verdicts").toContain("release Groups");
+      expect(subscribed(w)).toBe(false);
+      await executor.dispose();
+    });
   });
 
 
