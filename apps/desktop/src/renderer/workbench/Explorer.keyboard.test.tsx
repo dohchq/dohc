@@ -238,6 +238,7 @@ describe("macOS file tree keys", () => {
   });
 });
 
+// A share view's delete always asks first, so these tests use one.
 describe("the delete dialog by keyboard", () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -245,7 +246,7 @@ describe("the delete dialog by keyboard", () => {
     const deleteWorkspacePath = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("dohcDesktop", { platform: "win32", deleteWorkspacePath });
     const user = userEvent.setup();
-    render(<Fixture {...explorerProps()} />);
+    render(<Fixture {...explorerProps({ shareView: { granterEmail: "owner@example.test" } })} />);
     await user.click(row("notes.md"));
     await user.keyboard("{Delete}");
     return { user, deleteWorkspacePath };
