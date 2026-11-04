@@ -51,7 +51,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
     },
     () => undefined,
   );
-  const spawn = (command: string, assertMayStart = () => undefined, profile?: AgentLaunchProfile, dohcTools: RunDohcTools = "reply") =>
+  const spawn = (command: string, assertMayStart: () => void = () => undefined, profile?: AgentLaunchProfile, dohcTools: RunDohcTools = "reply") =>
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
@@ -494,12 +494,13 @@ describe("chat runner process", () => {
       },
     }, () => undefined);
     for (const executable of ["codex.cmd", "codex.exe"]) {
-      runner.spawnConfiguredRunner({
+      await runner.spawnConfiguredRunner({
         rootPath: workspace!,
         runId: "run-1",
         logPath: join(scratch, "run.log"),
         command: "",
         profile: { tool: "codex", executable: join(scratch, executable) },
+        dohcTools: "all",
         prompt: "",
         assertMayStart: () => undefined,
       });
