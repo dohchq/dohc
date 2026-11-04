@@ -63,7 +63,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     beforePresent:present?"null":"present",payloadBeforeBlobSha256:present?null:datasetSha,payloadBeforePath:present?null:datasetPath,
     payloadAfterBlobSha256:present?datasetSha:null,payloadAfterPath:present?datasetPath:null,
     ...(present?{payloadAfterContentKind:"text",payloadAfterByteLength:datasetFile.byteLength}:{}),metadata:{origin:"api"}})}]});
-  pushDatasetFile(1,true);
+  pushDatasetFile(0,true);
   storage.createFileLinkShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",selectorJson:JSON.stringify({paths:["fundraiser"],versionId:null}),createdAtMs:1},
     grant:{grantId:"g",shareId:"s",principalKind:"link",principalUserId:null,principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null},
     credential:{credentialId:"credential",grantId:"g",secretHash:hashLinkBearer(secret,linkKey),generation:1,mintedAtMs:1,retiredAtMs:null},guard(){}});
@@ -109,7 +109,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     },
   });
   return {application,publicationId,secret,calls,compiler:prepared.candidate.compilerIdentity,
-    deleteCollectionFile:()=>pushDatasetFile(2,false),advance(ms:number){clockOffset+=ms;},
+    deleteCollectionFile:()=>pushDatasetFile(1,false),advance(ms:number){clockOffset+=ms;},
     counts:()=>({participants:Number(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants").get()!.n),
       profiles:profiles.size,
       receipts:Number(storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n)}),
