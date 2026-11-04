@@ -50,8 +50,8 @@ describe("agent launch profiles", () => {
   it("lets a last flag that needs a value take only a repeat of what dohc sets later", () => {
     const codex = agentProfileArguments({ tool: "codex", executable: "/bin/codex", arguments: ["--model"] });
     expect(codex.slice(0, 5)).toEqual(["exec", "--model", "--config=approval_policy=never", "--config", "approval_policy=never"]);
-    const claude = agentProfileArguments({ tool: "claude", executable: "/bin/claude", arguments: ["--settings"] });
-    expect(claude.slice(0, 3)).toEqual(["-p", "--settings", "--setting-sources=user"]);
+    const claude = agentProfileArguments({ tool: "claude", executable: "/bin/claude", arguments: ["--model"] });
+    expect(claude.slice(0, 3)).toEqual(["-p", "--model", "--setting-sources=user"]);
     expect(claude.slice(3, 8)).toEqual(["--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user"]);
   });
   it("leaves the person's own flags out of a reply-only run, and keeps them in the owner's", () => {
@@ -93,6 +93,14 @@ describe("agent launch profiles", () => {
       expect(AgentLaunchProfile.safeParse({ tool: "codex", executable: "/bin/codex", arguments: flags }).success).toBe(true);
     }
   });
+  it("rejects Claude Code flags that end with a flag that reads a path", () => {
+    for (const last of ["--settings", "--mcp-config", "--plugin-dir", "--add-dir", "--system-prompt-file", "--append-system-prompt-file", "--agents", "--debug-file"]) {
+      expect(AgentLaunchProfile.safeParse({ tool: "claude", executable: "/bin/claude", arguments: ["--model", "opus", last] }).success).toBe(false);
+      expect(launchFromCommand(`/bin/claude --model opus ${last}`, { tool: "claude", executable: "/bin/claude" })).toEqual({ command: `/bin/claude --model opus ${last}` });
+      expect(AgentLaunchProfile.safeParse({ tool: "claude", executable: "/bin/claude", arguments: [last, "settings.json"] }).success).toBe(true);
+    }
+    expect(AgentLaunchProfile.safeParse({ tool: "codex", executable: "/bin/codex", arguments: ["--add-dir"] }).success).toBe(true);
+  });
   it("preserves the raw command and round-trips spaces, quotes and backslashes", () => {
     expect(launchCommand({ command: ' node "agent script.mjs" ' })).toBe('node "agent script.mjs"');
     const flags = ["--add-dir", "C:\\My Work\\", "a\\\"b", "", "D:\\"];
@@ -130,7 +138,7 @@ describe("a typed command", () => {
   it("adds the person's flags to the profile", () => {
     const claude = { tool: "claude", executable: "C:\\Tools\\claude.exe" } as const;
     expect(launchFromCommand("C:\\Tools\\claude.exe --model opus", claude)).toEqual({ ...claude, arguments: ["--model", "opus"] });
-    const codex = { tool: "codex", executable: "C:\\npm\\codex.CMD", arguments: ["--model", "o3"] } as const;
+    const codex: AgentLaunchProfile = { tool: "codex", executable: "C:\\npm\\codex.CMD", arguments: ["--model", "o3"] };
     expect(launchFromCommand('"C:\\npm\\codex.CMD" -c', codex)).toEqual({ tool: "codex", executable: "C:\\npm\\codex.CMD", arguments: ["-c"] });
     expect(launchFromCommand('"C:\\npm\\codex.CMD"', codex)).toEqual({ tool: "codex", executable: "C:\\npm\\codex.CMD" });
   });
