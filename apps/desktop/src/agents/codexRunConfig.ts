@@ -71,6 +71,24 @@ function choosesWindowsSandbox(value: unknown): boolean {
   return Object.values(value).some(choosesWindowsSandbox);
 }
 
+// Whether the system requirements keep a read-only Windows run out of the
+// unelevated sandbox, by leaving it out of the sandboxes they allow or by
+// requiring MXC. A requirements file dohc can't read or parse counts as yes.
+export function codexRequirementsRefuseReadOnly(
+  files: CodexConfigFiles | null,
+  platform: NodeJS.Platform,
+  read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): boolean {
+  if (platform !== "win32") return false;
+  const tables = files && readConfigTables(files.requirements, read);
+  if (tables === null) return true;
+  return tables.some(({ table }) => {
+    if (!isTable(table.windows)) return false;
+    const allowed = table.windows.allowed_sandbox_implementations;
+    return table.windows.require_mxc === true || (allowed !== undefined && !(Array.isArray(allowed) && allowed.includes("unelevated")));
+  });
+}
+
 // Codex applies [sandbox_workspace_write] only without a named profile, so
 // the run's profile carries these over itself.
 function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp"): boolean {
@@ -251,14 +269,15 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
 //   changes things only through dohc's tools.
 // - A permissions profile keeps the workspace's .dohc folder read-only. Its
 //   name is new for each run, because Codex merges a profile of the same name
-//   from the person's config into it. A read-only run uses Codex's built-in
-//   read-only profile instead, and takes none of the person's writable_roots;
-//   Codex refuses an unknown built-in name.
+//   from the person's config into it. A read-only run's profile reads only
+//   the workspace and takes none of the person's writable_roots.
 // - Mark the folder untrusted so Codex doesn't trust it on its own or load
 //   its .codex config.
 // - Codex runs Windows commands only in a sandbox the person or their
 //   organization chose. Without a choice it gets the unelevated one, which
-//   needs no setup.
+//   needs no setup. A read-only run always gets the unelevated one, without
+//   MXC, and doesn't start where the requirements rule that out
+//   (codexRequirementsRefuseReadOnly).
 export function codexRunConfig(input: {
   rootPath: string;
   runId: string;
@@ -306,12 +325,18 @@ export function codexRunConfig(input: {
   return [
     ...[
       ...(input.readOnly
-        // A model can start sub-agents whatever multi_agent says, unless
-        // agents.enabled is false and multi_agent_v2 is off.
-        ? ["default_permissions=':read-only'", ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`), "web_search='disabled'", "notify=[]", "agents.enabled=false"]
+        ? [
+          `permissions.${profile}={filesystem={':workspace_roots'='read'}}`, `default_permissions='${profile}'`,
+          ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`), "web_search='disabled'", "notify=[]",
+          // A model can start sub-agents whatever multi_agent says, unless
+          // agents.enabled is false and multi_agent_v2 is off.
+          "agents.enabled=false",
+        ]
         : [`permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`, `default_permissions='${profile}'`]),
       `projects={${projects.join(",")}}`,
-      ...(tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
+      ...(input.platform === "win32" && input.readOnly
+        ? ["windows.sandbox='unelevated'", "windows.allow_mxc=false"]
+        : tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
     ].flatMap((entry) => ["--config", entry]),
     ...(input.readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(input.replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : [])
       .flatMap((feature) => ["--disable", feature]),

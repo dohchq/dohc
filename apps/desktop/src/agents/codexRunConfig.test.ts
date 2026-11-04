@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join, posix, win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "smol-toml";
-import { type CodexConfigFiles, codexConfigFiles, codexMayRunWithoutLogin, codexRunConfig, codexTrustKeys, READ_ONLY_DISABLED_FEATURES } from "./codexRunConfig";
+import { type CodexConfigFiles, codexConfigFiles, codexMayRunWithoutLogin, codexRequirementsRefuseReadOnly, codexRunConfig, codexTrustKeys, READ_ONLY_DISABLED_FEATURES } from "./codexRunConfig";
 import { createTestScratch } from "../workspaces/testTemp";
 
 const SYSTEM = "C:\\ProgramData\\OpenAI\\Codex\\config.toml";
@@ -102,7 +102,7 @@ describe("a dohc Codex run", () => {
     expect(entry(other, "default_permissions=")).not.toBe(`default_permissions=${profile}`);
   });
 
-  it("can't write anywhere when read-only, starts none of the person's own tools, and still doesn't trust the workspace", () => {
+  it("only reads the workspace when read-only, starts none of the person's own tools, and still doesn't trust the workspace", () => {
     const entries = codexRunConfig({
       rootPath: "C:\\Users\\Sam\\dohc\\personal", runId: "run_1", platform: "win32", files: { requirements: [], config: [SYSTEM, USER] }, readOnly: true, replyOnly: true, realPath: (path) => path,
       readConfig: (path) => ({
@@ -110,8 +110,11 @@ describe("a dohc Codex run", () => {
         [USER]: "notify = ['notifier']\n[mcp_servers.github]\ncommand = 'gh'\n[mcp_servers.org-docs]\nenabled = true\n[mcp_servers.dohc]\ncommand = 'old'\n",
       })[path] ?? missing(path),
     });
+    const profile = entry(entries, "default_permissions=")!.slice("default_permissions=".length);
+    expect(profile).toMatch(/^'dohc_run_[0-9a-f]{16}'$/u);
     expect(entries).toEqual([
-      "--config", "default_permissions=':read-only'",
+      "--config", `permissions.${profile.slice(1, -1)}={filesystem={':workspace_roots'='read'}}`,
+      "--config", `default_permissions=${profile}`,
       "--config", "mcp_servers.org-docs.enabled=false",
       "--config", "mcp_servers.github.enabled=false",
       "--config", "web_search='disabled'",
@@ -119,6 +122,7 @@ describe("a dohc Codex run", () => {
       "--config", "agents.enabled=false",
       "--config", "projects={'c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'},'\\\\?\\c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'}}",
       "--config", "windows.sandbox='unelevated'",
+      "--config", "windows.allow_mxc=false",
       ...["plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
         "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "token_budget",
         "shell_tool", "unified_exec", "view_image"].flatMap((feature) => ["--disable", feature]),
@@ -211,6 +215,59 @@ describe("a dohc Codex run", () => {
     expect(entry(codexRunConfig({ rootPath: "/w", runId: "run_1", platform: "darwin", files: NONE }), "windows.sandbox=")).toBeUndefined();
   });
 
+  it("always gives a read-only Windows run the unelevated sandbox without MXC", () => {
+    const windows = (files: Record<string, string>, paths: CodexConfigFiles | null = { requirements: [REQUIREMENTS], config: [SYSTEM, USER] }, platform: NodeJS.Platform = "win32") =>
+      codexRunConfig({ rootPath: WORKSPACE, runId: "run_1", platform, files: paths, readOnly: true, replyOnly: true, readConfig: (path) => files[path] ?? missing(path), ...disk("win32", [WORKSPACE]) })
+        .filter((value, index, entries) => entries[index - 1] === "--config" && value.startsWith("windows."));
+    const unelevated = ["windows.sandbox='unelevated'", "windows.allow_mxc=false"];
+    expect(windows({})).toEqual(unelevated);
+    expect(windows({ [USER]: "[windows]
+sandbox = 'elevated'
+allow_mxc = true
+" })).toEqual(unelevated);
+    expect(windows({ [USER]: "[features]
+prefer_mxc = true
+" })).toEqual(unelevated);
+    expect(windows({ [REQUIREMENTS]: "[windows]
+allowed_sandbox_implementations = ['elevated', 'unelevated']
+" })).toEqual(unelevated);
+    expect(windows({ [USER]: "[windows
+" })).toEqual(unelevated);
+    expect(windows({}, null)).toEqual(unelevated);
+    expect(windows({}, NONE, "linux")).toEqual([]);
+  });
+
+  it("refuses a read-only Windows run where the requirements rule out the unelevated sandbox, or can't be read", () => {
+    const refuses = (text: string | null, platform: NodeJS.Platform = "win32") =>
+      codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER] }, platform, (path) => path === REQUIREMENTS && text !== null ? text : missing(path));
+    expect(refuses(null)).toBe(false);
+    expect(refuses("model = 'gpt-5'
+")).toBe(false);
+    expect(refuses("[windows]
+allowed_sandbox_implementations = ['elevated', 'unelevated']
+")).toBe(false);
+    expect(refuses("[windows]
+allow_mxc = false
+require_mxc = false
+")).toBe(false);
+    expect(refuses("[windows]
+allowed_sandbox_implementations = ['elevated']
+")).toBe(true);
+    expect(refuses("[windows]
+allowed_sandbox_implementations = []
+")).toBe(true);
+    expect(refuses("[windows]
+require_mxc = true
+")).toBe(true);
+    expect(refuses("[windows
+")).toBe(true);
+    expect(codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [] }, "win32", () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })).toBe(true);
+    expect(codexRequirementsRefuseReadOnly(null, "win32")).toBe(true);
+    expect(refuses("[windows]
+require_mxc = true
+", "linux")).toBe(false);
+  });
+
   it("carries the person's network access into the run's profile", () => {
     const profile = (files: Record<string, string>) => entry(windowsRun(files), "permissions.");
     const network = "[sandbox_workspace_write]\nnetwork_access = true\n";
@@ -293,8 +350,8 @@ describe("a dohc Codex run", () => {
     for (const replyOnly of [true, false]) {
       const { entries, realPath, readLink, fileId, listFolder } = run({ readOnly: true, replyOnly });
       expect(entries.filter((arg) => arg.toLowerCase().includes("c:\\other") || arg.includes("'write'"))).toEqual([]);
-      expect(entries.filter((arg) => arg.startsWith("permissions."))).toEqual([]);
-      expect(entries.filter((arg) => arg.startsWith("default_permissions="))).toEqual(["default_permissions=':read-only'"]);
+      expect(filesystem(entries)).toEqual({ ":workspace_roots": "read" });
+      expect(entries.filter((arg) => arg.startsWith("default_permissions="))).toEqual([expect.stringMatching(/^default_permissions='dohc_run_[0-9a-f]{16}'$/u)]);
       expect(fileId).not.toHaveBeenCalled();
       expect(listFolder).not.toHaveBeenCalled();
       expect(readLink).not.toHaveBeenCalled();

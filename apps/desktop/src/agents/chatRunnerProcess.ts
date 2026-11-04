@@ -5,7 +5,7 @@ import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:chil
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
-import { type CodexConfigFiles, codexConfigFiles, codexRunConfig } from "./codexRunConfig";
+import { type CodexConfigFiles, codexConfigFiles, codexRequirementsRefuseReadOnly, codexRunConfig } from "./codexRunConfig";
 
 export const RUNNER_KILL_GRACE_MS = 10_000;
 
@@ -410,6 +410,9 @@ export function createChatRunnerProcess(
     const codexBehindCmd = input.profile?.tool === "codex"
       && resolveSpawnCommand(input.profile.executable, [], { env, platform, cwd: input.rootPath }).windowsVerbatimArguments === true;
     const readOnly = input.dohcTools === "reply";
+    const codexFiles = input.profile?.tool === "codex"
+      ? options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform)
+      : null;
     const runArguments = input.profile
       ? [
         ...replyServerArguments({
@@ -420,7 +423,7 @@ export function createChatRunnerProcess(
             rootPath: input.rootPath,
             runId: input.runId,
             platform,
-            files: options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform),
+            files: codexFiles,
             behindCmd: codexBehindCmd,
             readOnly,
             replyOnly: input.dohcTools === "reply",
@@ -466,6 +469,9 @@ export function createChatRunnerProcess(
       );
     }
     if (readOnly && input.profile?.tool === "codex") {
+      if (codexRequirementsRefuseReadOnly(codexFiles, platform)) {
+        throw new Error("Your organization's Codex settings don't allow automations to start this agent.");
+      }
       await checkCodexServers(executable, runArguments, env, input.rootPath);
     }
     try {
