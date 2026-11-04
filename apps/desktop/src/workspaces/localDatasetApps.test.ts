@@ -106,6 +106,22 @@ describe("local approved dataset apps", () => {
     await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).rejects.toThrow("These Collections are on Laptop.");
   });
 
+  it("still matches an approval whose candidate has no display words, and shows what each operation does beside it", async () => {
+    const f = await fixture();
+    const stored = f.app.candidate.capabilities[0];
+    if (stored?.kind !== "dataset") throw new Error("Expected Dataset app.");
+    // The candidate, and so the approval's identity, holds only what an approval made before display words held.
+    expect(JSON.stringify(f.app.candidate)).not.toContain("display");
+    expect(f.published.publicationId).toBe(hash(JSON.stringify(["dohc-local-dataset-app-v1", "w", f.app.candidate])));
+    const [row] = f.host.apps.list("app");
+    if (!row || !("datasetCapability" in row)) throw new Error("Expected Dataset app.");
+    expect(row).toMatchObject({ active: true, approved: true });
+    expect(row.datasetCapability.operations.map(operation => operation.display)).toEqual([{ kind: "create", label: "Submit", fields: ["Name", "Receipt"] }]);
+    expect({ ...row.datasetCapability, operations: row.datasetCapability.operations.map(({ display: _, ...operation }) => operation) }).toEqual(stored);
+    expect(await f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).toMatchObject({ replayed: false });
+    expect(await f.host.apps.activate(f.app, new AbortController().signal)).toEqual(f.published);
+  });
+
   it("persists approval provenance with the captured candidate without changing app authority", async () => {
     const f = await fixture();
     await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);

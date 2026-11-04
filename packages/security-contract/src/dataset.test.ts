@@ -2,7 +2,7 @@ import { generateDatasetOperations } from "./datasetOperations";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { datasetBaseFolder, datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision } from "./dataset";
-import { effectiveDatasetOperations, hasGeneratedDatasetRevision, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
+import { displayAppDatasetCapability, effectiveDatasetOperations, hasGeneratedDatasetRevision, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -130,6 +130,26 @@ describe("dataset publication binding", () => {
     expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
     requested.operationIds.push(id(7));
     expect(capability.operationIds).toEqual([id(5), id(6)]);
+  });
+
+  it("shows what each operation does beside the capability, and keeps it out of what an approval verifies", () => {
+    const approved = revision();
+    const capability = resolveAppDatasetCapability(binding(approved), approved);
+    const shown = displayAppDatasetCapability(capability, approved);
+    expect(shown.operations.map(operation => operation.display)).toEqual([
+      { kind: "create", label: "Submit", fields: ["Name"] },
+      { kind: "read", label: "View responses", fields: ["Record ID", "Name"] },
+      { kind: "delete", label: "Delete response", fields: [] },
+    ]);
+    expect(parseAppDatasetCapability(shown)).toEqual(shown);
+    // A capability approved before Review app showed these words still verifies, unchanged. One that carries them does not.
+    expect(capability.operations.some(operation => "display" in operation)).toBe(false);
+    expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
+    expect(() => verifyAppDatasetCapability(shown, approved)).toThrow();
+    expect(() => displayAppDatasetCapability(capability, { ...approved, revision: 2 })).toThrow();
+    // A generated form's narrower create shows only the fields it writes.
+    const narrowed = resolveAppDatasetCapability({ ...binding(approved), createFields: [{ operationId: id(5), fieldIds: [] }] }, approved);
+    expect(displayAppDatasetCapability(narrowed, approved).operations[0]!.display).toEqual({ kind: "create", label: "Submit", fields: [] });
   });
 
   it.each(["source", "schemaSql", "operations", "dataPath"])("refuses %s supplied by a consumer binding", key => {

@@ -563,9 +563,11 @@ describe("owner app publication", () => {
   describe("review on this device", () => {
     type LocalRow = Extract<OwnerAppPublicationResult, { kind: "localListed" }>["publications"][number];
     type Capability = Extract<OwnerAppPublicationResult, { kind: "prepared" }>["capabilities"][number];
-    const listOperation = { operationId: "00000000-0000-4000-8000-000000000003", name: "list", access: "helper" as const, readOnly: true };
-    const cancelOperation = { operationId: "00000000-0000-4000-8000-000000000007", name: "cancel", access: "link" as const, readOnly: false };
-    const submitOperation = datasetCapability.operations[0]!;
+    const listOperation = { operationId: "00000000-0000-4000-8000-000000000003", name: "list", access: "helper" as const, readOnly: true,
+      display: { kind: "read" as const, label: "View orders", fields: ["Item", "Status"] } };
+    const cancelOperation = { operationId: "00000000-0000-4000-8000-000000000007", name: "cancel", access: "link" as const, readOnly: false,
+      display: { kind: "action" as const, label: "Cancel order", fields: [] } };
+    const submitOperation = { ...datasetCapability.operations[0]!, display: { kind: "create" as const, label: "Submit", fields: ["Item", "Quantity"] } };
     const approvedAccess = { ...datasetCapability, operationIds: [listOperation.operationId, submitOperation.operationId], operations: [listOperation, submitOperation] };
     const grownAccess = { ...approvedAccess, operationIds: [...approvedAccess.operationIds, cancelOperation.operationId], operations: [listOperation, submitOperation, cancelOperation] };
     const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), datasetCapability: approvedAccess, approved: true, active: true };
@@ -598,6 +600,8 @@ describe("owner app publication", () => {
     const ready = () => waitFor(() => expect(approveButton().disabled).toBe(false));
     // The text beside Reads or Changes in the access box.
     const reach = (term: "Reads" | "Changes") => within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.textContent;
+    // Each line beside Reads or Changes.
+    const lines = (term: "Reads" | "Changes") => Array.from(within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.children ?? [], line => line.textContent);
     const dialog = () => screen.queryByTestId("app-publication-dialog");
 
     it("asks for a first approval, shows what the app reaches, and approves and opens it", async () => {
@@ -613,8 +617,8 @@ describe("owner app publication", () => {
       expect(actions("checkLocal")).toEqual([{ action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip" }]);
       const access = screen.getByTestId("app-access");
       expect(within(access).getByText("Orders")).toBeTruthy();
-      expect(reach("Reads")).toBe("list");
-      expect(reach("Changes")).toBe("submit");
+      expect(reach("Reads")).toBe("Item, Status");
+      expect(reach("Changes")).toBe("Adds records with Item, Quantity");
       expect(within(access).queryByText("New")).toBeNull();
       expect(access.textContent).toContain("It can send what it receives to other websites.");
       expect(screen.getByRole("heading", { name: "What it can reach" })).toBeTruthy();
@@ -668,8 +672,8 @@ describe("owner app publication", () => {
       expect(await stateText()).toBe("Approved on this device");
       expect(actions("checkLocal")).toEqual([{ action: "checkLocal", workspaceId: "ws-trip", appRoot: "trip" }]);
       expect(actions("prepareLocal")).toEqual([]);
-      expect(reach("Reads")).toBe("list");
-      expect(reach("Changes")).toBe("submit");
+      expect(reach("Reads")).toBe("Item, Status");
+      expect(reach("Changes")).toBe("Adds records with Item, Quantity");
       expect(screen.queryByTestId("app-publication-approve")).toBeNull();
       expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
       expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
@@ -688,8 +692,9 @@ describe("owner app publication", () => {
       expect(await stateText()).toBe("Its source changed since you approved it.The app runs the approved version until you approve the changes.");
       await ready();
       expect(approveButton().textContent).toBe("Approve changes");
-      expect(reach("Reads")).toBe("list");
-      expect(reach("Changes")).toBe("submit, cancelNew");
+      expect(reach("Reads")).toBe("Item, Status");
+      // One line for each operation, and the New pill stays on the line it marks.
+      expect(lines("Changes")).toEqual(["Adds records with Item, Quantity", 'Runs "Cancel order"New']);
       expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
       expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
       await userEvent.setup().click(approveButton());
@@ -742,6 +747,25 @@ describe("owner app publication", () => {
       expect(reach("Reads")).toBe("destination, notesNew");
       expect(reach("Changes")).toBe("Adds records with destination, notesNew");
       expect(access.textContent).not.toContain("People with this share can read every response file");
+    });
+
+    type Display = NonNullable<Extract<Capability, { kind: "dataset" }>["operations"][number]["display"]>;
+    it.each<[string, Display, boolean, "Reads" | "Changes", string]>([
+      ["a read by the fields it reads", { kind: "read", label: "View entries", fields: ["Name", "Email"] }, true, "Reads", "Name, Email"],
+      ["a read that lists no fields as records", { kind: "read", label: "View entries", fields: [] }, true, "Reads", "Records"],
+      ["a create by the fields it adds", { kind: "create", label: "Submit", fields: ["Name", "Email"] }, false, "Changes", "Adds records with Name, Email"],
+      ["an edit by the fields it edits", { kind: "edit", label: "Fix entry", fields: ["Name", "Email"] }, false, "Changes", "Edits Name, Email"],
+      ["a delete", { kind: "delete", label: "Remove entry", fields: [] }, false, "Changes", "Deletes records"],
+      ["an action by its label", { kind: "action", label: "Archive old entries", fields: [] }, false, "Changes", 'Runs "Archive old entries"'],
+      ["a read-only action under Reads", { kind: "action", label: "Count entries", fields: [] }, true, "Reads", 'Runs "Count entries"'],
+    ])("says what %s does, not its operation name", async (_name, display, readOnly, term, words) => {
+      const operation = { operationId: submitOperation.operationId, name: "records.create", access: "link" as const, readOnly, display };
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: { ...datasetCapability, operations: [operation] } }]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      expect(lines(term)).toEqual([words]);
+      expect(screen.getByTestId("app-access").textContent).not.toContain("records.create");
     });
 
     it("removes an approval in place and returns to a first review", async () => {
