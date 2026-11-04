@@ -112,14 +112,34 @@ describe("makeCalloutChromePlugin — edits", () => {
     const [, ownerB] = headers(start, plugin).map(({ owner }) => owner);
     const [posA, posB] = calloutPositions(start.doc);
 
-    // B's title has focus. In one edit, A goes, C comes after B, and the
-    // paragraph before them changes.
+    // B's title has focus. In one edit, A goes, C comes after B, B's body
+    // gets a new first line, and the paragraph before them changes.
     let tr = start.tr.insert(posB! + b.nodeSize, c);
+    tr = tr.insert(posB! + 1, paragraph("new first line"));
     tr = tr.delete(posA!, posA! + a.nodeSize);
     const state = start.apply(tr.insertText("x", 1));
     const [shownB, shownC] = headers(state, plugin);
     expect(shownB!.owner).toBe(ownerB);
     expect(shownC!.owner).not.toBe(ownerB);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
+  it("keeps the focused callout's owner when the same edit adds a callout and a line at the start of its body", () => {
+    const plugin = makeCalloutChromePlugin();
+    const a = callout("note", "Title");
+    const start = EditorState.create({
+      doc: doc(paragraph("lead"), a, paragraph("after")),
+      plugins: [plugin],
+    });
+    const [ownerA] = headers(start, plugin).map(({ owner }) => owner);
+    const [posA] = calloutPositions(start.doc);
+
+    let tr = start.tr.insert(posA! + a.nodeSize, callout("tip", "New"));
+    tr = tr.insert(posA! + 1, paragraph("new first line"));
+    const state = start.apply(tr.insertText("x", 1));
+    const [shownA, shownC] = headers(state, plugin);
+    expect(shownA!.owner).toBe(ownerA);
+    expect(shownC!.owner).not.toBe(ownerA);
     expect(shown(state, plugin)).toEqual(expected(state.doc));
   });
 

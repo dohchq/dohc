@@ -421,6 +421,7 @@ export function makeCalloutChromePlugin() {
           old.find(range.from, range.toBefore),
           callouts.map(({ pos }) => pos + 1),
           throughEdit(tr.mapping, mapping),
+          1,
         );
         const headers = callouts.map(({ node, pos }) =>
           calloutHeader(node, pos, owners.get(pos + 1) ?? nextOwnerKey()),

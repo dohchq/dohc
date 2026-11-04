@@ -28,13 +28,15 @@ export function throughEdit(steps: Mappable, range: Mappable): Mappable {
 }
 
 /** The owners of the widgets an edit draws again, by their new position. A
- *  widget keeps its owner where `mapping` moves it. A remote update replaces
- *  the whole document, so its steps place nothing: when as many widgets are
- *  left as blocks, they keep their owners in order. */
+ *  widget sits `inside` positions after its block's start, and keeps its owner
+ *  where `mapping` moves that start. A remote update replaces the whole
+ *  document, so its steps place nothing: when as many widgets are left as
+ *  blocks, they keep their owners in order. */
 export function ownersInRange(
   previous: readonly Decoration[],
   positions: readonly number[],
   mapping: Mappable,
+  inside = 0,
 ): Map<number, string> {
   const wanted = new Set(positions);
   const owners = new Map<number, string>();
@@ -44,9 +46,12 @@ export function ownersInRange(
     .sort((a, b) => a.from - b.from);
   for (const decoration of owned) {
     const ownerKey = decoration.spec.ownerKey as string;
-    const mapped = mapping.mapResult(decoration.from, 1);
-    if (!mapped.deleted && wanted.has(mapped.pos) && !owners.has(mapped.pos)) {
-      owners.set(mapped.pos, ownerKey);
+    // The block's start, not the widget's place inside it, so content added
+    // at the start of the block's body does not move it.
+    const mapped = mapping.mapResult(decoration.from - inside, 1);
+    const pos = mapped.pos + inside;
+    if (!mapped.deleted && wanted.has(pos) && !owners.has(pos)) {
+      owners.set(pos, ownerKey);
     } else {
       unplaced.push(ownerKey);
     }
