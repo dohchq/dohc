@@ -509,6 +509,43 @@ export function collectionsRefusalError(refusal: DatasetListRefusal): Error {
     computerLabel: refusal.kind === "elsewhere" ? refusal.computer : null });
 }
 
+const LIVE_EDITING_STOPPED = "live-editing-stopped";
+const LIVE_EDITING_STOPPED_LEAD = "History is still paused. Live editing stopped on ";
+
+/**
+ * Try again on History that stopped recording, refused because it is still
+ * paused. `paths`: the pages whose live editing stopped, which keep History
+ * paused until they close; empty when something else keeps it paused. The
+ * message carries them as a JSON array, so any path survives Electron's one
+ * string whole.
+ */
+export class HistoryStillPausedError extends Error {
+  override name = "HistoryStillPausedError";
+  readonly code: typeof LIVE_EDITING_STOPPED | undefined;
+  constructor(readonly paths: readonly string[]) {
+    super(paths.length === 0 ? "History is still paused." : `${LIVE_EDITING_STOPPED_LEAD}${JSON.stringify(paths)}`);
+    this.code = paths.length === 0 ? undefined : LIVE_EDITING_STOPPED;
+  }
+}
+
+/** The pages whose live editing stopped, when that is what kept History paused after Try again; empty otherwise. */
+export function liveEditingStoppedPaths(error: unknown): readonly string[] {
+  const { name, code, message } = parse(error);
+  if (name !== "HistoryStillPausedError" || code !== LIVE_EDITING_STOPPED || !message.startsWith(LIVE_EDITING_STOPPED_LEAD)) return [];
+  let paths: unknown;
+  try { paths = JSON.parse(message.slice(LIVE_EDITING_STOPPED_LEAD.length)); } catch { return []; }
+  return Array.isArray(paths) && paths.length > 0 && paths.every((path): path is string => typeof path === "string" && path !== "")
+    ? paths : [];
+}
+
+/**
+ * Try again on History found it still taking in files: the engine refused
+ * while it reads the folder, or capture outlasted its settle budget.
+ */
+export function isHistoryCatchingUp(error: unknown): boolean {
+  return isWorkspaceUpdatingError(error) || parse(error).name === "EngineCaptureNotSettledError";
+}
+
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
 export function isPrivacyDenied(error: unknown): boolean {
   return readError(error).words === PRIVACY_DENIED_WORDS;

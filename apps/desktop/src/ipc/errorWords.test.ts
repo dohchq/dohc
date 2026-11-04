@@ -19,11 +19,13 @@ import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   CollectionMoveUnfinishedError,
   collectionsRefusalError,
   ERROR_WORDS,
+  HistoryStillPausedError,
   ipcWireError,
   isChatMentionPageChanged,
   isPrivacyDenied,
@@ -34,6 +36,8 @@ import {
   livePageTitle,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
+  isHistoryCatchingUp,
+  liveEditingStoppedPaths,
   namingCollectionMove,
   needsNewerDohc,
   PRIVACY_DENIED_WORDS,
@@ -641,6 +645,43 @@ describe("error words", () => {
     expect(withErrorWords("Could not share.", acrossIpc(new Error("Sync this workspace before sharing."))))
       .toBe("Could not share. Sync this workspace before sharing.");
   });
+});
+
+it("reads every page whose live editing stopped from Try again on History, whole, and from nothing else", () => {
+  const across = (error: Error) => acrossIpc(error, "desktop:retry-history-capture");
+  const one = ["notes/Q&A: plan [draft].md"];
+  const several = ["notes/a, b.md", "notes/12:30 \"call\" ].md", "notes/trailing space .md "];
+  for (const paths of [one, several]) {
+    const stopped = new HistoryStillPausedError(paths);
+    expect(liveEditingStoppedPaths(stopped)).toEqual(paths);
+    expect(liveEditingStoppedPaths(across(stopped))).toEqual(paths);
+    // The same words from another error name no page.
+    expect(liveEditingStoppedPaths(across(new Error(stopped.message)))).toEqual([]);
+  }
+  expect(liveEditingStoppedPaths(across(new HistoryStillPausedError([])))).toEqual([]);
+  // The class, the code and the lead are all needed, and the rest must be a list of paths.
+  const wire = (text: string) => new Error(`Error invoking remote method 'desktop:retry-history-capture': ${text}`);
+  const lead = "History is still paused. Live editing stopped on ";
+  for (const text of [
+    `HistoryStillPausedError [live-editing-stopped]: ${lead}notes/plan.md`,
+    `HistoryStillPausedError [live-editing-stopped]: ${lead}[]`,
+    `HistoryStillPausedError [live-editing-stopped]: ${lead}["notes/plan.md", 3]`,
+    `HistoryStillPausedError [live-editing-stopped]: ${lead}[""]`,
+    `HistoryStillPausedError [live-editing-stopped]: ${lead}{"0":"notes/plan.md"}`,
+    `HistoryStillPausedError: ${lead}["notes/plan.md"]`,
+    `HistoryStillPausedError [OVERLOADED]: ${lead}["notes/plan.md"]`,
+    `DaemonRefusalError [live-editing-stopped]: ${lead}["notes/plan.md"]`,
+    `HistoryStillPausedError [live-editing-stopped]: History is still paused. ["notes/plan.md"]`,
+  ]) expect(liveEditingStoppedPaths(wire(text))).toEqual([]);
+});
+
+it("reads Try again on History as catching up only while the engine still takes in files", () => {
+  const across = (error: Error) => acrossIpc(error, "desktop:retry-history-capture");
+  expect(isHistoryCatchingUp(across(refusal("OVERLOADED", "Workspace is still updating. Try again.")))).toBe(true);
+  expect(isHistoryCatchingUp(across(new EngineCaptureNotSettledError("workspace-1")))).toBe(true);
+  expect(isHistoryCatchingUp(across(refusal("OVERLOADED", "engine-store-busy")))).toBe(false);
+  expect(isHistoryCatchingUp(across(new HistoryStillPausedError([])))).toBe(false);
+  expect(isHistoryCatchingUp(across(new HistoryStillPausedError(["notes/plan.md"])))).toBe(false);
 });
 
 it("names the Collection in a stopped move's words, as written, and leaves any other error as it is", () => {

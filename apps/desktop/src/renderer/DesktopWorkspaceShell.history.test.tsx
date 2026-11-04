@@ -493,7 +493,9 @@ describe("history page", () => {
     }
   });
 
-  it("still says so when capture has failed and the newest-moment read stays updating", async () => {
+  // History paused already says capture failed, with its own Try again, so
+  // the newest-moment read that stays updating adds no row of its own.
+  it("shows only History paused when capture has failed and the newest-moment read stays updating", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const { bridge, state } = freshnessShell();
@@ -503,14 +505,16 @@ describe("history page", () => {
       state.queued.push("updating", "updating", "updating", "updating", "updating");
       act(() => bridge.emitWorkspaceActivity());
       await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
-      const toast = await screen.findByTestId("workspace-shell-error");
-      expect(toast.textContent).toContain("dohc could not check whether open files changed.");
-      expect(toast.textContent).toContain("Recent changes are still being added to History.");
+      await waitFor(() => expect(state.queued).toHaveLength(0));
+      await act(async () => {});
+      expect(screen.getByTestId("workspace-shell-error").textContent)
+        .toContain("Your files still save normally. Open files may not show changes made outside dohc until History records again.");
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       const notices = screen.getByRole("dialog", { name: "Notices" });
-      expect(notices.textContent).toContain("dohc could not check whether open files changed.");
-      await userEvent.click(within(notices).getByRole("button", { name: "Try again" }));
-      await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+      within(notices).getByTestId("notice-history-capture-failed");
+      expect(notices.textContent).not.toContain("dohc could not check whether open files changed.");
+      expect(notices.textContent).not.toContain("Recent changes are still being added to History.");
+      expect(bridge.readWorkspaceText.mock.calls.length).toBe(reads);
     } finally {
       vi.useRealTimers();
     }
@@ -560,8 +564,8 @@ describe("history page", () => {
     await act(async () => {});
     const readsInB = bridge.readWorkspaceText.mock.calls.length;
 
-    // A's held read answers `updating` under a failed capture: in A it would
-    // retry, then report. In B it does nothing at all.
+    // A's held read answers `updating`. In A it would retry. In B it does
+    // nothing at all.
     latestMomentOrder = 9;
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
@@ -574,7 +578,8 @@ describe("history page", () => {
       vi.useRealTimers();
     }
     expect(readsOfA).toBe(readsOfABeforeAnswer);
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    // B's own paused capture may toast; A's failure may not.
+    expect(screen.queryByTestId("workspace-shell-error")?.textContent ?? "").not.toContain("dohc could not check whether open files changed.");
     expect(bridge.readWorkspaceText.mock.calls.length).toBe(readsInB);
   });
 
@@ -838,7 +843,8 @@ describe("history page", () => {
       const line = await screen.findByTestId("history-paused");
       expect(line.textContent).toBe("History paused");
       expect(screen.queryByTestId("history-updating")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      // The panel's line offers no Try again; the paused capture's toast does.
+      expect(screen.queryAllByRole("button", { name: "Try again" }).filter(button => button.closest("[data-dohc-toasts]") === null)).toHaveLength(0);
 
       bridge.listHistory.mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
       act(() => bridge.emitWorkspaceActivity());

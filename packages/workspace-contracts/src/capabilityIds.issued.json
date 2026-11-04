@@ -265,6 +265,7 @@
   "device.update.download",
   "app.view",
   "app.local.check",
+  "capture.history.retry",
   "file.reveal",
   "explorer.menu.read"
 ]

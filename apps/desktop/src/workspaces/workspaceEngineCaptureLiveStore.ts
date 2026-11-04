@@ -185,6 +185,8 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
+  // Restart capture that stopped, then flush until it settles.
+  retryCapture?(): Promise<void>;
   watcherStatus?(): Promise<WatcherStatusResult>;
   // Files dohc moved aside while saving because another program changed
   // them meanwhile, and the step that moves one to a visible copy.
@@ -1528,6 +1530,13 @@ export function createCaptureLiveStores(
 
     async reconcileCapture() {
       const first = await runRead(async (adapter) => await adapter.reconcileCapture());
+      if (!first.settled) {
+        await this.flushCapture?.();
+      }
+    },
+
+    async retryCapture() {
+      const first = await runRead(async (adapter) => await adapter.retryCapture());
       if (!first.settled) {
         await this.flushCapture?.();
       }

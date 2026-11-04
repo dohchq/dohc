@@ -261,6 +261,7 @@
     "desktop:retry-file-observation",
     "desktop:retry-file-recovery",
     "desktop:retry-held-capture",
+    "desktop:retry-history-capture",
     "desktop:retry-owner-live-delivery",
     "desktop:retry-owner-live-quarantine",
     "desktop:retry-owner-live-share",

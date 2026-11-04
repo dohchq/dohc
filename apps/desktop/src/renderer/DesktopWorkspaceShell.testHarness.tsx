@@ -419,6 +419,9 @@ function makeBaseBridge(
     retryOwnerLiveDelivery: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
     ),
+    retryHistoryCapture: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<void> => undefined,
+    ),
     retryCloudSync: vi.fn(
       async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),

@@ -1413,16 +1413,9 @@ export function NoticeCenter(props: {
           : {}),
         Icon: AlertTriangle,
       });
-    } else if (props.syncStatus?.historyCaptureFailed) {
-      next.push({
-        id: "history-capture-failed",
-        tone: "warning",
-        title: "History paused",
-        body: "dohc couldn't record history for this workspace. Your files are safe on disk, but recent changes may be missing from History.",
-        actions: [{ label: "Open History", onClick: props.onOpenHistory }],
-        Icon: AlertTriangle,
-      });
     }
+    // History that stopped recording is the shell's workspace error, with
+    // its toast and Try again.
 
     // Persistent while true: no engine capture means no history recorder
     // exists at all. Never spammy: the flags change only at workspace open,
