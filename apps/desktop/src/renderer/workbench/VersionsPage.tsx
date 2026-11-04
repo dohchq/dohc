@@ -442,7 +442,6 @@ function VersionRow(props: {
         // title is its tooltip and its description. The review it opens lists
         // every open clash, not only this version's.
         title="Open the clashes"
-        aria-describedby={nameId}
         onClick={props.onReviewConflicts}
         className="cursor-pointer text-warning hover:underline"
       >
