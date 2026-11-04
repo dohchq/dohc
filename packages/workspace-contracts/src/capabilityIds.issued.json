@@ -264,5 +264,6 @@
   "settings.agents.order",
   "device.update.download",
   "app.view",
-  "app.local.check"
+  "app.local.check",
+  "capture.history.retry"
 ]

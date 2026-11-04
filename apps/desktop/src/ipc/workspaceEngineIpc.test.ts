@@ -300,7 +300,7 @@ const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryHistoryCapture, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  captureRecoveryOperations.retryHistoryCapture.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -416,15 +416,15 @@ describe("workspace engine IPC registrations", () => {
   });
   it("restarts History capture only for the writable workspace this renderer shows", async () => {
     const h = await harness();
-    await h.invoke(CHANNELS.retryHistoryCapture);
+    await h.invoke(captureRecoveryOperations.retryHistoryCapture.channel);
     expect(h.capture.retryHistoryCapture).toHaveBeenCalledOnce();
     expect(h.notify).toHaveBeenCalledWith({ workspaceId: "workspace" });
-    await expect(h.invoke(CHANNELS.retryHistoryCapture, { workspaceId: "other" })).rejects.toThrow();
+    await expect(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel, { workspaceId: "other" })).rejects.toThrow();
     h.writable.mockImplementation(() => { throw new Error("readonly"); });
-    await expect(h.invoke(CHANNELS.retryHistoryCapture)).rejects.toThrow("readonly");
+    await expect(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel)).rejects.toThrow("readonly");
     h.writable.mockImplementation(() => undefined);
     h.capture.retryHistoryCapture.mockRejectedValueOnce(new HistoryStillPausedError([]));
-    await expect(h.invoke(CHANNELS.retryHistoryCapture)).rejects.toThrow("History is still paused.");
+    await expect(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel)).rejects.toThrow("History is still paused.");
     expect(h.capture.retryHistoryCapture).toHaveBeenCalledTimes(2);
     expect(h.notify).toHaveBeenCalledTimes(2);
   });
@@ -434,9 +434,9 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     const received = async (refusal: Error): Promise<string> => {
       h.capture.retryHistoryCapture.mockRejectedValueOnce(refusal);
-      const refused = await Promise.resolve(h.invoke(CHANNELS.retryHistoryCapture)).then(() => null, (error: unknown) => error);
+      const refused = await Promise.resolve(h.invoke(captureRecoveryOperations.retryHistoryCapture.channel)).then(() => null, (error: unknown) => error);
       expect(refused).toBe(refusal);
-      return `Error invoking remote method '${CHANNELS.retryHistoryCapture}': ${String(ipcWireError(refused))}`;
+      return `Error invoking remote method '${captureRecoveryOperations.retryHistoryCapture.channel}': ${String(ipcWireError(refused))}`;
     };
     const stopped = await received(new HistoryStillPausedError(["notes/plan.md"]));
     expect(stopped).toContain("HistoryStillPausedError [live-editing-stopped]: ");

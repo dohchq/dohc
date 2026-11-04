@@ -467,7 +467,6 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(fileObservationOperations, invoke),
   retryOwnerLiveDelivery: (payload) => ipcRenderer.invoke(CHANNELS.retryOwnerLiveDelivery, payload),
   retryFileRecovery: (payload) => ipcRenderer.invoke(CHANNELS.retryFileRecovery, payload),
-  retryHistoryCapture: (payload) => ipcRenderer.invoke(CHANNELS.retryHistoryCapture, payload),
   retryCloudSync: (payload) => ipcRenderer.invoke(CHANNELS.retryCloudSync, payload),
   rebuildEngineStore: (payload) =>
     ipcRenderer.invoke(CHANNELS.rebuildEngineStore, payload),

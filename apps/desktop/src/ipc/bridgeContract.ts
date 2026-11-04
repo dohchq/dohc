@@ -1543,6 +1543,15 @@ export const captureRecoveryOperations = {
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler clears recovery only in the sending window's active workspace." },
   },
+  // Restarts History recording that stopped. Rejects while it is still paused.
+  retryHistoryCapture: {
+    capabilityId: "capture.history.retry",
+    channel: "desktop:retry-history-capture",
+    payload: WorkspaceIdPayload,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "The restart starts only in the sending window's active, writable workspace, and is awaited outside its workspace operation." },
+  },
 } satisfies OperationTable;
 
 export const fileObservationOperations = {
@@ -7518,8 +7527,6 @@ export interface DohcDesktopBridge
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
-  // Restarts History recording that stopped. Rejects while it is still paused.
-  retryHistoryCapture(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
   retryCloudSync(payload: RetryCloudSyncPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
