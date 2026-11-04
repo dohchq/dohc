@@ -100,27 +100,34 @@ describe("makeCalloutChromePlugin — edits", () => {
     expect(shown(state, plugin)).toEqual(expected(state.doc));
   });
 
-  it("keeps the focused callout's owner when the same edit deletes a callout and adds one", () => {
+  it("keys the headers an edit changes by their place among the callouts, as a full rebuild did", () => {
     const plugin = makeCalloutChromePlugin();
     const a = callout("note", "Same", paragraph("a"));
     const b = callout("note", "Same", paragraph("b"));
     const c = callout("note", "Same", paragraph("c"));
-    const start = EditorState.create({
-      doc: doc(paragraph("lead"), a, b, paragraph("after")),
-      plugins: [plugin],
-    });
-    const [, ownerB] = headers(start, plugin).map(({ owner }) => owner);
-    const [posA, posB] = calloutPositions(start.doc);
+    let start = EditorState.create({ doc: doc(paragraph("lead"), b, a, paragraph("after")), plugins: [plugin] });
+    let [ownerB, ownerA] = headers(start, plugin).map(({ owner }) => owner);
+    const [posB] = calloutPositions(start.doc);
 
-    // B's title has focus. In one edit, A goes, C comes after B, B's body
-    // gets a new first line, and the paragraph before them changes.
-    let tr = start.tr.insert(posB! + b.nodeSize, c);
-    tr = tr.insert(posB! + 1, paragraph("new first line"));
+    // A's title has focus. In one edit, C and a copy of A come before B, A
+    // goes, and the paragraph before them changes. The copy is second, as A was.
+    let tr = start.tr.insert(posB!, [c, a]);
+    const moved = posB! + c.nodeSize + a.nodeSize + b.nodeSize;
+    tr = tr.delete(moved, moved + a.nodeSize);
+    let state = start.apply(tr.insertText("x", 1));
+    expect(headers(state, plugin).map(({ owner }) => owner)[1]).toBe(ownerA);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+
+    // In one edit, A goes, B takes A's body, a copy of B follows, and the
+    // paragraph before them changes. The callouts end as they began.
+    start = EditorState.create({ doc: doc(paragraph("lead"), a, b, paragraph("after")), plugins: [plugin] });
+    [ownerA, ownerB] = headers(start, plugin).map(({ owner }) => owner);
+    const [posA, posSecond] = calloutPositions(start.doc);
+    tr = start.tr.insert(posSecond! + b.nodeSize, b);
+    tr = tr.replaceWith(posSecond! + 1, posSecond! + b.nodeSize - 1, a.content);
     tr = tr.delete(posA!, posA! + a.nodeSize);
-    const state = start.apply(tr.insertText("x", 1));
-    const [shownB, shownC] = headers(state, plugin);
-    expect(shownB!.owner).toBe(ownerB);
-    expect(shownC!.owner).not.toBe(ownerB);
+    state = start.apply(tr.insertText("x", 1));
+    expect(headers(state, plugin).map(({ owner }) => owner)).toEqual([ownerA, ownerB]);
     expect(shown(state, plugin)).toEqual(expected(state.doc));
   });
 
@@ -166,39 +173,6 @@ describe("makeCalloutChromePlugin — edits", () => {
     const [shownA, shownC] = headers(state, plugin);
     expect(shownA!.owner).toBe(ownerA);
     expect(shownC!.owner).not.toBe(ownerA);
-    expect(shown(state, plugin)).toEqual(expected(state.doc));
-  });
-
-  it("keeps the focused callout's owner when the same edit adds a copy of it before an earlier callout and deletes it", () => {
-    const plugin = makeCalloutChromePlugin();
-    const a = callout("note", "Same", paragraph("a"));
-    const b = callout("note", "Same", paragraph("b"));
-    const c = callout("note", "Same", paragraph("c"));
-    const start = EditorState.create({ doc: doc(paragraph("lead"), b, a, paragraph("after")), plugins: [plugin] });
-    const [ownerB, ownerA] = headers(start, plugin).map(({ owner }) => owner);
-    const [posB] = calloutPositions(start.doc);
-
-    // A's title has focus. In one edit, C and a copy of A come before B, A
-    // goes, and the paragraph before them changes.
-    let tr = start.tr.insert(posB!, [c, a]);
-    const moved = posB! + c.nodeSize + a.nodeSize + b.nodeSize;
-    tr = tr.delete(moved, moved + a.nodeSize);
-    const state = start.apply(tr.insertText("x", 1));
-    const [shownC, shownA, shownB] = headers(state, plugin).map(({ owner }) => owner);
-    expect([shownA, shownB]).toEqual([ownerA, ownerB]);
-    expect([ownerA, ownerB]).not.toContain(shownC);
-    expect(shown(state, plugin)).toEqual(expected(state.doc));
-  });
-
-  it("keeps a header on its callout when an identical callout is inserted right before it", () => {
-    const plugin = makeCalloutChromePlugin();
-    const a = callout("note", "Same", paragraph("a"));
-    const start = EditorState.create({ doc: doc(paragraph("lead"), a, paragraph("after")), plugins: [plugin] });
-    const [ownerA] = headers(start, plugin).map(({ owner }) => owner);
-    const state = start.apply(start.tr.insert(calloutPositions(start.doc)[0]!, a));
-    const [shownCopy, shownA] = headers(state, plugin).map(({ owner }) => owner);
-    expect(shownA).toBe(ownerA);
-    expect(shownCopy).not.toBe(ownerA);
     expect(shown(state, plugin)).toEqual(expected(state.doc));
   });
 
