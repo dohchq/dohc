@@ -35,6 +35,9 @@ function loadAnalytics(): Promise<PostHog> {
       // model, which Chrome reveals only when asked, are not on it.
       disable_scroll_properties: true,
       disableDeviceModel: true,
+      // PostHog's GeoIP step skips an event that carries this, so no report
+      // gains a location, whatever the order of PostHog's pipeline.
+      before_send: (event) => event && { ...event, properties: { ...event.properties, $geoip_disable: true } },
       // The project records sessions for the desktop app. Not here.
       disable_session_recording: true,
       capture_heatmaps: false,
