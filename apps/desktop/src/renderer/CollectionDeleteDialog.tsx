@@ -18,6 +18,8 @@ export interface CollectionDeletePreview {
 }
 export interface CollectionDeleteDialogProps {
   workspaceId: string; datasetId: string; name: string;
+  /** The Collection's folder from the workspace root, or "" at the root. Delete keeps its files. */
+  folder: string;
   onLoad(input: { workspaceId: string; datasetId: string; after?: string; limit: number }, signal: AbortSignal): Promise<CollectionDeletePreview>;
   onDelete(input: { workspaceId: string; datasetId: string; expected: DatasetCursor; reviewToken: string; acknowledge: true }, signal: AbortSignal): Promise<{ deleted: true; datasetId: string }>;
   onExport?(signal: AbortSignal): Promise<string | null>;
@@ -62,10 +64,9 @@ function Delete(props: CollectionDeleteDialogProps) {
   return <><Overlay appearance="warning" onClose={busy || exporting ? undefined : props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-labelledby": "delete-collection-title" }}>
     <section className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink">
       <h2 id="delete-collection-title" className="m-0 text-base font-semibold">Delete {props.name} permanently?</h2>
-      <p className="m-0 text-[13px] text-muted">This deletes every table, record, upload, history entry, and app grant in this Collection.</p>
+      <p className="m-0 text-[13px] text-muted">This deletes every table, record, upload, history entry, and app grant in this Collection. {props.folder ? <>The <span className="wrap-anywhere">{props.folder}</span> folder and its files stay.</> : "Its files stay."} Find them in Files.</p>
       <p className="m-0 text-[13px] text-danger">This cannot be undone on this host, even with a recovery file.</p>
       <p className="m-0 text-[13px] text-muted">Save a recovery file first to preserve a separate copy. Recovery requires another clean host with this workspace's identity. That host must never have stored or deleted this Collection.</p>
-      <p className="m-0 text-[13px] text-muted">App source files and recovery files you saved stay in place.</p>
       <div className="min-h-0 overflow-auto"><h3 className="mb-2 mt-0 text-[12px] font-semibold">Affected apps</h3>
         {!page ? busy ? <SkeletonRows rows={2} label="Loading affected apps…" /> : <p className="m-0 text-[12px] text-muted">Refresh to see affected apps.</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No affected apps on this page.</p>}
       </div>

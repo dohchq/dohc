@@ -9,6 +9,7 @@ import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/d
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
+import { dirnameOf } from "./path";
 import { TransactionalCollectionPage, type TransactionalButtons, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { transactionalDescription } from "./transactionalCollectionModel";
 import { CollectionActionDialog } from "./CollectionActionDialog";
@@ -234,7 +235,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     {owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}
     <SecondaryButton disabled={loading || restoring} onClick={() => void refresh()}>Refresh</SecondaryButton>
     {owner && !copy?.offline && <SecondaryButton className="text-danger" disabled={loading || restoring} onClick={() => setDeletingCollection(true)}>Delete permanently…</SecondaryButton>}
-  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name}
+  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} folder={dirnameOf(datasetPath)}
     onClose={() => setDeletingCollection(false)} onError={onError} onExport={exportRecovery} onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
     onDeleted={() => { request.current++; setDeletingCollection(false); setDeleted(true); onLifecycleChanged?.(); onNotice?.("Collection deleted"); }}
     onLoad={async (input, signal) => {
