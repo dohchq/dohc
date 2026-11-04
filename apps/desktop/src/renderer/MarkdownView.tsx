@@ -2192,6 +2192,7 @@ export function MarkdownView(props: {
               menu={{
                 workspaceId: props.workspaceId,
                 onOpen: openThisNote,
+                path: props.path,
                 suggestedName: filenameStem(props.path),
                 // Read the live Y.Doc at the action. The hidden mounted editor
                 // supplies the readiness guard while source view is shown.
@@ -2350,6 +2351,7 @@ export function MarkdownView(props: {
                 ? null
                 : {
                     workspaceId: props.workspaceId,
+                    path: props.path,
                     onOpen: openThisNote,
                     suggestedName: filenameStem(props.path),
                     // The same rule the engine branch answers to: emit the

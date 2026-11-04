@@ -81,6 +81,7 @@ function stubClipboard() {
 function renderMenu() {
   return render(
     <DocumentMenu
+      path="Plan.md"
       workspaceId="ws-1"
       suggestedName="Plan"
       getMarkdown={() => MARKDOWN}
@@ -124,7 +125,7 @@ describe("DocumentMenu", () => {
       const { report, wrapper } = notices();
       const logged = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
-        render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />, { wrapper });
+        render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />, { wrapper });
         await user.click(screen.getByTestId("document-menu-trigger"));
         await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
         if (dismiss === "Escape") await user.keyboard("{Escape}");
@@ -150,7 +151,7 @@ describe("DocumentMenu", () => {
       const user = userEvent.setup();
       stubClipboard();
       const markdown = deferred<string>();
-      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />);
+      render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />);
       await user.click(screen.getByTestId("document-menu-trigger"));
       await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
       vi.useFakeTimers();
@@ -179,11 +180,11 @@ describe("DocumentMenu", () => {
       const { report, wrapper } = notices();
       const logged = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
-        const view = render(<DocumentMenu workspaceId="ws-1" documentKey="a" suggestedName="Note" getMarkdown={() => markdown.promise} />, { wrapper });
+        const view = render(<DocumentMenu path="Plan.md" workspaceId="ws-1" documentKey="a" suggestedName="Note" getMarkdown={() => markdown.promise} />, { wrapper });
         await user.click(screen.getByTestId("document-menu-trigger"));
         await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
         // Same workspace and title: documentKey alone must retire the action.
-        view.rerender(<DocumentMenu workspaceId="ws-1" documentKey="b" suggestedName="Note" getMarkdown={() => "New document"} />);
+        view.rerender(<DocumentMenu path="Plan.md" workspaceId="ws-1" documentKey="b" suggestedName="Note" getMarkdown={() => "New document"} />);
         await user.keyboard("{Escape}");
         await act(async () => {
           if (outcome === "resolve") markdown.resolve(MARKDOWN);
@@ -205,7 +206,7 @@ describe("DocumentMenu", () => {
       const user = userEvent.setup();
       stubClipboard();
       const markdown = deferred<string>();
-      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />);
+      render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />);
       const row = () => screen.getByTestId("document-menu-item-copy-markdown");
       await user.click(screen.getByTestId("document-menu-trigger"));
       vi.useFakeTimers();
@@ -230,7 +231,7 @@ describe("DocumentMenu", () => {
       const user = userEvent.setup();
       stubClipboard();
       const { report, wrapper } = notices();
-      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />, { wrapper });
+      render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />, { wrapper });
       const failure = new Error("clipboard refused");
       writeText.mockImplementationOnce(() => Promise.reject(failure));
       await user.click(screen.getByTestId("document-menu-trigger"));
@@ -251,10 +252,10 @@ describe("DocumentMenu", () => {
     stubClipboard();
     let complete!: (text: string) => void;
     const pending = new Promise<string>(resolve => { complete = resolve; });
-    const view = render(<DocumentMenu workspaceId="ws-1" documentKey="a" suggestedName="Note" getMarkdown={() => pending} />);
+    const view = render(<DocumentMenu path="Plan.md" workspaceId="ws-1" documentKey="a" suggestedName="Note" getMarkdown={() => pending} />);
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
-    view.rerender(<DocumentMenu workspaceId="ws-2" documentKey="b" suggestedName="Note" getMarkdown={() => "New document"} />);
+    view.rerender(<DocumentMenu path="Plan.md" workspaceId="ws-2" documentKey="b" suggestedName="Note" getMarkdown={() => "New document"} />);
     await act(async () => {complete("Old document"); await pending;});
     expect(writeText).not.toHaveBeenCalled();
   });
@@ -283,7 +284,7 @@ describe("DocumentMenu", () => {
 
     render(
       <CustomizeContext.Provider value={{ customize }}>
-        <DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />
+        <DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />
       </CustomizeContext.Provider>,
     );
     await user.click(screen.getByTestId("document-menu-trigger"));
@@ -398,6 +399,7 @@ describe("DocumentMenu", () => {
     stubClipboard();
     render(
       <DocumentMenu
+        path="Plan.md"
         workspaceId="ws-1"
         suggestedName="Plan"
         getMarkdown={() => null}
@@ -449,6 +451,7 @@ describe("DocumentMenu", () => {
     stubClipboard();
     render(
       <DocumentMenu
+        path="Plan.md"
         workspaceId="ws-1"
         suggestedName="Plan"
         getMarkdown={() => null}
@@ -483,6 +486,7 @@ describe("DocumentMenu", () => {
     stubClipboard();
     render(
       <DocumentMenu
+        path="Plan.md"
         workspaceId="ws-1"
         suggestedName="Plan"
         getMarkdown={() => null}
@@ -551,6 +555,7 @@ describe("DocumentMenu", () => {
     let markdown: string | null = MARKDOWN;
     render(
       <DocumentMenu
+        path="Plan.md"
         workspaceId="ws-1"
         suggestedName="Plan"
         getMarkdown={() => markdown}
@@ -630,6 +635,7 @@ describe("DocumentMenu", () => {
     let markdown: string | null = null;
     render(
       <DocumentMenu
+        path="Plan.md"
         workspaceId="ws-1"
         suggestedName="Plan"
         getMarkdown={() => markdown}
@@ -721,6 +727,7 @@ describe("DocumentMenu", () => {
     try {
       render(
         <DocumentMenu
+          path="Plan.md"
           workspaceId="ws-1"
           suggestedName="Plan"
           getMarkdown={() => {
@@ -762,7 +769,7 @@ describe("DocumentMenu", () => {
   describe("a write that settles after the menu closed", () => {
     function renderReporting() {
       const shell = notices();
-      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />, { wrapper: shell.wrapper });
+      render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />, { wrapper: shell.wrapper });
       return shell;
     }
 
@@ -795,7 +802,7 @@ describe("DocumentMenu", () => {
       stubClipboard();
       const { report, clear, wrapper } = notices();
       let markdown: string | null = MARKDOWN;
-      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown} />, { wrapper });
+      render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown} />, { wrapper });
       const write = deferredWrite();
       writeText.mockImplementationOnce(() => write.promise);
       await user.click(screen.getByTestId("document-menu-trigger"));
@@ -842,7 +849,7 @@ describe("DocumentMenu", () => {
       const { report, clear, wrapper } = notices();
       const openPlan = vi.fn();
       const menu = (key: string, name: string, markdown: string) => (
-        <DocumentMenu workspaceId="ws-1" documentKey={key} suggestedName={name} getMarkdown={() => markdown} onOpen={key === "a" ? openPlan : undefined} />
+        <DocumentMenu path="Plan.md" workspaceId="ws-1" path={`${key}/${name}.md`} documentKey={key} suggestedName={name} getMarkdown={() => markdown} onOpen={key === "a" ? openPlan : undefined} />
       );
       const view = render(menu("a", "Plan", MARKDOWN), { wrapper });
       writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused")));
@@ -876,6 +883,95 @@ describe("DocumentMenu", () => {
       expect(await copied).toBe("# Plan, revised\n");
       expect(writeText).toHaveBeenCalledExactlyOnceWith("# Plan, revised\n");
       expect(clear).toHaveBeenLastCalledWith(first.identity);
+    });
+
+    it("retries only its own note when another folder has a note of the same name", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const { report, wrapper } = notices();
+      const view = render(<DocumentMenu path="a/Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => "# Plan in a\n"} />, { wrapper });
+      writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused")));
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
+      const first = report.mock.calls[0]![0];
+      view.unmount();
+      writeText.mockClear();
+
+      render(<DocumentMenu path="b/Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => "# Plan in b\n"} />, { wrapper });
+      await act(async () => first.retry?.());
+      expect(writeText, "know a note by its name -> Try again copies the other folder's Plan.").not.toHaveBeenCalled();
+      expect(report.mock.calls[1]![0].message).toBe("dohc could not copy Plan as Markdown, because Plan is not open.");
+    });
+
+    it("lets a Copy from the note's reopened menu take over from a Try again still reading it", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const { report, clear, wrapper } = notices();
+      const view = render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />, { wrapper });
+      writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused")));
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
+      const first = report.mock.calls[0]![0];
+      view.unmount();
+      writeText.mockClear();
+
+      // Opened again, the note's first read is slow, and Try again waits on it.
+      let finishRead!: (markdown: string) => void;
+      const slowRead = new Promise<string>((resolve) => { finishRead = resolve; });
+      const reads = [() => slowRead, () => MARKDOWN];
+      render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => reads.shift()!()} />, { wrapper });
+      await act(async () => first.retry?.());
+
+      // A newer Copy from the menu fails.
+      writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused again")));
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
+      expect(report).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        finishRead("# Plan, an older read\n");
+        await slowRead;
+      });
+      expect(writeText, "count Copies per menu -> the older Try again writes over the newer Copy.").toHaveBeenCalledTimes(1);
+      expect(report).toHaveBeenCalledTimes(2);
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it("keeps a newer failure's notice when an older Try again's write lands", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const { report, clear, wrapper } = notices();
+      render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} />, { wrapper });
+      writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused")));
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
+      const first = report.mock.calls[0]![0];
+      await user.keyboard("{Escape}");
+      writeText.mockClear();
+
+      // Try again's write waits on the clipboard.
+      const slowWrite = deferredWrite();
+      writeText.mockImplementationOnce(() => slowWrite.promise);
+      await act(async () => first.retry?.());
+      await act(async () => {});
+      expect(writeText).toHaveBeenCalledTimes(1);
+
+      // A newer Copy fails.
+      writeText.mockImplementationOnce(() => Promise.reject(new Error("clipboard refused again")));
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
+      expect(report).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        slowWrite.resolve();
+        await slowWrite.promise;
+      });
+      expect(clear, "take the notice back after any write -> the older success removes the newer failure.").not.toHaveBeenCalled();
     });
 
     it("reports nothing for a success, and takes back the note's notice", async () => {
@@ -936,7 +1032,7 @@ describe("DocumentMenu", () => {
   it.each(['refusal','failure'])('does not show a stale serialization %s in a reopened menu',async kind=>{
     const user=userEvent.setup();let finish!:(value:string|null)=>void;let fail!:(error:Error)=>void;
     const pending=new Promise<string|null>((resolve,reject)=>{finish=resolve;fail=reject});
-    render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={()=>pending}/>);
+    render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={()=>pending}/>);
     await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await user.keyboard('{Escape}');await user.click(screen.getByTestId('document-menu-trigger'));
     await act(async()=>{if(kind==='refusal')finish(null);else fail(Error('late'));await pending.catch(()=>{});});
     expect(screen.queryByText('Document not open')).toBeNull();expect(screen.queryByText("Couldn't copy")).toBeNull();
@@ -947,7 +1043,7 @@ describe("DocumentMenu", () => {
     stubClipboard();
     let finish!: (text: string) => void;
     const pending = new Promise<string>(resolve => {finish = resolve;});
-    render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => pending}/>);
+    render(<DocumentMenu path="Plan.md" workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => pending}/>);
     await user.click(screen.getByTestId('document-menu-trigger'));
     await user.click(screen.getByTestId('document-menu-item-export-markdown'));
     await user.keyboard('{Escape}');

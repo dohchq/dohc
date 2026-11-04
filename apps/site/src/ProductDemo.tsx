@@ -35,7 +35,7 @@ import { EmptyEditorGroup } from "../../desktop/src/renderer/workbench/EmptyEdit
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
 import { EditorGroupFrame } from "../../desktop/src/renderer/workbench/tabRowActions";
 import { WorkspaceSyncStatus } from "../../desktop/src/renderer/workbench/WorkspaceSyncStatus";
-import { ShellErrorReporter, useShellError } from "../../desktop/src/renderer/shell/useShellError";
+import { ShellErrorReporter, ShellNoticeClear, useShellError } from "../../desktop/src/renderer/shell/useShellError";
 import { matchShellShortcut } from "../../desktop/src/shortcuts/shortcutRegistry";
 import {
   DEMO_EDITOR_GROUP_ID,
@@ -268,6 +268,9 @@ export function ProductDemo() {
     reportShellFailure,
     hideShellError,
     dismissShellError,
+    retryShellError,
+    runShellErrorAction,
+    clearIdentity,
   } = useShellError("marketing-demo");
   const reportFailureMessage = useCallback(
     (message: string) => reportShellFailure({ message }),
@@ -779,8 +782,11 @@ export function ProductDemo() {
               workspaceErrors={shellErrors.map((error) => ({
                 ...error,
                 copy: { report: error.message },
-                canRetry: false,
+                canRetry: error.retry !== null,
+                ...(error.action ? { actionLabel: error.action.label } : {}),
               }))}
+              onRetryWorkspaceError={retryShellError}
+              onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideShellError}
               onDismissWorkspaceError={dismissShellError}
             />
@@ -829,18 +835,21 @@ export function ProductDemo() {
                 <ViewActions
                   actions={
                     <ShellErrorReporter.Provider value={reportShellFailure}>
-                      <DocumentControls
-                        toggle={{
-                          label: showSource ? "WYSIWYG" : "Source",
-                          testId: "markdown-edit-toggle",
-                          onClick: toggleSource,
-                        }}
-                        menu={{
-                          workspaceId: "marketing-demo",
-                          suggestedName: filenameStem(activePath),
-                          getMarkdown: () => composeCurrentDocument(),
-                        }}
-                      />
+                      <ShellNoticeClear.Provider value={clearIdentity}>
+                        <DocumentControls
+                          toggle={{
+                            label: showSource ? "WYSIWYG" : "Source",
+                            testId: "markdown-edit-toggle",
+                            onClick: toggleSource,
+                          }}
+                          menu={{
+                            workspaceId: "marketing-demo",
+                            path: activePath,
+                            suggestedName: filenameStem(activePath),
+                            getMarkdown: () => composeCurrentDocument(),
+                          }}
+                        />
+                      </ShellNoticeClear.Provider>
                     </ShellErrorReporter.Provider>
                   }
                 />
