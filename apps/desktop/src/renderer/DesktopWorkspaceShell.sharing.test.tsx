@@ -231,6 +231,46 @@ describe("workspace share handoff placement", () => {
   });
 });
 
+describe("refreshing shares added to this workspace", () => {
+  // The record keeps the person's own files apart while dohc can't read it,
+  // so the row has no × and ends when that share's refresh completes.
+  it("keeps a share whose collision record dohc can't read in Notices until it refreshes", async () => {
+    const words =
+      "dohc did not update alex because it could not read " +
+      "shared-with-me/alex/.dohc/local/share-refresh/share-collision-record.json. " +
+      "It keeps a refresh from replacing your own files.";
+    const bridge = makeBridge(Promise.resolve(null));
+    let refreshes = 0;
+    const refresh = vi.fn(async () => {
+      refreshes += 1;
+      return {
+        results: [
+          refreshes > 1
+            ? { shareId: "share-1", label: "alex", status: "unchanged" as const, changedPaths: 0 }
+            : { shareId: "share-1", label: "alex", status: "failed" as const, changedPaths: 0, errorKind: "collision-record" as const },
+        ],
+      };
+    });
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    // The polled refresh files the row, and a new row toasts.
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(words);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(notices).queryByText(words, { exact: false })).toBeNull());
+    expect(notices.textContent).toContain("Shares refreshed — 0 files updated.");
+  });
+});
+
 describe("adding a share to this workspace", () => {
   // The folder under shared-with-me is read-only at every level, so the
   // message names the level only where it has somewhere else to go. An

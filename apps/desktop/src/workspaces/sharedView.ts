@@ -201,6 +201,16 @@ function collisionRecordFailure(
   };
 }
 
+// Whether a refresh stopped because dohc could not read the share's collision
+// record, or could not set it aside. A mount's refresh row carries this kind.
+export function isCollisionRecordRefusal(error: unknown): boolean {
+  return (
+    error instanceof CollisionRecordRefusal ||
+    (error instanceof CapturePartialFailureError &&
+      error.cause instanceof CollisionRecordRefusal)
+  );
+}
+
 // Containment before any disk write: the engine already restricts paths to
 // validated workspace-relative ones, but a defense layer this close to
 // fs writes is cheap and permanent.

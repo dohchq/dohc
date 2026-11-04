@@ -28,6 +28,7 @@ import {
   type ShareViewFilesDependencies,
 } from "./shareViewFiles";
 import { assertActiveShareViewFilesOwner } from "./shareViewFilesOwner";
+import { isCollisionRecordRefusal } from "./sharedView";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
 import { parseShareCode, relayUrlsMatch } from "./syncCode";
 
@@ -463,6 +464,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           mount: unknown,
           status: ShareMountStatusRow["status"],
           changedPaths: number,
+          collisionRecord?: Pick<ShareMountStatusRow, "errorKind" | "collisionRecordQuarantined">,
         ): void => {
           if (!record(mount)) return;
           const row = shareMountResultRow({
@@ -470,6 +472,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             label: mount.label,
             status,
             changedPaths,
+            ...collisionRecord,
           });
           if (row) results.push(row);
         };
@@ -522,6 +525,9 @@ export function createShareMountCommands<WorkspaceSummary>(
                 mount,
                 reconciled.outcome.status,
                 reconciled.outcome.changedPaths,
+                reconciled.outcome.collisionRecordQuarantined
+                  ? { collisionRecordQuarantined: true }
+                  : undefined,
               );
             } catch (error) {
               const verdict = classifyShareMountRefreshError(error);
@@ -532,7 +538,14 @@ export function createShareMountCommands<WorkspaceSummary>(
                 `share-mount refresh failed for ${mount.label}:`,
                 error,
               );
-              pushResult(mount, verdict.status, 0);
+              pushResult(
+                mount,
+                verdict.status,
+                0,
+                verdict.status === "failed" && isCollisionRecordRefusal(error)
+                  ? { errorKind: "collision-record" }
+                  : undefined,
+              );
             }
           }
           return { results };
