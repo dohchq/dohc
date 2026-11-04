@@ -1477,6 +1477,7 @@ define_server_error_codes! {
     "ambiguous_selector" => |_| RelayError::AmbiguousSelector,
     "api_version_too_new" => |_| RelayError::ApiVersionTooNew,
     "api_version_too_old" => |_| RelayError::ApiVersionTooOld,
+    "app_collection_missing" => |_| RelayError::HttpStatus(410),
     "authorship_mismatch" => |_| RelayError::AuthorshipMismatch,
     "automation_host_rate_limited" => |_| RelayError::HttpStatus(429),
     "automation_press_rate_limited" => |_| RelayError::HttpStatus(429),

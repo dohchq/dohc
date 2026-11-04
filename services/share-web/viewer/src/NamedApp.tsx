@@ -1,3 +1,4 @@
+import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
 import {normalizeShareLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
 import {useEffect, useRef, useState} from "react";
 import {accountUser, namedRequest} from "./namedRecipient";
@@ -61,7 +62,8 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
     const controller = start("open");
     // A successful launch leaves the page through the submitted form, so only a failure settles.
     void launchSharedApp({workspaceId: target.workspaceId, publicationId: target.publicationId}, controller.signal)
-      .catch((reason: unknown) => finish(controller, reason instanceof AppLaunchError && reason.status !== 503 ? LAUNCH_REFUSED : LAUNCH_UNAVAILABLE));
+      .catch((reason: unknown) => finish(controller, !(reason instanceof AppLaunchError) || reason.status === 503 ? LAUNCH_UNAVAILABLE
+        : reason.status === 410 ? LINK_REFUSALS.app_collection_missing.error : LAUNCH_REFUSED));
   };
   const busy = pending !== null;
   return <div className="viewer named-recipient">

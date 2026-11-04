@@ -2,6 +2,7 @@
   { "code": "ambiguous_selector", "status": 400 },
   { "code": "api_version_too_new", "status": 400 },
   { "code": "api_version_too_old", "status": 400 },
+  { "code": "app_collection_missing", "status": 410 },
   { "code": "authorship_mismatch", "status": 403 },
   { "code": "settlement_proof_budget", "status": 503 },
   { "code": "automation_host_rate_limited", "status": 429 },

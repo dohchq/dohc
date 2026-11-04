@@ -14,7 +14,7 @@ export async function relayLinkRefusal(response: Response, signal: AbortSignal):
     await response.body?.cancel().catch(() => undefined);
     return unavailableLinkRefusal();
   }
-  if (!response.redirected && !response.headers.has("location") && [403, 429].includes(response.status) &&
+  if (!response.redirected && !response.headers.has("location") && [403, 410, 429].includes(response.status) &&
       response.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
     const code = parseLinkRefusal(await readBoundedJson(response, 4096, signal).catch(() => null), response.status);
     if (code) return Response.json(linkRefusalBody(code), {status: response.status, headers});

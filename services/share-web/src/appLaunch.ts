@@ -8,7 +8,7 @@ import type { LinkBrowserMaterial } from "./server";
 import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { forwardAppCollection } from "./appCollectionProxy";
 import { forwardAppBackend } from "./appBackendProxy";
-import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
+import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {opaqueLinkRefusal as refusal} from "./linkRefusal";
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -21,6 +21,7 @@ const unavailable = () => new Response(null, {status: 503, headers});
 const rateLimited = () => new Response(null, {status: 429, headers});
 class RelayUnavailable extends Error {}
 class RelayRateLimited extends Error {}
+class CollectionMissing extends Error {}
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
@@ -88,6 +89,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
     const response = await relay(launch, "", signal);
     try {
       if (response.status === 429) throw new RelayRateLimited();
+      if (response.status === 410) throw new CollectionMissing();
       if (response.status >= 500) throw new RelayUnavailable();
       if (response.status !== 200 || response.redirected || response.headers.has("location")) throw new Error("Unavailable publication.");
       const value = await readBoundedJson(response, 4096, signal);
@@ -225,7 +227,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           if (launches.get(host) !== launch) {launch.staged = undefined; stagedSlots.delete(launch); return refusal();}
           if (launch.expires <= now()) { launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host); return refusal(); }
           const proof = token(); launch.cookieHash = hash(cookie); launch.proofHash = hash(proof); if (request.method === "POST") launch.expires = now() + SESSION_MS;
-          const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';const lifetime=new AbortController();(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal}),lifetime.signal);const stop=()=>{stopped=true;lifetime.abort();frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',stop,{once:true});})();`;
+          const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';const lifetime=new AbortController();(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal}).then(r=>{if(r.status===410)gone();return r;}),lifetime.signal);const stop=()=>{stopped=true;lifetime.abort();frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const gone=()=>{stop();document.getElementById('status').textContent=${JSON.stringify(LINK_REFUSALS.app_collection_missing.error)};};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(r.status===410){gone();return;}if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(r.status===410){gone();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',stop,{once:true});})();`;
           const source = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
           const csp = `default-src 'none'; script-src ${source} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
           return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Shared app</title></head><body style="margin:0"><p id="status" role="status" style="margin:0">Opening app</p><script>${script}</script></body></html>`,
@@ -250,6 +252,9 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       } catch (error) {
         const launch = launches.get(host);
         if (error instanceof RelayRateLimited) return rateLimited();
+        if (error instanceof CollectionMissing) return url.pathname === "/bootstrap"
+          ? new Response(LINK_REFUSALS.app_collection_missing.error, {status: 410, headers: {...headers, "content-type": "text/plain; charset=utf-8"}})
+          : Response.json(linkRefusalBody("app_collection_missing"), {status: 410, headers});
         return (namedIssue || (launch && namedMaterial(launch.material))) && error instanceof RelayUnavailable ? unavailable() : refusal();
       } finally {
         if (scope) requests.delete(scope);

@@ -24,6 +24,7 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+import { forgetCollectionFilePresence } from "./collectionFilePresence";
 import {confirmLiveApplication} from "./liveApplicationAuthorship";
 import {REFUSED_OP_KIND} from "./relayAdmission";
 import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
@@ -286,6 +287,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           const moment = objectMomentFromMomentPayload(op.payloadJson);
           if (moment) {
             if (moment.versionId === "main" && moment.path !== null) notifyDesktopReadiness(storage, {workspaceId: input.workspaceId, path: moment.path});
+            if (moment.versionId === "main") forgetCollectionFilePresence(storage, input.workspaceId);
             objectMomentStmt.run(
               input.workspaceId,
               moment.objectId,

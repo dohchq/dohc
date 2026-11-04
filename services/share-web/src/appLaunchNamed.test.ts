@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { expect, it } from "vitest";
+import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { createAppLaunchHandler } from "./appLaunch";
 
 const config = { viewerOrigin: "https://viewer.example.com", appDomain: "example.net" };
 const publicationId = "a".repeat(64), workspaceId = "workspace-1";
 function fixture() {
-  let active = true, revision = 1, relayDown = false, materialDown = false;
+  let active = true, revision = 1, relayDown = false, materialDown = false, collectionMissing = false;
   const requests: Request[] = [], resolutions: unknown[] = [];
   const bytes = Buffer.from("document.getElementById('root').textContent='Admin app';");
   const file = { path: "bundle.js", sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, contentType: "text/javascript; charset=utf-8" };
@@ -24,6 +25,7 @@ function fixture() {
         expect(request.headers.has("x-dohc-link-profile-secret")).toBe(false);
         if (relayDown) throw Error("Relay unavailable");
         if (!active) return new Response(null, { status: 403 });
+        if (collectionMissing) return Response.json(linkRefusalBody("app_collection_missing"), { status: 410 });
         const url = new URL(request.url);
         expect(url.pathname).toContain(`/sync/link/app-publications/${publicationId}`);
         if (url.pathname.endsWith("/summary")) return Response.json({subjectName: "Trip planner", sharerName: "Ana", access: "comment"});
@@ -49,10 +51,10 @@ function fixture() {
     const proof = /const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!;
     const cookie = bootstrap.headers.get("set-cookie")!.split(";")[0]!;
     const call = (path: string, body: unknown = "", custom: Record<string, string> = {}) => post(origin + path, body, { origin, cookie, "x-dohc-app-proof": proof, ...custom });
-    return { html, call };
+    return { html, call, origin, cookie };
   };
   const summary = (cookie = "account=owner-session") => post(`${config.viewerOrigin}/api/apps/summary`, {workspaceId, publicationId}, {origin: config.viewerOrigin, cookie});
-  return { summary, issue, open, resolutions, requests, revoke() { active = false; }, narrow() { revision++; }, disconnect() { relayDown = true; }, failMaterial() { materialDown = true; } };
+  return { handler, summary, issue, open, resolutions, requests, revoke() { active = false; }, narrow() { revision++; }, disconnect() { relayDown = true; }, failMaterial() { materialDown = true; }, loseCollection() { collectionMissing = true; } };
 }
 
 it("launches a signed-in app without exposing account cookies or named credentials to its document", async () => {
@@ -86,6 +88,18 @@ it("rechecks named authorization on backend, document, and status requests", asy
   f.narrow(); expect((await app.call("/backend", input)).status).toBe(404);
   f.revoke();
   for (const path of ["/backend", "/document", "/status"]) expect((await app.call(path, path === "/backend" ? input : "")).status).toBe(404);
+});
+
+it("gives a signed-in person a missing Collection's words on Open app, in an open app, and on reload", async () => {
+  const f = fixture(), app = await f.open();
+  f.loseCollection();
+  const status = await app.call("/status");
+  expect(status.status).toBe(410); expect(await status.json()).toEqual(linkRefusalBody("app_collection_missing"));
+  expect(app.html).toContain("if(r.status===410){gone();return;}");
+  const reload = await f.handler.handle(new Request(`${app.origin}/bootstrap`, { headers: { host: new URL(app.origin).host, cookie: app.cookie } }));
+  expect(reload.status).toBe(410); expect(await reload.text()).toBe(LINK_REFUSALS.app_collection_missing.error);
+  const issued = await f.issue();
+  expect(issued.status).toBe(410); expect(await issued.json()).toEqual(linkRefusalBody("app_collection_missing"));
 });
 
 it("distinguishes unavailable named session resolution and relay transport from refusal", async () => {
