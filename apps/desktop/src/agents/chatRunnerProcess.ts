@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
-import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
+import { agentProfileArguments, tokenizeRunnerCommand, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
 import { type CodexConfigFiles, codexConfigFiles, codexRequirementsRefuseReadOnly, codexRunConfig } from "./codexRunConfig";
 
@@ -201,48 +201,6 @@ function replyServerArguments(input: {
     // including one added later, is approved.
     "mcp_servers.dohc.default_tools_approval_mode='approve'",
   ].flatMap((entry) => ["--config", entry]);
-}
-
-export function tokenizeRunnerCommand(command: string): string[] {
-  const tokens: string[] = [];
-  let token = "";
-  let inDoubleQuotes = false;
-  let tokenStarted = false;
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (character === '"') {
-      inDoubleQuotes = !inDoubleQuotes;
-      tokenStarted = true;
-      continue;
-    }
-    if (character === "\\") {
-      const next = command[index + 1];
-      if (next === '"' || next === "\\") {
-        token += next;
-        tokenStarted = true;
-        index += 1;
-        continue;
-      }
-    }
-    if (/\s/u.test(character) && !inDoubleQuotes) {
-      if (tokenStarted) {
-        tokens.push(token);
-        token = "";
-        tokenStarted = false;
-      }
-      continue;
-    }
-    token += character;
-    tokenStarted = true;
-  }
-  if (inDoubleQuotes) {
-    throw new Error("Runner command has an unterminated double quote.");
-  }
-  if (tokenStarted) tokens.push(token);
-  if (tokens.length === 0 || !tokens[0]) {
-    throw new Error("Configure a runner command before dispatching.");
-  }
-  return tokens;
 }
 
 export interface ChatRunnerProcessOptions {

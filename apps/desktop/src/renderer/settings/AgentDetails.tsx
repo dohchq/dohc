@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
-import { AGENT_TOOLS, launchCommand, launchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
+import { AGENT_TOOLS, launchCommand, launchCommandHint, launchFromCommand, launchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { Agent, AgentSettings } from "../../settings/userSettings";
 import { isComposingKey } from "../ui/keys";
 import { HueControl } from "./SettingRow";
@@ -25,17 +25,21 @@ function InlineField(props: {
   initial: string;
   className: string;
   numeric?: boolean;
+  // A line under the field about what the draft does once saved.
+  hint?: (draft: string) => string;
   onCommit: (value: string) => void;
   onDone: () => void;
 }) {
   const [draft, setDraft] = useState(props.initial);
   const input = useRef<HTMLInputElement | null>(null);
   const cancelled = useRef(false);
+  const hintId = useId();
   useEffect(() => input.current?.select(), []);
-  return (
+  const field = (
     <input
       ref={input}
       aria-label={props.label}
+      aria-describedby={props.hint ? hintId : undefined}
       value={draft}
       spellCheck={false}
       autoComplete="off"
@@ -59,6 +63,12 @@ function InlineField(props: {
       className={`h-7 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink ${props.className}`}
     />
   );
+  return props.hint ? (
+    <div className="flex w-full min-w-0 flex-col gap-1">
+      {field}
+      <p id={hintId} className="m-0 text-[12px] text-muted">{props.hint(draft)}</p>
+    </div>
+  ) : field;
 }
 
 function Term(props: { label: string; children: ReactNode }) {
@@ -81,12 +91,13 @@ export function AgentDetails(props: {
   const { agent, onChange } = props;
   const [editing, setEditing] = useState<"timeout" | "command" | null>(null);
   const profile = agent.launch ? launchProfile(agent.launch) : undefined;
-  const command = agent.launch && "command" in agent.launch ? agent.launch.command : null;
+  // The person's own command, or a tool's program with their own flags.
+  const command = agent.launch && (!profile || (profile.arguments?.length ?? 0) > 0) ? launchCommand(agent.launch) : null;
   const id = `agent-details-${agent.id}`;
   const saveCommand = (value: string) => {
-    const next = value.trim();
-    if (next && next !== (agent.launch ? launchCommand(agent.launch) : "")) {
-      onChange((current) => ({ ...current, launch: { command: next } }));
+    const next = launchFromCommand(value);
+    if (next && value.trim() !== (agent.launch ? launchCommand(agent.launch) : "")) {
+      onChange((current) => ({ ...current, launch: next }));
     }
   };
   return (
@@ -107,7 +118,7 @@ export function AgentDetails(props: {
         </Term>
         {profile ? <>
           <Term label="Tool">{toolLine(profile.tool, props.tools)}</Term>
-          <Term label="Program"><span className="min-w-0 break-all">{profile.executable}</span></Term>
+          {command === null ? <Term label="Program"><span className="min-w-0 break-all">{profile.executable}</span></Term> : null}
         </> : null}
         {agent.launch ? (
           <Term label="Stops after">
@@ -130,6 +141,7 @@ export function AgentDetails(props: {
         <Term label="Command">
           {editing === "command" ? (
             <InlineField label={`Command that starts ${agent.name}`} initial={agent.launch ? launchCommand(agent.launch) : ""} className="w-full font-mono"
+              hint={(draft) => launchCommandHint(launchFromCommand(draft))}
               onDone={() => setEditing(null)} onCommit={saveCommand} />
           ) : command !== null ? <>
             <code className="min-w-0 truncate font-mono" title={command}>{command}</code>
