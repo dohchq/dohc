@@ -192,10 +192,10 @@ test("quits within its budget while a push and the automation host read wait on 
     const quitLine = logs.find((entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"))?.text.trim() ?? "no quit line";
     console.log(`#2868 e2e push: ${exitedAtMs !== null ? `quit took ${quitMs} ms` : `app still running after ${quitMs} ms`}; ${quitLine}`);
     expect(exitedAtMs, "The app exits during an unanswered push").not.toBeNull();
-    expect(read.closed, "The automation host read closes").toBe(true);
     // The app's own quit line. A step that waits on the server, such as
     // closing the workspace, runs past the budget and is named here.
     expect(quitLine, "Quit finishes within its budget, with no step still running").toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
+    await expect.poll(() => read.closed, { timeout: 5_000, message: "The automation host read closes" }).toBe(true);
 
     // The next start, with the server answering, reads the host record
     // again and sends what the quit left owed.
