@@ -223,21 +223,6 @@ type CollaborationExtensions = {
   yTiptap: YTiptap;
 };
 
-let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
-
-function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
-  collaborationExtensionsPromise ??= Promise.all([
-    import("@tiptap/extension-collaboration"),
-    import("@tiptap/extension-collaboration-caret"),
-    import("@tiptap/y-tiptap"),
-  ]).then(([collaboration, collaborationCaret, yTiptap]) => ({
-    Collaboration: collaboration.Collaboration,
-    CollaborationCaret: collaborationCaret.CollaborationCaret,
-    yTiptap,
-  }));
-  return collaborationExtensionsPromise;
-}
-
 type CollaborationExtensionsLoad =
   | { status: "loading" }
   | { status: "ready"; extensions: CollaborationExtensions }
@@ -247,6 +232,36 @@ function collaborationLoadError(error: unknown): Error {
   return error instanceof Error
     ? error
     : new Error("Collaboration extensions failed to load", { cause: error });
+}
+
+let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
+
+// Read during render, so once the extensions have loaded, a live document's
+// editor mounts in its first commit. Otherwise every open paints the loading
+// rows over the read view's text while the editor builds.
+let collaborationExtensionsLoad: CollaborationExtensionsLoad = { status: "loading" };
+
+function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
+  collaborationExtensionsPromise ??= Promise.all([
+    import("@tiptap/extension-collaboration"),
+    import("@tiptap/extension-collaboration-caret"),
+    import("@tiptap/y-tiptap"),
+  ]).then(
+    ([collaboration, collaborationCaret, yTiptap]) => {
+      const extensions = {
+        Collaboration: collaboration.Collaboration,
+        CollaborationCaret: collaborationCaret.CollaborationCaret,
+        yTiptap,
+      };
+      collaborationExtensionsLoad = { status: "ready", extensions };
+      return extensions;
+    },
+    (error: unknown) => {
+      collaborationExtensionsLoad = { status: "failed", error: collaborationLoadError(error) };
+      throw error;
+    },
+  );
+  return collaborationExtensionsPromise;
 }
 
 type MarkdownEditorInnerProps = MarkdownEditorProps & {
@@ -1345,18 +1360,16 @@ const MarkdownEditorCollabLoader = forwardRef<
   MarkdownEditorHandle,
   MarkdownEditorProps
 >(function MarkdownEditorCollabLoader(props, ref) {
-  const [load, setLoad] = useState<CollaborationExtensionsLoad>({
-    status: "loading",
-  });
+  const [load, setLoad] = useState(collaborationExtensionsLoad);
 
   useAsyncResponseEffect(
-    loadCollaborationExtensions,
+    () => (load.status === "loading" ? loadCollaborationExtensions() : null),
     {
       onSuccess: (extensions) => setLoad({ status: "ready", extensions }),
       onError: (error) =>
         setLoad({ status: "failed", error: collaborationLoadError(error) }),
     },
-    [],
+    [load.status],
   );
 
   if (load.status === "failed") throw load.error;
