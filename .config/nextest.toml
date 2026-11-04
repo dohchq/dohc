@@ -42,3 +42,11 @@ threads-required = "num-test-threads"
 [[profile.default.overrides]]
 filter = 'binary_id(=dohc-engine-runtime::owner_publication) & test(=held_proof::a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding)'
 threads-required = "num-test-threads"
+
+# Publishing 2,000 link placements took 216 s alone on a 4-core Linux VM: a
+# median of 95 ms per placement, nearly all of it the disk sync that makes each
+# placement durable. A test-only change cannot make it faster, so it gets about
+# 3x that. A stall still fails within a minute through the test's progress check (#3136).
+[[profile.default.overrides]]
+filter = 'test(=actor::link_rewrites::tests::publication::two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update)'
+slow-timeout = { period = "60s", terminate-after = 11 }
