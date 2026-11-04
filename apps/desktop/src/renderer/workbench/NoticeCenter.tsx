@@ -1,11 +1,11 @@
 import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -219,13 +219,8 @@ const ROW_ACTIONS_CLASS = "-ml-1.5 mt-1 flex flex-wrap items-center gap-1";
 const ROW_ACTION_CLASS =
   "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 aria-busy:opacity-50";
 
-// A row counts as read once the pointer or keyboard focus rests on it this
-// long: longer than crossing a row on the way to another, about when a
-// tooltip would show.
-const READ_REST_MS = 600;
-
-type RestSource = "pointer" | "focus";
-type RestHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onPointerLeave" | "onFocus" | "onBlur">;
+// A row counts as read the moment the pointer or keyboard focus reaches it.
+type ReachHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onFocus">;
 
 // A read row of this computer's is remembered by what it says, so one whose
 // words or time change is unread again.
@@ -696,7 +691,7 @@ export function WorkspaceErrorToast(props: {
 export function LocalNoticeRow(props: {
   notice: Notice;
   unread: boolean;
-  rest?: RestHandlers;
+  reach?: ReachHandlers;
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   onAction: (action: NoticeAction) => void;
   onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -709,7 +704,7 @@ export function LocalNoticeRow(props: {
       data-notice-row=""
       tabIndex={-1}
       onKeyDown={props.onKeyDown}
-      {...props.rest}
+      {...props.reach}
       className={ROW_CLASS}
     >
       <UnreadMark unread={props.unread} testId={`notice-${notice.id}-unread`} />
@@ -897,7 +892,7 @@ export function NoticeCenter(props: {
   // Try again on a failed run's notice. The shell asks first when the run
   // would start over, and reports why it did not run.
   onRetrySentNotice?: (notice: NoticeRow) => void;
-  // Marks one notice read: the pointer or keyboard focus rested on its row.
+  // Marks one notice read: the pointer or keyboard focus reached its row.
   onReadSentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
@@ -1584,7 +1579,7 @@ export function NoticeCenter(props: {
     for (const row of rows) row.onRead?.();
   };
   // How to read each unread row as it is now, by a name that stays with the
-  // row while its words change. A rest that ends reads what the row says then.
+  // row while its words change.
   const readers = new Map<string, () => void>();
   for (const notice of unreadNotices) readers.set(`local:${notice.id}`, () => readLocal([notice], false));
   if (setAsideUnread) readers.set("set-aside", () => readLocal([], true));
@@ -1593,57 +1588,16 @@ export function NoticeCenter(props: {
       readers.set(`sent:${sentKey(sentAccount, notice)}`, () => props.onReadSentNotice?.(notice));
     }
   }
-  const latestReaders = useRef(readers);
-  // The row the pointer rests on and the row holding focus, each waiting to
-  // be read. Closing the panel reads neither.
-  const rests = useRef<Record<RestSource, { row: string; timer: ReturnType<typeof setTimeout> } | null>>({ pointer: null, focus: null });
-  const stopRest = (by: RestSource) => {
-    const rest = rests.current[by];
-    if (rest) clearTimeout(rest.timer);
-    rests.current[by] = null;
-  };
-  // A row that goes away or is read stops its rest, which a removed row
-  // cannot do by blur or pointer leave. A row that returns waits again.
-  useLayoutEffect(() => {
-    latestReaders.current = readers;
-    for (const by of ["pointer", "focus"] as const) {
-      const row = rests.current[by]?.row;
-      if (row !== undefined && !readers.has(row)) stopRest(by);
-    }
-  });
-  useEffect(() => {
-    const current = rests.current;
-    return () => {
-      if (current.pointer) clearTimeout(current.pointer.timer);
-      if (current.focus) clearTimeout(current.focus.timer);
-      current.pointer = null;
-      current.focus = null;
+  // A row reads the moment the pointer or keyboard focus reaches it, and its
+  // mark clears before the frame paints. The pointer and focus can both reach
+  // a row before it shows read; it reads once.
+  const readOnReach = (row: string): ReachHandlers => {
+    const read = () => {
+      const reader = readers.get(row);
+      readers.delete(row);
+      if (reader) flushSync(reader);
     };
-  }, [open]);
-  const restReads = (row: string): RestHandlers => {
-    const start = (by: RestSource) => {
-      if (rests.current[by]?.row === row) return;
-      stopRest(by);
-      const timer = setTimeout(() => {
-        rests.current[by] = null;
-        // One read per rest, even when the pointer and focus both wait on the row.
-        const other = by === "pointer" ? "focus" : "pointer";
-        if (rests.current[other]?.row === row) stopRest(other);
-        latestReaders.current.get(row)?.();
-      }, READ_REST_MS);
-      rests.current[by] = { row, timer };
-    };
-    const end = (by: RestSource) => {
-      if (rests.current[by]?.row === row) stopRest(by);
-    };
-    return {
-      onPointerEnter: () => start("pointer"),
-      onPointerLeave: () => end("pointer"),
-      onFocus: () => start("focus"),
-      onBlur: (event: FocusEvent<HTMLElement>) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) end("focus");
-      },
-    };
+    return { onPointerEnter: read, onFocus: read };
   };
   // The newest error whose toast is still open. One at a time: the rest
   // wait in Notices with the count. The list is in arrival order, so two
@@ -2046,7 +2000,7 @@ export function NoticeCenter(props: {
               {recoveryRows.length > 0 ? (
                 <section
                   data-testid="notice-set-aside-edits"
-                  {...restReads("set-aside")}
+                  {...readOnReach("set-aside")}
                   className="flex gap-2 border-b border-line px-3 py-2"
                 >
                   <UnreadMark unread={setAsideUnread} testId="notice-set-aside-edits-unread" className="h-4" />
@@ -2069,7 +2023,7 @@ export function NoticeCenter(props: {
                   key={notice.id}
                   notice={notice}
                   unread={unreadNotices.includes(notice)}
-                  rest={restReads(`local:${notice.id}`)}
+                  reach={readOnReach(`local:${notice.id}`)}
                   onKeyDown={rowKeys({
                     open: firstAction(notice),
                     dismiss: notice.onDismiss,
@@ -2123,7 +2077,7 @@ export function NoticeCenter(props: {
                           data-notice-row=""
                           tabIndex={-1}
                           onKeyDown={rowKeys({ open: openNotice, dismiss: dismissNotice })}
-                          {...restReads(`sent:${key}`)}
+                          {...readOnReach(`sent:${key}`)}
                           className={ROW_CLASS}
                         >
                           <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
