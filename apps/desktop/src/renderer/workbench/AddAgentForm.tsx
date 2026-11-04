@@ -49,6 +49,9 @@ export function AddAgentForm(props: {
   const savedProfileCommand = savedProfile ? launchCommand(savedProfile) : "";
   const [agentName, setAgentName] = useState(agent?.name ?? "");
   const [profile, setProfile] = useState(savedProfile);
+  // The tool the command field started from. Typing keeps it only while the
+  // command starts that same program.
+  const [startProfile, setStartProfile] = useState(savedProfile);
   const [advanced, setAdvanced] = useState(savedCommand.length > 0 || (savedProfile?.arguments?.length ?? 0) > 0);
   const requests = useRequestSequence([props.workspaceId]);
   const [command, setCommand] = useState(savedCommand);
@@ -77,9 +80,10 @@ export function AddAgentForm(props: {
     setAgentName(agent?.name ?? "");
     setCommand(savedCommand);
     setProfile(savedProfile);
+    setStartProfile(savedProfile);
   }, [agent?.name, savedCommand, savedProfile?.tool, savedProfileCommand]);
 
-  const launch = useMemo(() => launchFrom(profile, command), [profile, command]);
+  const launch = useMemo(() => launchFrom(profile, command, startProfile), [profile, command, startProfile]);
   const trimmedCommand = launch ? launchCommand(launch) : "";
   const preview = agentName.trim() || "Your agent";
 
@@ -194,7 +198,7 @@ export function AddAgentForm(props: {
         </div>
 
         <AgentToolPicker workspaceId={props.workspaceId} profile={launch ? launchProfile(launch) : undefined} usingCommand={command.trim().length > 0} disabled={busy}
-          onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
+          onError={props.onError} onChange={(value) => { setProfile(value); setStartProfile(value); setCheck({ status: "idle" }); }} />
         <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
           <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
           {profile && command.trim() ? <SecondaryButton size="compact" disabled={busy} onClick={() => { setProfile(undefined); setCheck({ status: "idle" }); }}>Use saved command</SecondaryButton> : null}
