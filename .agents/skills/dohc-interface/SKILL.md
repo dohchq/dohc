@@ -166,7 +166,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 
 - If the dialog has a field, the first field takes focus.
 - If it has none, a `ConfirmDialog` focuses its primary, so Enter runs it. If the primary waits for a choice in the dialog, the first control takes focus. Any other dialog focuses its panel.
-- A dialog that opens while someone types, in a field, editable text or an app's frame, focuses its panel, so their next Enter can't run the primary.
+- A `ConfirmDialog` that opens while someone types, in a field, editable text or an app's frame, focuses its panel, so their next Enter can't run the primary.
 - In a `ConfirmDialog`, the arrow keys move between the buttons, and a held Enter does nothing.
 - Give the panel `aria-labelledby` on its title and `aria-describedby` on its body, so a screen reader reads both.
 - Enter in a single-line field runs the primary.

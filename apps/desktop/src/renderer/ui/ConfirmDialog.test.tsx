@@ -43,6 +43,18 @@ describe("ConfirmDialog intent", () => {
     expect(screen.getByTestId("confirm-cancel").textContent).toBe("Cancel");
     expect(confirm.textContent).toBe("Delete files");
   });
+
+  // Focus opens on the confirm button, so a screen reader reads the title and
+  // the button. The body says what is lost, so it must be read too.
+  it("is described by its body", () => {
+    render(card());
+    expect(
+      screen.getByRole("dialog", {
+        name: "Delete 12 files from Research?",
+        description: "They move to the system trash.",
+      }),
+    ).toBeTruthy();
+  });
 });
 
 function dialog(overrides: Partial<{ confirmDisabled: boolean; choice: boolean }> = {}) {

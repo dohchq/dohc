@@ -27,6 +27,7 @@ const FOCUS_RING = "focus-visible:outline-2 focus-visible:outline-focus";
 // renders it over a frame with no keyboard behavior.
 export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref<HTMLButtonElement> }) {
   const titleId = `${props.testId}-title`;
+  const bodyId = `${props.testId}-body`;
   const Confirm = props.intent === "danger" ? DangerButton : PrimaryButton;
   return (
     <div
@@ -35,12 +36,13 @@ export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
+      aria-describedby={bodyId}
     >
       <div>
         <h3 id={titleId} className="m-0 break-words text-base font-semibold text-ink">
           {props.title}
         </h3>
-        {props.children}
+        <div id={bodyId}>{props.children}</div>
       </div>
       <div data-confirm-actions className="flex justify-end gap-2">
         <SecondaryButton data-testid={props.cancelTestId} className={FOCUS_RING} onClick={props.onCancel}>
