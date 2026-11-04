@@ -1058,6 +1058,51 @@ describe("ConflictReviewDialog waiting version", () => {
     expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
   });
 
+  it("keeps a Show more page that lands after a reread, then reads again", async () => {
+    type Page = { conflicts: WorkspaceVersionConflict[]; nextAfterConflictId: string | null };
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("c-1")],
+      nextAfterConflictId: "c-1",
+    });
+    openReview();
+    await settle();
+    let answerReread!: (page: Page) => void;
+    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(
+      new Promise((resolve) => { answerReread = resolve; }),
+    );
+    await signal();
+    let answerPage!: (page: Page) => void;
+    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(
+      new Promise((resolve) => { answerPage = resolve; }),
+    );
+    fireEvent.click(screen.getByTestId("conflict-list-show-more"));
+    await settle();
+
+    await act(async () => {
+      answerReread({ conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" });
+    });
+    await settle();
+    await act(async () => {
+      answerPage({ conflicts: [syncConflict("c-2")], nextAfterConflictId: null });
+    });
+    await settle();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
+
+    bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
+      async (payload: { afterConflictId?: string }) =>
+        payload.afterConflictId === undefined
+          ? { conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" }
+          : { conflicts: [waiting("c-2")], nextAfterConflictId: null },
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+    });
+    await settle();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
+    fireEvent.click(screen.getAllByTestId("version-conflict-toggle")[1]!);
+    expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
+  });
+
   it("reads again after the first load when sync signalled during it", async () => {
     let versionsAnswer!: (value: { versions: []; activeVersionId: string }) => void;
     bridgeMock.listWorkspaceVersions.mockReturnValueOnce(

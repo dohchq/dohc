@@ -2126,6 +2126,9 @@ export function ConflictReviewDialog(props: {
   // the window that asked, and every window change (the initial load, each
   // resolution's remaining page, each reread, each append) advances this.
   const windowGeneration = useRef(0);
+  // "Show more" requests in flight. A reread waits for them, so neither
+  // answer discards the other.
+  const pagesLoading = useRef(0);
 
   useEffect(() => {
     const token = liveToken.next();
@@ -2176,37 +2179,42 @@ export function ConflictReviewDialog(props: {
     if (state.status !== "ready" || state.nextAfterConflictId === null) return;
     const token = liveToken.current();
     const generation = windowGeneration.current;
-    const page = await bridge().listWorkspaceVersionConflicts({
-      workspaceId,
-      afterConflictId: state.nextAfterConflictId,
-    });
-    if (!liveToken.isCurrent(token)) return;
-    // A resolution replaced the window while this page was in flight; its
-    // rows belong to the window that asked, not the one that remains.
-    if (generation !== windowGeneration.current) return;
-    windowGeneration.current += 1;
-    setState((current) =>
-      current.status === "ready"
-        ? {
-            ...current,
-            conflicts: [...current.conflicts, ...page.conflicts],
-            nextAfterConflictId: page.nextAfterConflictId,
-          }
-        : current,
-    );
+    pagesLoading.current += 1;
+    try {
+      const page = await bridge().listWorkspaceVersionConflicts({
+        workspaceId,
+        afterConflictId: state.nextAfterConflictId,
+      });
+      if (!liveToken.isCurrent(token)) return;
+      // A resolution replaced the window while this page was in flight; its
+      // rows belong to the window that asked, not the one that remains.
+      if (generation !== windowGeneration.current) return;
+      windowGeneration.current += 1;
+      setState((current) =>
+        current.status === "ready"
+          ? {
+              ...current,
+              conflicts: [...current.conflicts, ...page.conflicts],
+              nextAfterConflictId: page.nextAfterConflictId,
+            }
+          : current,
+      );
+    } finally {
+      pagesLoading.current -= 1;
+    }
   }, [state, workspaceId]);
 
   // A sync pass can hold a newer version behind a conflict on screen. Each
   // pass signals without paths, so read the loaded window again then. Keys
   // stay the conflict ids, so the open card and its combined copy survive.
-  // A signal during the first load, or a window that changes during the
-  // reread, reads again once the window settles.
+  // A signal during the first load or a Show more, or a window that changes
+  // during the reread, reads again once the window settles.
   const stateRef = useRef(state);
   stateRef.current = state;
   useEffect(() => {
     const refresh = createActivityCoalescer(() => {
       const shown = stateRef.current;
-      if (shown.status === "loading") {
+      if (shown.status === "loading" || pagesLoading.current > 0) {
         refresh.schedule();
         return;
       }
@@ -2232,6 +2240,10 @@ export function ConflictReviewDialog(props: {
           } while (after !== null && rows.length < shown.conflicts.length);
         } catch {
           // The window on screen stays; the next change reads it again.
+          return;
+        }
+        if (pagesLoading.current > 0) {
+          refresh.schedule();
           return;
         }
         windowGeneration.current += 1;
