@@ -3282,6 +3282,36 @@ mod tests {
             .expect("read edges")
         }
 
+        /// The Collections' records, fields and relations without the
+        /// workspace id, so two workspaces can be compared.
+        fn collections_state(&self) -> Vec<String> {
+            let conn = rusqlite::Connection::open_with_flags(
+                self.open.actor.database_path(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db");
+            let mut rows = Vec::new();
+            for query in [
+                "SELECT 'record ' || json_array(version_id, record_id, collection_path, \
+                 file_path, object_id, adoption_state) \
+                 FROM collection_records WHERE workspace_id = ?1",
+                "SELECT 'field ' || json_array(version_id, record_id, field_name, value_json, \
+                 validation_status, validation_reason_json) \
+                 FROM collection_record_fields WHERE workspace_id = ?1",
+                "SELECT 'edge ' || json_array(version_id, source_record_id, field_name, \
+                 target_record_id, target_collection_path, many) \
+                 FROM collection_relation_edges WHERE workspace_id = ?1",
+            ] {
+                let mut statement = conn.prepare(query).expect("prepare");
+                let found = statement
+                    .query_map([self.workspace_id], |row| row.get::<_, String>(0))
+                    .expect("query");
+                rows.extend(found.map(|row| row.expect("row")));
+            }
+            rows.sort();
+            rows
+        }
+
         fn owed(&self) -> bool {
             self.open.collections_owed.load(Ordering::SeqCst)
         }
@@ -4252,32 +4282,41 @@ mod tests {
         .await
     }
 
-    /// Commit page one, then pull and commit page two, whose terminal commit
-    /// pays the owed update with the relation intact.
-    async fn finish_half_pull(f: CursorFixture, page_one: Value) {
+    /// Commit a pulled page's cursor.
+    async fn commit_page(f: &CursorFixture, page: &Value) -> Result<Value, WireError> {
         let ctx = RequestContext::unbounded();
-        let commit = |page: Value| {
-            let token = page["pendingCursor"]["token"]
-                .as_str()
-                .expect("pending cursor")
-                .to_owned();
-            let request = f.request(0, "sync.commitCursor", &token);
-            f.service
-                .sync_commit_cursor(&ctx, request.workspace, request.params)
-        };
-        commit(page_one).await.expect("commit page one");
+        let token = page["pendingCursor"]["token"]
+            .as_str()
+            .expect("pending cursor");
+        let request = f.request(0, "sync.commitCursor", token);
+        f.service
+            .sync_commit_cursor(&ctx, request.workspace, request.params)
+            .await
+    }
+
+    /// Commit page one, then pull and commit page two, whose terminal commit
+    /// pays the owed update with the relation intact. Returns the
+    /// Collections at the end.
+    async fn finish_half_pull(f: CursorFixture, page_one: Value) -> Vec<String> {
+        commit_page(&f, &page_one).await.expect("commit page one");
         let page_two = pull(&f).await.expect("page two lands");
         assert_eq!(page_two["hasMore"], json!(false));
-        commit(page_two).await.expect("commit page two");
+        commit_page(&f, &page_two).await.expect("commit page two");
         assert!(!f.owed());
         assert_eq!(f.edges(), 1, "the source still relates to the target");
+        let state = f.collections_state();
         f.close().await;
+        state
     }
 
     /// A Collections update is admitted under the capture gate while a pull
-    /// waits for its first page, which removes a relation's target that the
-    /// second page brings back. The page must not land between the update's
-    /// admission and its run, so the update never sees half the pull.
+    /// fetches its first page, which removes a relation's target that the
+    /// second page brings back. Fetching takes neither the gate nor the
+    /// pull's token, so the update runs first, on the state from before the
+    /// pull, and page one waits for the gate. An update owed between the
+    /// pages stays owed while the pull's token stands. No update sees half
+    /// the pull, and the Collections end as they do when the update runs
+    /// only after the whole pull.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_admitted_collections_update_never_sees_half_a_pull() {
         let ctx = RequestContext::unbounded();
@@ -4308,8 +4347,30 @@ mod tests {
         assert_eq!(page_one["hasMore"], json!(true));
         drop(update);
         assert_eq!(f.edges(), 1, "the update did not see page one alone");
-        assert!(f.owed(), "the update waits for the terminal page");
-        finish_half_pull(f, page_one).await;
+        assert!(!f.owed(), "the update ran before the pull placed page one");
+        commit_page(&f, &page_one).await.expect("commit page one");
+        // Between the pages the pull's token stands, so an owed update waits.
+        f.open.collections_owed.store(true, Ordering::SeqCst);
+        f.service.settle_owed_collections(&ctx, &f.open).await;
+        assert!(f.owed(), "an update between the pages waits for the terminal page");
+        assert_eq!(f.edges(), 1, "the update did not see page one alone");
+        let page_two = pull(&f).await.expect("page two lands");
+        assert_eq!(page_two["hasMore"], json!(false));
+        commit_page(&f, &page_two).await.expect("commit page two");
+        assert!(!f.owed());
+        assert_eq!(f.edges(), 1, "the source still relates to the target");
+        let state = f.collections_state();
+        f.close().await;
+
+        // The same pull and update, with the update run only after the
+        // terminal commit, as on main.
+        let (relay, f) = half_pull_fixture("owed-after-pull", true).await;
+        relay.release();
+        let page_one = pull(&f).await.expect("page one lands");
+        assert_eq!(page_one["hasMore"], json!(true));
+        assert!(f.owed(), "no update ran during the pull");
+        let after = finish_half_pull(f, page_one).await;
+        assert_eq!(state, after, "the update's order leaves the same Collections");
     }
 
     /// A Collections update is admitted under the capture gate before a pull
