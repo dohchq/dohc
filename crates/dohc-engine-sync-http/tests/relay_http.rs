@@ -789,14 +789,7 @@ fn pull_aborts_when_has_more_cursor_does_not_advance() {
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|_| log_page(Vec::new(), 0, true));
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
+        .fetch_pull(&mut engine, "ws", &NoFaults)
         .expect_err("non-advancing page must abort");
     assert_eq!(
         error,
@@ -830,11 +823,16 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
             false,
         )
     });
-    let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
+    let client = RelaySyncClient::new(transport(&server));
+    let prepared = client
+        .fetch_pull(&mut engine, "ws", &NoFaults)
+        .expect("fetch page");
+    let error = client
+        .apply_pull(
             &mut engine,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -869,11 +867,16 @@ fn pull_accepts_the_relays_integral_float_normalization() {
         )
     });
 
-    let outcome = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
+    let client = RelaySyncClient::new(transport(&server));
+    let prepared = client
+        .fetch_pull(&mut engine, "ws", &NoFaults)
+        .expect("fetch page");
+    let outcome = client
+        .apply_pull(
             &mut engine,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -1084,14 +1087,7 @@ fn pull_rejects_fetched_blob_with_wrong_sha() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
+        .fetch_pull(&mut engine, "ws", &NoFaults)
         .expect_err("wrong blob content must fail");
     assert_eq!(error, RelayError::BlobInvalid);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -1143,11 +1139,15 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         }
     });
     let client = RelaySyncClient::new(transport(&server));
+    let prepared = client
+        .fetch_pull(&mut engine, "ws", &NoFaults)
+        .expect("fetch first page");
     let first = client
-        .pull_chat_workspace(
+        .apply_pull(
             &mut engine,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -1179,11 +1179,15 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
             .is_none(),
         "the simulated crash must leave the persisted cursor unchanged"
     );
+    let prepared = client
+        .fetch_pull(&mut reopened, "ws", &NoFaults)
+        .expect("fetch second page");
     let second = client
-        .pull_chat_workspace(
+        .apply_pull(
             &mut reopened,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -1235,11 +1239,15 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
             .cursor,
         1
     );
+    let prepared = client
+        .fetch_pull(&mut committed, "ws", &NoFaults)
+        .expect("fetch third page");
     let third = client
-        .pull_chat_workspace(
+        .apply_pull(
             &mut committed,
             &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
+            &prepared,
             &NoFaults,
             &NoLiveLeases,
             1_000,
@@ -1814,14 +1822,9 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
     // The served bytes hash to the requested sha256, so only the ceiling can
     // refuse them.
     assert_eq!(
-        RelaySyncClient::new(transport(&server)).pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        ),
+        RelaySyncClient::new(transport(&server))
+            .fetch_pull(&mut engine, "ws", &NoFaults)
+            .map(|_| ()),
         Err(RelayError::BlobTooLarge {
             constraint,
             limit_bytes,
@@ -1916,14 +1919,7 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
+        .fetch_pull(&mut engine, "ws", &NoFaults)
         .expect_err("a binary body past the read limit is refused");
     assert_eq!(
         error,
