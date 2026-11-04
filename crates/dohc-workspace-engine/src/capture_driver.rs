@@ -171,7 +171,7 @@ struct CaptureApplyProbeInner {
     import_commit_armed: std::sync::atomic::AtomicBool,
     import_commit_entered: tokio::sync::Semaphore,
     import_commit_release: (Mutex<bool>, std::sync::Condvar),
-    fail_before_worker_armed: std::sync::atomic::AtomicBool,
+    fail_before_worker_armed: std::sync::atomic::AtomicU32,
     manual_initial_deadline_armed: std::sync::atomic::AtomicBool,
     manual_initial_deadline: tokio::sync::Notify,
     version_scan_count: std::sync::atomic::AtomicU64,
@@ -214,7 +214,7 @@ impl Default for CaptureApplyProbeInner {
             import_commit_armed: std::sync::atomic::AtomicBool::new(false),
             import_commit_entered: tokio::sync::Semaphore::new(0),
             import_commit_release: (Mutex::new(false), std::sync::Condvar::new()),
-            fail_before_worker_armed: std::sync::atomic::AtomicBool::new(false),
+            fail_before_worker_armed: std::sync::atomic::AtomicU32::new(0),
             manual_initial_deadline_armed: std::sync::atomic::AtomicBool::new(false),
             manual_initial_deadline: tokio::sync::Notify::new(),
             version_scan_count: std::sync::atomic::AtomicU64::new(0),
@@ -470,9 +470,14 @@ impl CaptureApplyProbe {
     /// Fail the next apply before its plain worker starts. The normal
     /// all-failed acknowledgment keeps the plan dirty for a retry.
     pub fn fail_next_apply_before_worker(&self) {
+        self.fail_next_applies_before_worker(1);
+    }
+
+    /// Fail each of the next `count` applies before its plain worker starts.
+    pub fn fail_next_applies_before_worker(&self, count: u32) {
         self.inner
             .fail_before_worker_armed
-            .store(true, Ordering::Release);
+            .store(count, Ordering::Release);
     }
 
     /// Replace the production timer with a manual edge for one initial settle.
@@ -701,7 +706,10 @@ impl CaptureApplyProbe {
         {
             self.inner
                 .fail_before_worker_armed
-                .swap(false, Ordering::AcqRel)
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
         }
         #[cfg(not(feature = "harness"))]
         {
