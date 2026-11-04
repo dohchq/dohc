@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readlink, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, parse } from "node:path";
+import { basename, dirname, join, normalize, parse } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DISK_ROOT_REFUSAL, FILESYSTEM_ROOT_REFUSAL, HOME_FOLDER_REFUSAL, stateFolderRefusal } from "@dohc/workspace-core";
+import { DISK_ROOT_REFUSAL, HOME_FOLDER_REFUSAL, stateFolderRefusal } from "@dohc/workspace-core";
 import { assertNotStateFolder, canonicalWorkspaceRoot, createWorkspaceFolder } from "./createWorkspaceFolder";
 import { readSyncHistory, recordSynced, scheduleComputer } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
@@ -231,13 +231,13 @@ describe("createWorkspaceFolder", () => {
     const toHome = join(base, "home-link");
     await symlink(homeDir, toHome, linkType);
     await expect(createWorkspaceFolder({ rootPath: toHome, homeDir, stateDir, computer, kind: "personal" }))
-      .rejects.toThrow("workspace root cannot be the home directory itself");
+      .rejects.toThrow(HOME_FOLDER_REFUSAL);
     expect(await readdir(homeDir)).toEqual(["notes.md"]);
 
     const toDisk = join(base, "disk-link");
     await symlink(parse(base).root, toDisk, linkType);
     await expect(createWorkspaceFolder({ rootPath: toDisk, homeDir, stateDir, computer, kind: "personal" }))
-      .rejects.toThrow("workspace root cannot be the filesystem root");
+      .rejects.toThrow(DISK_ROOT_REFUSAL);
   });
 
   it("refuses dohc's state folder and a folder that holds it, by any path, and writes nothing there", async () => {
@@ -252,11 +252,11 @@ describe("createWorkspaceFolder", () => {
     for (const rootPath of [appData, join(appData, "Roaming"), state, toAppData]) {
       // The refusal names the folder as the person picked it, link included.
       await expect(createWorkspaceFolder({ rootPath, homeDir, stateDir: state, computer, kind: "personal" }), rootPath)
-        .rejects.toThrow(stateFolderRefusal(rootPath));
+        .rejects.toThrow(stateFolderRefusal(rootPath, "new"));
     }
     // dohc may name its state folder through a link too.
     await expect(createWorkspaceFolder({ rootPath: appData, homeDir, stateDir: stateLink, computer, kind: "personal" }))
-      .rejects.toThrow(stateFolderRefusal(appData));
+      .rejects.toThrow(stateFolderRefusal(appData, "new"));
     expect(await readdir(appData)).toEqual(["Roaming"]);
     expect(await readdir(state)).toEqual(["dohc-settings.json"]);
     // A folder beside it is an ordinary choice.
@@ -276,20 +276,21 @@ describe("createWorkspaceFolder", () => {
     await symlink(appData, link, linkType);
     const before = await readdir(appData);
     for (const picked of [registered.rootPath, link]) {
-      expect(() => assertNotStateFolder(picked, canonicalWorkspaceRoot(picked), state)).toThrow(stateFolderRefusal(picked));
+      // The list spells a root with forward slashes on Windows; the refusal uses the OS's.
+      expect(() => assertNotStateFolder(picked, canonicalWorkspaceRoot(picked), state, "listed")).toThrow(stateFolderRefusal(normalize(picked), "listed"));
     }
     expect(await readdir(appData)).toEqual(before);
     expect(await readFile(join(state, "dohc-settings.json"), "utf8")).toBe("{}");
     // Another registered workspace opens as before.
     const other = await createWorkspaceFolder({ rootPath: join(base, "notes"), homeDir, stateDir: state, computer, kind: "personal" });
-    expect(() => assertNotStateFolder(other.rootPath, canonicalWorkspaceRoot(other.rootPath), state)).not.toThrow();
+    expect(() => assertNotStateFolder(other.rootPath, canonicalWorkspaceRoot(other.rootPath), state, "listed")).not.toThrow();
   });
 
   it("refuses the home folder named through a link to it", async () => {
     const homeLink = join(base, "home-alias");
     await symlink(homeDir, homeLink, linkType);
     await expect(createWorkspaceFolder({ rootPath: homeDir, homeDir: homeLink, stateDir, computer, kind: "personal" }))
-      .rejects.toThrow("workspace root cannot be the home directory itself");
+      .rejects.toThrow(HOME_FOLDER_REFUSAL);
     expect(await readdir(homeDir)).toEqual([]);
   });
 
@@ -361,7 +362,7 @@ describe("createWorkspaceFolder", () => {
     await mkdir(root);
     statOf("/", async () => await actualFs.stat(root, { bigint: true }));
     await expect(createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" }))
-      .rejects.toThrow(FILESYSTEM_ROOT_REFUSAL);
+      .rejects.toThrow(DISK_ROOT_REFUSAL);
     expect(await readdir(root)).toEqual([]);
   });
 

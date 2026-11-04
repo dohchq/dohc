@@ -2622,7 +2622,7 @@ const activity = {
   open: (workspace: RegistryEntry) =>
     workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
       const canonical = canonicalWorkspaceFor(lease);
-      assertNotStateFolder(workspace.rootPath, canonical.rootPath, stateDir());
+      assertNotStateFolder(workspace.rootPath, canonical.rootPath, stateDir(), "listed");
       return workspaceActivity.open(canonical, lease.state.activity);
     }),
   close: (

@@ -1,7 +1,6 @@
 import {
   checkManifest,
   DISK_ROOT_REFUSAL,
-  FILESYSTEM_ROOT_REFUSAL,
   HOME_FOLDER_REFUSAL,
   holdsStateFolder,
   ReservedWorkspaceIdError,
@@ -17,7 +16,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { realpathSync, type BigIntStats } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { dirname, join, parse } from "node:path";
+import { dirname, join, normalize, parse } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
 import { recordNewCollectionsHolder } from "./collectionsHolder";
@@ -41,10 +40,15 @@ export function canonicalWorkspaceRoot(rootPath: string): string {
 // dohc never makes or opens a workspace in a folder that is, or holds, its own
 // state folder, so the workspace's file tools can't reach dohc's settings.
 // `realRoot` is the folder's real path; the refusal names the folder as the
-// person picked it.
-export function assertNotStateFolder(picked: string, realRoot: string, stateDir: string): void {
+// person picked it, with the OS's separators.
+export function assertNotStateFolder(
+  picked: string,
+  realRoot: string,
+  stateDir: string,
+  workspace: "new" | "listed",
+): void {
   if (holdsStateFolder(realRoot, canonicalWorkspaceRoot(stateDir), process.platform)) {
-    throw new Error(stateFolderRefusal(picked));
+    throw new Error(stateFolderRefusal(normalize(picked), workspace));
   }
 }
 
@@ -130,7 +134,7 @@ async function realFolderPath(path: string): Promise<string> {
   // A drive's root is refused here, while its real path still reads "C:\".
   // The app spells it "C:", which names the drive's current folder instead.
   const real = realpathSync.native(path);
-  if (parse(real).root === real) throw new Error(FILESYSTEM_ROOT_REFUSAL);
+  if (parse(real).root === real) throw new Error(DISK_ROOT_REFUSAL);
   return rootSpelling(real);
 }
 
@@ -227,8 +231,8 @@ export async function createWorkspaceFolderWithFreshness(input: {
   const rootCheck = validateWorkspaceRootChoice(rootPath, home.path, process.platform);
   if (!rootCheck.ok) throw new Error(rootCheck.reason);
   if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new Error(HOME_FOLDER_REFUSAL);
-  assertNotStateFolder(input.rootPath, rootPath, input.stateDir);
-  if (await isFilesystemRoot(folder)) throw new Error(FILESYSTEM_ROOT_REFUSAL);
+  assertNotStateFolder(input.rootPath, rootPath, input.stateDir, "new");
+  if (await isFilesystemRoot(folder)) throw new Error(DISK_ROOT_REFUSAL);
   if (await isDiskRoot(rootPath, folder)) throw new Error(DISK_ROOT_REFUSAL);
   const startedEmpty = (await readdir(rootPath)).length === 0;
   // Node cannot create files relative to an open folder, so writes go by path.
