@@ -54,6 +54,19 @@ describe("makeCodeBlockChromePlugin — edits", () => {
     expect(toolbars(state, plugin)[0]!.owner).toBe(before!.owner);
   });
 
+  it("keeps a toolbar on its code block when an identical code block is inserted right before it", () => {
+    const plugin = makeCodeBlockChromePlugin();
+    const lead = paragraph("lead");
+    const block = codeBlock("x", "go");
+    const start = EditorState.create({ doc: doc(lead, block, paragraph("after")), plugins: [plugin] });
+    const [before] = toolbars(start, plugin);
+    const state = start.apply(start.tr.insert(lead.nodeSize, block));
+    const [copy, original] = toolbars(state, plugin);
+    expect(original!.owner).toBe(before!.owner);
+    expect(copy!.owner).not.toBe(before!.owner);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
   it("keeps a toolbar's owner through one edit on both sides of it, and through a remote update", () => {
     const plugin = makeCodeBlockChromePlugin();
     let state = EditorState.create({

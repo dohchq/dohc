@@ -1,5 +1,5 @@
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
-import { ownersInRange, throughEdit } from "./widgetOwnership";
+import { ownersInRange, withSteps } from "./widgetOwnership";
 import { documentChange, stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
@@ -360,9 +360,10 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
       // toolbar again; the rest move with the edit and keep their DOM.
       apply(tr, old) {
         if (!tr.docChanged) return old;
-        const { range, mapping } = documentChange(tr.before, tr.doc);
+        const { range: changed, mapping } = documentChange(tr.before, tr.doc);
         const decorations = old.map(mapping, tr.doc);
-        if (!range) return decorations;
+        if (!changed) return decorations;
+        const range = withSteps(changed, tr.mapping, tr.doc.content.size, tr.before.content.size);
         // A toolbar sits before its block, so content inserted at a block's
         // start leaves its toolbar at the start of the range.
         const blocks: Array<{ node: ProseMirrorNode; pos: number }> = [];
@@ -374,7 +375,7 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
         const owners = ownersInRange(
           old.find(range.from, range.toBefore),
           blocks.map(({ pos }) => pos),
-          throughEdit(tr.mapping, mapping),
+          tr.mapping,
         );
         const toolbars = blocks.map(({ node, pos }) =>
           codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report),
