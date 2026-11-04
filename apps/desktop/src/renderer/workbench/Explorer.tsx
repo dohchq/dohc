@@ -1577,7 +1577,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           ? target.closest<HTMLElement>('[data-testid="tree-row"], [data-home-key]')
           : null;
       // A Home row with its own menu, such as a Collection that can't open, opens it itself.
-      if (row?.dataset.ownMenu !== undefined) return;
+      // A Home row with no menu, such as a Collection a share leaves out, opens none, as a right-click does.
+      if (row?.dataset.ownMenu !== undefined || (row?.dataset.homeKey !== undefined && row.dataset.path === undefined)) return;
       const path = row?.dataset.path;
       if (row && path !== undefined) {
         const box = row.getBoundingClientRect();

@@ -180,6 +180,25 @@ describe("Explorer collection folders", () => {
       expect(readExplorerMenu).not.toHaveBeenCalled();
     } finally { vi.unstubAllGlobals(); }
   });
+  it("opens no menu from the Menu key or Shift+F10 on a Collection a share leaves out", async () => {
+    const readExplorerMenu = explorerMenu();
+    vi.stubGlobal("dohcDesktop", { readExplorerMenu });
+    render(<Explorer {...explorerProps({ mode: "home", dataCollections: [
+      { datasetId: "d3", datasetPath: null, datasetAddressStatus: "missing", tableId: "00000000-0000-4000-8000-000000000002", name: "Volunteers" },
+    ] })} />);
+    try {
+      const share = screen.getByRole("button", { description: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." });
+      for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
+        share.focus();
+        fireEvent.keyDown(share, key);
+        fireEvent.contextMenu(share);
+        await act(async () => {});
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(document.activeElement).toBe(share);
+      }
+      expect(readExplorerMenu).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
     render(<Explorer {...props} />);
