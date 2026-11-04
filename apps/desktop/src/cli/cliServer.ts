@@ -741,6 +741,17 @@ function writeActor(
   return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
 }
 
+// Who a chat message or reaction through this socket is. While a run dohc
+// started holds the run slot, it is that run's agent, whatever actor the
+// caller named.
+function chatWriteActor(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): CliActor {
+  return options.dispatchedAgent(context.workspaceId) === null ? writeActor(actor, context, options) : "agent";
+}
+
 // The agent writing through this socket: its handshake or --agent name. A
 // run dohc dispatched is its agent, by id, whatever name a write claims, so
 // the run's file edits and replies are one actor.
@@ -3669,7 +3680,7 @@ async function dispatchWorkspace(
       if (channel.engine.kind === "agent" && request.args.title) {
         throw new CliCommandError("An agent DM is one conversation, so its messages have no title. Drop --title.");
       }
-      const actor = writeActor(request.args.actor, context, options);
+      const actor = chatWriteActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
         writer: cliChatWriter(actor, context, options, request.args.agent, request.args.reported),
         channelId: channel.engine.id,
@@ -3699,7 +3710,7 @@ async function dispatchWorkspace(
 
     case "reply": {
       const { threadId, messages } = await readReplyThread(context, request.args.thread, options);
-      const actor = writeActor(request.args.actor, context, options);
+      const actor = chatWriteActor(request.args.actor, context, options);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
         : actor === "agent"
@@ -3806,7 +3817,7 @@ async function dispatchWorkspace(
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
       const reaction = await options.chatWrites.setReaction(context, {
-        writer: cliChatWriter(writeActor(request.args.actor, context, options), context, options),
+        writer: cliChatWriter(chatWriteActor(request.args.actor, context, options), context, options),
         threadId: target.thread.thread.id,
         messageId: target.rootMessage.id,
         emoji: request.args.emoji,
