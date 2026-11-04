@@ -1,10 +1,24 @@
 import { createHash } from "node:crypto";
-import { access, chmod, constants, copyFile, lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, chmod, constants, copyFile, lstat, mkdir, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { agentRuntimeTarget, bundledPosixLauncher, posixMcpLauncher } from "../../scripts/mcp-launchers.mjs";
 import { PINNED_NODE } from "../../scripts/pinned-node.mjs";
+
+// After a crash, the launcher must not name a file whose bytes never reached
+// the disk. Each file is flushed before its rename, and its folder after it,
+// so the launcher's rename comes last.
+async function flushFile(filePath: string): Promise<void> {
+  const handle = await open(filePath, "r+");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+const DURABLE_RENAME = { syncDirectory: true };
 
 async function publishAtomically(
   sourcePath: string,
@@ -14,7 +28,8 @@ async function publishAtomically(
   await atomicReplaceFile(targetPath, async (tempPath) => {
     await copyFile(sourcePath, tempPath);
     if (mode !== undefined) await chmod(tempPath, mode);
-  });
+    await flushFile(tempPath);
+  }, DURABLE_RENAME);
 }
 
 async function publishContentAtomically(
@@ -25,7 +40,8 @@ async function publishContentAtomically(
   await atomicReplaceFile(targetPath, async (tempPath) => {
     await writeFile(tempPath, content);
     if (mode !== undefined) await chmod(tempPath, mode);
-  });
+    await flushFile(tempPath);
+  }, DURABLE_RENAME);
 }
 
 async function contentHash(filePath: string): Promise<string> {
@@ -75,7 +91,25 @@ async function publishNode(sourcePath: string, targetPath: string, sha256: strin
     if (await sha256InWorker(tempPath) !== sha256) {
       throw new Error("dohc's Node.js does not match its pinned release.");
     }
-  });
+    await flushFile(tempPath);
+  }, DURABLE_RENAME);
+}
+
+const LAUNCHER_NODE = /^NODE="\$\{0%\/\*\}\/(node-[0-9a-f]{64})"$/m;
+
+// One dohc runs per settings folder, so a temp file here is from a copy that a
+// quit or crash cut short. A Node.js that neither the launcher nor this release
+// names is from an earlier release. Each can be 120 MB. The Node.js an earlier
+// launcher names goes on the refresh after the one that replaces that launcher.
+async function removeLeftovers(targetDir: string, currentNode: string | undefined): Promise<void> {
+  const launcher = await readFile(join(targetDir, "dohc-mcp"), "utf8").catch(() => "");
+  const namedNode = LAUNCHER_NODE.exec(launcher)?.[1];
+  for (const name of await readdir(targetDir)) {
+    const earlierNode = /^node-[0-9a-f]{64}$/.test(name) && name !== namedNode && name !== currentNode;
+    if (name.includes(".tmp-") || earlierNode) {
+      await rm(join(targetDir, name), { force: true }).catch(() => undefined);
+    }
+  }
 }
 
 export async function syncLinuxStableCliBin(input: {
@@ -84,6 +118,12 @@ export async function syncLinuxStableCliBin(input: {
   arch?: string;
 }): Promise<void> {
   await mkdir(input.targetDir, { recursive: true });
+  const arch = input.arch ?? process.arch;
+  const pinned = agentRuntimeTarget("linux", arch) === "bundled"
+    ? PINNED_NODE[`linux-${arch}` as keyof typeof PINNED_NODE]
+    : undefined;
+  const nodeFileName = pinned ? `node-${pinned.sha256}` : undefined;
+  await removeLeftovers(input.targetDir, nodeFileName);
   const hash = await contentHash(join(input.resourcesCliBinDir, "dohc-mcp.mjs"));
   const moduleFileName = `dohc-mcp-${hash}.mjs`;
   // The content-addressed name keeps a published module immutable. If this
@@ -95,10 +135,7 @@ export async function syncLinuxStableCliBin(input: {
     join(input.targetDir, moduleFileName),
   );
   let launcher = posixMcpLauncher(moduleFileName);
-  const arch = input.arch ?? process.arch;
-  if (agentRuntimeTarget("linux", arch) === "bundled") {
-    const pinned = PINNED_NODE[`linux-${arch}` as keyof typeof PINNED_NODE];
-    const nodeFileName = `node-${pinned.sha256}`;
+  if (pinned && nodeFileName) {
     await publishNode(
       join(input.resourcesCliBinDir, "..", "app-compiler", "node"),
       join(input.targetDir, nodeFileName),
@@ -113,7 +150,8 @@ export async function syncLinuxStableCliBin(input: {
 
 // Atomic publication keeps each real path complete. The launcher's content
 // names its exact module, and its Node.js when it has one, so checking those
-// files proves they belong to one generation.
+// files proves they belong to one generation. This runs only after a refresh
+// fails, so it hashes the Node.js against the hash in its name.
 export async function hasIntactStableCliBin(targetDir: string): Promise<boolean> {
   try {
     const launcherPath = join(targetDir, "dohc-mcp");
@@ -126,8 +164,10 @@ export async function hasIntactStableCliBin(targetDir: string): Promise<boolean>
     if (!referencedModule) return false;
     const moduleStat = await stat(join(targetDir, referencedModule));
     if (!moduleStat.isFile() || moduleStat.size === 0) return false;
-    const referencedNode = /^NODE="\$\{0%\/\*\}\/(node-[0-9a-f]{64})"$/m.exec(launcherContent)?.[1];
-    return referencedNode === undefined || await isExecutableFile(join(targetDir, referencedNode));
+    const referencedNode = LAUNCHER_NODE.exec(launcherContent)?.[1];
+    if (referencedNode === undefined) return true;
+    const nodePath = join(targetDir, referencedNode);
+    return await isExecutableFile(nodePath) && await sha256InWorker(nodePath) === referencedNode.slice("node-".length);
   } catch {
     return false;
   }

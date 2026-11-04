@@ -7,6 +7,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +23,8 @@ import {
 const scratchDirs: string[] = [];
 let failLauncherPublish = false;
 const pinned = vi.hoisted(() => ({ sha256: "" }));
+// Flushes and renames, in order, with temp names shortened to "<name>.tmp".
+const fsEvents = vi.hoisted((): string[] => []);
 
 vi.mock("../../scripts/pinned-node.mjs", () => ({
   PINNED_NODE: { "linux-x64": { get sha256() { return pinned.sha256; } } },
@@ -29,6 +32,7 @@ vi.mock("../../scripts/pinned-node.mjs", () => ({
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const shortName = (path: unknown) => basename(String(path)).replace(/\.tmp-.*$/, ".tmp");
   return {
     ...actual,
     writeFile: (async (...args: Parameters<typeof actual.writeFile>) => {
@@ -38,11 +42,25 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.writeFile(...args);
     }) as typeof actual.writeFile,
+    open: (async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        fsEvents.push(`flush ${shortName(args[0])}`);
+        await sync();
+      };
+      return handle;
+    }) as typeof actual.open,
+    rename: (async (...args: Parameters<typeof actual.rename>) => {
+      fsEvents.push(`rename ${shortName(args[1])}`);
+      await actual.rename(...args);
+    }) as typeof actual.rename,
   };
 });
 
 afterEach(() => {
   failLauncherPublish = false;
+  fsEvents.length = 0;
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -182,6 +200,41 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
     await syncLinuxStableCliBin(f);
     rmSync(join(f.targetDir, f.nodeFileName));
     expect(await hasIntactStableCliBin(f.targetDir)).toBe(false);
+  });
+
+  it("removes a cut-short copy and an earlier release's Node.js, but not the one the launcher names", async () => {
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    writeFileSync(join(f.targetDir, `${f.nodeFileName}.tmp-1-cut`), "partial");
+    const next = `${RUNTIME}# next release\n`;
+    writeFileSync(join(f.resourcesCliBinDir, "..", "app-compiler", "node"), next);
+    pinned.sha256 = createHash("sha256").update(next).digest("hex");
+    const nodeFiles = () => readdirSync(f.targetDir).filter((name) => name.startsWith("node-")).sort();
+
+    await syncLinuxStableCliBin(f);
+    // The launcher still named the first release's Node.js when this refresh began.
+    expect(nodeFiles()).toEqual([f.nodeFileName, `node-${pinned.sha256}`].sort());
+    await syncLinuxStableCliBin(f);
+    expect(nodeFiles()).toEqual([`node-${pinned.sha256}`]);
+  });
+
+  it("is not intact when the Node.js its launcher names was cut short", async () => {
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    truncateSync(join(f.targetDir, f.nodeFileName), 1);
+    expect(await hasIntactStableCliBin(f.targetDir)).toBe(false);
+  });
+
+  it("flushes each file and its folder before the next rename, and publishes the launcher last", async () => {
+    if (process.platform === "win32") return; // Node can't open a folder to flush it on Windows.
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    const moduleFileName = publishedModuleNames(f.targetDir)[0]!;
+    expect(fsEvents).toEqual([
+      `flush ${moduleFileName}.tmp`, `rename ${moduleFileName}`, "flush cli-bin",
+      `flush ${f.nodeFileName}.tmp`, `rename ${f.nodeFileName}`, "flush cli-bin",
+      "flush dohc-mcp.tmp", "rename dohc-mcp", "flush cli-bin",
+    ]);
   });
 });
 
