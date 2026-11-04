@@ -1,4 +1,5 @@
 import { documentChange, isCodeBlockNode, normalizeLanguage, stopEditorMouseEvent } from "./pmHelpers";
+import { throughEdit } from "./widgetOwnership";
 // Mermaid diagram rendering inside WYSIWYG code blocks — a ProseMirror
 // decoration layer, deliberately not a schema/nodeView change. Mermaid
 // fences are plain `codeBlock` nodes with `language: "mermaid"` (the same
@@ -15,7 +16,7 @@ import { documentChange, isCodeBlockNode, normalizeLanguage, stopEditorMouseEven
 
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
-import type { Mapping } from '@tiptap/pm/transform'
+import type { Mappable, Mapping } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 
 /** Inserted by the `/mermaid` slash command (slashCommands.tsx) as the
@@ -105,18 +106,31 @@ export function reconcileMermaidEntries(
   })
 }
 
+/** The fences an edit read again: their ids before and after it, and where
+ *  their decorations lie in the new document. */
+export type MermaidRedraw = { ids: ReadonlySet<string>; from: number; to: number }
+
 /** Pure: the entries for `doc`, given the entries for `before`. Only fences
  *  that touch the changed range are read again; the ones after it shift.
- *  `changed` says whether any fence was read again, and `mapping` moves
- *  decorations from `before` to `doc`. */
+ *  `changed` says whether any fence was read again, `redrawn` which ones, and
+ *  `mapping` moves decorations from `before` to `doc`. `steps`, the edit's
+ *  own mapping, places a fence the edit moved. When the changed range holds
+ *  as many fences as before, each keeps its id in order, as a fence between
+ *  two of the edit's changes, or under a remote update, does. */
 export function updateMermaidEntries(
   previous: readonly MermaidWidgetEntry[],
   before: ProseMirrorNode,
   doc: ProseMirrorNode,
   nextId: () => string,
-): { entries: readonly MermaidWidgetEntry[]; changed: boolean; mapping: Mapping } {
+  steps?: Mappable,
+): {
+  entries: readonly MermaidWidgetEntry[]
+  changed: boolean
+  redrawn: MermaidRedraw | null
+  mapping: Mapping
+} {
   const { range, mapping } = documentChange(before, doc)
-  if (!range) return { entries: previous, changed: false, mapping }
+  if (!range) return { entries: previous, changed: false, redrawn: null, mapping }
   // A preview sits at its fence's end, so a fence that ends at the edit is
   // read again too.
   const head = previous.filter((entry) => entry.end < range.from)
@@ -125,13 +139,26 @@ export function updateMermaidEntries(
   const blocks = mermaidBlocksBetween(doc, Math.max(0, range.from - 1), range.to)
     .filter((block) => block.end >= range.from)
   const shift = range.to - range.toBefore
+  const edit = steps ? throughEdit(steps, mapping) : mapping
+  const read =
+    touched.length === blocks.length
+      ? blocks.map((block, index) => ({ ...block, id: touched[index]!.id }))
+      : reconcileMermaidEntries(touched, blocks, (pos) => edit.map(pos), nextId)
+  const changed = touched.length > 0 || blocks.length > 0
   return {
     entries: [
       ...head,
-      ...reconcileMermaidEntries(touched, blocks, (pos) => mapping.map(pos), nextId),
+      ...read,
       ...tail.map((entry) => ({ ...entry, pos: entry.pos + shift, end: entry.end + shift })),
     ],
-    changed: touched.length > 0 || blocks.length > 0,
+    changed,
+    redrawn: changed
+      ? {
+          ids: new Set([...touched, ...read].map(({ id }) => id)),
+          from: Math.min(range.from, ...touched.map(({ pos }) => pos), ...read.map(({ pos }) => pos)),
+          to: Math.max(range.to, ...touched.map(({ end }) => mapping.map(end)), ...read.map(({ end }) => end)),
+        }
+      : null,
     mapping,
   }
 }
@@ -360,30 +387,32 @@ function buildMermaidDecorationSet(
   entries: readonly MermaidWidgetEntry[],
   cursorPos: number,
 ): DecorationSet {
-  const decorations: Decoration[] = []
-  for (const entry of entries) {
-    const collapsed = isMermaidBlockCollapsed(entry, cursorPos)
-    decorations.push(
-      Decoration.node(entry.pos, entry.end, {
-        class: collapsed ? 'dohc-mermaid-block dohc-mermaid-collapsed' : 'dohc-mermaid-block',
-      }),
-    )
-    decorations.push(
-      Decoration.widget(entry.end, buildMermaidPreviewWidget(entry.id), {
-        // Keep the preview immediately after its source fence at the same
-        // document boundary.
-        side: 0,
-        // Keyed by the stable widget id (not the doc position): ProseMirror's
-        // widget equality is key-based, so an edit above the fence maps the
-        // decoration to its new position while PM preserves the painted DOM
-        // instead of destroying it and building an empty canvas.
-        key: `mermaid-preview-${entry.id}`,
-        ignoreSelection: true,
-        stopEvent: () => true,
-      }),
-    )
-  }
-  return DecorationSet.create(doc, decorations)
+  return DecorationSet.create(doc, entries.flatMap((entry) => mermaidDecorations(entry, cursorPos)))
+}
+
+function mermaidDecorations(entry: MermaidWidgetEntry, cursorPos: number): Decoration[] {
+  const collapsed = isMermaidBlockCollapsed(entry, cursorPos)
+  return [
+    Decoration.node(
+      entry.pos,
+      entry.end,
+      { class: collapsed ? 'dohc-mermaid-block dohc-mermaid-collapsed' : 'dohc-mermaid-block' },
+      { mermaidId: entry.id },
+    ),
+    Decoration.widget(entry.end, buildMermaidPreviewWidget(entry.id), {
+      // Keep the preview immediately after its source fence at the same
+      // document boundary.
+      side: 0,
+      // Keyed by the stable widget id (not the doc position): ProseMirror's
+      // widget equality is key-based, so an edit above the fence maps the
+      // decoration to its new position while PM preserves the painted DOM
+      // instead of destroying it and building an empty canvas.
+      key: `mermaid-preview-${entry.id}`,
+      mermaidId: entry.id,
+      ignoreSelection: true,
+      stopEvent: () => true,
+    }),
+  ]
 }
 
 function applyMermaidResult(container: HTMLElement, result: MermaidRenderResult): void {
@@ -434,10 +463,6 @@ function collapsedIds(entries: readonly MermaidWidgetEntry[], cursorPos: number)
   return new Set(entries.filter((entry) => isMermaidBlockCollapsed(entry, cursorPos)).map(({ id }) => id))
 }
 
-function sameIds(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
-  return a.size === b.size && [...a].every((id) => b.has(id))
-}
-
 const mermaidPreviewKey = new PluginKey<MermaidPluginState>('dohc-mermaid-preview')
 
 export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaidDiagram) {
@@ -469,21 +494,36 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
         // A fence shifted by an edit above it keeps its stable id (and painted
         // widget) rather than being reminted under a new position-derived key.
         const update = tr.docChanged
-          ? updateMermaidEntries(old.entries, tr.before, newState.doc, () => `m${seq++}`)
+          ? updateMermaidEntries(old.entries, tr.before, newState.doc, () => `m${seq++}`, tr.mapping)
           : null
         const entries = update?.entries ?? old.entries
         const cursorPos = newState.selection.from
         const collapsed = collapsedIds(entries, cursorPos)
-        if (!update?.changed && sameIds(collapsed, old.collapsed)) {
+        const redrawn = update?.redrawn ?? null
+        const toggled = new Set([
+          ...[...collapsed].filter((id) => !old.collapsed.has(id)),
+          ...[...old.collapsed].filter((id) => !collapsed.has(id)),
+        ])
+        if (!redrawn && toggled.size === 0) {
           if (!update) return old
           return { seq, entries, collapsed, set: old.set.map(update.mapping, newState.doc) }
         }
-        return {
-          seq,
-          entries,
-          collapsed,
-          set: buildMermaidDecorationSet(newState.doc, entries, cursorPos),
+        // Only the fences the edit read again, and those the cursor moved
+        // into or out of, get their decorations again.
+        const set = update ? old.set.map(update.mapping, newState.doc) : old.set
+        const ofFence = (ids: ReadonlySet<string>) => (spec: { mermaidId?: string }) =>
+          spec.mermaidId !== undefined && ids.has(spec.mermaidId)
+        const stale = redrawn ? set.find(redrawn.from, redrawn.to, ofFence(redrawn.ids)) : []
+        const added: Decoration[] = []
+        for (const entry of entries) {
+          if (redrawn?.ids.has(entry.id)) {
+            added.push(...mermaidDecorations(entry, cursorPos))
+          } else if (toggled.has(entry.id)) {
+            stale.push(...set.find(entry.pos, entry.end, ofFence(new Set([entry.id]))))
+            added.push(...mermaidDecorations(entry, cursorPos))
+          }
         }
+        return { seq, entries, collapsed, set: set.remove(stale).add(newState.doc, added) }
       },
     },
     props: {
