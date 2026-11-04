@@ -1192,17 +1192,22 @@ test("a record names its service's processes in the boot that wrote it, and stay
  * A stub service under `root`: it records its pid in spawned.log, then waits for go and exits without it, as the
  * real service does. After go it runs `body`, records its pid in services.log, and heartbeats until the test process exits.
  */
-function stubService(root, body = "") {
+function stubService(root, body = "", { onEof = "process.exit(1)" } = {}) {
   const service = join(root, "service", "stub", "scripts", "verification");
   mkdirSync(service, { recursive: true });
   writeFileSync(join(root, "current"), "stub");
   writeFileSync(join(service, "queue-service.mjs"), `
     import { spawn } from "node:child_process";
-    import { appendFileSync, writeFileSync } from "node:fs";
-    appendFileSync(${JSON.stringify(join(root, "spawned.log"))}, process.pid + "\\n");
+    import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+    // Records each earlier service that still runs as this one starts.
+    const spawned = ${JSON.stringify(join(root, "spawned.log"))};
+    for (const pid of existsSync(spawned) ? readFileSync(spawned, "utf8").split("\\n").filter(Boolean) : []) {
+      try { process.kill(Number(pid), 0); appendFileSync(${JSON.stringify(join(root, "overlap.log"))}, pid + "\\n"); } catch { /* Gone. */ }
+    }
+    appendFileSync(spawned, process.pid + "\\n");
     let go = false;
     for await (const chunk of process.stdin) if ((go = String(chunk).includes("go"))) break;
-    if (!go) process.exit(1);
+    if (!go) ${onEof};
     ${body}
     // A test stopped midway must not leave this service running.
     setInterval(() => { try { process.kill(${process.pid}, 0); } catch { process.exit(0); } }, 1000);
@@ -1239,15 +1244,17 @@ test("the supervisor starts no service while the last one's processes cannot be 
 
 test("a service the supervisor could not record exits before the next one starts", { skip: process.platform === "win32" && "the Windows supervisor is queue-supervisor.ps1" }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "dohc-queue-unrecorded-")));
-  stubService(root);
+  // A service told no go takes a second to exit, so a next one started without waiting would overlap it.
+  stubService(root, "", { onEof: "await new Promise(done => setTimeout(done, 1000)), process.exit(1)" });
   const abort = new AbortController();
   let reads = 0;
   const table = () => { if (reads++ === 0) throw new Error("ps timed out"); return processTable(); };
-  const supervising = supervise(root, { stopLast: async () => [], table, retryMs: 300, signal: abort.signal });
+  const supervising = supervise(root, { stopLast: async () => [], table, restartMs: 50, signal: abort.signal });
   t.after(async () => { abort.abort(); await supervising; for (const pid of logged(root, "spawned")) try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ } rmSync(root, { recursive: true, force: true }); });
   const [second] = await waitFor(() => logged(root, "services").length ? logged(root, "services") : null, "the next service starts");
   const [first, next] = logged(root, "spawned");
   assert.equal(next, second);
+  assert.deepEqual(logged(root, "overlap"), [], "no service starts while the unrecorded one runs");
   assert.equal(running(first), false, "the service with no record is gone");
   assert.match(readFileSync(join(root, "supervisor.log"), "utf8"), /service stub failed to start: ps timed out/u);
 });

@@ -175,9 +175,10 @@ export async function holdSocket(path) {
 
 /**
  * Run the service under this supervisor until `signal` aborts or a signal stops the supervisor.
- * `stopLast` replaces stopping the last recorded service's processes, and `retryMs` the first wait before trying again, for tests.
+ * `stopLast` replaces stopping the last recorded service's processes, `retryMs` the first wait before trying again,
+ * and `restartMs` the first wait before restarting a service that stopped, for tests.
  */
-export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats = 24, stopLast = stopRecorded, retryMs = 5000, table = processTable, signal: abort } = {}) {
+export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats = 24, stopLast = stopRecorded, retryMs = 5000, restartMs = 5000, table = processTable, signal: abort } = {}) {
   root = resolve(root);
   const logPath = join(root, "supervisor.log");
   const log = line => {
@@ -215,7 +216,7 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
   log(`supervisor ${process.pid} started for ${root}`);
   // launchd stops only this supervisor when it kills it, so the last service and its commands may still run.
   if (!await cleanUp("the last service left")) stopping = true;
-  let backoff = 5;
+  let backoff = restartMs;
   while (!stopping) {
     let current = null;
     let reason = "exited";
@@ -274,10 +275,10 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
     const why = typeof code === "number" && code !== 0 && code !== 75 ? errors.trim() : "";
     log(`service ${current} ${reason} (exit ${code})${why ? `\n${why}` : ""}`);
     if (!await cleanUp(`that service ${current} started`) || stopping) break;
-    if (code === 75) { backoff = 5; continue; }
-    if (Date.now() - started > 10 * 60_000) backoff = 5;
-    await pause(backoff * 1000);
-    backoff = Math.min(backoff * 2, 60);
+    if (code === 75) { backoff = restartMs; continue; }
+    if (Date.now() - started > 10 * 60_000) backoff = restartMs;
+    await pause(backoff);
+    backoff = Math.min(backoff * 2, 60_000);
   }
   log(`supervisor ${process.pid} stopped`);
   abort?.removeEventListener("abort", stop);
