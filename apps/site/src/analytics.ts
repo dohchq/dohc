@@ -26,7 +26,8 @@ function loadAnalytics(): Promise<PostHog> {
       // list leaves out demo menus that open directly on <body>.
       autocapture: {
         css_selector_allowlist: ["body > header *", "body > main *", "body > footer *"],
-        css_selector_ignorelist: ["#desktop-demo", "[data-sync-demo]"],
+        // .sync-stage holds the sync demo and its online switch.
+        css_selector_ignorelist: ["#desktop-demo", ".sync-stage"],
       },
       capture_pageview: true,
       capture_pageleave: true,

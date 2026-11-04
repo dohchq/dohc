@@ -51,7 +51,8 @@ it("autocaptures the site's own elements, not the demo's", async () => {
   const captured = (el: Element) =>
     anyMatches(el, autocapture.css_selector_allowlist) && !anyMatches(el, autocapture.css_selector_ignorelist);
   document.body.innerHTML = `<main><a href="#">Read</a><section><div id="desktop-demo"></div></section>
-    <div data-sync-demo><textarea></textarea></div></main>`;
+    <div class="sync-stage"><div data-sync-demo><textarea></textarea></div>
+    <label><input type="checkbox" data-sync-toggle /></label></div></main>`;
   const shadow = document.getElementById("desktop-demo")!.attachShadow({ mode: "open" });
   shadow.innerHTML = `<main><button>notes.md</button></main>`;
   const portal = document.createElement("button");
@@ -60,6 +61,7 @@ it("autocaptures the site's own elements, not the demo's", async () => {
   expect(captured(shadow.querySelector("button")!)).toBe(false);
   expect(captured(portal)).toBe(false);
   expect(captured(document.querySelector("textarea")!)).toBe(false);
+  expect(captured(document.querySelector("[data-sync-toggle]")!)).toBe(false);
 });
 
 it("names the build in a download click, and skips a click that only scrolls", async () => {
