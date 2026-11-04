@@ -304,17 +304,19 @@ describe("chat runner process", () => {
     expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "path", available: false });
   });
 
-  it.each(["claude", "codex"] as const)("passes the person's own %s flags once, before dohc's reply server", async (tool) => {
+  it.each(["claude", "codex"] as const)("passes the person's own %s flags once, before dohc's reply server, only in the owner's run", async (tool) => {
     const { calls, spawn } = await runnerFixture("linux");
     const profile = { tool, executable: `/opt/bin/${tool}`, arguments: ["--model", "own-model"] };
     await spawn("", () => undefined, profile, "all");
-    expect(calls).toHaveLength(1);
-    const [owner] = calls;
+    await spawn("", () => undefined, profile, "reply");
+    expect(calls).toHaveLength(2);
+    const [owner, replyOnly] = calls;
     expect(owner!.command).toBe(`/opt/bin/${tool}`);
     expect(owner!.args.slice(0, 3)).toEqual([tool === "claude" ? "-p" : "exec", "--model", "own-model"]);
     expect(owner!.args.filter((arg) => arg === "own-model")).toHaveLength(1);
     const replyServer = owner!.args.indexOf(tool === "claude" ? "--mcp-config" : "mcp_servers.dohc.required=true");
     expect(replyServer).toBeGreaterThan(owner!.args.indexOf("own-model"));
+    expect(replyOnly!.args).not.toContain("own-model");
   });
 
   it("keeps the workspace folder out of the runner's program search", async () => {
