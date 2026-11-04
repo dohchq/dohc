@@ -760,7 +760,6 @@ export const FileInspector = memo(function FileInspector(
         toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : "dohc could not open this file." }}
         menu={{
           workspaceId: props.workspaceId,
-          reportError: props.onButtonError,
           suggestedName: filenameStem(props.path),
           getMarkdown: () => null,
           disabled: !opening,

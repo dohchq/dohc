@@ -35,7 +35,7 @@ import { EmptyEditorGroup } from "../../desktop/src/renderer/workbench/EmptyEdit
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
 import { EditorGroupFrame } from "../../desktop/src/renderer/workbench/tabRowActions";
 import { WorkspaceSyncStatus } from "../../desktop/src/renderer/workbench/WorkspaceSyncStatus";
-import { useShellError } from "../../desktop/src/renderer/shell/useShellError";
+import { ShellErrorReporter, useShellError } from "../../desktop/src/renderer/shell/useShellError";
 import { matchShellShortcut } from "../../desktop/src/shortcuts/shortcutRegistry";
 import {
   DEMO_EDITOR_GROUP_ID,
@@ -266,7 +266,6 @@ export function ProductDemo() {
   const {
     shellErrors,
     reportShellFailure,
-    reportButtonError,
     hideShellError,
     dismissShellError,
   } = useShellError("marketing-demo");
@@ -829,19 +828,20 @@ export function ProductDemo() {
               <>
                 <ViewActions
                   actions={
-                    <DocumentControls
-                      toggle={{
-                        label: showSource ? "WYSIWYG" : "Source",
-                        testId: "markdown-edit-toggle",
-                        onClick: toggleSource,
-                      }}
-                      menu={{
-                        workspaceId: "marketing-demo",
-                        suggestedName: filenameStem(activePath),
-                        reportError: reportButtonError,
-                        getMarkdown: () => composeCurrentDocument(),
-                      }}
-                    />
+                    <ShellErrorReporter.Provider value={reportShellFailure}>
+                      <DocumentControls
+                        toggle={{
+                          label: showSource ? "WYSIWYG" : "Source",
+                          testId: "markdown-edit-toggle",
+                          onClick: toggleSource,
+                        }}
+                        menu={{
+                          workspaceId: "marketing-demo",
+                          suggestedName: filenameStem(activePath),
+                          getMarkdown: () => composeCurrentDocument(),
+                        }}
+                      />
+                    </ShellErrorReporter.Provider>
                   }
                 />
                 {showSource ? (
