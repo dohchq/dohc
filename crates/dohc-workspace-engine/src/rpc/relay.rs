@@ -1063,17 +1063,25 @@ impl EngineService {
             None
         };
         let cancellation = OperationCancellation::new(ctx);
-        Self::read_under_ctx(
-            &cancellation,
-            label,
-            open.actor.relay(
-                configuration,
-                operation,
-                self.leases.scoped(&open.root),
-                cancellation.token(),
-                reservation,
-            ),
-        )
+        let fetching = matches!(&operation, RelayOperation::FetchPull { .. });
+        let relay = open.actor.relay(
+            configuration,
+            operation,
+            self.leases.scoped(&open.root),
+            cancellation.token(),
+            reservation,
+        );
+        tokio::pin!(relay);
+        Self::read_under_ctx(&cancellation, label, async {
+            tokio::select! {
+                biased;
+                () = open.pull_fetch_cancel.cancelled(), if fetching => {
+                    cancellation.token.cancel();
+                    relay.await
+                }
+                result = &mut relay => result,
+            }
+        })
         .await
     }
 
@@ -4456,6 +4464,44 @@ mod tests {
         );
         assert_eq!(f.edges(), 1);
         f.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closing_during_fetch_releases_its_token_before_the_actor_stops() {
+        let (relay, f) = half_pull_fixture("close-during-fetch", true).await;
+        let service = Arc::clone(&f.service);
+        let handle = f.handle.clone();
+        let fetch = tokio::spawn(async move {
+            service
+                .sync_fetch_pull(
+                    &RequestContext::unbounded(),
+                    Some(handle),
+                    json!({"workspaceId": "close-during-fetch"}),
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !relay.started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fetch started");
+        assert!(f.pull_token().is_some());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            f.service.workspace_close(Some(f.handle.clone())),
+        )
+        .await
+        .expect("close does not wait for the relay")
+        .expect("close");
+        assert_eq!(f.pull_token(), None);
+        let fetched = tokio::time::timeout(std::time::Duration::from_secs(10), fetch)
+            .await
+            .expect("fetch cleanup finishes before the relay answers")
+            .expect("fetch task");
+        assert!(fetched.is_err());
+        relay.release();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
