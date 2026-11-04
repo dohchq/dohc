@@ -627,6 +627,7 @@ export function DesktopWorkspaceShell(props: {
     invalidateVisibility,
     refreshFiles,
     hasCommittedListing,
+    issuedFilesRequest,
     prepareRestoredTabPruning,
   } = useWorkspaceListing(props.workspace.workspaceId);
   // Main's single answer to "does anything record here": when the
@@ -973,25 +974,27 @@ export function DesktopWorkspaceShell(props: {
   );
   // A failed move's row goes once the move happens, by any route. A move made
   // through the CLI or MCP reaches the shell only as workspace activity and
-  // the listing that follows, so a listing that shows the source gone and the
-  // destination there clears the row. A destination that was already there
-  // when the move failed counts only after a listing shows it gone, since a
-  // deleted source would look the same. The shell remounts for each
-  // workspace, and so does this map.
-  const listing = useRef({ files, folders });
-  listing.current = { files, folders };
-  const failedMoves = useRef(new Map<string, { move: PendingTreeMove; destinationTaken: boolean }>());
+  // the listing that follows. So a fresh listing asked for after the failure,
+  // with the source gone and the destination there, clears the row. A listing
+  // walked earlier can show a move main was still undoing. A destination listed
+  // beside the source was taken, and counts only after a listing shows it
+  // gone, since a deleted source would look the same. The shell remounts for
+  // each workspace, and so does this map.
+  const failedMoves = useRef(new Map<string, { move: PendingTreeMove; destinationTaken: boolean; after: number }>());
   const clearFailedMove = useCallback((identity: string) => {
     failedMoves.current.delete(identity);
     clearIdentity(identity);
   }, [clearIdentity]);
   useEffect(() => {
+    if (fileListingCommit?.listingSource !== "fresh") return;
     for (const [identity, failed] of failedMoves.current) {
+      if (fileListingCommit.request <= failed.after) continue;
       const ends = listedMoveEnds(failed.move, files, folders);
       if (!ends.to) failed.destinationTaken = false;
-      else if (!failed.destinationTaken && !ends.from) clearFailedMove(identity);
+      else if (ends.from) failed.destinationTaken = true;
+      else if (!failed.destinationTaken) clearFailedMove(identity);
     }
-  }, [files, folders, clearFailedMove]);
+  }, [fileListingCommit, files, folders, clearFailedMove]);
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
@@ -1000,13 +1003,9 @@ export function DesktopWorkspaceShell(props: {
       const deleted = change && (change.kind === "delete-file" || change.kind === "delete-folder") ? change : undefined;
       const identity = move ? moveFailureIdentity(workspaceId, move)
         : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
+      // A Try again keeps what the first failure knew of the destination.
       if (move && identity) {
-        const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
-        // A Try again keeps what the first failure knew of the destination.
-        const destinationTaken = ends.to && (ends.from || failedMoves.current.get(identity)?.destinationTaken === true);
-        // A listing that landed before this failure can already show the move made.
-        if (ends.to && !ends.from && !destinationTaken) return;
-        failedMoves.current.set(identity, { move, destinationTaken });
+        failedMoves.current.set(identity, { move, destinationTaken: failedMoves.current.get(identity)?.destinationTaken ?? false, after: issuedFilesRequest() });
       }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
@@ -1014,7 +1013,7 @@ export function DesktopWorkspaceShell(props: {
         ...(livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
     },
-    [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
+    [issuedFilesRequest, reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
   // Chats' failures. An archive refused for live editing opens Live documents
   // at the page's row, and the page's archive takes the refusal back.

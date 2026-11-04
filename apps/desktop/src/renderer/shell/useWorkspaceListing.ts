@@ -123,6 +123,9 @@ export function useWorkspaceListing(workspaceId: string) {
     () => committedFilesRequest.current !== 0,
     [],
   );
+  // The newest listing asked for. A commit with a higher `request` was asked
+  // for after this call.
+  const issuedFilesRequest = useCallback(() => filesRequest.current, []);
   const prepareRestoredTabPruning = useCallback(
     (restoredTabPaths: ReadonlySet<string>, dirtyPaths: ReadonlySet<string>) => {
       if (!filesRevalidated || restoredTabPaths.size === 0) return null;
@@ -169,6 +172,7 @@ export function useWorkspaceListing(workspaceId: string) {
     fileListingCommit,
     refreshFiles,
     hasCommittedListing,
+    issuedFilesRequest,
     prepareRestoredTabPruning,
   };
 }
