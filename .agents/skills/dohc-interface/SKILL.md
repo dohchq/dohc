@@ -204,7 +204,7 @@ The Words rules apply, and these too:
 | Before | After |
 | --- | --- |
 | `Everything version-1 changed will be brought into Main. version-1 stays as it is, so you can keep working in it. Your unsaved changes are saved first.` | `You can keep working in version-1.` The title already says Main gets the changes. |
-| A divider, then `Versions cover text files during the alpha — other files stay exactly as they are. If Main changed in ways that clash with version-1, you'll choose what to keep, file by file.`, then a divider | Nothing. The first claim was false, and the clash step shows itself when it comes. |
+| A divider, then `Versions cover text files during the alpha — other files stay exactly as they are. If Main changed in ways that clash with version-1, you'll choose what to keep, file by file.`, then a divider | Nothing. The first claim was false, and the conflict step shows itself when it comes. |
 | A `Merging version-1 into Main…` paragraph | The primary reads `Merging…` |
 
 The title, `Merge version-1 into Main`, and the buttons, Cancel and `Merge into Main`, stay.

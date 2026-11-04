@@ -15,11 +15,11 @@ import { NewVersionHint, type VersionNameField, type WorkspaceVersions } from ".
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
-interface Clashes { count: number; more: boolean }
+interface ConflictCount { count: number; more: boolean }
 
-// Clash counts read the open conflicts a page at a time. Past this many pages
+// Conflict counts read the open conflicts a page at a time. Past this many pages
 // a count shows as a lower bound.
-const CLASH_PAGES_MAX = 5;
+const CONFLICT_PAGES_MAX = 5;
 const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
 // What a version leaves alone. The sizes are the engine's capture caps:
 // larger files stay as they are on disk.
@@ -46,7 +46,7 @@ export function VersionsPage(props: {
   const { snapshot } = versions;
   const [lastChanges, setLastChanges] = useState<Map<string, LastChange> | null>(null);
   const [counts, setCounts] = useState<ReadonlyMap<string, Count>>(new Map());
-  const [clashes, setClashes] = useState<ReadonlyMap<string, Clashes>>(new Map());
+  const [conflictCounts, setConflictCounts] = useState<ReadonlyMap<string, ConflictCount>>(new Map());
   const [countRetry, setCountRetry] = useState(0);
   // The row that takes focus when the control in it that had focus goes away.
   const [focusRow, setFocusRow] = useState<string | null>(null);
@@ -164,21 +164,21 @@ export function VersionsPage(props: {
     switchedTo.current = null;
   }, [activeVersionId]);
 
-  const clashesFailing = useRef(false);
-  const clashReads = useRequestSequence([workspaceId]);
+  const conflictsFailing = useRef(false);
+  const conflictReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     if (versionIds === null) return;
-    const token = clashReads.next();
+    const token = conflictReads.next();
     void (async () => {
-      const found = new Map<string, Clashes>();
+      const found = new Map<string, ConflictCount>();
       let after: string | null = null;
       try {
-        for (let page = 0; page < CLASH_PAGES_MAX; page += 1) {
+        for (let page = 0; page < CONFLICT_PAGES_MAX; page += 1) {
           const result = await bridge().listWorkspaceVersionConflicts({
             workspaceId,
             ...(after === null ? {} : { afterConflictId: after }),
           });
-          if (!clashReads.isCurrent(token)) return;
+          if (!conflictReads.isCurrent(token)) return;
           for (const conflict of result.conflicts) {
             if (conflict.origin !== "merge") continue;
             const entry = found.get(conflict.sourceVersionId) ?? { count: 0, more: false };
@@ -188,15 +188,15 @@ export function VersionsPage(props: {
           if (after === null) break;
         }
       } catch (error) {
-        if (!clashReads.isCurrent(token) || clashesFailing.current) return;
-        clashesFailing.current = true;
+        if (!conflictReads.isCurrent(token) || conflictsFailing.current) return;
+        conflictsFailing.current = true;
         props.onError("dohc could not read which merges have files to decide.", error);
         return;
       }
-      clashesFailing.current = false;
+      conflictsFailing.current = false;
       // The pages ran out before the list did, so every count is a lower bound.
       if (after !== null) for (const [id, entry] of found) found.set(id, { ...entry, more: true });
-      setClashes(found);
+      setConflictCounts(found);
     })();
   }, [workspaceId, versionIds, props.versionKey]);
 
@@ -314,7 +314,7 @@ export function VersionsPage(props: {
             lastChange={lastChanges.get(version.id) ?? null}
             lastChangesFailed={lastChangesFailed}
             count={counts.get(version.id)}
-            clashes={clashes.get(version.id)}
+            conflicts={conflictCounts.get(version.id)}
             locked={locked}
             takeFocus={focusRow === version.id}
             onFocused={() => setFocusRow(null)}
@@ -373,7 +373,7 @@ function VersionRow(props: {
   // The last changes could not be read, so a missing one is not known.
   lastChangesFailed: boolean;
   count: Count | undefined;
-  clashes: Clashes | undefined;
+  conflicts: ConflictCount | undefined;
   locked: boolean;
   takeFocus: boolean;
   onFocused: () => void;
@@ -432,20 +432,20 @@ function VersionRow(props: {
       `Changed ${relativeTime(lastChange.atMs)}${lastChange.personName === undefined ? "" : ` by ${lastChange.personName}`}`,
     ]);
   }
-  if (props.clashes !== undefined && props.clashes.count > 0) {
+  if (props.conflicts !== undefined && props.conflicts.count > 0) {
     parts.push([
-      "clashes",
+      "conflicts",
       <button
         type="button"
-        data-testid="versions-page-clashes"
+        data-testid="versions-page-conflicts"
         // Named by its words, so voice control finds it by what it shows. The
         // title is its tooltip and its description. The review it opens lists
-        // every open clash, not only this version's.
-        title="Open the clashes"
+        // every open conflict, not only this version's.
+        title="Open the conflicts"
         onClick={props.onReviewConflicts}
         className="cursor-pointer text-warning hover:underline"
       >
-        {props.clashes.count}{props.clashes.more ? "+" : ""} to decide
+        {props.conflicts.count}{props.conflicts.more ? "+" : ""} to decide
       </button>,
     ]);
   }
