@@ -52,12 +52,10 @@ describe("CloudLogin fields", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
-  it("shows no introduction or dohc Drive promotion", async () => {
+  it("shows no introduction above the address", async () => {
     render(<CloudLogin onConnectionError={() => undefined} />);
     await screen.findByTestId("cloud-server-url");
     expect(screen.queryByText(/already work on this machine/)).toBeNull();
-    expect(screen.queryByText("dohc Drive")).toBeNull();
-    expect(screen.queryByText("Coming soon")).toBeNull();
   });
 
   it("checks the address when focus leaves it, not on each key", async () => {

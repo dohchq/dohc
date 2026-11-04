@@ -32,6 +32,7 @@ type FieldErrors = { code?: string; folder?: string; passphrase?: string };
 const CODE_ERROR = "Enter a workspace code.";
 const FOLDER_ERROR = "Choose an empty folder.";
 const PASSPHRASE_ERROR = "Enter the protected-file passphrase.";
+const WRONG_PASSPHRASE_ERROR = "That passphrase didn't unlock the protected files.";
 
 function isWindows(): boolean {
   return bridge().platform === "win32";
@@ -56,9 +57,7 @@ export function JoinSyncedWorkspace(props: {
   const [joining, setJoining] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [error, setError] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  useMouseBackButton(warning === null && !joining ? props.onBack : undefined);
-  const joinedRef = useRef<Workspace | null>(null);
+  useMouseBackButton(joining ? undefined : props.onBack);
   const codeField = useRef<HTMLInputElement>(null);
   const folderChip = useRef<HTMLButtonElement>(null);
   const passphraseField = useRef<HTMLInputElement>(null);
@@ -147,22 +146,21 @@ export function JoinSyncedWorkspace(props: {
         ...(needsPassphrase ? { passphrase } : {}),
       });
       if (!actionRequests.isCurrent(actionRequest)) return;
-      if (result.warning) {
-        // The workspace was added but its first sync didn't finish. Say so
-        // and let the user open it deliberately.
-        joinedRef.current = result.workspace;
-        setWarning(result.warning);
-        return;
-      }
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
       if (!actionRequests.isCurrent(actionRequest)) return;
       const message = ipcErrorMessage(cause, "Couldn't join the workspace.");
-      if (/passphrase required to unlock synced secrets/i.test(message)) {
+      const required = /passphrase required to unlock synced secrets/i.test(message);
+      const wrong = /^Passphrase could not\b/u.test(message);
+      if (required || wrong) {
+        // Either way the attempt filled this folder, so the retry needs another.
         setNeedsPassphrase(true);
         setUsedFolder(folder);
         setFolder(null);
-        setFieldErrors({ passphrase: PASSPHRASE_ERROR });
+        setFieldErrors({ passphrase: wrong ? WRONG_PASSPHRASE_ERROR : PASSPHRASE_ERROR });
+        // Selected, so typing replaces the passphrase that failed.
+        passphraseField.current?.focus();
+        passphraseField.current?.select();
       } else {
         setError(message);
       }
@@ -185,159 +183,142 @@ export function JoinSyncedWorkspace(props: {
       className="dohc-elevated flex w-105 flex-col gap-5 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
-        {warning === null ? (
-          // Gated while a join is in flight (the request cannot be
-          // cancelled) and gone once the workspace exists (warning state):
-          // the only honest affordance left then is "Open workspace".
-          <IconButton
-            aria-label="Back"
-            disabled={joining}
-            onClick={props.onBack}
-            className="shrink-0"
-          >
-            <ArrowLeft size={13} aria-hidden />
-          </IconButton>
-        ) : null}
+        {/* Gated while a join is in flight: the request cannot be cancelled. */}
+        <IconButton
+          aria-label="Back"
+          disabled={joining}
+          onClick={props.onBack}
+          className="shrink-0"
+        >
+          <ArrowLeft size={13} aria-hidden />
+        </IconButton>
         <h2 className="m-0 text-base font-semibold text-ink">Join a synced workspace</h2>
       </div>
 
-      {warning !== null ? (
-        <>
-          <p data-testid="join-warning" className="m-0 text-xs leading-relaxed text-warning">
-            {warning} The workspace was added to this computer.
-          </p>
-          <PrimaryButton
-            data-testid="join-open-anyway"
-            onClick={() => {
-              if (joinedRef.current) props.onWorkspaceReady(joinedRef.current);
+      {/* Not a <form>: the embedded sign-in panel owns one, and nested forms
+          collapse so Connect would submit the join instead. Enter in either
+          join field submits through onKeyDown. */}
+      <div className="flex flex-col">
+        <Step
+          number={1}
+          title="Connect your server"
+          state={gate.kind === "signed-in" ? "done" : "current"}
+          summary={gate.kind === "signed-in" ? gate.email : undefined}
+        >
+          {gate.kind === "checking" ? (
+            <p className="m-0 text-xs text-subtle">Checking your server connection…</p>
+          ) : gate.kind === "check-failed" ? (
+            <RetryRow testId="join-check-failed" onRetry={checkSession} />
+          ) : (
+            <>
+              <p className="sr-only">Connect your server first, then enter the code from your other machine.</p>
+              <CloudLogin
+                onConnected={checkSession}
+                embedded
+                untitled
+                onConnectionError={props.onConnectionError}
+                initialServerUrl={props.initialServerUrl}
+              />
+            </>
+          )}
+        </Step>
+
+        <Step
+          number={2}
+          title="Enter the code from your other machine"
+          state={fieldState}
+          labelFor="join-sync-code"
+        >
+          <input
+            ref={codeField}
+            id="join-sync-code"
+            data-testid="join-sync-code"
+            value={code}
+            onChange={(event) => {
+              setCode(event.currentTarget.value);
+              setNeedsPassphrase(false);
+              setUsedFolder(null);
+              setPassphrase("");
+              setFieldErrors(({ folder: folderError }) => ({ folder: folderError }));
+              setError(null);
             }}
+            onBlur={() => setFieldError("code", code.trim() ? undefined : CODE_ERROR)}
+            aria-invalid={fieldErrors.code ? true : undefined}
+            aria-describedby={fieldErrors.code ? "join-sync-code-error" : undefined}
+            placeholder="dohc-sync:…"
+            spellCheck={false}
+            onKeyDown={onEnter}
+            className={`h-9 w-full rounded-md border bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle ${fieldErrors.code ? "border-danger focus:border-danger!" : "border-line focus:border-ink"}`}
+          />
+          {fieldErrors.code ? (
+            <FieldError id="join-sync-code-error">{fieldErrors.code}</FieldError>
+          ) : null}
+          {needsPassphrase ? (
+            <>
+              <label htmlFor="join-sync-passphrase" className="w-fit text-[12px] text-muted">
+                Protected-file passphrase
+              </label>
+              <input
+                ref={passphraseField}
+                id="join-sync-passphrase"
+                data-testid="join-sync-passphrase"
+                value={passphrase}
+                type="password"
+                spellCheck={false}
+                onChange={(event) => {
+                  setPassphrase(event.currentTarget.value);
+                  setFieldError("passphrase", undefined);
+                }}
+                // Adds only the empty error: one that failed to unlock stays until edited.
+                onBlur={() => {
+                  if (!passphrase) setFieldError("passphrase", PASSPHRASE_ERROR);
+                }}
+                aria-invalid={fieldErrors.passphrase ? true : undefined}
+                aria-describedby={fieldErrors.passphrase ? "join-sync-passphrase-error" : undefined}
+                onKeyDown={onEnter}
+                className={`h-9 w-full rounded-md border bg-bg px-3 text-[13px] text-ink placeholder:text-subtle ${fieldErrors.passphrase ? "border-danger focus:border-danger!" : "border-line focus:border-ink"}`}
+              />
+              {fieldErrors.passphrase ? (
+                <FieldError id="join-sync-passphrase-error">{fieldErrors.passphrase}</FieldError>
+              ) : null}
+            </>
+          ) : null}
+        </Step>
+
+        <Step number={3} title="Choose an empty folder on this machine" state={fieldState} last>
+          <FolderChip
+            ref={folderChip}
+            folder={folder ? displayPath(folder) : null}
+            placeholder={usedFolder ? "Choose another empty folder" : "Choose an empty folder"}
+            testId="join-choose-folder"
+            errorId={fieldErrors.folder ? "join-choose-folder-error" : undefined}
+            onClick={() => void chooseFolder()}
+          />
+          {fieldErrors.folder ? (
+            <FieldError id="join-choose-folder-error">{fieldErrors.folder}</FieldError>
+          ) : null}
+          {usedFolder ? (
+            <p data-testid="join-used-folder" className="m-0 text-xs text-muted">
+              Files stay in {displayPath(usedFolder)}.
+            </p>
+          ) : null}
+
+          {error ? (
+            <p data-testid="join-error" role="alert" className="m-0 text-xs leading-relaxed text-danger">
+              {error}
+            </p>
+          ) : null}
+          <PrimaryButton
+            type="button"
+            data-testid="join-workspace-start"
+            onClick={() => void join()}
+            disabled={joining}
+            className="mt-2"
           >
-            Open workspace
+            {joining ? "Joining…" : "Join workspace"}
           </PrimaryButton>
-        </>
-      ) : (
-        // Not a <form>: the embedded sign-in panel owns one, and nested forms
-        // collapse so Connect would submit the join instead. Enter in either
-        // join field submits through onKeyDown.
-        <div className="flex flex-col">
-          <Step
-            number={1}
-            title="Connect your server"
-            state={gate.kind === "signed-in" ? "done" : "current"}
-            summary={gate.kind === "signed-in" ? gate.email : undefined}
-          >
-            {gate.kind === "checking" ? (
-              <p className="m-0 text-xs text-subtle">Checking your server connection…</p>
-            ) : gate.kind === "check-failed" ? (
-              <RetryRow testId="join-check-failed" onRetry={checkSession} />
-            ) : (
-              <>
-                <p className="sr-only">Connect your server first, then enter the code from your other machine.</p>
-                <CloudLogin
-                  onConnected={checkSession}
-                  embedded
-                  untitled
-                  onConnectionError={props.onConnectionError}
-                  initialServerUrl={props.initialServerUrl}
-                />
-              </>
-            )}
-          </Step>
-
-          <Step
-            number={2}
-            title="Enter the code from your other machine"
-            state={fieldState}
-            labelFor="join-sync-code"
-          >
-            <input
-              ref={codeField}
-              id="join-sync-code"
-              data-testid="join-sync-code"
-              value={code}
-              onChange={(event) => {
-                setCode(event.currentTarget.value);
-                setNeedsPassphrase(false);
-                setUsedFolder(null);
-                setPassphrase("");
-                setFieldErrors(({ folder: folderError }) => ({ folder: folderError }));
-                setError(null);
-              }}
-              onBlur={() => setFieldError("code", code.trim() ? undefined : CODE_ERROR)}
-              aria-invalid={fieldErrors.code ? true : undefined}
-              aria-describedby={fieldErrors.code ? "join-sync-code-error" : undefined}
-              placeholder="dohc-sync:…"
-              spellCheck={false}
-              onKeyDown={onEnter}
-              className={`h-9 w-full rounded-md border bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle ${fieldErrors.code ? "border-danger focus:border-danger!" : "border-line focus:border-ink"}`}
-            />
-            {fieldErrors.code ? (
-              <FieldError id="join-sync-code-error">{fieldErrors.code}</FieldError>
-            ) : null}
-            {needsPassphrase ? (
-              <>
-                <label htmlFor="join-sync-passphrase" className="w-fit text-[12px] text-muted">
-                  Protected-file passphrase
-                </label>
-                <input
-                  ref={passphraseField}
-                  id="join-sync-passphrase"
-                  data-testid="join-sync-passphrase"
-                  value={passphrase}
-                  type="password"
-                  spellCheck={false}
-                  onChange={(event) => {
-                    setPassphrase(event.currentTarget.value);
-                    setFieldError("passphrase", undefined);
-                  }}
-                  onBlur={() => setFieldError("passphrase", passphrase ? undefined : PASSPHRASE_ERROR)}
-                  aria-invalid={fieldErrors.passphrase ? true : undefined}
-                  aria-describedby={fieldErrors.passphrase ? "join-sync-passphrase-error" : undefined}
-                  onKeyDown={onEnter}
-                  className={`h-9 w-full rounded-md border bg-bg px-3 text-[13px] text-ink placeholder:text-subtle ${fieldErrors.passphrase ? "border-danger focus:border-danger!" : "border-line focus:border-ink"}`}
-                />
-                {fieldErrors.passphrase ? (
-                  <FieldError id="join-sync-passphrase-error">{fieldErrors.passphrase}</FieldError>
-                ) : null}
-              </>
-            ) : null}
-          </Step>
-
-          <Step number={3} title="Choose an empty folder on this machine" state={fieldState} last>
-            <FolderChip
-              ref={folderChip}
-              folder={folder ? displayPath(folder) : null}
-              placeholder={usedFolder ? "Choose another empty folder" : "Choose an empty folder"}
-              testId="join-choose-folder"
-              errorId={fieldErrors.folder ? "join-choose-folder-error" : undefined}
-              onClick={() => void chooseFolder()}
-            />
-            {fieldErrors.folder ? (
-              <FieldError id="join-choose-folder-error">{fieldErrors.folder}</FieldError>
-            ) : null}
-            {usedFolder ? (
-              <p data-testid="join-used-folder" className="m-0 text-xs text-muted">
-                Files remain in {displayPath(usedFolder)}.
-              </p>
-            ) : null}
-
-            {error ? (
-              <p data-testid="join-error" role="alert" className="m-0 text-xs leading-relaxed text-danger">
-                {error}
-              </p>
-            ) : null}
-            <PrimaryButton
-              type="button"
-              data-testid="join-workspace-start"
-              onClick={() => void join()}
-              disabled={joining}
-              className="mt-2"
-            >
-              {joining ? "Joining…" : "Join workspace"}
-            </PrimaryButton>
-          </Step>
-        </div>
-      )}
+        </Step>
+      </div>
     </div>
   );
 }

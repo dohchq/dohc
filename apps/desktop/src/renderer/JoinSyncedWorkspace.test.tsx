@@ -85,7 +85,7 @@ describe("JoinSyncedWorkspace", () => {
       .mockRejectedValueOnce(
         new Error(
           "Error invoking remote method 'desktop:cloud-join-workspace': Error: " +
-            "Passphrase required to unlock synced secrets. Files remain in /home/sam/dohc/notes. Choose another empty folder to try again.",
+            "Passphrase required to unlock synced secrets. Files stay in /home/sam/dohc/notes. Choose another empty folder to try again.",
         ),
       )
       .mockResolvedValueOnce({ workspace: JOINED });
@@ -98,7 +98,7 @@ describe("JoinSyncedWorkspace", () => {
     await waitFor(() => expect(document.activeElement).toBe(passphrase));
     expectFieldError(passphrase, "join-sync-passphrase-error", "Enter the protected-file passphrase.");
     expect(screen.queryByTestId("join-error")).toBeNull();
-    expect(screen.getByTestId("join-used-folder").textContent).toBe("Files remain in /home/sam/dohc/notes.");
+    expect(screen.getByTestId("join-used-folder").textContent).toBe("Files stay in /home/sam/dohc/notes.");
     expect(screen.getByTestId("join-choose-folder").textContent).toContain("Choose another empty folder");
 
     await user.type(passphrase, "shared protected-files passphrase");
@@ -120,6 +120,43 @@ describe("JoinSyncedWorkspace", () => {
       }),
     );
     await waitFor(() => expect(onReady).toHaveBeenCalledWith(JOINED));
+  });
+
+  it("says when the passphrase did not unlock, selects it, and asks for another folder", async () => {
+    const user = userEvent.setup();
+    bridgeMock.cloudJoinWorkspace
+      .mockRejectedValueOnce(new Error("Passphrase required to unlock synced secrets."))
+      // Main's words for a wrong passphrase (cloudIpc.ts join failure).
+      .mockRejectedValueOnce(
+        new Error(
+          "Error invoking remote method 'desktop:cloud-join-workspace': Error: " +
+            "Passphrase could not unlock synced secrets. Files stay in /home/sam/dohc/retry. Choose another empty folder to try again.",
+        ),
+      );
+    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
+    await fillJoinForm(user);
+    await user.click(screen.getByTestId("join-workspace-start"));
+    const passphrase = (await screen.findByTestId("join-sync-passphrase")) as HTMLInputElement;
+    await user.type(passphrase, "wrong passphrase");
+    bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/retry");
+    await user.click(screen.getByTestId("join-choose-folder"));
+    await user.click(screen.getByTestId("join-workspace-start"));
+
+    await waitFor(() =>
+      expectFieldError(passphrase, "join-sync-passphrase-error", "That passphrase didn't unlock the protected files."),
+    );
+    expect(document.activeElement).toBe(passphrase);
+    expect(passphrase.selectionStart).toBe(0);
+    expect(passphrase.selectionEnd).toBe("wrong passphrase".length);
+    expect(screen.queryByTestId("join-error")).toBeNull();
+    expect(screen.getByTestId("join-used-folder").textContent).toBe("Files stay in /home/sam/dohc/retry.");
+    expect(screen.getByTestId("join-choose-folder").textContent).toContain("Choose another empty folder");
+
+    // Leaving the field keeps the error; editing clears it.
+    await user.tab();
+    expect(document.getElementById("join-sync-passphrase-error")).not.toBeNull();
+    await user.type(passphrase, "x");
+    expect(document.getElementById("join-sync-passphrase-error")).toBeNull();
   });
 
   it("drops the protected-file passphrase when the workspace code changes", async () => {
@@ -264,30 +301,7 @@ describe("JoinSyncedWorkspace", () => {
     expect(error.textContent).not.toContain("remote method");
   });
 
-  it("surfaces a first-sync warning and lets the user open the workspace deliberately", async () => {
-    const user = userEvent.setup();
-    const onReady = vi.fn();
-    bridgeMock.cloudJoinWorkspace.mockResolvedValueOnce({
-      workspace: JOINED,
-      warning:
-        "The workspace was added, but the first sync didn't finish. It will keep trying — check your connection.",
-    });
-    render(<JoinSyncedWorkspace onWorkspaceReady={onReady} onBack={() => {}} />);
-    await fillJoinForm(user);
-    await user.click(screen.getByTestId("join-workspace-start"));
-
-    expect((await screen.findByTestId("join-warning")).textContent).toContain(
-      "first sync didn't finish",
-    );
-    expect(onReady).not.toHaveBeenCalled();
-    await user.click(screen.getByTestId("join-open-anyway"));
-    expect(onReady).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceId: "ws-joined" }),
-    );
-  });
-
-  // 0P-C gate fixes: the in-flight join cannot be backed out of silently,
-  // and a created-but-warned workspace only offers "Open workspace".
+  // The in-flight join cannot be backed out of silently.
   it("disables Back while a join is in flight and ignores a resolve after unmount", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
@@ -315,23 +329,6 @@ describe("JoinSyncedWorkspace", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(onReady).not.toHaveBeenCalled();
-  });
-
-  it("removes Back once the workspace exists (warning state) — only Open workspace remains", async () => {
-    const user = userEvent.setup();
-    const onReady = vi.fn();
-    bridgeMock.cloudJoinWorkspace.mockResolvedValueOnce({
-      workspace: JOINED,
-      warning: "The workspace was added, but the first sync didn't finish.",
-    });
-    render(<JoinSyncedWorkspace onWorkspaceReady={onReady} onBack={() => {}} />);
-    await fillJoinForm(user);
-    await user.click(screen.getByTestId("join-workspace-start"));
-    await screen.findByTestId("join-warning");
-    // The workspace is durably created: "back as if nothing happened" is a
-    // lie, so the affordance is gone and Open workspace is the way forward.
-    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
-    expect(screen.getByTestId("join-open-anyway")).toBeTruthy();
   });
 
   it("gates on the server connection and unlocks after the embedded login completes", async () => {

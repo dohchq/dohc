@@ -12,7 +12,7 @@ import {
   useConnectionNotices,
   type ConnectionNoticeHost,
 } from "./shell/connectionNotices";
-import { FieldError, IconButton, PrimaryButton, RetryRow } from "./ui/controls";
+import { FieldError, IconButton, Pill, PrimaryButton, RetryRow } from "./ui/controls";
 
 const SETUP_GUIDE_URL =
   "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
@@ -66,8 +66,8 @@ export function CloudLogin(props: {
   // its account row and sync switch live.
   handOffSession?: boolean;
   // Nested inside another elevated card (join/open-shared/handoff signed-out
-  // gates): drop this panel's own frame so cards never stack elevation, and
-  // leave focus to the host.
+  // gates): drop this panel's own frame so cards never stack elevation, drop
+  // the dohc Drive note, and leave focus to the host.
   embedded?: boolean;
   // The host already titles the step (a step title, a section header): drop
   // this panel's own heading so the name is not said twice.
@@ -411,6 +411,20 @@ export function CloudLogin(props: {
               </button>
             </div>
           </form>
+          {props.embedded ? null : (
+            <div
+              data-testid="cloud-drive-coming-soon"
+              className="mt-4 border-t border-line pt-3"
+            >
+              <p className="m-0 flex items-center gap-1.5 text-[11px] font-semibold text-ink">
+                dohc Drive
+                <Pill>Coming soon</Pill>
+              </p>
+              <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
+                Hosting, setup, and maintenance managed by dohc.
+              </p>
+            </div>
+          )}
         </>
       ) : null}
 

@@ -43,7 +43,7 @@ function readableId(value: unknown): value is string {
 }
 
 export const SHARE_VIEW_REOPEN_MESSAGE =
-  "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
+  "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays.";
 
 /**
  * Whether a share view still names its share and the account that opened it.

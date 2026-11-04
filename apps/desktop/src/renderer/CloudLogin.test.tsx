@@ -134,6 +134,20 @@ describe("CloudLogin", () => {
     );
   });
 
+  it("names dohc Drive as coming soon without an action, and not when embedded", async () => {
+    const { unmount } = render(<CloudLogin />);
+
+    const comingSoon = await screen.findByTestId("cloud-drive-coming-soon");
+    expect(comingSoon.textContent).toContain("Coming soon");
+    expect(comingSoon.querySelector("button")).toBeNull();
+    expect(comingSoon.querySelector("a")).toBeNull();
+    unmount();
+
+    render(<CloudLogin embedded />);
+    await screen.findByTestId("cloud-server-url");
+    expect(screen.queryByTestId("cloud-drive-coming-soon")).toBeNull();
+  });
+
   it("names a missing server address instead of starting a login", async () => {
     render(<CloudLogin />);
     await screen.findByTestId("cloud-server-url");

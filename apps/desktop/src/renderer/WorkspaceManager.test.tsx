@@ -6,6 +6,7 @@ import type { MenuCommand, ReadCrashReportResult, UpdateCheckResult } from "../i
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { byRecency, openedLabel, WorkspaceManager } from "./WorkspaceManager";
+import { namesList, removalFacts } from "./workspaceRemoval";
 
 let menuListener: ((command: MenuCommand) => void) | null = null;
 const sendMenuCommand = (command: MenuCommand) => act(() => menuListener?.(command));
@@ -768,88 +769,114 @@ describe("workspace manager with registered workspaces", () => {
     expect(list.style.width, "clamped to the minimum").toBe("220px");
   });
 
-  it("forgets a workspace, refreshes, and says the folder was kept", async () => {
+  it("removes a workspace from the list and refreshes, with no message", async () => {
     const user = userEvent.setup();
     const onForgot = vi.fn(async () => [KNOWN[0]]);
     render(
       <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={onForgot} onOpenWorkspace={() => {}} />,
     );
     await user.click(await screen.findByRole("button", { name: "More for team" }));
-    await user.click(screen.getByRole("menuitem", { name: "Forget" }));
+    const remove = screen.getByRole("menuitem", { name: "Remove from list" });
+    expect(remove.className).not.toContain("text-danger");
+    await user.click(remove);
     expect(bridge.forgetWorkspace).toHaveBeenCalledWith({ workspaceId: "ws-b" });
     expect(onForgot).toHaveBeenCalledOnce();
-    expect(await screen.findByText(/Forgot team\. Its folder was not deleted\./)).toBeTruthy();
+    expect(screen.queryByText(/folder was not deleted/)).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("reports a failed Forget in a toast and one Notices row, not inline, and Try again forgets again", async () => {
+  it("raises a failed removal as a toast with Try again", async () => {
     const user = userEvent.setup();
-    const onForgot = vi.fn(async () => [KNOWN[0]]);
-    bridge.forgetWorkspace.mockRejectedValueOnce(new Error(
-      "Error invoking remote method 'desktop:forget-workspace': Error: This workspace changed while this ran. Try again.",
-    ));
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full"));
     render(
-      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={onForgot} onOpenWorkspace={() => {}} />,
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
     );
     await user.click(await screen.findByRole("button", { name: "More for team" }));
-    await user.click(screen.getByRole("menuitem", { name: "Forget" }));
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Could not forget team. This workspace changed while this ran. Try again.");
-    expect(screen.getAllByRole("alert")).toEqual([toast]);
-    expect(within(toast).getByRole("button", { name: "Try again" })).toBeDefined();
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = screen.getByTestId("notice-center");
-    expect(within(notices).getAllByText(/Could not forget team\. This workspace changed while this ran\. Try again\./)).toHaveLength(1);
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc could not remove this workspace from the list.",
+    );
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(2));
+  });
+
+  it("asks first when the row holds more than its place, and Cancel keeps it", async () => {
+    const user = userEvent.setup();
+    const synced = [KNOWN[0], { ...KNOWN[1], sync: "on" as const, joinedChatCount: 2 }];
+    render(<WorkspaceManager workspaces={synced} current={null} onForgot={async () => synced} onOpenWorkspace={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+
+    const dialog = screen.getByTestId("workspace-remove-confirm");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Remove team from this list?");
+    expect(dialog.textContent).toContain("Sync turns off. Turn it on again in Settings › Sync and sharing.");
+    expect(dialog.textContent).toContain("2 shared chats leave this workspace.");
+    const confirm = screen.getByTestId("workspace-remove-confirm-button");
+    expect(confirm.textContent).toBe("Remove from list");
+    expect(confirm.className).not.toContain("danger");
+    expect(bridge.forgetWorkspace).not.toHaveBeenCalled();
+    // The panel takes focus, and Tab reaches Cancel first.
+    expect(document.activeElement?.getAttribute("data-focus-surface")).toBe("dialog");
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByTestId("workspace-remove-cancel"));
+    await user.keyboard("{Enter}");
+    expect(screen.queryByTestId("workspace-remove-confirm")).toBeNull();
+    expect(bridge.forgetWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("shows a failed removal in its dialog, then removes on the next try", async () => {
+    const user = userEvent.setup();
+    const synced = [KNOWN[0], { ...KNOWN[1], sync: "paused" as const }];
+    const onForgot = vi.fn(async () => [KNOWN[0]]);
+    const removal = deferred<undefined>();
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full")).mockReturnValueOnce(removal.promise);
+    render(<WorkspaceManager workspaces={synced} current={null} onForgot={onForgot} onOpenWorkspace={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await user.click(screen.getByTestId("workspace-remove-confirm-button"));
+
+    expect((await screen.findByTestId("workspace-remove-error")).textContent).toBe("disk full");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(onForgot).not.toHaveBeenCalled();
 
-    await user.click(within(notices).getByRole("button", { name: "Try again" }));
-    expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(2);
+    const confirm = screen.getByTestId("workspace-remove-confirm-button") as HTMLButtonElement;
+    await user.click(confirm);
+    expect(confirm.textContent).toBe("Removing…");
+    expect(confirm.disabled).toBe(true);
+    await act(async () => removal.resolve(undefined));
+    await waitFor(() => expect(screen.queryByTestId("workspace-remove-confirm")).toBeNull());
     expect(bridge.forgetWorkspace).toHaveBeenLastCalledWith({ workspaceId: "ws-b" });
-    await waitFor(() => expect(onForgot).toHaveBeenCalledOnce());
-    // Once Forget works, no toast or Notices row is left, so Notices goes away.
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    expect(screen.queryByTestId("connection-notices")).toBeNull();
+    expect(onForgot).toHaveBeenCalledOnce();
   });
 
-  it("takes back a failed Forget's notice when Forget from the menu then works", async () => {
-    const user = userEvent.setup();
-    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("This workspace changed while this ran. Try again."));
-    render(
-      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={async () => [KNOWN[0]]} onOpenWorkspace={() => {}} />,
-    );
-    const forgetFromMenu = async () => {
-      await user.click(await screen.findByRole("button", { name: "More for team" }));
-      await user.click(screen.getByRole("menuitem", { name: "Forget" }));
-    };
-    await forgetFromMenu();
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("Could not forget team.");
-    await forgetFromMenu();
-    await waitFor(() => expect(screen.queryByTestId("connection-notices")).toBeNull());
-    expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(2);
+  it("says what each kind of hold loses, with names", () => {
+    const base = KNOWN[0];
+    const mount = (label: string, extra: object = {}) => ({ shareId: `s-${label}`, label, granterEmail: null, access: "view" as const, ...extra });
+    expect(removalFacts(base)).toEqual([]);
+    expect(removalFacts({ ...base, sync: "paused" })).toEqual([
+      "Its paused sync ends. Turn sync on again in Settings › Sync and sharing.",
+    ]);
+    expect(removalFacts({ ...base, joinedChatCount: 1 })).toEqual([
+      "1 shared chat leaves this workspace. In Chats, join it again from Shared with you or Message requests, unless its share has ended.",
+    ]);
+    expect(removalFacts({ ...base, joinedChatCount: 3 })).toEqual([
+      "3 shared chats leave this workspace. In Chats, join groups again from Shared with you and direct messages from Message requests, unless their share has ended.",
+    ]);
+    expect(removalFacts({ ...base, shareMounts: [mount("Trip"), mount("Old", { ended: true })] })).toEqual([
+      "Shared folder Trip stops refreshing, and its files stay.",
+    ]);
+    expect(removalFacts({ ...base, shareMounts: [mount("Trip"), mount("Budget")] })).toEqual([
+      "Shared folders Trip and Budget stop refreshing, and their files stay. A share added again with its code arrives as a new folder.",
+    ]);
+    expect(removalFacts({ ...base, shareView: { shareId: "s", granterEmail: null, access: "view" } })).toEqual([
+      "Its folder stays but stops refreshing. To open the share again, use its share code.",
+    ]);
+    expect(removalFacts({ ...base, shareView: { shareId: "s", granterEmail: null, ended: true } })).toEqual([]);
+    expect(namesList(["A", "B", "C"])).toBe("A, B and C");
+    expect(namesList(["A", "B", "C", "D", "E"])).toBe("A, B, C and 2 more");
   });
 
-  it("says Forget worked when only the list refresh fails, and Try again only refreshes", async () => {
-    const user = userEvent.setup();
-    const onForgot = vi
-      .fn<() => Promise<Workspace[]>>()
-      .mockRejectedValueOnce(new Error("The workspace list could not be read."))
-      .mockResolvedValue([KNOWN[0]]);
-    render(
-      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={onForgot} onOpenWorkspace={() => {}} />,
-    );
-    await user.click(await screen.findByRole("button", { name: "More for team" }));
-    await user.click(screen.getByRole("menuitem", { name: "Forget" }));
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Could not refresh the workspace list.");
-    expect(toast.textContent).not.toContain("Could not forget");
-    expect(screen.getByText(/Forgot team\. Its folder was not deleted\./)).toBeTruthy();
-
-    await user.click(within(toast).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(onForgot).toHaveBeenCalledTimes(2));
-    expect(bridge.forgetWorkspace).toHaveBeenCalledOnce();
-    expect(screen.queryByTestId("connection-notices")).toBeNull();
-  });
-
-  it("stays open with the reason when opening fails, then lets the person retry", async () => {
+  it("raises a failed open as a toast, then Try again opens it", async () => {
     const user = userEvent.setup();
     const onOpen = vi
       .fn<(workspace: Workspace) => Promise<void>>()
@@ -861,15 +888,16 @@ describe("workspace manager with registered workspaces", () => {
       <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={onOpen} />,
     );
     await user.click(await screen.findByTitle("/home/sam/dohc/team"));
-    expect((await screen.findByRole("alert")).textContent).toBe("That folder is gone.");
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("That folder is gone.");
+    expect(toast.textContent).not.toContain("remote method");
     expect(screen.getAllByTestId("workspace-manager-row")).toHaveLength(2);
 
-    await user.click(screen.getByTitle("/home/sam/dohc/team"));
-    expect(onOpen).toHaveBeenCalledTimes(2);
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(2));
   });
 
-  it("shows a failed open from the create route instead of dropping it", async () => {
+  it("raises a failed open from the create route as a toast", async () => {
     const user = userEvent.setup();
     const onOpen = vi.fn(async () => {
       throw new Error("No window for that workspace.");
@@ -877,7 +905,24 @@ describe("workspace manager with registered workspaces", () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onOpen} />);
     await user.click(await screen.findByRole("button", { name: /create workspace/i }));
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }));
-    expect((await screen.findByRole("alert")).textContent).toBe("No window for that workspace.");
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "No window for that workspace.",
+    );
+  });
+
+  it("raises a failed folder reveal as a toast with Try again", async () => {
+    const user = userEvent.setup();
+    bridge.revealWorkspaceFolder.mockRejectedValueOnce(new Error("no file manager"));
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for personal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Show in file manager" }));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc could not show this workspace's folder.",
+    );
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.revealWorkspaceFolder).toHaveBeenCalledTimes(2));
   });
 
   it("drives the row menu from the keyboard and returns focus to its trigger", async () => {
@@ -894,8 +939,8 @@ describe("workspace manager with registered workspaces", () => {
     await waitFor(() => expect(document.activeElement).toBe(reveal));
 
     await user.keyboard("{ArrowDown}");
-    const forget = screen.getByRole("menuitem", { name: "Forget" });
-    await waitFor(() => expect(document.activeElement).toBe(forget));
+    const remove = screen.getByRole("menuitem", { name: "Remove from list" });
+    await waitFor(() => expect(document.activeElement).toBe(remove));
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).toBeNull();
     expect(document.activeElement).toBe(trigger);

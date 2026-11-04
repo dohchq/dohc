@@ -5,7 +5,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { ipcErrorMessage } from "./ipcError";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { displayPath, NewWorkspaceCard, openExistingFolder } from "./NewWorkspaceCard";
 import { OpenSharedView } from "./OpenSharedView";
@@ -16,8 +15,11 @@ import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures"
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
+import { ipcErrorMessage } from "./ipcError";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { GhostButton, IconButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
+import { removalFacts } from "./workspaceRemoval";
 import { PathLine } from "./ui/PathLine";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
 import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
@@ -98,13 +100,14 @@ function writeListWidth(width: number): void {
 }
 
 const ROW_MENU_WIDTH = 176;
+const REMOVE_FAILED = "dohc could not remove this workspace from the list.";
 
 function WorkspaceRow(props: {
   workspace: Workspace;
   current: boolean;
   onOpen: () => void;
   onReveal: () => void;
-  onForget: () => void;
+  onRemove: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const label = `More for ${workspaceName(props.workspace)}`;
@@ -160,7 +163,7 @@ function WorkspaceRow(props: {
           )}
           items={[
             { id: "reveal", label: revealInFileManagerLabel(window.dohcDesktop?.platform), onSelect: props.onReveal },
-            { id: "forget", label: "Forget", danger: true, onSelect: props.onForget },
+            { id: "remove", label: "Remove from list", onSelect: props.onRemove },
           ]}
         />
       </div>
@@ -171,19 +174,18 @@ function WorkspaceRow(props: {
 export function WorkspaceManager(props: {
   workspaces: Workspace[];
   // The workspace open behind the manager, when there is one. Back returns
-  // to it; forgetting it drops to whatever remains.
+  // to it; removing it from the list drops to whatever remains.
   current: Workspace | null;
-  // May reject: the manager stays open and shows why.
+  // May reject: the manager stays open and a toast says why.
   onOpenWorkspace: (workspace: Workspace) => void | Promise<void>;
   onForgot: () => Promise<unknown>;
   handoffStatus?: ShareHandoffStatus;
   onDismissShareHandoff?: () => void;
   onShareHandoffOpened?: () => void;
 }) {
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
+  const [removing, setRemoving] = useState<{ workspace: Workspace; busy: boolean; error: string | null } | null>(null);
   // The manager owns connection notices rather than the route that raised
   // them: a route change unmounts the panel, and the failure has to survive
   // it along with the way to try again.
@@ -219,17 +221,17 @@ export function WorkspaceManager(props: {
     setOpeningShare(false);
   }, [handoffStatus.status]);
 
+  // A failed row action is a toast and a Notices row with Try again: the list
+  // stays as it was, so the row is still there to act on.
   async function open(workspace: Workspace) {
-    setError(null);
     try {
       await props.onOpenWorkspace(workspace);
     } catch (cause) {
-      setError(ipcErrorMessage(cause, "Couldn't open the workspace."));
+      connectionNotices.reportError("dohc could not open this workspace.", cause, () => void open(workspace));
     }
   }
 
   async function openExisting() {
-    setError(null);
     try {
       const workspace = await openExistingFolder();
       if (workspace) await open(workspace);
@@ -239,36 +241,42 @@ export function WorkspaceManager(props: {
   }
 
   async function reveal(workspace: Workspace) {
-    setError(null);
     try {
       await bridge().revealWorkspaceFolder({ workspaceId: workspace.workspaceId });
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      connectionNotices.reportError("dohc could not show this workspace's folder.", cause, () => void reveal(workspace));
     }
   }
 
-  async function forget(workspace: Workspace) {
-    setError(null);
-    setNotice(null);
-    // One row per workspace, which a later Forget that works takes back.
-    const identity = `forget:${workspace.workspaceId}`;
+  // The row leaves the list, which is the result in view, so success says
+  // nothing.
+  async function removeFromList(workspace: Workspace) {
     try {
       await bridge().forgetWorkspace({ workspaceId: workspace.workspaceId });
-    } catch (cause) {
-      connectionNotices.reportError(`Could not forget ${workspaceName(workspace)}.`, cause, () => void forget(workspace), undefined, identity);
-      return;
-    }
-    connectionNotices.clearIdentity(identity);
-    setNotice(`Forgot ${workspaceName(workspace)}. Its folder was not deleted.`);
-    await refreshAfterForget();
-  }
-
-  // Forget already worked, so trying again only refreshes the list.
-  async function refreshAfterForget() {
-    try {
       await props.onForgot();
     } catch (cause) {
-      connectionNotices.reportError("Could not refresh the workspace list.", cause, () => void refreshAfterForget());
+      connectionNotices.reportError(
+        REMOVE_FAILED,
+        cause,
+        () => void removeFromList(workspace),
+      );
+    }
+  }
+
+  // A row that holds more than its place asks first and says what goes.
+  function requestRemoval(workspace: Workspace) {
+    if (removalFacts(workspace).length === 0) void removeFromList(workspace);
+    else setRemoving({ workspace, busy: false, error: null });
+  }
+
+  async function confirmRemoval(workspace: Workspace) {
+    setRemoving({ workspace, busy: true, error: null });
+    try {
+      await bridge().forgetWorkspace({ workspaceId: workspace.workspaceId });
+      await props.onForgot();
+      setRemoving(null);
+    } catch (cause) {
+      setRemoving({ workspace, busy: false, error: ipcErrorMessage(cause, REMOVE_FAILED) });
     }
   }
 
@@ -364,11 +372,10 @@ export function WorkspaceManager(props: {
                   current={workspace.workspaceId === props.current?.workspaceId}
                   onOpen={() => void open(workspace)}
                   onReveal={() => void reveal(workspace)}
-                  onForget={() => void forget(workspace)}
+                  onRemove={() => requestRemoval(workspace)}
                 />
               ))}
             </ul>
-            {notice ? <p className="m-0 px-4 pb-3 text-[11px] text-subtle">{notice}</p> : null}
             <div
               data-testid="workspace-manager-list-resize"
               role="separator"
@@ -419,16 +426,32 @@ export function WorkspaceManager(props: {
           <div className="m-auto flex w-105 max-w-full flex-col items-center gap-8">
             <DohcMark size={32} className="text-ink" />
             {routes}
-            {/* Below every route: a failed open from the list or a finished
-                route must stay visible with the manager. */}
-            {error ? (
-              <p role="alert" className="m-0 w-full text-xs leading-relaxed text-danger">
-                {error}
-              </p>
-            ) : null}
           </div>
         </div>
       </div>
+      {removing ? (
+        <ConfirmDialog
+          title={`Remove ${workspaceName(removing.workspace)} from this list?`}
+          confirmLabel={removing.busy ? "Removing…" : "Remove from list"}
+          confirmDisabled={removing.busy}
+          testId="workspace-remove-confirm"
+          cancelTestId="workspace-remove-cancel"
+          confirmTestId="workspace-remove-confirm-button"
+          onCancel={() => {
+            if (!removing.busy) setRemoving(null);
+          }}
+          onConfirm={() => void confirmRemoval(removing.workspace)}
+        >
+          {removalFacts(removing.workspace).map((fact) => (
+            <p key={fact} className="m-0 mt-2 text-[13px] text-muted">{fact}</p>
+          ))}
+          {removing.error ? (
+            <p data-testid="workspace-remove-error" role="alert" className="m-0 mt-3 text-[13px] text-danger">
+              {removing.error}
+            </p>
+          ) : null}
+        </ConfirmDialog>
+      ) : null}
       <ConnectionNotices
         notices={connectionNotices.notices}
         reportFailure={connectionNotices.reportFailure}
