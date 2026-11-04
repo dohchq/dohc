@@ -96,6 +96,7 @@ export async function createSharedViewsIpcHarness(options: {
     closeRelay: cleanup, rollbackComplete: () => { surfaces(); notify(); }, logError: vi.fn(),
   });
   const setView = vi.fn<Dependencies["setWorkspaceShareView"]>(async (id, shareView) => { steps.push("pin"); registry.get(id)!.shareView = shareView; });
+  const writeMarker = vi.fn<Dependencies["writeShareViewMarker"]>(async () => { steps.push("marker"); });
   const recordIdentity = vi.fn<EngineRelayWorkspaceClient["recordShareViewIdentity"]>(async () => { steps.push("identity"); return { identity: "recorded" }; });
   const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ recordShareViewIdentity: recordIdentity } as unknown as EngineRelayWorkspaceClient));
   const status = vi.fn<() => Promise<WatcherStatusResult>>(async () => { steps.push("capture-ready"); return ready; });
@@ -122,7 +123,7 @@ export async function createSharedViewsIpcHarness(options: {
     currentCredentialGeneration: () => cache.snapshot().generation,
     onSenderClosed: (_sender, close) => { closed.add(close); return () => { closed.delete(close); }; },
     fetchShareViewInfo: fetchInfo, fetchShareViewAccess: fetchAccess, usableRoot: roots.usableRoot, readdir: readDir, mkdir, createJoinedWorkspace,
-    setWorkspaceShareView: setView, refreshNativeWorkspaceSurfaces: surfaces, workspaceAuthorities: authorities,
+    setWorkspaceShareView: setView, writeShareViewMarker: writeMarker, refreshNativeWorkspaceSurfaces: surfaces, workspaceAuthorities: authorities,
     canonicalWorkspaceFor: lease => {
       lease.assertCurrent();
       return { ...registry.get(lease.binding.workspaceId)!, rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId };
@@ -136,7 +137,7 @@ export async function createSharedViewsIpcHarness(options: {
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
   const openPayload = { rootPath, shareCode: buildShareCode({ relayUrl: credentials.relayUrl!, shareId: "share" }) };
   return { workspace, registry, authorities, attachmentId, roots, cache, load, warm, startup, fetchInfo, readDir,
-    mkdir, createFolder, cleanup, notify, surfaces, setView, recordIdentity, relayFor, status, storeFor, reconcile,
+    mkdir, createFolder, cleanup, notify, surfaces, setView, writeMarker, recordIdentity, relayFor, status, storeFor, reconcile,
     syncNotices, probeLog, registryRead, workspaceOperation, open, end, narrow, fetchAccess, closed, recordRefusal, handlers, invoke, openPayload, steps,
     closeRenderer: () => { rendererClosed = true; for (const close of [...closed]) close(); },
     retireRenderer: () => { rendererCurrent = false; } };

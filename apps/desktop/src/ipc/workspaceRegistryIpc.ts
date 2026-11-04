@@ -8,7 +8,9 @@ import type {
   createWorkspaceFolderWithFreshness,
   FreshWorkspaceFolder,
 } from "../workspaces/createWorkspaceFolder";
+import type { RegistryEntry } from "../workspaces/registryStore";
 import type { Computer } from "../workspaces/syncHistory";
+import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -94,7 +96,10 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   openWorkspaceWindow(workspace: WorkspaceSummary): Promise<unknown>;
   openWorkspaceManager(): unknown;
   closeWindowOf(event: Event): void;
-  registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
+  // The share view a folder's own marker names, so a forgotten share's
+  // folder opens as that share again. Undefined for an ordinary folder.
+  shareViewMarkerOf(workspace: CreatedWorkspace): Promise<RegistryEntry["shareView"]>;
+  registerPhysicalWorkspace(workspace: RegistryEntry): unknown;
   // New workspace's one default: a workspace made from nothing starts
   // trusted, in the folder that creation made. Every other way in starts in
   // Restricted Mode.
@@ -121,6 +126,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     openWorkspaceWindow,
     openWorkspaceManager,
     closeWindowOf,
+    shareViewMarkerOf,
     registerPhysicalWorkspace,
     trustNewWorkspace,
     refreshNativeWorkspaceSurfaces,
@@ -214,8 +220,11 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // Parse-then-register (see createLocalWorkspace): a foreign manifest's
     // workspaceId is untrusted input — an oversized or non-hostname-safe id
     // must fail the attach with a visible error, not brick the registry.
-    const summary = WorkspaceSummary.parse(attached);
-    registerPhysicalWorkspace(attached);
+    WorkspaceSummary.parse(attached);
+    const shareView = await shareViewMarkerOf(attached);
+    const entry: RegistryEntry = shareView === undefined ? attached : { ...attached, shareView };
+    const summary = workspaceSummaryFor(entry);
+    registerPhysicalWorkspace(entry);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });

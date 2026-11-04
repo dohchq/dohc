@@ -367,6 +367,7 @@ import {
   shareViewIdentityIsIntact,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
+import { shareViewFromFolderMarker, writeFolderShareViewMarker } from "./workspaces/folderShareViewMarker";
 import { shareViewWriteScopeOf, workspaceWriteRefusal } from "./workspaces/shareWriteGate";
 import {
   workspaceSummariesFrom,
@@ -6088,8 +6089,12 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
   },
   register: async (rootPath) => {
     const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal", computer: thisComputer() });
-    const workspace = WorkspaceSummary.parse(created);
-    registerPhysicalWorkspace(created);
+    WorkspaceSummary.parse(created);
+    // As Open folder does: a forgotten share's folder opens as that share.
+    const shareView = await shareViewFromFolderMarker(created);
+    const entry: RegistryEntry = shareView === undefined ? created : { ...created, shareView };
+    const workspace = workspaceSummaryFor(entry);
+    registerPhysicalWorkspace(entry);
     return workspace;
   },
   activate: async (workspace, file, window) => {
@@ -6438,6 +6443,7 @@ function registerIpcHandlers(): void {
       }),
     openWorkspaceManager: () => desktopWindows.showOrCreateManagerWindow(),
     closeWindowOf: (event) => BrowserWindow.fromWebContents(event.sender)?.close(),
+    shareViewMarkerOf: shareViewFromFolderMarker,
     registerPhysicalWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -7317,7 +7323,7 @@ function registerIpcHandlers(): void {
     },
     engineDaemonStartup: () => desktopEngine.startup,
     fetchShareViewInfo, fetchShareViewAccess, probeShareViewLog, usableRoot, readdir, mkdir, createJoinedWorkspace,
-    setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
+    setWorkspaceShareView, writeShareViewMarker: writeFolderShareViewMarker, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
     syncNotices: isCurrent => noticeStore().sync(isCurrent),

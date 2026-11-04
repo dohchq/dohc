@@ -85,7 +85,7 @@ export interface ShareCodeParts {
   relayUrl: string;
 }
 
-function isValidShareId(value: string): boolean {
+export function isValidShareId(value: string): boolean {
   return (
     value.length > 0 &&
     value.length <= MAX_SHARE_ID_LENGTH &&
