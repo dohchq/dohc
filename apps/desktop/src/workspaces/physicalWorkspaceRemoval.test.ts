@@ -172,7 +172,30 @@ it("leaves no grant behind when a Trust is given while Forget runs", async () =>
   await h.forget("workspace");
   expect(await late).toBe(true);
   expect(h.grants()).toEqual([]);
+  expect(h.trust.isRevoked("workspace")).toBe(true);
+  expect(await h.trust.isTrusted(h.workspace)).toBe(false);
   expect(h.current()).toBeNull();
+});
+
+it("keeps the workspace listed when the restrict after it closes fails", async () => {
+  const h = harness(true, vi.fn(async () => true));
+  await h.trustIt();
+  const error = new Error("trust file is busy");
+  let late: Promise<boolean> | undefined;
+  h.writeText
+    .mockImplementationOnce(async (file, text) => {
+      late = h.owner.withAuthority("workspace", () => h.trustIt());
+      h.files.set(file, text);
+    })
+    .mockImplementationOnce(async (file, text) => { h.files.set(file, text); })
+    .mockImplementationOnce(async () => { throw error; });
+  await expect(h.forget("workspace")).rejects.toBe(error);
+  expect(await late).toBe(true);
+  expect(h.trust.isRevoked("workspace")).toBe(true);
+  expect(h.grants()).toEqual(["workspace"]);
+  expect(h.current()).toEqual(h.workspace);
+  expect(h.removeWorkspace).not.toHaveBeenCalled();
+  expect(h.clearNotices).not.toHaveBeenCalled();
 });
 
 it("leaves no grant behind when another window's Restrict fails while Forget runs", async () => {
