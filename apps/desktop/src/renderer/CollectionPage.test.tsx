@@ -39,6 +39,7 @@ import {
 } from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+import { publishReopenKey } from "./documentVersionKey";
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
 // module evaluates and tracks droppable geometry with IntersectionObserver.
@@ -2119,6 +2120,16 @@ describe("CollectionRecordFieldWrite", () => {
     expect(props.onSettled).toHaveBeenCalledOnce();
     expect(props.onFailed).not.toHaveBeenCalled();
     expect(props.onHeldDurably).not.toHaveBeenCalled();
+  });
+
+  it("opens the record with its open editor's key, so the write joins that editor's session", () => {
+    act(() => publishReopenKey("ws-keyed", 4));
+    docMock.current = engineDocState({ opening: true });
+    render(<CollectionRecordFieldWrite {...writerProps()} workspaceId="ws-keyed" />);
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 4 });
+    // A version switch moves the write with its editor.
+    act(() => publishReopenKey("ws-keyed", 5));
+    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 5 });
   });
 
   it("reports a save error as a failure, never a settle", () => {

@@ -5,6 +5,7 @@ import { PROPERTIES_READ_ONLY_REASON } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
+import { useReopenKey } from "../documentVersionKey";
 import { useBoundNoteCheck } from "../editor/lossyNote";
 import { useRecordSourceCheck } from "./recordSourceCheck";
 import { SecondaryButton } from "../ui/controls";
@@ -96,10 +97,13 @@ export function CollectionRecordFieldWrite({
   // The record's file is checked before its session opens, and the session's
   // own document again once it binds. A lossy note (CONTEXT.md) refuses.
   const source = useRecordSourceCheck(workspaceId, change.recordPath);
+  // The key the record's open editor uses, so the edit lands in its session.
+  const reopenKey = useReopenKey(workspaceId);
   const docState = useEngineDoc({
     workspaceId,
     path: change.recordPath,
     enabled: source.state === "clear",
+    reopenKey,
   });
   const session = useBoundNoteCheck({
     open: change.recordPath,
