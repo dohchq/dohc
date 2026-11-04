@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Node as PMNode } from "@tiptap/pm/model";
+import { Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, type Plugin } from "@tiptap/pm/state";
 import { Decoration, type DecorationSet } from "@tiptap/pm/view";
 import { makeCalloutChromePlugin } from "./calloutChrome";
@@ -127,6 +127,32 @@ describe("makeCalloutChromePlugin — edits", () => {
     const [remoteB, remoteC] = headers(state, plugin);
     expect(remoteB!.owner).toBe(ownerB);
     expect([ownerA, ownerB]).not.toContain(remoteC!.owner);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
+  it("compares no callouts whose title changed under a remote update", () => {
+    const plugin = makeCalloutChromePlugin();
+    const count = 300;
+    let state = EditorState.create({
+      doc: doc(
+        paragraph("lead"),
+        ...Array.from({ length: count }, (_, index) => callout("note", `Callout ${index}`)),
+        paragraph("after"),
+      ),
+      plugins: [plugin],
+    });
+    const remote = doc(
+      paragraph("lead, edited"),
+      ...Array.from({ length: count }, (_, index) => callout("note", `Renamed ${index}`)),
+      paragraph("after, edited"),
+    );
+    const eq = vi.spyOn(PMNode.prototype, "eq");
+    try {
+      state = state.apply(state.tr.replaceWith(0, state.doc.content.size, remote.content));
+      expect(eq.mock.calls.length).toBeLessThan(count);
+    } finally {
+      eq.mockRestore();
+    }
     expect(shown(state, plugin)).toEqual(expected(state.doc));
   });
 

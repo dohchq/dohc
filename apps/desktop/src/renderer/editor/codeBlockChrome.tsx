@@ -1,5 +1,5 @@
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
-import { ownersInRange, throughEdit } from "./widgetOwnership";
+import { ownersInRange, throughEdit, type OwnedBlock } from "./widgetOwnership";
 import { documentChange, stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import { CODE_LANGUAGE_OPTIONS, cleanCodeLanguage } from "./codeLanguages";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -336,20 +336,24 @@ export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
         if (!range) return decorations;
         // A toolbar sits before its block, so content inserted at a block's
         // start leaves its toolbar at the start of the range.
-        const blocks: Array<{ node: ProseMirrorNode; pos: number }> = [];
-        tr.doc.nodesBetween(range.from, Math.min(range.to + 1, tr.doc.content.size), (node, pos) => {
-          if (!isCodeBlockNode(node)) return !node.isTextblock;
-          if (pos >= range.from) blocks.push({ node, pos });
-          return false;
-        });
+        const codeBlocks = (doc: ProseMirrorNode, from: number, to: number) => {
+          const found: OwnedBlock[] = [];
+          doc.nodesBetween(from, Math.min(to + 1, doc.content.size), (node, pos) => {
+            if (!isCodeBlockNode(node)) return !node.isTextblock;
+            if (pos >= from) found.push({ at: pos, node });
+            return false;
+          });
+          return found;
+        };
+        const blocks = codeBlocks(tr.doc, range.from, range.to);
         const owners = ownersInRange(
           old.find(range.from, range.toBefore),
-          blocks.map(({ node, pos }) => ({ at: pos, node })),
+          blocks,
           throughEdit(tr.mapping, mapping),
-          (from) => tr.before.nodeAt(from),
+          () => codeBlocks(tr.before, range.from, range.toBefore),
         );
-        const toolbars = blocks.map(({ node, pos }) =>
-          codeBlockToolbar(node, pos, owners.get(pos) ?? nextOwnerKey(), report),
+        const toolbars = blocks.map(({ node, at }) =>
+          codeBlockToolbar(node, at, owners.get(at) ?? nextOwnerKey(), report),
         );
         return decorations.remove(decorations.find(range.from, range.to)).add(tr.doc, toolbars);
       },

@@ -97,18 +97,18 @@ export function reconcileMermaidEntries(
   }
   const placed = blocks.map((block) => byMappedPos.get(block.pos))
   // A remote update replaces the whole document, so its steps place no fence
-  // inside it. There a fence keeps the id of the next unplaced fence with the
-  // same text, in order.
+  // inside it. There a fence keeps the id of an unplaced fence with the same
+  // text.
   const used = new Set(placed)
-  const unplaced = previous.filter((entry) => !used.has(entry))
-  let next = 0
+  const byText = new Map<string, MermaidWidgetEntry[]>()
+  for (const entry of previous) {
+    if (used.has(entry)) continue
+    const list = byText.get(entry.text)
+    if (list) list.push(entry)
+    else byText.set(entry.text, [entry])
+  }
   return blocks.map((block, index) => {
-    let match = placed[index]
-    for (let at = next; !match && at < unplaced.length; at += 1) {
-      if (unplaced[at]!.text !== block.text) continue
-      match = unplaced[at]
-      next = at + 1
-    }
+    const match = placed[index] ?? byText.get(block.text)?.shift()
     return { id: match?.id ?? nextId(), pos: block.pos, end: block.end, text: block.text }
   })
 }
