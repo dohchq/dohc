@@ -221,6 +221,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
+import { windowShowsWorkspace } from "./window/workspaceWindowReuse";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
   createRendererWorkspaceOperationRunner,
@@ -6440,10 +6441,8 @@ function registerIpcHandlers(): void {
     trustNewWorkspace: (workspace, fresh) => workspaceTrust.trust(workspace, fresh),
     showItemInFolder: (path) => shell.showItemInFolder(path),
     openWorkspaceWindow: (workspace) =>
-      desktopWindows.openWorkspaceInWindow(workspace, (window) => {
-        const session = rendererWorkspaceSessions.current(window.webContents);
-        return session?.workspaceId === workspace.workspaceId;
-      }),
+      desktopWindows.openWorkspaceInWindow(workspace, (window) =>
+        windowShowsWorkspace(rendererWorkspaceSessions.current(window.webContents), workspace.workspaceId, workspaceAuthorities)),
     openWorkspaceManager: () => desktopWindows.showOrCreateManagerWindow(),
     closeWindowOf: (event) => BrowserWindow.fromWebContents(event.sender)?.close(),
     registerPhysicalWorkspace,
