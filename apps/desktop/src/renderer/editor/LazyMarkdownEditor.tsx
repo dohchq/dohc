@@ -1,6 +1,7 @@
 import { forwardRef, useState, type ReactNode } from "react";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
+import { preloadCollaborationExtensions } from "./collaborationExtensions";
 import type {
   MarkdownEditor,
   MarkdownEditorHandle,
@@ -23,7 +24,11 @@ let markdownEditorPromise: Promise<MarkdownEditorComponent> | null = null;
 let markdownEditorLoad: MarkdownEditorLoad = { status: "loading" };
 
 function loadMarkdownEditor(): Promise<MarkdownEditorComponent> {
-  markdownEditorPromise ??= import("./MarkdownEditor").then(
+  if (markdownEditorPromise) return markdownEditorPromise;
+  // A live note's editor also needs the collaboration code. Loading both
+  // together keeps a note's text on screen through its first open.
+  preloadCollaborationExtensions();
+  markdownEditorPromise = import("./MarkdownEditor").then(
     (mod) => {
       markdownEditorLoad = { status: "ready", Editor: mod.MarkdownEditor };
       return mod.MarkdownEditor;
