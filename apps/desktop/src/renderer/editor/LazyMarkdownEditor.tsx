@@ -46,7 +46,8 @@ function loadMarkdownEditor(): Promise<MarkdownEditorComponent> {
 }
 
 export function preloadMarkdownEditor(): void {
-  void loadMarkdownEditor();
+  // A failure stays in `markdownEditorLoad`, and the editor shows it.
+  loadMarkdownEditor().catch(() => undefined);
 }
 
 function liveEditorSettled(): boolean {
