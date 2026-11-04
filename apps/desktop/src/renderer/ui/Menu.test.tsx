@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MENU_SEPARATOR, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
 import { Overlay } from "../Overlay";
@@ -445,6 +445,35 @@ describe("Menu", () => {
       expect(menu.className).toContain("dohc-menu-in");
     } finally {
       vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("opens under its anchor when given one, still lined up with the trigger", async () => {
+    const user = userEvent.setup();
+    function Anchored() {
+      const [open, setOpen] = useState(false);
+      const row = useRef<HTMLDivElement | null>(null);
+      return (
+        <div ref={row} data-testid="row">
+          <Menu label="Row actions" testId="row-menu" open={open} onOpenChange={setOpen} items={items} width={200} anchor={row} />
+        </div>
+      );
+    }
+    render(<Anchored />);
+    const trigger = screen.getByTestId("row-menu");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
+      { top: 102, bottom: 126, left: 280, right: 304, width: 24, height: 24, x: 280, y: 102, toJSON: () => ({}) },
+    );
+    vi.spyOn(screen.getByTestId("row"), "getBoundingClientRect").mockReturnValue(
+      { top: 100, bottom: 144, left: 8, right: 308, width: 300, height: 44, x: 8, y: 100, toJSON: () => ({}) },
+    );
+    try {
+      await user.click(trigger);
+      const menu = screen.getByRole("menu");
+      expect(menu.style.top).toBe("148px");
+      expect(menu.style.left).toBe("104px");
+    } finally {
       vi.restoreAllMocks();
     }
   });

@@ -684,6 +684,7 @@ const HomeRow = memo(function HomeRow(props: {
   const [reached, setReached] = useState(false);
   const [fixMenuOpen, setFixMenuOpen] = useState(false);
   const rowButton = useRef<HTMLButtonElement | null>(null);
+  const rowBox = useRef<HTMLDivElement | null>(null);
   const dragPath = drag && path ? path : null;
   // A cause takes its own line under the name, so the name never gives way to
   // it. The first line keeps the row's 28px, so the mark and ••• stay on it.
@@ -691,6 +692,7 @@ const HomeRow = memo(function HomeRow(props: {
   return (
     <li role="none" className="px-1">
       <div
+        ref={rowBox}
         onPointerEnter={reached ? undefined : () => setReached(true)}
         className={`group relative flex items-center rounded-md transition-colors duration-75 ${cause ? "" : "h-7"} ${fill}`}
       >
@@ -787,6 +789,8 @@ const HomeRow = memo(function HomeRow(props: {
                 label={`More actions for ${row.label}`}
                 items={[{ id: "show-in-files", label: "Show in Files", testId: "home-row-show-in-files", onSelect: () => props.onClick(row) }]}
                 open={fixMenuOpen}
+                // Under the cause line, so the list never covers what it acts on.
+                anchor={cause ? rowBox : undefined}
                 // Focus goes back to the row, where Home's arrows and Enter work, not to the •••.
                 onOpenChange={(open) => {
                   setFixMenuOpen(open);

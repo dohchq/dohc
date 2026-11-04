@@ -249,6 +249,8 @@ export function Menu(props: {
   width?: number;
   /** The list lines up with the trigger's right edge, or with its left at "start". */
   align?: "start" | "end";
+  /** The list opens under or over this box instead of the trigger, still lined up with the trigger. */
+  anchor?: RefObject<HTMLElement | null>;
   closeOnPick?: boolean;
   /** The list opens over the page, for a trigger inside a box that clips it, such as a chat row. */
   topLayer?: boolean;
@@ -283,17 +285,18 @@ export function Menu(props: {
     if (!open) return;
     if (props.topLayer) list.current?.showPopover?.();
     const box = trigger.current?.getBoundingClientRect();
+    const edge = props.anchor?.current?.getBoundingClientRect() ?? box;
     const height = list.current?.offsetHeight ?? 0;
-    if (box) {
+    if (box && edge) {
       const left = props.align === "start"
         ? Math.max(EDGE_PX, Math.min(box.left, window.innerWidth - EDGE_PX - width))
         : Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
-      const below = window.innerHeight - box.bottom - GAP_PX - EDGE_PX;
-      const above = box.top - GAP_PX - EDGE_PX;
+      const below = window.innerHeight - edge.bottom - GAP_PX - EDGE_PX;
+      const above = edge.top - GAP_PX - EDGE_PX;
       setPlace(
         height > below && above > below
-          ? { left, bottom: window.innerHeight - box.top + GAP_PX, maxHeight: above, above: true }
-          : { left, top: box.bottom + GAP_PX, maxHeight: below, above: false },
+          ? { left, bottom: window.innerHeight - edge.top + GAP_PX, maxHeight: above, above: true }
+          : { left, top: edge.bottom + GAP_PX, maxHeight: below, above: false },
       );
     }
     // A field that took focus as it mounted keeps it.
@@ -302,7 +305,7 @@ export function Menu(props: {
       setPlace(null);
       setPointerMoved(false);
     };
-  }, [open, width, props.align, props.topLayer]);
+  }, [open, width, props.align, props.anchor, props.topLayer]);
 
   // Placed, a list shorter than its rows shows its top, so it scrolls to the
   // row focus opened on.
