@@ -7,6 +7,7 @@ import {
   launchCommandHint,
   launchFrom,
   launchFromCommand,
+  ownFlagsProblem,
   supportsAgentProfile,
   tokenizeRunnerCommand,
 } from "./agentToolCatalog";
@@ -101,6 +102,13 @@ describe("agent launch profiles", () => {
     }
     expect(AgentLaunchProfile.safeParse({ tool: "codex", executable: "/bin/codex", arguments: ["--add-dir"] }).success).toBe(true);
   });
+  it("names the first rule the person's own flags break", () => {
+    expect(ownFlagsProblem({ tool: "codex", arguments: ["resume", "--"] })).toBe("The first word after the program must be a flag, such as --model.");
+    expect(ownFlagsProblem({ tool: "claude", arguments: ["--model", "opus", "--", "--settings"] })).toBe("Its flags cannot include a bare --.");
+    expect(ownFlagsProblem({ tool: "claude", arguments: ["--model", "opus", "--settings"] })).toBe("Its last flag needs a file or folder after it.");
+    expect(ownFlagsProblem({ tool: "codex", arguments: ["--model", "o3"] })).toBeNull();
+    expect(ownFlagsProblem({ tool: "claude" })).toBeNull();
+  });
   it("preserves the raw command and round-trips spaces, quotes and backslashes", () => {
     expect(launchCommand({ command: ' node "agent script.mjs" ' })).toBe('node "agent script.mjs"');
     const flags = ["--add-dir", "C:\\My Work\\", "a\\\"b", "", "D:\\"];
@@ -157,8 +165,8 @@ describe("a typed command", () => {
     expect(launchFromCommand("C:\\Tools\\codex.exe exec --full-auto")).toEqual({ command: "C:\\Tools\\codex.exe exec --full-auto" });
   });
   it("says what dohc adds for each kind of launch", () => {
-    expect(launchCommandHint({ tool: "claude", executable: "/bin/claude" })).toBe("dohc adds its reply tool. The conversation arrives through stdin.");
-    expect(launchCommandHint({ tool: "codex", executable: "/bin/codex" })).toBe("dohc adds its reply tool and sandbox. The conversation arrives through stdin.");
+    expect(launchCommandHint({ tool: "claude", executable: "/bin/claude" })).toBe("dohc adds its reply tool. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds.");
+    expect(launchCommandHint({ tool: "codex", executable: "/bin/codex" })).toBe("dohc adds its reply tool and sandbox. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds.");
     expect(launchCommandHint({ command: "node agent.mjs" })).toBe("dohc runs this command as typed. The conversation arrives through stdin.");
     expect(launchCommandHint(null)).toBe("dohc runs this command as typed. The conversation arrives through stdin.");
   });

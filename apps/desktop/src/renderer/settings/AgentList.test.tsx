@@ -259,7 +259,7 @@ it("keeps a tool's profile when its command is saved as shown, and adds your own
   await userEvent.click(details.getByRole("button", { name: "Use your own command" }));
   const field = details.getByRole<HTMLInputElement>("textbox", { name: "Command that starts Codex" });
   expect(field.value).toBe("C:\\Tools\\codex.exe");
-  expect(details.getByText("dohc adds its reply tool and sandbox. The conversation arrives through stdin.")).toBeTruthy();
+  expect(details.getByText("dohc adds its reply tool and sandbox. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds.")).toBeTruthy();
   await userEvent.type(field, "x", { initialSelectionStart: field.value.length, initialSelectionEnd: field.value.length });
   expect(field.value).toBe("C:\\Tools\\codex.exex");
   expect(details.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
