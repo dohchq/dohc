@@ -926,6 +926,27 @@ pub fn get_secret_moment_keyless(
     })
 }
 
+/// One page of a protected-file comparison: each path in either version, in
+/// path order, with its row from each side. The primary key covers path, so
+/// the page's paths come from two ordered index walks and each row from one
+/// key lookup. A `FULL OUTER JOIN` of the two sides compared every pair of
+/// rows on each page.
+const COMPARE_SECRET_FILES_PAGE_SQL: &str = "WITH page(path) AS ( \
+        SELECT path FROM secret_files \
+        WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?4 \
+        UNION \
+        SELECT path FROM secret_files \
+        WHERE workspace_id = ?1 AND version_id = ?3 AND path > ?4 \
+        ORDER BY 1 LIMIT ?5) \
+     SELECT t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
+            s.path, s.iv_base64, s.auth_tag_base64, s.ciphertext_base64, s.byte_length \
+     FROM page \
+     LEFT JOIN secret_files AS t \
+       ON t.workspace_id = ?1 AND t.version_id = ?2 AND t.path = page.path \
+     LEFT JOIN secret_files AS s \
+       ON s.workspace_id = ?1 AND s.version_id = ?3 AND s.path = page.path \
+     ORDER BY page.path";
+
 /// Whole-version secret comparison that can run keyless when no encrypted
 /// state exists. A key is only consulted for ciphertext-different rows.
 pub fn compare_secret_files_page_keyless(
@@ -946,18 +967,7 @@ pub fn compare_secret_files_page_keyless(
         require_version(conn, workspace_id, source_version_id)?;
         require_version(conn, workspace_id, target_version_id)?;
         let mut stmt = conn
-            .prepare_cached(
-                "SELECT t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
-                        s.path, s.iv_base64, s.auth_tag_base64, s.ciphertext_base64, s.byte_length \
-                 FROM (SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
-                       FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2) AS t \
-                 FULL OUTER JOIN \
-                      (SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
-                       FROM secret_files WHERE workspace_id = ?1 AND version_id = ?3) AS s \
-                   ON t.path = s.path \
-                 WHERE COALESCE(t.path, s.path) > ?4 \
-                 ORDER BY COALESCE(t.path, s.path) LIMIT ?5",
-            )
+            .prepare_cached(COMPARE_SECRET_FILES_PAGE_SQL)
             .map_err(DomainError::sql_corrupt)?;
         let rows = stmt
             .query_map(
@@ -2015,4 +2025,137 @@ pub fn list_secret_files_keyless(
         }
         Ok(out)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_storage::NoFaults;
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+    use std::time::{Duration, Instant};
+
+    /// Two versions of 5,000 protected files: `feat` deletes 1 and adds 1.
+    /// The others match byte for byte, so the comparison needs no key.
+    const LARGE_SECRET_VERSIONS_SQL: &str = "
+        INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms, fork_version_id)
+            VALUES ('ws', 'feat', 'named', 'feat', 2, 'main');
+        WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 4999)
+        INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, auth_tag_base64,
+                                  ciphertext_base64, byte_length, updated_at_ms, latest_moment_id)
+            SELECT 'ws', v.id, printf('secrets/d%02d/f%03d.env', n.i / 100, n.i % 100),
+                   'iv', 'tag', 'sealed-' || n.i, 10, 1, 'moment'
+            FROM n CROSS JOIN (SELECT 'main' AS id UNION ALL SELECT 'feat') AS v
+            WHERE NOT (v.id = 'feat' AND n.i = 7);
+        INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, auth_tag_base64,
+                                  ciphertext_base64, byte_length, updated_at_ms, latest_moment_id)
+            VALUES ('ws', 'feat', 'secrets/added.env', 'iv', 'tag', 'sealed-added', 10, 1, 'moment');";
+
+    fn compare_walk(
+        store: &EngineStore,
+        limit: usize,
+    ) -> (Vec<(String, VersionFileChangeStatus)>, usize) {
+        let mut changes = Vec::new();
+        let mut pages = 0;
+        let mut after: Option<String> = None;
+        loop {
+            let page = compare_secret_files_page_keyless(
+                store,
+                None,
+                "ws",
+                "feat",
+                "main",
+                after.as_deref(),
+                limit,
+            )
+            .expect("compare page");
+            pages += 1;
+            changes.extend(
+                page.entries
+                    .into_iter()
+                    .map(|entry| (entry.path, entry.status)),
+            );
+            match page.next_after_path {
+                Some(next) => after = Some(next),
+                None => return (changes, pages),
+            }
+        }
+    }
+
+    /// The full outer join this query replaced compared every pair of
+    /// protected files on each page: several seconds for these two versions on
+    /// a desktop. With and without statistics, the whole walk now stays within
+    /// a budget, pages of 200 find the same changes as one page, and each side
+    /// is read through the primary key.
+    #[test]
+    fn comparing_two_large_protected_versions_stays_fast_and_exact() {
+        const BUDGET: Duration = Duration::from_secs(3);
+
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store =
+            EngineStore::open(&engine_db_path(&scratch).expect("database path"), 1).expect("store");
+        crate::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("main");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(LARGE_SECRET_VERSIONS_SQL)
+                    .map_err(DomainError::sql_persist)
+            })
+            .expect("large protected versions");
+        let expected = [
+            ("secrets/added.env", VersionFileChangeStatus::Added),
+            ("secrets/d00/f007.env", VersionFileChangeStatus::Deleted),
+        ]
+        .map(|(path, status)| (path.to_owned(), status))
+        .to_vec();
+
+        for statistics in ["", "ANALYZE"] {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch(statistics)
+                        .map_err(DomainError::sql_persist)
+                })
+                .expect("statistics");
+            let started = Instant::now();
+            let (paged, pages) = compare_walk(&store, 200);
+            let elapsed = started.elapsed();
+            eprintln!("comparing two 5,000-file protected versions ({statistics:?}): {elapsed:?}");
+            assert_eq!(paged, expected, "{statistics}");
+            assert_eq!(pages, 26, "5,001 paths in pages of 200 ({statistics})");
+            assert!(
+                elapsed <= BUDGET,
+                "comparing two 5,000-file protected versions took {elapsed:?}; budget {BUDGET:?} ({statistics})"
+            );
+            assert_eq!(
+                compare_walk(&store, 10_000),
+                (expected.clone(), 1),
+                "{statistics}"
+            );
+
+            let plan = store
+                .read_with(|conn| {
+                    conn.prepare(&format!(
+                        "EXPLAIN QUERY PLAN {COMPARE_SECRET_FILES_PAGE_SQL}"
+                    ))?
+                    .query_map(params!["ws", "main", "feat", "", 200], |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .expect("query plan");
+            for side in ["t", "s"] {
+                let lookup = format!(
+                    "SEARCH {side} USING INDEX sqlite_autoindex_secret_files_1 \
+                     (workspace_id=? AND version_id=? AND path=?) LEFT-JOIN"
+                );
+                assert!(plan.contains(&lookup), "{statistics}: {plan:?}");
+            }
+            assert!(
+                !plan.iter().any(
+                    |step| step.contains("RIGHT-JOIN") || step.starts_with("SCAN secret_files")
+                ),
+                "{statistics}: {plan:?}"
+            );
+        }
+    }
 }
