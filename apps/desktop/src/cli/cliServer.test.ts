@@ -2847,6 +2847,32 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(opened);
   });
 
+  it("posts as the agent of a run dohc started after it ends, only in its own workspace", async () => {
+    if (!store) throw new Error("Store is not available");
+    // The run has let go of the slot; main still knows the workspace of the
+    // id it gave the run.
+    dispatchedRun = null;
+    serverOptions.agentRunWorkspace = (runId) => runId === "run_finished" ? WORKSPACE_ID : undefined;
+    const late = await post({ actor: "human", title: "Late", body: "Published the trip app.", runId: "run_finished" });
+    const [message] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${late.threadId.slice("th_".length)}` });
+    expect(message?.author.kind).toBe("agent");
+
+    // A run id dohc never gave out leaves the caller's actor as it is.
+    const unknown = await post({ actor: "human", title: "Mine", body: "My own post.", runId: "run_never_issued" });
+    const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${unknown.threadId.slice("th_".length)}` });
+    expect(mine?.author.kind).toBe("human");
+
+    const nestedRoot = join(workspaceRoot, "notes");
+    await mkdir(nestedRoot);
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
+    const opened = calls.openWorkspace;
+    await expect(invoke("post", {
+      cwd: nestedRoot, actor: "human", runId: "run_finished", group: "general",
+      attachments: [], needsDecision: false, body: "Published the trip app.",
+    })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    expect(calls.openWorkspace).toBe(opened);
+  });
+
   it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
     const posted = await post({ actor: "human", title: "Test", body: "Check." });
     serverOptions.agentRunWorkspace = (runId) => runId === "run_live" ? WORKSPACE_ID : undefined;

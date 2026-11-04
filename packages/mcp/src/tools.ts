@@ -2056,7 +2056,8 @@ interface ChatWriteInput {
 }
 
 function chatWriteArgs(ctx: ToolContext, input: ChatWriteInput) {
-  const runId = input.runId ?? ctx.runId;
+  // The run this server works for wins over a run the caller names.
+  const runId = ctx.runId ?? input.runId;
   return {
     ...(runId !== undefined ? { runId } : {}),
     attachments: input.attachments ?? [],
@@ -2437,7 +2438,7 @@ export async function startFileChat(
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  const runId = args.runId ?? ctx.runId;
+  const runId = ctx.runId ?? args.runId;
   return requestCli(ctx, "fileChatStart", {
     ...args,
     ...(runId !== undefined ? { runId } : {}),

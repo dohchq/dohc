@@ -2789,9 +2789,11 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedRunId(lease.state.activity),
     ),
-  agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
-    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
-  ),
+  // A run dohc started keeps its workspace after it ends; any other run only
+  // while it holds a slot.
+  agentRunWorkspace: (runId: string) => chatDispatchService.runWorkspace(runId) ??
+    workspaceAuthorities.workspaceIds().find((workspaceId) =>
+      withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId)),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
