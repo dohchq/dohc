@@ -123,8 +123,8 @@ export function VersionsPage(props: {
         // it counted waits behind the rest. Steady writes, such as a count's
         // own capture, then still reach every row.
         const order = countOrder.current;
-        const start = last === null ? 0 : order.indexOf(last) + 1;
-        const versionId = [...order.slice(start), ...order.slice(0, start)].find((id) => staleCounts.current.has(id));
+        const start: number = last === null ? 0 : order.indexOf(last) + 1;
+        const versionId: string | undefined = [...order.slice(start), ...order.slice(0, start)].find((id) => staleCounts.current.has(id));
         if (versionId === undefined) break;
         staleCounts.current.delete(versionId);
         let count: Count;
