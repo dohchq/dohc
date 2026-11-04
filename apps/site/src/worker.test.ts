@@ -7,18 +7,29 @@ const upstream = vi.fn(async (_url: string, _init: RequestInit) =>
 vi.stubGlobal("fetch", upstream);
 afterEach(() => vi.clearAllMocks());
 
-it("forwards events to PostHog without this site's cookies, and with the visitor's address", async () => {
+it("forwards events to PostHog with only the SDK's headers and the visitor's address", async () => {
   const response = await worker.fetch(new Request("https://dohc.computer/ingest/i/v0/e/?ver=1", {
     method: "POST",
     body: "{}",
-    headers: { cookie: "cf_clearance=x", "cf-connecting-ip": "203.0.113.7", authorization: "Basic x" },
+    headers: {
+      cookie: "cf_clearance=x",
+      "cf-connecting-ip": "203.0.113.7",
+      "cf-ipcountry": "NZ",
+      "cf-ipcity": "Wellington",
+      "x-real-ip": "203.0.113.7",
+      authorization: "Bearer phx_personal",
+      "content-type": "application/json",
+      "user-agent": "Browser/1",
+    },
   }), { ASSETS: assets });
   const [url, init] = upstream.mock.calls[0]!;
   const headers = new Headers(init.headers);
   expect(url).toBe("https://us.i.posthog.com/i/v0/e/?ver=1");
-  expect(headers.get("cookie")).toBeNull();
-  expect(headers.get("authorization")).toBeNull();
-  expect(headers.get("x-forwarded-for")).toBe("203.0.113.7");
+  expect([...headers]).toEqual([
+    ["content-type", "application/json"],
+    ["user-agent", "Browser/1"],
+    ["x-forwarded-for", "203.0.113.7"],
+  ]);
   expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe("{}");
   expect(response.headers.get("set-cookie")).toBeNull();
   expect(assets.fetch).not.toHaveBeenCalled();
