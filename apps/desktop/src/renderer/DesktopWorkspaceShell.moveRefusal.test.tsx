@@ -111,16 +111,75 @@ it("a failed move's toast and Notices row go once an agent makes the same move t
   await listAfterActivity(bridge, ["a.md", "b.md"], "c.md");
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
   expect(await noticeRows(user)).toHaveLength(1);
-  // So does one that takes a.md away without putting it at renamed.md, such
-  // as a delete or a move to another name.
-  await listAfterActivity(bridge, ["b.md"], "d.md");
-  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
-  expect(await noticeRows(user)).toHaveLength(1);
   // The agent's move of a.md to renamed.md.
-  await listAfterActivity(bridge, ["renamed.md", "b.md"], "e.md");
+  await listAfterActivity(bridge, ["renamed.md", "b.md"], "d.md");
   await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   expect(await noticeRows(user)).toEqual([]);
   expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1);
+});
+
+it("a failed move's toast and Notices row stay when its file goes but nothing arrives where it was going", async () => {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn().mockRejectedValue(LIVE_MOVE_REFUSAL) });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await rename(user);
+  await screen.findByTestId("workspace-shell-error");
+  // A delete of a.md, or a move of it to another name.
+  await listAfterActivity(bridge, ["b.md"], "c.md");
+  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REFUSAL_WORDS);
+  expect(await noticeRows(user)).toHaveLength(1);
+});
+
+const TAKEN_WORDS = "renamed.md already exists.";
+const TAKEN = new Error(`Error invoking remote method 'desktop:move-workspace-path': Error: ${TAKEN_WORDS} Choose another destination, or move with overwrite.`);
+
+// Renames a.md to renamed.md from the tree, and fails it with `cause` after a
+// listing of `paths` lands while the rename runs. Resolves once the tree has
+// reported the failure and asked for a new listing.
+async function failWhileListed(bridge: ReturnType<typeof makeBridge> & { moveWorkspacePath: ReturnType<typeof vi.fn> }, user: ReturnType<typeof userEvent.setup>, paths: string[], cause: unknown) {
+  const held = deferred<never>();
+  bridge.moveWorkspacePath.mockImplementationOnce(() => held.promise);
+  await rename(user);
+  await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
+  await listAfterActivity(bridge, paths, "c.md");
+  const listings = bridge.listWorkspaceFiles.mock.calls.length;
+  held.reject(cause);
+  await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
+}
+
+// The agent's move lands before the tree's own attempt fails.
+it("a failed move leaves no toast or Notices row when the listing already shows the same move made", async () => {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn() });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await failWhileListed(bridge, user, ["renamed.md", "b.md"], LIVE_MOVE_REFUSAL);
+  expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  expect(await noticeRows(user)).toEqual([]);
+});
+
+// With renamed.md already there, a listing without a.md could be a delete.
+it("a move that failed onto a taken name keeps its row when a.md goes and renamed.md stays", async () => {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn() });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await failWhileListed(bridge, user, ["a.md", "b.md", "renamed.md"], TAKEN);
+  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
+  await listAfterActivity(bridge, ["b.md", "renamed.md"], "d.md");
+  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
+});
+
+it("a move that failed onto a taken name loses its row once that name is free and an agent makes the move", async () => {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn() });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await failWhileListed(bridge, user, ["a.md", "b.md", "renamed.md"], TAKEN);
+  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
+  // renamed.md is deleted, then the agent moves a.md there.
+  await listAfterActivity(bridge, ["a.md", "b.md"], "d.md");
+  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
+  await listAfterActivity(bridge, ["renamed.md", "b.md"], "e.md");
+  await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  expect(await noticeRows(user, TAKEN_WORDS)).toEqual([]);
 });
 
 // After the person moves the file again from the tree, to any name, the

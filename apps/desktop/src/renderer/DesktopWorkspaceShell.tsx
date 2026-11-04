@@ -973,14 +973,14 @@ export function DesktopWorkspaceShell(props: {
   );
   // A failed move's row goes once the move happens, by any route. A move made
   // through the CLI or MCP reaches the shell only as workspace activity and
-  // the listing that follows, so this effect clears the row once a listing
-  // shows the source gone and the destination there. If both were listed when
-  // the move failed, a deleted source would look the same, so only the tree's
-  // success clears that row. The shell remounts for each workspace, and so
-  // does this map.
+  // the listing that follows, so a listing that shows the source gone and the
+  // destination there clears the row. A destination that was already there
+  // when the move failed counts only after a listing shows it gone, since a
+  // deleted source would look the same. The shell remounts for each
+  // workspace, and so does this map.
   const listing = useRef({ files, folders });
   listing.current = { files, folders };
-  const failedMoves = useRef(new Map<string, { move: PendingTreeMove; bothListed: boolean }>());
+  const failedMoves = useRef(new Map<string, { move: PendingTreeMove; destinationTaken: boolean }>());
   const clearFailedMove = useCallback((identity: string) => {
     failedMoves.current.delete(identity);
     clearIdentity(identity);
@@ -988,7 +988,8 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     for (const [identity, failed] of failedMoves.current) {
       const ends = listedMoveEnds(failed.move, files, folders);
-      if (!failed.bothListed && !ends.from && ends.to) clearFailedMove(identity);
+      if (!ends.to) failed.destinationTaken = false;
+      else if (!failed.destinationTaken && !ends.from) clearFailedMove(identity);
     }
   }, [files, folders, clearFailedMove]);
   // Explorer's failures. A move refused for live editing opens Live
@@ -1001,7 +1002,9 @@ export function DesktopWorkspaceShell(props: {
         : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
       if (move && identity) {
         const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
-        failedMoves.current.set(identity, { move, bothListed: ends.from && ends.to });
+        // A listing that landed before this failure can already show the move made.
+        if (!ends.from && ends.to) return;
+        failedMoves.current.set(identity, { move, destinationTaken: ends.to });
       }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
