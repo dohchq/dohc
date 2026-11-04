@@ -1,7 +1,8 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { editorTabTestId } from "../src/testPins";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -18,7 +19,7 @@ import {
 // a notice with Try again, and a failed merge in its dialog, with Details; each
 // merge stage, with and without the protected files a merge replaced; a merge
 // whose dialog closed while it ran, answering as a toast and a Notices row; the
-// save-first
+// Versions page with a conflict waiting, and its tooltip; the save-first
 // confirm; and keyboard focus on the disabled Merge row. Light and dark. Not a
 // regression test; it runs only when a shot directory is set, the way
 // ui-audit-screenshots.spec.ts does.
@@ -113,6 +114,32 @@ async function shootParts(page: Page, name: string, parts: Locator[]): Promise<v
     await page.screenshot({ path: join(SHOT_DIR, `${name}-${theme}.png`), clip: { x: left, y: top, width: right - left, height: bottom - top } });
   }
   await setTheme(page, "light");
+}
+
+// The screen under the page's window, as PNG bytes. A native tooltip is a
+// window of its own, which page.screenshot never sees, so main captures it.
+async function screenUnderWindow(desktop: Desktop): Promise<Buffer> {
+  const windowId = await (await desktop.app.browserWindow(desktop.page)).evaluate((win) => win.id);
+  const base64 = await desktop.app.evaluate(async ({ BrowserWindow, desktopCapturer, screen }, id) => {
+    const win = BrowserWindow.fromId(id);
+    if (!win) throw new Error("the page's window is gone");
+    const bounds = win.getBounds();
+    const display = screen.getDisplayMatching(bounds);
+    const scale = display.scaleFactor;
+    const sources = await desktopCapturer.getSources({
+      types: ["screen"],
+      thumbnailSize: { width: Math.round(display.size.width * scale), height: Math.round(display.size.height * scale) },
+    });
+    const source = sources.find((item) => item.display_id === String(display.id)) ?? sources[0];
+    if (!source || source.thumbnail.isEmpty()) throw new Error("no screen to capture");
+    const size = source.thumbnail.getSize();
+    const x = Math.max(0, Math.round((bounds.x - display.bounds.x) * scale));
+    const y = Math.max(0, Math.round((bounds.y - display.bounds.y) * scale));
+    const width = Math.min(Math.round(bounds.width * scale), size.width - x);
+    const height = Math.min(Math.round(bounds.height * scale), size.height - y);
+    return source.thumbnail.crop({ x, y, width, height }).toPNG().toString("base64");
+  }, windowId);
+  return Buffer.from(base64, "base64");
 }
 
 async function shootMenu(page: Page, name: string): Promise<void> {
@@ -315,7 +342,9 @@ test("@ui-audit the versions menu and what it opens", async () => {
       await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
       await releaseHeld(app);
     };
-    await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nThird draft.\n");
+    // Each clean merge below changes a file the earlier merges left alone. A
+    // second merge of plan.md would ask which copy to keep (#3211).
+    await writeCaptured(page, temp.rootPath, "Draft", "ideas.md", "# Ideas\n");
     await closeWhileMerging("hold", "merge-running-close");
     const mergedAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merged 1 file from Draft into Main" });
     await expect(mergedAway).toBeVisible({ timeout: 30_000 });
@@ -325,7 +354,7 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.mouse.move(0, 0);
     await expect(mergedAway).toHaveCount(0, { timeout: 30_000 });
 
-    await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nFourth draft.\n");
+    await writeCaptured(page, temp.rootPath, "Draft", "todo.md", "# To do\n");
     await closeWhileMerging("hold-then-fail");
     const failedAway = errorToast(page, "dohc could not merge Draft into Main");
     await expect(failedAway).toBeVisible({ timeout: 30_000 });
@@ -359,6 +388,36 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(decideRow).toBeVisible();
     await shootWindow(page, "merge-closed-decide-notices");
     await page.getByTestId("notice-center-toggle").click();
+
+    // The Versions page with the conflict waiting, then the tooltip on its
+    // "1 to decide". The tab closes again, so the shots after it match.
+    await openMenu(page);
+    await page.getByTestId("version-all").click();
+    const toDecide = page
+      .getByTestId("versions-page-row")
+      .filter({ has: page.getByTestId("versions-page-name").getByText("Draft", { exact: true }) })
+      .getByTestId("versions-page-conflicts");
+    await expect(toDecide).toHaveText("1 to decide", { timeout: 30_000 });
+    await page.mouse.move(4, 400);
+    await shootWindow(page, "versions-page-conflicts");
+    for (const theme of ["light", "dark"] as const) {
+      await setTheme(page, theme);
+      await page.mouse.move(4, 400);
+      await toDecide.hover();
+      // A native tooltip shows after a delay the page can't observe.
+      await page.waitForTimeout(1_500);
+      try {
+        await writeFile(join(SHOT_DIR, `versions-page-conflicts-tooltip-${theme}.png`), await screenUnderWindow(app));
+      } catch (error) {
+        test.info().annotations.push({ type: "warning", description: `tooltip shot (${theme}): ${String(error)}` });
+      }
+    }
+    await setTheme(page, "light");
+    await page.mouse.move(4, 400);
+    const versionsTab = page.getByTestId(editorTabTestId("tab://versions"));
+    await versionsTab.hover();
+    await versionsTab.getByRole("button", { name: /^Close / }).click();
+    await expect(versionsTab).toHaveCount(0);
     await decideAway.getByTestId("workspace-shell-error-action").click();
     await page.getByTestId("version-conflict-keep-incoming").click();
     await page.getByTestId("conflict-review-done").click();
