@@ -161,7 +161,7 @@ describe("chat runner process", () => {
       expect(args).toContain("mcp_servers.dohc.default_tools_approval_mode='approve'");
       expect(args.some((arg) => arg.startsWith("mcp_servers.dohc.tools."))).toBe(false);
       const permissions = args.filter((arg) => arg.startsWith("permissions.") || arg.startsWith("default_permissions="));
-      if (readOnly) expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{filesystem=\{':workspace_roots'='read'\}\}$/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
+      if (readOnly) expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{filesystem=\{':workspace_roots'=\{'\.'='read','\.dohc'='deny'\}\}\}$/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
       else expect(permissions).toEqual([expect.stringMatching(/^permissions\.dohc_run_\w+=\{extends=':workspace',/u), expect.stringMatching(/^default_permissions='dohc_run_\w+'$/u)]);
       expect(args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : [])).toEqual(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...REPLY_ONLY_DISABLED_FEATURES] : []);
       expect(args.includes("web_search='disabled'")).toBe(readOnly);

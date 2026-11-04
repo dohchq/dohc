@@ -97,13 +97,13 @@ function tomlStrings(value) {
 // run's permissions profile and folder trust follow the server's entries, and
 // on Windows so does the unelevated sandbox when no config chose one
 // (codexRunConfig.ts). The profile is named for the run and keeps .dohc
-// read-only; a read-only run's profile only reads the workspace, and on
-// Windows always gets the unelevated sandbox without MXC. Every name Codex
-// looks the workspace up by is untrusted.
+// read-only; a read-only run's profile only reads the workspace outside
+// .dohc, and on Windows always gets the unelevated sandbox without MXC.
+// Every name Codex looks the workspace up by is untrusted.
 function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
   const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
-  const readOnly = config.get(`permissions.${profile}`) === "{filesystem={':workspace_roots'='read'}}";
+  const readOnly = config.get(`permissions.${profile}`) === "{filesystem={':workspace_roots'={'.'='read','.dohc'='deny'}}}";
   const disabled = args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : []);
   const replyOnly = tomlStrings(config.get("mcp_servers.dohc.args") ?? "").includes("--tool");
   const owners = [...config.keys()].filter((key) => /^mcp_servers\.[\w-]+\.enabled$/u.test(key));

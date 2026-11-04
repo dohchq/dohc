@@ -279,7 +279,8 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
 // - A permissions profile keeps the workspace's .dohc folder read-only. Its
 //   name is new for each run, because Codex merges a profile of the same name
 //   from the person's config into it. A read-only run's profile reads only
-//   the workspace and takes none of the person's writable_roots.
+//   the workspace, without its .dohc folder, and takes none of the person's
+//   writable_roots.
 // - Mark the folder untrusted so Codex doesn't trust it on its own or load
 //   its .codex config.
 // - Codex runs Windows commands only in a sandbox the person or their
@@ -336,7 +337,7 @@ export function codexRunConfig(input: {
     ...[
       ...(input.readOnly
         ? [
-          `permissions.${profile}={filesystem={':workspace_roots'='read'}}`, `default_permissions='${profile}'`,
+          `permissions.${profile}={filesystem={':workspace_roots'={'.'='read','.dohc'='deny'}}}`, `default_permissions='${profile}'`,
           ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`), "web_search='disabled'", "notify=[]",
           // A model can start sub-agents whatever multi_agent says, unless
           // agents.enabled is false and multi_agent_v2 is off.

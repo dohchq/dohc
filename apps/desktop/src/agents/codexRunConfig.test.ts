@@ -113,7 +113,7 @@ describe("a dohc Codex run", () => {
     const profile = entry(entries, "default_permissions=")!.slice("default_permissions=".length);
     expect(profile).toMatch(/^'dohc_run_[0-9a-f]{16}'$/u);
     expect(entries).toEqual([
-      "--config", `permissions.${profile.slice(1, -1)}={filesystem={':workspace_roots'='read'}}`,
+      "--config", `permissions.${profile.slice(1, -1)}={filesystem={':workspace_roots'={'.'='read','.dohc'='deny'}}}`,
       "--config", `default_permissions=${profile}`,
       "--config", "mcp_servers.org-docs.enabled=false",
       "--config", "mcp_servers.github.enabled=false",
@@ -336,7 +336,7 @@ describe("a dohc Codex run", () => {
     for (const replyOnly of [true, false]) {
       const { entries, realPath, readLink, fileId, listFolder } = run({ readOnly: true, replyOnly });
       expect(entries.filter((arg) => arg.toLowerCase().includes("c:\\other") || arg.includes("'write'"))).toEqual([]);
-      expect(filesystem(entries)).toEqual({ ":workspace_roots": "read" });
+      expect(filesystem(entries)).toEqual({ ":workspace_roots": { ".": "read", ".dohc": "deny" } });
       expect(entries.filter((arg) => arg.startsWith("default_permissions="))).toEqual([expect.stringMatching(/^default_permissions='dohc_run_[0-9a-f]{16}'$/u)]);
       expect(fileId).not.toHaveBeenCalled();
       expect(listFolder).not.toHaveBeenCalled();
