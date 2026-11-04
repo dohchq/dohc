@@ -105,29 +105,41 @@ fn pause(ws: &str) -> (Arc<tokio::sync::Notify>, Sender<()>) {
 }
 impl Fixture {
     async fn wait_disk(&self, sources: usize) {
-        let result = tokio::time::timeout(
-            Duration::from_secs(if sources > 3 { 300 } else { 120 }),
-            async {
-                let mut next = 0;
-                loop {
-                    while next < sources
-                        && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
-                            .ok()
-                            .as_deref()
-                            == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
-                    {
-                        next += 1;
-                    }
-                    if next == sources {
-                        break;
-                    }
-                    self.actor.run(|_, _| Ok(())).await.unwrap();
-                    tokio::task::yield_now().await;
-                }
-            },
-        )
-        .await;
-        if result.is_err() {
+        // A busy machine slows publication down without stopping it, so only
+        // 120 s with no new file and no finished turn counts as a stall.
+        let quiet = Duration::from_secs(120);
+        let turns = || {
+            placements()
+                .lock()
+                .unwrap()
+                .get(&self.ws)
+                .map_or(0, |p| p.turns.len())
+        };
+        let (mut next, mut progress, mut since) = (0, turns(), Instant::now());
+        let stalled = loop {
+            while next < sources
+                && std::fs::read_to_string(self.root.join(format!("source-{next:04}.md")))
+                    .ok()
+                    .as_deref()
+                    == Some("[[new#part|label]] [[./new.md]] [old](old.md)")
+            {
+                next += 1;
+            }
+            if next == sources {
+                break false;
+            }
+            if next + turns() != progress {
+                (progress, since) = (next + turns(), Instant::now());
+            } else if since.elapsed() >= quiet {
+                break true;
+            }
+            match tokio::time::timeout(quiet, self.actor.run(|_, _| Ok(()))).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => break true,
+            }
+            tokio::task::yield_now().await;
+        };
+        if stalled {
             let pending = self
                 .actor
                 .history_operation_pending_jobs(self.ws.clone(), OP.into())
