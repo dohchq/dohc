@@ -102,6 +102,69 @@ async fn tick_waiting_on_apply_gate_leaves_link_drain_running() {
     assert_gate_wait_leaves_link_drain_running(true).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_after_a_rule_change_waits_for_the_rebuild() {
+    use dohc_engine_testkit::ScratchDir;
+    use std::sync::atomic::AtomicU64;
+
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let events = EngineEvents::default();
+    let (open_ready_tx, _) = tokio::sync::watch::channel(true);
+    let status = Arc::new(DriverStatus::default());
+    status.mark_initial_ready();
+    let mut env = RealEnv {
+        observation: crate::file_observation::FileObservation::new(events.clone(), "ws".into()),
+        root: scratch.path().to_owned(),
+        initial_links_hold: None,
+        actor,
+        lease_releases_seen: 0,
+        workspace_id: "ws".into(),
+        leases: LeaseRegistry::new(),
+        status,
+        author_json: Arc::new(Mutex::new(None)),
+        self_writes: SelfWriteSuppression::default(),
+        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
+        store_freshly_created: false,
+        open_ready_tx,
+        refresh_epoch: Arc::new(AtomicU64::new(0)),
+        events,
+        apply_probe: None,
+        scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
+        no_atomic_placement_announced: false,
+        first_import: None,
+        unsettled: None,
+        rule_waits: 0,
+    };
+    let cancel = CancellationToken::new();
+    env.observation.start(env.root.clone()).unwrap();
+    let layer = FilesLayer::start_with_fingerprint(
+        &env.root,
+        &cancel,
+        None,
+        policy_fingerprint(&env.root),
+        0,
+        &env.scan,
+        &env.observation,
+    )
+    .await
+    .unwrap()
+    .0;
+    std::fs::create_dir_all(env.root.join(".dohc")).unwrap();
+    std::fs::write(
+        env.root.join(".dohc/files.toml"),
+        "[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    )
+    .unwrap();
+    for _ in 0..RULE_CHANGE_WAITS {
+        assert_eq!(env.tick(&layer, &cancel).await, TickIo::AwaitingRebuild);
+    }
+    assert_ne!(env.tick(&layer, &cancel).await, TickIo::AwaitingRebuild);
+}
+
 async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
     use dohc_engine_storage::EngineStore;
     use dohc_engine_testkit::ScratchDir;
