@@ -172,7 +172,9 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
           const expected = record(body.expected, ["workspaceId", "datasetId", "hostEpoch", "approvedRevisionHash", "revision", "digest"]);
           if (expected.workspaceId !== scope.workspaceId || expected.datasetId !== scope.datasetId || !Number.isSafeInteger(expected.revision) || Number(expected.revision) < 0) throw badRequest("Invalid dataset cursor.");
           return host.deleteDataset(auth, {...scope, acknowledge: true, reviewToken: digest(body.reviewToken), expected: {...scope, hostEpoch: text(expected.hostEpoch),
-            approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}});
+            approvedRevisionHash: digest(expected.approvedRevisionHash), revision: Number(expected.revision), digest: digest(expected.digest)}})
+            // The owner hears why a delete was refused, such as a Collection that isn't archived yet.
+            .catch(error => { throw error instanceof DatasetHostError && error.code === "conflict" ? relayError("conflict", error.message) : error; });
         }
         if (route.action === "archive" || route.action === "restore") {
           record(raw, []);
