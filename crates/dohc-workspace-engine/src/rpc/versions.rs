@@ -973,6 +973,14 @@ impl VersionFence {
                 return Err(unsettled_fork_error(content_kind));
             }
 
+            // Stop the link publisher before sorting the operation's pending jobs. Once the
+            // gates drop, it must not publish a job this sort left unpublished.
+            let _link_stop = match &intent {
+                VersionFenceIntent::Undo { operation_id, .. } => {
+                    Some(open.actor.stop_link_rewrites(operation_id))
+                }
+                _ => None,
+            };
             let mut unpublished = std::collections::HashSet::new();
             if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
                 let (preimages, jobs) = open
@@ -1083,6 +1091,9 @@ impl VersionFence {
                         .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
                     let placement_now = now_ms()?;
                     drop(_barriers);
+                    if let Some(probe) = &probe {
+                        probe.pause_undo_after_fence_if_armed().await;
+                    }
                     let result = Box::pin(open.actor.history_undo_in_turns(
                         open.workspace_id.clone(),
                         operation_id,

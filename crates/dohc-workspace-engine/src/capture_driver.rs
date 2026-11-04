@@ -157,6 +157,9 @@ struct CaptureApplyProbeInner {
     undo_placement_armed: std::sync::atomic::AtomicBool,
     undo_placement_entered: tokio::sync::Semaphore,
     undo_placement_release: tokio::sync::Semaphore,
+    undo_after_fence_armed: std::sync::atomic::AtomicBool,
+    undo_after_fence_entered: tokio::sync::Semaphore,
+    undo_after_fence_release: tokio::sync::Semaphore,
     commit_armed: std::sync::atomic::AtomicBool,
     commit_entered: tokio::sync::Semaphore,
     commit_release: tokio::sync::Semaphore,
@@ -197,6 +200,9 @@ impl Default for CaptureApplyProbeInner {
             undo_placement_armed: std::sync::atomic::AtomicBool::new(false),
             undo_placement_entered: tokio::sync::Semaphore::new(0),
             undo_placement_release: tokio::sync::Semaphore::new(0),
+            undo_after_fence_armed: std::sync::atomic::AtomicBool::new(false),
+            undo_after_fence_entered: tokio::sync::Semaphore::new(0),
+            undo_after_fence_release: tokio::sync::Semaphore::new(0),
             commit_armed: std::sync::atomic::AtomicBool::new(false),
             commit_entered: tokio::sync::Semaphore::new(0),
             commit_release: tokio::sync::Semaphore::new(0),
@@ -345,6 +351,24 @@ impl CaptureApplyProbe {
     }
     pub fn release_undo_placement(&self) {
         self.inner.undo_placement_release.add_permits(1);
+    }
+
+    /// Pauses the next Undo after its fence releases the gates, before Undo's turns start.
+    pub fn pause_next_undo_after_fence(&self) {
+        self.inner
+            .undo_after_fence_armed
+            .store(true, Ordering::Release);
+    }
+    pub async fn wait_until_undo_after_fence_paused(&self) {
+        self.inner
+            .undo_after_fence_entered
+            .acquire()
+            .await
+            .expect("Undo probe open")
+            .forget();
+    }
+    pub fn release_undo_after_fence(&self) {
+        self.inner.undo_after_fence_release.add_permits(1);
     }
 
     pub fn pause_next_version_commit(&self) {
@@ -578,6 +602,23 @@ impl CaptureApplyProbe {
             self.inner.undo_placement_entered.add_permits(1);
             self.inner
                 .undo_placement_release
+                .acquire()
+                .await
+                .expect("Undo probe open")
+                .forget();
+        }
+    }
+
+    pub(crate) async fn pause_undo_after_fence_if_armed(&self) {
+        #[cfg(feature = "harness")]
+        if self
+            .inner
+            .undo_after_fence_armed
+            .swap(false, Ordering::AcqRel)
+        {
+            self.inner.undo_after_fence_entered.add_permits(1);
+            self.inner
+                .undo_after_fence_release
                 .acquire()
                 .await
                 .expect("Undo probe open")
