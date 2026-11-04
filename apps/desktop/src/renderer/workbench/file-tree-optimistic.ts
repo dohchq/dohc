@@ -12,9 +12,9 @@ export type PendingTreeMove = {
   toPath: string
 }
 
-// One refused move in the shell's Notices: a later success of the same move
-// removes it.
-export function moveRefusalIdentity(workspaceId: string, move: Pick<PendingTreeMove, 'fromPath' | 'toPath'>): string {
+// One failed move in the shell's Notices, named by its workspace, source and
+// destination: a later success of the same move removes it.
+export function moveFailureIdentity(workspaceId: string, move: Pick<PendingTreeMove, 'fromPath' | 'toPath'>): string {
   return `move:${JSON.stringify([workspaceId, move.fromPath, move.toPath])}`
 }
 
@@ -64,6 +64,20 @@ export function projectTreePath(
     (next, move) => (next === null ? null : projectPathForChange(next, move)),
     path,
   )
+}
+
+// Which ends of a move a listing holds. A file's end is that file. A folder's
+// end is the folder or anything in it.
+export function listedMoveEnds(
+  move: PendingTreeMove,
+  files: ReadonlyArray<FileRow>,
+  folders: ReadonlyArray<FolderInput>,
+): { from: boolean; to: boolean } {
+  const listed = (path: string) =>
+    move.kind === 'file'
+      ? files.some((file) => file.path === path)
+      : folders.includes(path) || files.some((file) => pathInsideFolder(file.path, path))
+  return { from: listed(move.fromPath), to: listed(move.toPath) }
 }
 
 export function applyPendingTreeMoves(

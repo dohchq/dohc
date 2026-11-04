@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -212,7 +212,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -331,6 +331,35 @@ function archiveRefusalIdentity(workspaceId: string, path: string): string {
 
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
+}
+
+// A move that failed, and whether its destination was already taken.
+type FailedMove = { move: PendingTreeMove; destinationTaken: boolean };
+
+// What a listing says of a failed move: made, or its destination taken.
+function failedMoveNow(
+  failed: FailedMove,
+  files: Parameters<typeof listedMoveEnds>[1],
+  folders: Parameters<typeof listedMoveEnds>[2],
+) {
+  const ends = listedMoveEnds(failed.move, files, folders);
+  return {
+    made: ends.to && !ends.from && !failed.destinationTaken,
+    taken: ends.to && (ends.from || failed.destinationTaken),
+  };
+}
+
+// Whether a listing shows any failed move made, or its destination's state changed.
+function failedMovesChanged(
+  failed: Iterable<FailedMove>,
+  files: Parameters<typeof listedMoveEnds>[1],
+  folders: Parameters<typeof listedMoveEnds>[2],
+) {
+  for (const one of failed) {
+    const now = failedMoveNow(one, files, folders);
+    if (now.made || now.taken !== one.destinationTaken) return true;
+  }
+  return false;
 }
 
 function groupsMountingNewDocument(
@@ -971,10 +1000,65 @@ export function DesktopWorkspaceShell(props: {
       reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
+  // A failed move's row goes once the move happens, by any route. A move made
+  // through the CLI or MCP reaches the shell only as workspace activity and
+  // the listing that follows. But a listing can come from a walk main made
+  // while it was still undoing a refused move. So a listing only raises the
+  // question: when one shows a failed move's ends changed, the shell asks for
+  // a full listing, which main walks anew, and only that answer decides. One
+  // question is out at a time. If a listing lands while it is out, the newest
+  // listing is checked against the answer after, and a change there asks again.
+  // A destination listed beside the source was taken, and counts only after
+  // an answer shows it gone, since a deleted source would look the same.
+  const listing = useRef({ files, folders });
+  listing.current = { files, folders };
+  const failedMoves = useRef(new Map<string, FailedMove>());
+  const clearFailedMove = useCallback((identity: string) => {
+    failedMoves.current.delete(identity);
+    clearIdentity(identity);
+  }, [clearIdentity]);
+  const confirming = useRef<"idle" | "asking" | "again">("idle");
+  const confirmFailedMoves = useCallback(async () => {
+    const id = workspaceId;
+    // A listing that lands during the await can set the ref, so a call reads it.
+    const askedAgain = () => confirming.current === "again";
+    do {
+      confirming.current = "asking";
+      const asked = new Map(failedMoves.current);
+      // A failed listing keeps the rows, and the next activity asks again.
+      const answer = await refreshFiles().catch(() => null);
+      if (!answer || workspaceIdRef.current !== id) continue;
+      for (const [identity, failed] of asked) {
+        if (failedMoves.current.get(identity) !== failed) continue;
+        const now = failedMoveNow(failed, answer.files, answer.folders ?? []);
+        if (now.made) clearFailedMove(identity);
+        else failed.destinationTaken = now.taken;
+      }
+    } while (
+      askedAgain() &&
+      failedMovesChanged(failedMoves.current.values(), listing.current.files, listing.current.folders)
+    );
+    confirming.current = "idle";
+  }, [workspaceId, refreshFiles, clearFailedMove]);
+  useEffect(() => {
+    if (!fileListingCommit) return;
+    if (confirming.current !== "idle") confirming.current = "again";
+    else if (failedMovesChanged(failedMoves.current.values(), files, folders)) void confirmFailedMoves();
+  }, [fileListingCommit, files, folders, confirmFailedMoves]);
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
+    (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange, livePage?: LivePageRefused) => {
+      const move = change && (change.kind === "file" || change.kind === "folder") ? change : undefined;
+      const deleted = change && (change.kind === "delete-file" || change.kind === "delete-folder") ? change : undefined;
+      const identity = move ? moveFailureIdentity(workspaceId, move)
+        : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
+      // A Try again keeps what the first failure knew of the destination.
+      if (move && identity) {
+        const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
+        const destinationTaken = failedMoves.current.get(identity)?.destinationTaken === true || (ends.from && ends.to);
+        failedMoves.current.set(identity, { move, destinationTaken });
+      }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
@@ -3916,9 +4000,15 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
-      // A move that succeeds takes back its earlier refusal.
+      // A move that succeeds from the tree takes back every failed move of
+      // the same path, whatever its destination, since their Try again would
+      // now fail.
       for (const change of changes) {
-        if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
+        if (change.kind === "folder" || change.kind === "file") {
+          for (const [identity, failed] of failedMoves.current) {
+            if (failed.move.fromPath === change.fromPath) clearFailedMove(identity);
+          }
+        }
         if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
       }
       // Set-aside drafts key by path, so recovery follows the same projection
@@ -3946,7 +4036,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [clearIdentity, mutateWb, workspaceId],
+    [clearFailedMove, clearIdentity, mutateWb, workspaceId],
   );
 
   const {
@@ -4455,7 +4545,7 @@ export function DesktopWorkspaceShell(props: {
       setWorkspaceOpenFailedFor(null);
 
       const refreshInitialFiles = async () => {
-        const paintedCachedListing = await refreshFiles({ allowCached: true });
+        const paintedCachedListing = (await refreshFiles({ allowCached: true })).cached === true;
         if (cancelled || !paintedCachedListing) return;
         await refreshFiles();
       };
@@ -5390,7 +5480,6 @@ export function DesktopWorkspaceShell(props: {
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
         onError={reportExplorerError}
-        onChangeSucceeded={clearIdentity}
         onNewCollection={setNewCollectionFolder}
       />
     </>
