@@ -1020,6 +1020,8 @@ export function DesktopWorkspaceShell(props: {
   const confirming = useRef<"idle" | "asking" | "again">("idle");
   const confirmFailedMoves = useCallback(async () => {
     const id = workspaceId;
+    // A listing that lands during the await can set the ref, so a call reads it.
+    const askedAgain = () => confirming.current === "again";
     do {
       confirming.current = "asking";
       const asked = new Map(failedMoves.current);
@@ -1033,7 +1035,7 @@ export function DesktopWorkspaceShell(props: {
         else failed.destinationTaken = now.taken;
       }
     } while (
-      confirming.current === "again" &&
+      askedAgain() &&
       failedMovesChanged(failedMoves.current.values(), listing.current.files, listing.current.folders)
     );
     confirming.current = "idle";
