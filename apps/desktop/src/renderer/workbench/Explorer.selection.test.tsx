@@ -383,6 +383,77 @@ describe("refusals in a batch", () => {
       .toBe("History is off: b.md. Restart dohc, then try again.\nLive editing is on: c.md");
   });
 
+  it("files its notice again, as it was, when Try again cannot prepare the change", async () => {
+    const user = userEvent.setup();
+    const writeFailed = new Error("dohc could not save a Collection value.");
+    const operation = { settle: vi.fn(async () => undefined), release: vi.fn() };
+    const onBeginChanges = vi.fn().mockResolvedValueOnce(operation).mockRejectedValueOnce(writeFailed);
+    const props = explorerProps({ files: FILES.slice(0, 3), onBeginChanges });
+    deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath === "b.md") throw refusal(relativePath);
+      if (relativePath === "c.md") throw historyOff(relativePath);
+    });
+    render(<Explorer {...props} />);
+    await deleteAll(user);
+
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    const group = lastGroup(props);
+    deleteWorkspacePath.mockClear();
+    await act(async () => group.retry(group));
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(2));
+    expect(deleteWorkspacePath).not.toHaveBeenCalled();
+    expect(vi.mocked(props.onError).mock.calls.map(([, cause]) => cause)).toEqual([writeFailed]);
+    const again = lastGroup(props);
+    expect(again).toMatchObject({ identity: group.identity, total: 3, went: 1 });
+    expect(again.refusals.map((refusal) => refusal.identity).sort()).toEqual(group.refusals.map((refusal) => refusal.identity).sort());
+    expect(refusedChangesWords(again)).toEqual(refusedChangesWords(group));
+  });
+
+  it("leaves out a refusal another notice's Try again took back while it ran", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps();
+    let releaseC: (cause: Error) => void = () => undefined;
+    let phase: "first" | "rerun" | "goes" = "first";
+    deleteWorkspacePath.mockImplementation(async ({ relativePath }: { relativePath: string }) => {
+      if (phase === "goes" || relativePath === "a.md") return;
+      if (relativePath === "c.md" && phase === "rerun") return new Promise((_, reject) => { releaseC = reject; });
+      throw refusal(relativePath);
+    });
+    render(<Explorer {...props} />);
+    // G1 holds b.md and c.md.
+    await user.click(row("a.md"));
+    await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
+    await user.click(screen.getByTestId("confirm-delete"));
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(1));
+    const first = lastGroup(props);
+    // G2 holds b.md and d.md.
+    await user.click(row("b.md"));
+    await user.keyboard("{Control>}");
+    await user.click(row("d.md"));
+    await user.keyboard("{/Control}{Delete}");
+    await user.click(screen.getByTestId("confirm-delete"));
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(2));
+    const second = lastGroup(props);
+    expect(second.refusals.map((refusal) => refusal.path)).toEqual(["b.md", "d.md"]);
+
+    // G1's Try again: b.md is refused again, and c.md is still running.
+    phase = "rerun";
+    deleteWorkspacePath.mockClear();
+    act(() => first.retry(first));
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(2));
+    // Meanwhile G2's Try again deletes b.md.
+    phase = "goes";
+    await act(async () => second.retry(second));
+    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(4));
+    expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual(["b.md", "c.md", "b.md", "d.md"]);
+
+    await act(async () => releaseC(refusal("c.md")));
+    await waitFor(() => expect(props.onChangesRefused).toHaveBeenCalledTimes(3));
+    expect(lastGroup(props).identity).toBe(first.identity);
+    expect(lastGroup(props).refusals.map((refusal) => refusal.path)).toEqual(["c.md"]);
+    expect(refusedChangesWords(lastGroup(props)).title).toBe("dohc deleted 2 of 3 items");
+  });
+
   it("offers no Try again when nothing refused can run again", async () => {
     const user = userEvent.setup();
     const props = explorerProps({ files: FILES.slice(0, 2) });

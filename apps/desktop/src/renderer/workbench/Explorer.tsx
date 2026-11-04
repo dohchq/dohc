@@ -462,8 +462,12 @@ export const TreeRow = memo(function TreeRow(props: {
   );
 });
 
-// A batch's refusals so far, for Try again to carry into its rerun.
-type RefusalBatch = Pick<RefusedChanges, "identity" | "total" | "went" | "refusals">;
+// Try again on a batch's notice: the refusals it reruns, in the order of
+// the changes it runs, and the ones it carries into the notice it files.
+type RefusalBatch = Pick<RefusedChanges, "identity" | "total" | "went"> & {
+  rerun: readonly RefusedChange[];
+  carried: readonly RefusedChange[];
+};
 
 function changedPath(change: PendingTreeChange): string {
   return "path" in change ? change.path : change.fromPath;
@@ -576,6 +580,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
+  // Each refusal identity a change that went takes back, with the count of
+  // changes gone when it went. A run's notice leaves out a refusal another
+  // run took back after it started.
+  const wentAt = useRef(new Map<string, number>());
+  const changesWent = useRef(0);
   // Keep the actual drag-origin element mounted while Chromium owns the
   // gesture. A virtualized source that disappears during auto-scroll does not
   // receive dragend, which can otherwise leave a stale internal move armed.
@@ -889,11 +898,30 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       run: (change: PendingTreeChange) => Promise<unknown>,
       afterBegin?: () => void,
       action: "move" | "rename" = "move",
-      // Try again on a batch's notice: the refusals it left, which stay in
-      // the notice this run files, and where each rerun change first ran.
-      batch?: RefusalBatch & { orders: readonly number[] },
+      batch?: RefusalBatch,
     ): Promise<void> {
       if (changes.length === 0) return;
+      const started = changesWent.current;
+      const publish = (refused: readonly RefusedChange[], went: number) => {
+        const left = refused.filter((refusal) => (wentAt.current.get(refusal.identity) ?? 0) <= started);
+        if (left.length === 0) return;
+        const deleting = left.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder");
+        onChangesRefused({
+          identity: batch?.identity ?? `refused:${JSON.stringify([workspaceId, nextChangeId()])}`,
+          action: deleting ? "delete" : "move",
+          total: batch?.total ?? changes.length,
+          went: went + refused.length - left.length,
+          refusals: left,
+          // Reruns the refusals a single refusal would rerun. The others
+          // stay in the notice the rerun files, with what it refused again.
+          retry: (current) => {
+            const rerun = current.refusals.filter((refusal) => refusal.retryable);
+            void runChangesOnce(rerun.map((refusal) => ({ ...refusal.change, id: nextChangeId() })), run, undefined, action,
+              { identity: current.identity, total: current.total, went: current.went, rerun,
+                carried: current.refusals.filter((refusal) => !refusal.retryable) });
+          },
+        });
+      };
       // Land the stable active draft and drain queued collection writes
       // before paths move underneath them. The operation cannot preserve
       // text or values this begin rejected.
@@ -902,6 +930,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         operation = (await onBeginChanges?.()) ?? null;
       } catch (cause) {
         onError(ipcErrorMessage(cause, "dohc could not change these files."), cause);
+        // Nothing ran, so a batch's notice comes back as it was.
+        if (batch) publish([...batch.carried, ...batch.rerun], batch.went);
         return;
       } finally {
         afterBegin?.();
@@ -922,6 +952,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             await run(change);
             if (afterRun(change)) setPending((current) => [...current, change]);
             succeeded.push(change);
+            changesWent.current += 1;
+            const takenBack = change.kind === "file" || change.kind === "folder" ? [moveRefusalIdentity(workspaceId, change), `move:${change.fromPath}`]
+              : change.kind === "delete-file" || change.kind === "delete-folder" ? [deleteRefusalIdentity(workspaceId, change.path)] : [];
+            for (const taken of takenBack) wentAt.current.set(taken, changesWent.current);
             if (identity) onChangeSucceeded?.(identity);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
@@ -944,7 +978,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             const refusedAs = refusalIdentity ?? identity;
             if (grouped && refused && refusedAs !== undefined) {
               const live = isLivePageOwnedRefusal(cause) || isLiveFolderRefusal(cause);
-              refusals.push({ change, order: batch?.orders[index] ?? index, identity: refusedAs,
+              refusals.push({ change, order: batch?.rerun[index]?.order ?? index, identity: refusedAs,
                 path: livePage?.path ?? changedPath(change), live, reveal: livePage?.path ?? null, retryable, cause });
               continue;
             }
@@ -952,24 +986,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, retryable ? rerun : undefined, refused ? refusalIdentity : identity, livePage);
           }
         }
-        const all = [...(batch?.refusals ?? []), ...refusals];
-        if (grouped && all.length > 0) {
-          const deleting = all.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder");
-          onChangesRefused({
-            identity: batch?.identity ?? `refused:${JSON.stringify([workspaceId, nextChangeId()])}`,
-            action: deleting ? "delete" : "move",
-            total: batch?.total ?? changes.length,
-            went: (batch?.went ?? 0) + succeeded.length,
-            refusals: all,
-            // Reruns the refusals a single refusal would rerun. The others
-            // stay in the notice the rerun files, with what it refused again.
-            retry: (current) => {
-              const again = current.refusals.filter((refusal) => refusal.retryable);
-              void runChangesOnce(again.map((refusal) => ({ ...refusal.change, id: nextChangeId() })), run, undefined, action,
-                { ...current, refusals: current.refusals.filter((refusal) => !refusal.retryable), orders: again.map((refusal) => refusal.order) });
-            },
-          });
-        }
+        if (grouped) publish([...(batch?.carried ?? []), ...refusals], (batch?.went ?? 0) + succeeded.length);
         const changedExistingPath = succeeded.some(
           (change) => change.kind !== "create-folder",
         );
