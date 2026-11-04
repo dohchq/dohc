@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { forwardRef, useImperativeHandle } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -307,6 +307,27 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await waitFor(()=>expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
     await user.click(screen.getByTestId('document-menu-item-export-markdown'));await waitFor(()=>expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content:yDocToMarkdown(doc)})));
     if(kind==='without witness') expect(projectArtifactSource).not.toHaveBeenCalled(); doc.destroy();
+  });
+
+  it('Copy uses canonical output within 2 s when the source proof is stuck', async () => {
+    const doc = markdownToYDoc('Body
+
+'); engineDocState.doc = doc;
+    for (const key of ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256']) doc.getMap('meta').set(key, 'plain');
+    // A stuck proof worker answers only when its own 15 s limit rejects it.
+    vi.mocked(projectArtifactSource).mockImplementation(() => new Promise((_, reject) => {
+      setTimeout(() => reject(Error('Source projection timed out.')), 15_000);
+    }));
+    const user = userEvent.setup(); Object.defineProperty(navigator, 'clipboard', {value: {writeText}, configurable: true});
+    render(<FileInspector workspaceId="ws-1" path="a.md"/>); await screen.findByTestId('editor-stub');
+    await user.click(screen.getByTestId('document-menu-trigger'));
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByTestId('document-menu-item-copy-markdown'));
+      await vi.advanceTimersByTimeAsync(2_000);
+    } finally { vi.useRealTimers(); }
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
+    doc.destroy();
   });
 
   it('reuses worker output without serializing the editor for readiness',async()=>{
