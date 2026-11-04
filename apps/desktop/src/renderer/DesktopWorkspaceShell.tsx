@@ -7156,6 +7156,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
+            workspaceName={workspaceName(props.workspace)}
             sharedView={!!shareView}
             // Main's own decision, not the renderer's settings read:
             // only main knows whether a recorder exists for this session, and

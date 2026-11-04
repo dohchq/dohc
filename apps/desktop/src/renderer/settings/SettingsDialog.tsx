@@ -123,6 +123,8 @@ export function SettingsDialog(props: {
   workspaceIsReady: boolean;
   workspaceOpenFailed?: boolean;
   workspacePath: string;
+  /** What the workspace goes by, which for a shared view is what it shares. Its folder's name when absent. */
+  workspaceName?: string;
   /**
    * True when this workspace is a shared view. See the Advanced
    * section: the engine toggle asserts a choice and a recording that a
@@ -1157,6 +1159,7 @@ export function SettingsDialog(props: {
     >
       <SettingsNav
         workspacePath={props.workspacePath}
+        workspaceName={props.workspaceName}
         sections={visibleSections}
         activeSection={activeSection}
         onSelect={setActiveSection}
