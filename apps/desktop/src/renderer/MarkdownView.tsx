@@ -69,7 +69,11 @@ import type {
   BlockNavigationTarget,
   MarkdownEditorHandle,
 } from "./editor/MarkdownEditor";
-import { LazyMarkdownEditor, preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
+import {
+  LazyMarkdownEditor,
+  preloadMarkdownEditor,
+  useLiveEditorSettled,
+} from "./editor/LazyMarkdownEditor";
 import type { WorkspaceLinkTarget } from "./linkActivation";
 import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
@@ -380,7 +384,11 @@ export function MarkdownView(props: {
   // editor — writable, autosaving straight TO disk — while the session about
   // to bind seeded from the engine head. Keystrokes in that window took a path
   // that session never sees. Nothing here is writable until the open answers.
-  const opening = engine.opening || props.lossyNote === "checking";
+  // The read view's text stays until the live editor can replace it in one
+  // frame, never with loading rows between them.
+  const editorSettled = useLiveEditorSettled(engine.doc !== null);
+  const awaitingEditor = engine.doc !== null && !editorSettled;
+  const opening = engine.opening || props.lossyNote === "checking" || awaitingEditor;
   // What the user sees, as against `mode`, which is what the user CHOSE. An
   // opening document reads; its chosen mode is kept and restored, so a
   // document that would have opened straight into the editor still does.
@@ -709,9 +717,11 @@ export function MarkdownView(props: {
     return () => doc.destroy();
   }, [endedSnapshot]);
   const readOnlyCopy = showEndedCopy && endedCopy?.key === props.documentKey ? endedCopy.doc : null;
-  // A large note's session can bind before its check answers. Until then it
-  // stays in read mode, as it opened, and its editor mounts once, editable.
-  const displayDoc = props.lossyNote === "checking" ? null : engine.doc ?? readOnlyCopy;
+  // A large note's session can bind before its check answers, or before its
+  // editor's code has loaded. Until both, it stays in read mode, as it opened,
+  // and its editor mounts once, editable.
+  const displayDoc =
+    props.lossyNote === "checking" || awaitingEditor ? null : engine.doc ?? readOnlyCopy;
 
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {

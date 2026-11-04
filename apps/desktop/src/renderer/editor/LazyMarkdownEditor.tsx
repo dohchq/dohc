@@ -1,7 +1,11 @@
-import { forwardRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useState, type ReactNode } from "react";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
-import { preloadCollaborationExtensions } from "./collaborationExtensions";
+import {
+  currentCollaborationExtensionsLoad,
+  loadCollaborationExtensions,
+  preloadCollaborationExtensions,
+} from "./collaborationExtensions";
 import type {
   MarkdownEditor,
   MarkdownEditorHandle,
@@ -43,6 +47,31 @@ function loadMarkdownEditor(): Promise<MarkdownEditorComponent> {
 
 export function preloadMarkdownEditor(): void {
   void loadMarkdownEditor();
+}
+
+function liveEditorSettled(): boolean {
+  return (
+    markdownEditorLoad.status !== "loading" &&
+    currentCollaborationExtensionsLoad().status !== "loading"
+  );
+}
+
+/** Whether a live note's editor can mount without loading rows: its code and
+ *  the collaboration code have loaded, or one of them failed and the editor
+ *  shows that failure. */
+export function useLiveEditorSettled(wanted: boolean): boolean {
+  const [settled, setSettled] = useState(liveEditorSettled);
+  useEffect(() => {
+    if (!wanted || settled) return;
+    let current = true;
+    void Promise.allSettled([loadMarkdownEditor(), loadCollaborationExtensions()]).then(() => {
+      if (current) setSettled(true);
+    });
+    return () => {
+      current = false;
+    };
+  }, [settled, wanted]);
+  return settled || liveEditorSettled();
 }
 
 // Children commit with the editor, never with the loading state.
