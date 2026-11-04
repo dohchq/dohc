@@ -5,45 +5,9 @@ use dohc_engine_storage::NoFaults;
 use dohc_engine_testkit::open_store;
 use serde_json::json;
 
-fn decision(index: usize, object_id: String, claim: &str) -> BaseRepairDecision {
-    BaseRepairDecision::Base {
-        version_id: "main".into(),
-        object_id,
-        lineage_claim_id: claim.into(),
-        origin_id: "peer".into(),
-        origin_seq: index as i64,
-        relay_seq: None,
-        recorded_at_ms: 1_000,
-    }
-}
-
-fn encoded_len(index: usize, object_id: String, claim: &str) -> usize {
-    serde_json::to_vec(&("0".repeat(64), decision(index, object_id, claim)))
-        .unwrap()
-        .len()
-        + 1
-}
-
-fn boundary_objects(delta: isize, claim: &str) -> Vec<String> {
-    let mut objects = Vec::new();
-    let mut bytes = 0;
-    loop {
-        let object = format!("doc-{:05}", objects.len());
-        let next = encoded_len(objects.len(), object.clone(), claim);
-        if bytes + next >= MAX_PREPARED_BASE_REPAIR_BYTES {
-            break;
-        }
-        objects.push(object);
-        bytes += next;
-    }
-    let padding = (MAX_PREPARED_BASE_REPAIR_BYTES - bytes) as isize + delta;
-    assert!(padding >= 0);
-    objects
-        .last_mut()
-        .unwrap()
-        .push_str(&"x".repeat(padding as usize));
-    assert!(objects.last().unwrap().len() <= crate::model::MAX_IDENTIFIER_BYTES);
-    objects
+fn boundary_objects(delta: isize, _claim: &str) -> Vec<String> {
+    (0..(MAX_BASE_REPAIR_LOOKUPS as isize + delta) as usize)
+        .map(|index| format!("00000000-0000-0000-0000-{index:012x}")).collect()
 }
 
 fn seed(store: &mut EngineStore, objects: &[String], claim: &str) -> PagedRelay {
@@ -121,7 +85,7 @@ fn prepared_repairs_prioritize_the_page_object_past_the_cap() {
     let relay = touching(seed(&mut store, &objects, &claim), "zz-page");
     let client = RelaySyncClient::new(relay);
     let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-    assert!(page.repairs.decode().unwrap().values().any(|decision| matches!(decision,
+    assert!(page.repairs.by_signature().values().any(|decision| matches!(decision,
         BaseRepairDecision::Base {object_id, ..} if object_id == "zz-page")));
     apply(&mut store, &page);
     let unresolved: i64 = store.read_with(|conn| conn.query_row(
@@ -227,26 +191,32 @@ fn boundary(delta: isize) {
     let claim =
         dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
     let objects = boundary_objects(delta, &claim);
-    let client = RelaySyncClient::new(seed(&mut store, &objects, &claim));
+    let origin = "origin_0123456789abcdef0123456789abcdef";
+    let mut relay = seed(&mut store, &objects, &claim);
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET origin_id=?1 WHERE origin_id='peer'", [origin]).map_err(SyncError::persist)?;
+        tx.execute("UPDATE ydoc_base_relay_candidates SET origin_id=?1 WHERE origin_id='peer'", [origin]).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    for index in 0..objects.len() { relay = relay.with_coordinate(origin, index as i64, LogCoordinateResponse::Absent); }
+    let client = RelaySyncClient::new(relay);
     let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
     assert_eq!(remaining(&store), objects.len(), "fetch applies no repair");
-    assert!(page.repairs.encoded.len() <= MAX_PREPARED_BASE_REPAIR_BYTES);
-    assert_eq!(
-        page.repairs.encoded.capacity(),
-        MAX_PREPARED_BASE_REPAIR_BYTES
-    );
-    if delta <= 0 {
-        assert_eq!(
-            page.repairs.encoded.len(),
-            (MAX_PREPARED_BASE_REPAIR_BYTES as isize + delta) as usize
-        );
-    } else {
-        assert_eq!(page.repairs.decode().unwrap().len(), objects.len() - 1);
-    }
+    let held = objects.len().min(MAX_BASE_REPAIR_LOOKUPS);
+    assert_eq!(page.repairs.decisions.len(), held);
+    assert_eq!(client.transport().coordinate_lookups.lock().unwrap().len(), held);
+    assert!(page.repairs.decisions.iter().all(|(_, decision)| matches!(decision,
+        BaseRepairDecision::Base {object_id, origin_id, lineage_claim_id, ..}
+        if object_id.len() == 36 && origin_id == origin && lineage_claim_id.len() == 64)));
     apply(&mut store, &page);
     assert_eq!(remaining(&store), usize::from(delta > 0));
     let next = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-    assert_eq!(next.repairs.decode().unwrap().len(), usize::from(delta > 0));
+    assert_eq!(next.repairs.decisions.len(), usize::from(delta > 0));
+    if delta > 0 {
+        assert!(matches!(&next.repairs.decisions[0].1,
+            BaseRepairDecision::Base {origin_seq: 256, ..}));
+    }
+    assert_eq!(client.transport().coordinate_lookups.lock().unwrap().len(), objects.len());
     apply(&mut store, &next);
     assert_eq!(
         remaining(&store),
@@ -256,39 +226,18 @@ fn boundary(delta: isize) {
 }
 
 #[test]
-fn prepared_repair_answers_just_under_the_byte_cap() {
+fn prepared_repair_answers_just_under_the_count_cap() {
     boundary(-1);
 }
 
 #[test]
-fn prepared_repair_answers_exactly_at_the_byte_cap() {
+fn prepared_repair_answers_exactly_at_the_count_cap() {
     boundary(0);
 }
 
 #[test]
-fn prepared_repair_answers_over_the_byte_cap_wait_for_the_next_fetch() {
+fn prepared_repair_answer_257_starts_the_next_fetch() {
     boundary(1);
-}
-
-#[test]
-fn a_repair_answer_larger_than_the_byte_cap_goes_alone_in_its_batch() {
-    // Identifiers cap a real answer far below the cap; this pins progress anyway.
-    let mut answers = BaseRepairAnswers::default();
-    let wide = "x".repeat(MAX_PREPARED_BASE_REPAIR_BYTES);
-    assert!(
-        answers
-            .keep(wide.clone(), decision(0, "a".into(), "claim"))
-            .unwrap()
-    );
-    assert!(answers.encoded.len() > MAX_PREPARED_BASE_REPAIR_BYTES);
-    assert!(
-        !answers
-            .keep("0".repeat(64), decision(1, "b".into(), "claim"))
-            .unwrap()
-    );
-    let kept = answers.decode().unwrap();
-    assert_eq!(kept.len(), 1);
-    assert!(kept.contains_key(&wide));
 }
 
 #[test]
@@ -299,8 +248,8 @@ fn prepared_repairs_replay_after_a_stop_before_apply() {
     let objects = boundary_objects(0, &claim);
     let client = RelaySyncClient::new(seed(&mut store, &objects, &claim));
     let first = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-    let encoded = first.repairs.encoded.clone();
-    assert_eq!(encoded.len(), MAX_PREPARED_BASE_REPAIR_BYTES);
+    let decisions = first.repairs.decisions.clone();
+    assert_eq!(decisions.len(), MAX_BASE_REPAIR_LOOKUPS);
     let ops = first.ops.clone();
     drop(first);
     drop(store);
@@ -319,7 +268,7 @@ fn prepared_repairs_replay_after_a_stop_before_apply() {
     assert_eq!(imported, 0);
     let second = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
     assert_eq!(second.ops, ops);
-    assert_eq!(second.repairs.encoded, encoded);
+    assert_eq!(second.repairs.decisions, decisions);
     assert_eq!(remaining(&store), objects.len());
     assert_eq!(crate::read_relay_cursor(&store, "ws").unwrap(), None);
     apply(&mut store, &second);
@@ -367,8 +316,7 @@ fn prepared_repairs_keep_a_group_wider_than_a_lookup_batch_atomic() {
     let client = RelaySyncClient::new(relay);
     let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
     assert_eq!(remaining(&store), 600);
-    assert_eq!(page.repairs.decode().unwrap().len(), 1);
-    assert!(page.repairs.encoded.len() < MAX_PREPARED_BASE_REPAIR_BYTES);
+    assert_eq!(page.repairs.decisions.len(), 1);
     apply(&mut store, &page);
     assert_eq!(remaining(&store), 0);
     let sequence: i64 = store
@@ -387,7 +335,7 @@ fn prepared_repairs_keep_a_group_wider_than_a_lookup_batch_atomic() {
 }
 
 #[test]
-fn prepared_deferred_repairs_share_the_byte_cap_and_resume_on_the_next_fetch() {
+fn prepared_deferred_repairs_share_the_count_cap_and_resume_on_the_next_fetch() {
     let (_scratch, _path, mut store) = open_store();
     let claim =
         dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
@@ -435,15 +383,19 @@ fn prepared_deferred_repairs_share_the_byte_cap_and_resume_on_the_next_fetch() {
     };
     let client = RelaySyncClient::new(relay);
     let first = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-    let held = first.repairs.decode().unwrap().len();
+    let held = first.repairs.decisions.len();
     assert!(held > 0 && held < 600);
-    assert!(first.repairs.encoded.len() <= MAX_PREPARED_BASE_REPAIR_BYTES);
+    assert_eq!(held, MAX_BASE_REPAIR_LOOKUPS);
     assert_eq!(unresolved(&store), 600, "fetch applies no deferred repair");
     apply(&mut store, &first);
     assert_eq!(unresolved(&store), 600 - held);
-    let second = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
-    assert_eq!(second.repairs.decode().unwrap().len(), 600 - held);
-    apply(&mut store, &second);
+    while unresolved(&store) > 0 {
+        let before = unresolved(&store);
+        let next = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+        assert_eq!(next.repairs.decisions.len(), before.min(MAX_BASE_REPAIR_LOOKUPS));
+        apply(&mut store, &next);
+        assert!(unresolved(&store) < before);
+    }
     assert_eq!(unresolved(&store), 0);
 }
 

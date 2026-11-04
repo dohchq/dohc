@@ -479,7 +479,7 @@ pub(super) struct PagedRelay {
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
-    coordinate_lookups: Mutex<Vec<(String, i64)>>,
+    pub(super) coordinate_lookups: Mutex<Vec<(String, i64)>>,
     pushes: Mutex<Vec<PushRequest>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
     push_conflicts: Mutex<usize>,

@@ -848,29 +848,16 @@ fn pull_objects(page: &[ReplicationEnvelope]) -> BTreeSet<String> {
     objects
 }
 
-// Keep validated decisions instead of full envelopes, including for wide base groups.
-// The encoded buffer bounds all repair answers retained between fetch and apply.
-// One answer holds a signature, four ids of at most 512 bytes and three integers: under 5 KB.
-const MAX_PREPARED_BASE_REPAIR_BYTES: usize = 64 * 1024;
-
 #[cfg(test)]
 #[path = "tests/prepared_base_repairs.rs"]
 mod prepared_base_repair_tests;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct BaseRepairAnswers {
-    encoded: Vec<u8>,
+    decisions: Vec<(String, BaseRepairDecision)>,
 }
 
-impl Default for BaseRepairAnswers {
-    fn default() -> Self {
-        Self {
-            encoded: Vec::with_capacity(MAX_PREPARED_BASE_REPAIR_BYTES),
-        }
-    }
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BaseRepairDecision {
     Unchanged,
     Base {
@@ -894,29 +881,16 @@ impl BaseRepairAnswers {
         &mut self,
         signature: String,
         decision: BaseRepairDecision,
-    ) -> Result<bool, RelayError> {
-        let encoded = serde_json::to_vec(&(signature, decision))
-            .map_err(|error| local(SyncError::corrupt(error)))?;
-        // The first answer always fits, so an answer larger than the cap still
-        // goes through, alone in its batch, and every fetch makes progress.
-        if !self.encoded.is_empty()
-            && self.encoded.len() + encoded.len() + 1 > MAX_PREPARED_BASE_REPAIR_BYTES
-        {
-            return Ok(false);
+    ) -> bool {
+        if self.decisions.len() == MAX_BASE_REPAIR_LOOKUPS {
+            return false;
         }
-        self.encoded.extend(encoded);
-        self.encoded.push(b'\n');
-        Ok(true)
+        self.decisions.push((signature, decision));
+        true
     }
 
-    fn decode(&self) -> Result<BTreeMap<String, BaseRepairDecision>, RelayError> {
-        self.encoded
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                serde_json::from_slice(line).map_err(|error| local(SyncError::corrupt(error)))
-            })
-            .collect()
+    fn by_signature(&self) -> BTreeMap<&str, &BaseRepairDecision> {
+        self.decisions.iter().map(|(signature, decision)| (signature.as_str(), decision)).collect()
     }
 }
 
@@ -1503,12 +1477,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .push(repair);
         }
         if let BaseRepairPhase::Apply(answers) = &phase {
-            let decisions = answers.decode()?;
+            let decisions = answers.by_signature();
             let touched = pull_objects(page);
             let mut missing = false;
             for group in groups.values() {
                 let signature = base_repair_signature(local_pushed_seq, group.iter());
-                if let Some(decision) = decisions.get(&signature) {
+                if let Some(decision) = decisions.get(signature.as_str()) {
                     decision.apply(store, workspace_id, faults)?;
                 } else if touched.contains(&group[0].key.object_id) {
                     missing = true;
@@ -1516,7 +1490,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             for repair in &deferred {
                 let signature = deferred_repair_signature(local_pushed_seq, repair);
-                if let Some(decision) = decisions.get(&signature) {
+                if let Some(decision) = decisions.get(signature.as_str()) {
                     decision.apply(store, workspace_id, faults)?;
                 } else if touched.contains(&repair.object_id) {
                     missing = true;
@@ -1560,7 +1534,21 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             chunks.push(chunk);
         }
 
-        for BaseRelayRepairChunk { repairs, deferred } in chunks {
+        for BaseRelayRepairChunk { mut repairs, mut deferred } in chunks {
+            if let BaseRepairPhase::Fetch(answers) = &phase {
+                let mut available = MAX_BASE_REPAIR_LOOKUPS - answers.decisions.len();
+                if available == 0 { break; }
+                let mut selected = BTreeSet::new();
+                repairs.retain(|repair| {
+                    let key = (repair.key.version_id.clone(), repair.key.object_id.clone(), repair.lineage_claim_id.clone());
+                    if selected.contains(&key) { return true; }
+                    if available == 0 { return false; }
+                    selected.insert(key);
+                    available -= 1;
+                    true
+                });
+                deferred.truncate(available);
+            }
             let mut coordinates = BTreeSet::new();
             coordinates.extend(
                 repairs
@@ -1726,7 +1714,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         None => (&candidates[0].0, None),
                     };
                     if relay_seq.is_none() && candidates.iter().any(|(_, _, unresolved)| *unresolved) {
-                        if !answers.keep(signature, BaseRepairDecision::Unchanged)? { return Ok(()); }
+                        if !answers.keep(signature, BaseRepairDecision::Unchanged) { return Ok(()); }
                         continue;
                     }
                     if !answers.keep(
@@ -1740,12 +1728,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             relay_seq,
                             recorded_at_ms: chosen.recorded_at_ms,
                         },
-                    )? {
+                    ) {
                         return Ok(());
                     }
                 }
                 for (signature, decision) in prepared_deferred {
-                    if !answers.keep(signature, decision)? {
+                    if !answers.keep(signature, decision) {
                         return Ok(());
                     }
                 }
