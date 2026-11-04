@@ -40,6 +40,8 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
   const sources = new Map<string, Uint8Array>([["fundraiser/app.publish.json", manifestBytes]]);
   // app.publish.json paths are relative to the app folder.
   for (const path of manifest.inputs as string[]) sources.set(`fundraiser/${path}`, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/fundraiser/${path}`, import.meta.url)));
+  // The manifest names its Collection by this file, so publishing reads it.
+  sources.set("fundraiser/dataset.json", readFileSync(new URL("../../../examples/fundraiser/dataset.json", import.meta.url)));
   const prepared = await prepareOwnerAppPublication({workspaceId:"w",appRoot:"fundraiser",shareId:"s",grantId:"g"},
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
