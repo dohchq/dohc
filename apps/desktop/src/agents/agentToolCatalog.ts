@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-// Claude Code flags that read a file or folder. With no value, one takes
-// dohc's next argument as a path in the workspace, so own flags can't end with one.
+// Claude Code flags that read a file or folder.
 const CLAUDE_PATH_FLAGS = new Set(["--settings", "--mcp-config", "--plugin-dir", "--add-dir", "--system-prompt-file", "--append-system-prompt-file", "--agents", "--debug-file"]);
 
 export const AgentLaunchProfile = z.object({
@@ -10,14 +9,23 @@ export const AgentLaunchProfile = z.object({
     (value) => /^(?:\/|[a-z]:[\\/]|\\\\)/iu.test(value) && !/[\r\n\0]/u.test(value),
     "Choose an absolute executable path.",
   ),
-  // The person's own flags, at most as long as a typed command. They start
-  // with a flag, so none is read as a subcommand, and a bare -- would turn
-  // dohc's flags after them into prompt text.
+  // The person's own flags, at most as long as a typed command.
   arguments: z.array(z.string().refine((value) => !/[\r\n\0]/u.test(value)))
-    .max(2048).refine((values) => values.join(" ").length <= 4096)
-    .refine((values) => values.length === 0 || (/^-[^-]|^--./u.test(values[0]!) && !values.includes("--"))).optional(),
-}).strict().refine((profile) => profile.tool !== "claude" || !CLAUDE_PATH_FLAGS.has(profile.arguments?.at(-1) ?? ""));
+    .max(2048).refine((values) => values.join(" ").length <= 4096).optional(),
+}).strict().refine((profile) => ownFlagsProblem(profile) === null);
 export type AgentLaunchProfile = z.infer<typeof AgentLaunchProfile>;
+
+// The first rule the person's own flags break. Saving and each run refuse
+// them. Own flags start with a flag, so none is read as a subcommand. A bare
+// -- would turn dohc's flags after them into prompt text. A last path flag
+// would take dohc's next argument as a path in the workspace.
+export function ownFlagsProblem(profile: { tool: string; arguments?: readonly string[] }): string | null {
+  const flags = profile.arguments ?? [];
+  if (flags.length > 0 && !/^-[^-]|^--./u.test(flags[0]!)) return "The first word after the program must be a flag, such as --model.";
+  if (flags.includes("--")) return "Its flags cannot include a bare --.";
+  if (profile.tool === "claude" && CLAUDE_PATH_FLAGS.has(flags.at(-1) ?? "")) return "Its last flag needs a file or folder after it.";
+  return null;
+}
 
 // How dohc starts an agent: a tool it knows, or the person's own command.
 export const AgentLaunch = z.union([
@@ -57,11 +65,13 @@ export function launchFromCommand(command: string, current?: AgentLaunchProfile)
   return profile.success ? profile.data : { command: trimmed };
 }
 
+const OWN_FLAGS_HINT = "Flags you add apply only to runs you start, and can change what dohc adds.";
+
 /** The line under a command field: what dohc adds when it starts the command. */
 export function launchCommandHint(launch: AgentLaunch | null): string {
   const tool = launch ? launchProfile(launch)?.tool : undefined;
-  return tool === "claude" ? "dohc adds its reply tool. The conversation arrives through stdin."
-    : tool === "codex" ? "dohc adds its reply tool and sandbox. The conversation arrives through stdin."
+  return tool === "claude" ? `dohc adds its reply tool. The conversation arrives through stdin. ${OWN_FLAGS_HINT}`
+    : tool === "codex" ? `dohc adds its reply tool and sandbox. The conversation arrives through stdin. ${OWN_FLAGS_HINT}`
     : "dohc runs this command as typed. The conversation arrives through stdin.";
 }
 export type AgentToolId = "claude" | "codex" | "opencode" | "cursor";

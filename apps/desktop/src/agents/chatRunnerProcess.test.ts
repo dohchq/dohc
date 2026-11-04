@@ -54,6 +54,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
+      agentName: "Nova",
       logPath: join(root, "logs", "run.log"),
       command,
       profile,
@@ -319,6 +320,21 @@ describe("chat runner process", () => {
     expect(replyOnly!.args).not.toContain("own-model");
   });
 
+  it("refuses own flags that saving refuses, in the owner's run and a reply-only run", async () => {
+    const { calls, spawn } = await runnerFixture("linux");
+    for (const [tool, flags, rule] of [
+      ["codex", ["resume", "--last"], "The first word after the program must be a flag, such as --model."],
+      ["codex", ["--model", "o3", "--"], "Its flags cannot include a bare --."],
+      ["claude", ["--model", "opus", "--settings"], "Its last flag needs a file or folder after it."],
+    ] as const) {
+      for (const dohcTools of ["all", "reply"] as const) {
+        await expect(spawn("", () => undefined, { tool, executable: `/opt/bin/${tool}`, arguments: [...flags] }, dohcTools))
+          .rejects.toThrow(`dohc did not start Nova. ${rule} Change the command in Settings › Agents.`);
+      }
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("keeps the workspace folder out of the runner's program search", async () => {
     const spaced = join(process.cwd(), "Program Files");
     vi.stubEnv("PATH", ["", ".", "relative", '"."', process.cwd(), `"${spaced}"`].join(delimiter));
@@ -431,6 +447,7 @@ describe("chat runner process", () => {
       const child = await runner.spawnConfiguredRunner({
         rootPath: workspace,
         runId: "run-1",
+        agentName: "Nova",
         logPath: join(shims, "run.log"),
         command: `"${shim}"`,
         dohcTools: "reply",
@@ -458,6 +475,7 @@ describe("chat runner process", () => {
     const start = (rootPath: string) => runner.spawnConfiguredRunner({
       rootPath,
       runId: "run-1",
+      agentName: "Nova",
       logPath: join(root, "run.log"),
       command: "",
       profile: { tool: "codex", executable: codex },
@@ -504,6 +522,7 @@ describe("chat runner process", () => {
       await runner.spawnConfiguredRunner({
         rootPath: workspace!,
         runId: "run-1",
+        agentName: "Nova",
         logPath: join(scratch, "run.log"),
         command: "",
         profile: { tool: "codex", executable: join(scratch, executable) },

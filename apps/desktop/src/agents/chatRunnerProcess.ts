@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
-import { agentProfileArguments, tokenizeRunnerCommand, type AgentLaunchProfile } from "./agentToolCatalog";
+import { agentProfileArguments, ownFlagsProblem, tokenizeRunnerCommand, type AgentLaunchProfile } from "./agentToolCatalog";
 import { resolveDohcNodeExecutable } from "./dohcNodeExecutable";
 import { type CodexConfigFiles, codexConfigFiles, codexRequirementsRefuseReadOnly, codexRunConfig } from "./codexRunConfig";
 
@@ -312,6 +312,8 @@ export function createChatRunnerProcess(
     rootPath: string;
     threadId?: string;
     runId: string;
+    // The agent's name from dohc's settings.
+    agentName: string;
     logPath: string;
     command: string;
     profile?: AgentLaunchProfile;
@@ -340,6 +342,8 @@ export function createChatRunnerProcess(
     input: Parameters<typeof spawnConfiguredRunner>[0],
     logFd: number,
   ): Promise<RunnerProcess> {
+    const problem = input.profile ? ownFlagsProblem(input.profile) : null;
+    if (problem) throw new Error(`dohc did not start ${input.agentName}. ${problem} Change the command in Settings › Agents.`);
     const bundledNode = options.isPackaged() ? resolveDohcNodeExecutable({
       resourcesPath: options.resourcesPath?.() ?? dirname(process.execPath),
       platform,
