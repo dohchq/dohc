@@ -102,6 +102,7 @@ export function workspaceVersionHandlers(dependencies: {
         mergedFileCount: result.mergedFileCount,
         unchangedFileCount: result.unchangedFileCount,
         conflictCount: result.conflictCount,
+        replacedProtectedPaths: result.replacedProtectedPaths,
         conflicts: page.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: page.nextAfterConflictId,
       };

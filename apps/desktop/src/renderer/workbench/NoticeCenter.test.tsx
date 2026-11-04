@@ -916,6 +916,73 @@ describe("notice center", () => {
     expect(onRetryWorkspaceError).toHaveBeenCalledWith("shell-error-2");
   });
 
+  it("lists a notice's paths one per line, three facts whole and the rest behind Show more", async () => {
+    const user = userEvent.setup();
+    const paths = [".env", "keys/deploy.pem", "config/production.env"];
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-3", tone: "success", title: "Merged 1 file from Draft into Main",
+        message: "3 protected files took Draft's copy.", paths, details: "", atMs: 1_000, canRetry: false, seen: false,
+      }],
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    const listed = (testId: string) => [...screen.getByTestId(testId).querySelectorAll("li")].map((item) => item.title);
+    // The message is the first fact, so two paths show before Show more.
+    expect(listed("workspace-shell-toast-paths")).toEqual(paths.slice(0, 2));
+    await user.click(screen.getByTestId("workspace-shell-toast-more"));
+    expect(listed("workspace-shell-toast-paths")).toEqual(paths);
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(listed("notice-shell-error-3-paths")).toEqual(paths.slice(0, 2));
+    await user.click(screen.getByTestId("notice-shell-error-3-more"));
+    expect(listed("notice-shell-error-3-paths")).toEqual(paths);
+  });
+
+  it("puts Try again before a step that asks to come after it, on the toast and the row", async () => {
+    const user = userEvent.setup();
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-5", title: "dohc could not finish merging Draft into Main", message: "Some of Draft's changes are in Main, and History shows which.",
+        details: "Error: disk full", atMs: 1_000, canRetry: true, actionLabel: "Open History", actionAfterRetry: true, seen: false,
+      }],
+      onWorkspaceErrorAction: vi.fn(),
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    const worded = (container: HTMLElement) => within(container).getAllByRole("button").map((button) => button.textContent)
+      .filter((label) => label === "Try again" || label === "Open History");
+    expect(worded(screen.getByTestId("workspace-shell-error"))).toEqual(["Try again", "Open History"]);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(worded(screen.getByTestId("notice-shell-error-5"))).toEqual(["Try again", "Open History"]);
+  });
+
+  it("shows a Try again that can't run yet as disabled with its reason under it, on the toast and the row", async () => {
+    const onRetryWorkspaceError = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-4", title: "dohc could not merge Draft into Main", message: "The engine stopped.",
+        details: "Error: The engine stopped.", atMs: 1_000, canRetry: true, retryBlocked: "Close the open merge first.", seen: false,
+      }],
+      onRetryWorkspaceError,
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    // A disabled button takes no focus, so the reason shows as text, and a
+    // screen reader reads it as the button's description.
+    const reason = "Close the open merge first.";
+    const blocked = (place: HTMLElement) => {
+      expect(within(place).getByRole("button", { name: "Try again", description: reason })).toHaveProperty("disabled", true);
+      expect(within(place).getByText(reason)).toBeTruthy();
+    };
+    blocked(screen.getByTestId("workspace-shell-error"));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    blocked(screen.getByTestId("notice-shell-error-4"));
+    expect(onRetryWorkspaceError).not.toHaveBeenCalled();
+  });
+
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
     renderNotices({
       syncStatus: {

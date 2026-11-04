@@ -365,6 +365,9 @@ export function readError(error: unknown): ReadError {
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
+  // The merge dialog words a merge that stopped partway, since only it knows
+  // the version. The message is the failure's own text, for Copy details.
+  if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
   if (name === "DaemonRefusalError" && code === "INVALID_PARAMS" && [
     "Each choice is one line of at most 200 characters.",
     "Each choice appears once.",
@@ -576,6 +579,11 @@ export function isWorkspaceRestricted(error: unknown): boolean {
 /** An exclusive create found the path taken. */
 export function isPathTaken(error: unknown): boolean {
   return parse(error).code === "EEXIST";
+}
+
+/** A merge failed after some of the version's files were already in Main. */
+export function isMergeStoppedPartway(error: unknown): boolean {
+  return parse(error).name === "MergeStoppedPartwayError";
 }
 
 /** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */

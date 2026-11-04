@@ -283,7 +283,7 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
     // Keep Feature's copy — Main resolves to the incoming side.
     await conflict.getByTestId("version-conflict-keep-incoming").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(
-      /All conflicts are resolved/,
+      /^Merged .+ into Main$/,
       { timeout: 30_000 },
     );
     await page.getByTestId("version-merge-done").click();
@@ -368,7 +368,7 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
     await expect(conflict.getByTestId("version-conflict-combine")).toHaveCount(0);
     await conflict.getByTestId("version-conflict-keep-incoming").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(
-      /All conflicts are resolved/,
+      /^Merged .+ into Main$/,
       { timeout: 30_000 },
     );
     await page.getByTestId("version-merge-done").click();
@@ -405,7 +405,7 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
     });
     await keepMineConflict.getByTestId("version-conflict-keep-current").click();
     await expect(page.getByTestId("version-merge-status")).toHaveText(
-      /All conflicts are resolved/,
+      /^Merged .+ into Main$/,
       { timeout: 30_000 },
     );
     await page.getByTestId("version-merge-done").click();

@@ -3013,6 +3013,9 @@ export const MergeWorkspaceVersionResult = z.object({
   // a clean merge into a conflicted one. The count sentence over the cards
   // reads the loaded rows instead: it describes what the user is looking at.
   conflictCount: z.number().int().min(0),
+  // Protected files whose Main copy the merge replaced. Paths only, never
+  // contents: the result lists them because they never become conflicts.
+  replacedProtectedPaths: z.array(PATH_STRING),
   conflicts: z.array(WorkspaceVersionConflict),
   nextAfterConflictId: OPAQUE_ID.nullable(),
 });

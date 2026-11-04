@@ -320,6 +320,9 @@ export interface WorkspaceVersionMergeResult {
   // rows themselves are open conflicts in the engine; readers page them
   // through listOpenConflictsPage instead of carrying them here.
   conflictCount: number;
+  // Protected files whose Main copy this merge replaced with the version's,
+  // in merge order. They never conflict, so the result has to name them.
+  replacedProtectedPaths: string[];
 }
 
 // One page of open conflicts, the engine's own `conflicts.list` page passed
@@ -1261,6 +1264,15 @@ export class RestoreFolderInUseError extends Error {
   constructor(readonly path: string) {
     super(`${path} shares its folder with other files.`);
     this.name = "RestoreFolderInUseError";
+  }
+}
+
+// A merge failed after some of the version's files were already in Main.
+// Its message is the failure's own, for Copy details.
+export class MergeStoppedPartwayError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause), { cause });
+    this.name = "MergeStoppedPartwayError";
   }
 }
 
@@ -6860,7 +6872,10 @@ export function createWorkspaceEngineCapture(
     },
 
     mergeVersionIntoMain(sourceVersionId) {
-      return enqueueResult("merge version into Main", async () => {
+      // The version's files already in Main. A failure after the first says
+      // the merge stopped partway.
+      let mergedFileCount = 0;
+      const merge = async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
@@ -6950,7 +6965,6 @@ export function createWorkspaceEngineCapture(
         }
         const materializations: MaterializeOperation[] = [];
         let conflictCount = 0;
-        let mergedFileCount = 0;
         let unchangedFileCount = 0;
         for (const path of mergeOrder) {
           if (openConflictPaths.has(path)) {
@@ -6982,6 +6996,7 @@ export function createWorkspaceEngineCapture(
         // history — restorable, so nothing is lost.
         const secrets = secretStoreFor();
         const secretChanges: SecretFileComparePage["entries"] = [];
+        const replacedProtectedPaths: string[] = [];
         {
           let secretAfterPath: string | undefined;
           do {
@@ -7014,6 +7029,7 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           mergedFileCount += 1;
+          replacedProtectedPaths.push(change.path);
           if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
             const materialized = await secrets.materializeSecretFile({
               workspaceId,
@@ -7037,8 +7053,11 @@ export function createWorkspaceEngineCapture(
         if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
           await materialize(deletesBeforeWrites(materializations), policy);
         }
-        return { mergedFileCount, unchangedFileCount, conflictCount };
-      });
+        return { mergedFileCount, unchangedFileCount, conflictCount, replacedProtectedPaths };
+      };
+      return enqueueResult("merge version into Main", () => merge().catch((error: unknown) => {
+        throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
+      }));
     },
 
     async listOpenConflictsPage(afterConflictId) {

@@ -536,10 +536,10 @@ describe("Menu", () => {
 
     it("names its hint as the field's description", async () => {
       const user = userEvent.setup();
-      render(<Naming onSubmit={vi.fn()} hint="Starts as a copy of Main" />);
+      render(<Naming onSubmit={vi.fn()} hint="Starts from Main" />);
       await user.click(screen.getByTestId("row-menu"));
       await user.click(screen.getByTestId("new"));
-      const hint = screen.getByText("Starts as a copy of Main");
+      const hint = screen.getByText("Starts from Main");
       expect(screen.getByTestId("new-input").getAttribute("aria-describedby")).toBe(hint.id);
     });
 

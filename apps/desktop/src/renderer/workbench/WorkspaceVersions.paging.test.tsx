@@ -86,7 +86,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     const conflicts = [row];
     bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
     bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
-      mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, conflicts, nextAfterConflictId: null,
+      mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, replacedProtectedPaths: [], conflicts, nextAfterConflictId: null,
     });
     // The initial merge's gate has already released when its conflict cards appear.
     const mergeBegin = vi.fn().mockResolvedValueOnce(() => {}).mockImplementation(beginLineageOperation);
@@ -97,8 +97,8 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     ) : (
       <VersionMergeDialog workspaceId="ws-1"
         source={{ id: "v-1", name: "Feature", kind: "named", createdAtMs: 1, canMergeIntoMain: true }}
-        activeTabDirty={false} beginLineageOperation={mergeBegin}
-        onWorkspaceStateChanged={mergeChanged} onMerged={() => {}} onFailed={() => {}} onConflictError={onError}
+        beginLineageOperation={mergeBegin}
+        onWorkspaceStateChanged={mergeChanged} onMerged={() => {}} onAnsweredAway={() => {}} onConflictError={onError}
         onClose={() => {}} />
     ));
     if (surface === "merge") fireEvent.click(screen.getByTestId("version-merge-confirm"));
@@ -196,7 +196,7 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
     const title = "dohc can't settle the conflict in c-1.md";
-    expect(screen.getByTestId("version-conflict-error").textContent).toBe(shape === "sync-delete" ? title : "Could not apply that choice.");
+    expect(screen.getByTestId("version-conflict-error").textContent).toBe(shape === "sync-delete" ? title : "dohc could not apply that choice.");
     expect(report).toHaveBeenCalled();
     if (shape === "sync-delete") {
       const notice = readError(report.mock.calls[0]![1]);
@@ -433,11 +433,10 @@ describe("VersionMergeDialog conflict paging", () => {
       <VersionMergeDialog
         workspaceId="ws-1"
         source={source}
-        activeTabDirty={false}
         beginLineageOperation={async () => () => {}}
         onWorkspaceStateChanged={() => {}}
         onMerged={() => {}}
-        onFailed={() => {}}
+        onAnsweredAway={() => {}}
         onConflictError={() => {}}
         onClose={() => {}}
       />,
@@ -452,13 +451,14 @@ describe("VersionMergeDialog conflict paging", () => {
       mergedFileCount: 2,
       unchangedFileCount: 0,
       conflictCount: 0,
+      replacedProtectedPaths: [],
       conflicts: [{ ...conflict("c-sync"), origin: "sync" }],
       nextAfterConflictId: null,
     });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
-    screen.getByText("Merged 2 files into Main.");
+    screen.getByText("Merged 2 files into Main");
   });
 
   it("pages the conflicts stage through the open-conflict listing", async () => {
@@ -466,6 +466,7 @@ describe("VersionMergeDialog conflict paging", () => {
       mergedFileCount: 0,
       unchangedFileCount: 0,
       conflictCount: 2,
+      replacedProtectedPaths: [],
       conflicts: [conflict("c-1")],
       nextAfterConflictId: "c-1",
     });
@@ -496,13 +497,14 @@ describe("VersionMergeDialog conflict paging", () => {
       mergedFileCount: 0,
       unchangedFileCount: 0,
       conflictCount: 2,
+      replacedProtectedPaths: [],
       conflicts: [],
       nextAfterConflictId: null,
     });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
-    screen.getByText("All conflicts are resolved. Main is up to date.");
+    screen.getByText("Merged Feature into Main");
     expect(screen.queryByTestId("version-conflict")).toBeNull();
   });
 
@@ -515,6 +517,7 @@ describe("VersionMergeDialog conflict paging", () => {
       mergedFileCount: 0,
       unchangedFileCount: 0,
       conflictCount: 2,
+      replacedProtectedPaths: [],
       conflicts: [conflict("c-1"), conflict("c-2")],
       nextAfterConflictId: "c-2",
     });
@@ -730,7 +733,7 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
   const conflicts = [syncConflict("c-1")];
   bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
   bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
-    mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, conflicts, nextAfterConflictId: null,
+    mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, replacedProtectedPaths: [], conflicts, nextAfterConflictId: null,
   });
   bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error("DaemonRefusalError [INVALID_PARAMS]: synced-deletion-revival-refused"));
   const onError = vi.fn();
@@ -738,7 +741,7 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
   const user = userEvent.setup();
   render(<VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
     onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={onError} clearError={() => {}}
-    onConflictError={onConflictError} />);
+    onMergeNotice={() => {}} onConflictError={onConflictError} />);
   await settle();
   await user.click(screen.getByTestId("version-menu-button"));
   await user.click(screen.getByTestId("version-merge"));
@@ -746,7 +749,7 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
   await settle();
   fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
   await settle();
-  expect(onConflictError).toHaveBeenCalledExactlyOnceWith("Could not apply that choice.", expect.anything());
+  expect(onConflictError).toHaveBeenCalledExactlyOnceWith("dohc could not apply that choice.", expect.anything());
   expect(readError(onConflictError.mock.calls[0]![1]).title).toBe("dohc can't bring back c-1.md, because that could stop sync");
   expect(onError).not.toHaveBeenCalled();
 });
@@ -759,7 +762,7 @@ it("returns focus after a press on blank space closes the Versions menu", async 
     return <div ref={root} data-focus-surface="workspace" data-testid="workspace">
       <VersionMenu workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
         onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} clearError={() => {}}
-        onConflictError={() => {}} />
+        onMergeNotice={() => {}} onConflictError={() => {}} />
     </div>;
   }
   render(<Shell />);
@@ -774,4 +777,95 @@ it("returns focus after a press on blank space closes the Versions menu", async 
   await user.pointer({ keys: "[/MouseLeft]" });
   await settle();
   expect(document.activeElement).toBe(trigger);
+});
+
+describe("VersionMergeDialog result", () => {
+  const source = { id: "v-1", name: "Feature", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true };
+  const merged = { mergedFileCount: 3, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null };
+
+  function renderMerge() {
+    render(
+      <VersionMergeDialog workspaceId="ws-1" source={source} beginLineageOperation={async () => () => {}}
+        onWorkspaceStateChanged={() => {}} onMerged={() => {}} onAnsweredAway={() => {}} onConflictError={() => {}}
+        onClose={() => {}} />,
+    );
+  }
+
+  it("says it is merging on the primary, then gives Done the focus", async () => {
+    let finishMerge: (() => void) | null = null;
+    bridgeMock.mergeWorkspaceVersion.mockReturnValue(new Promise((resolve) => {
+      finishMerge = () => resolve({ ...merged, replacedProtectedPaths: [] });
+    }));
+    renderMerge();
+    fireEvent.click(screen.getByTestId("version-merge-confirm"));
+    await settle();
+    const confirm = screen.getByTestId<HTMLButtonElement>("version-merge-confirm");
+    expect(confirm.textContent).toBe("Merging…");
+    expect(confirm.disabled).toBe(true);
+    // Closing doesn't stop the merge, so the button says Close and keeps the focus.
+    const close = screen.getByTestId<HTMLButtonElement>("version-merge-cancel");
+    expect(close.textContent).toBe("Close");
+    expect(close.disabled).toBe(false);
+    expect(document.activeElement).toBe(close);
+    expect(screen.queryByTestId("version-merge-status")).toBeNull();
+
+    finishMerge!();
+    await settle();
+    expect(screen.getByTestId("version-merge-status").textContent).toBe("Merged 3 files into Main");
+    expect(document.activeElement).toBe(screen.getByTestId("version-merge-done"));
+    expect(screen.queryByTestId("version-merge-protected")).toBeNull();
+  });
+
+  it("lists the protected files the merge replaced, open on the result", async () => {
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({ ...merged, replacedProtectedPaths: [".env", "config/deploy/secrets.json"] });
+    renderMerge();
+    fireEvent.click(screen.getByTestId("version-merge-confirm"));
+    await settle();
+    const block = screen.getByTestId("version-merge-protected");
+    expect(block.querySelector("p")?.textContent).toBe("These 2 protected files took Feature's copy.");
+    const rows = screen.getAllByRole("listitem");
+    expect(rows.map((row) => row.getAttribute("title"))).toEqual([".env", "config/deploy/secrets.json"]);
+    expect(rows[1]!.textContent).toBe("config/deploy/secrets.json");
+    expect(screen.queryByTestId("version-merge-protected-toggle")).toBeNull();
+  });
+
+  it("keeps the protected list behind Show files while conflicts are open", async () => {
+    const conflicts = [conflict("c-1")];
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
+      ...merged, conflictCount: 1, conflicts, replacedProtectedPaths: [".env"],
+    });
+    renderMerge();
+    fireEvent.click(screen.getByTestId("version-merge-confirm"));
+    await settle();
+    expect(screen.getByTestId("version-merge-protected").querySelector("p")?.textContent).toBe("This protected file took Feature's copy.");
+    const toggle = screen.getByTestId("version-merge-protected-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("list", { name: "Protected files" })).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.textContent).toBe("Hide files");
+    expect(screen.getByRole("list", { name: "Protected files" }).textContent).toBe(".env");
+  });
+});
+
+describe("ConflictReviewDialog read failure", () => {
+  it("offers Try again, which reads the conflicts again", async () => {
+    bridgeMock.listWorkspaceVersionConflicts
+      .mockRejectedValueOnce(new Error("daemon busy"))
+      .mockResolvedValue({ conflicts: [conflict("c-1")], nextAfterConflictId: null });
+    render(
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+        workspaceId="ws-1"
+        onWorkspaceStateChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    await settle();
+    expect(screen.queryByTestId("version-conflict")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await settle();
+    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(2);
+  });
 });

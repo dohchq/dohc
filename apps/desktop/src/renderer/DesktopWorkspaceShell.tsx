@@ -113,6 +113,7 @@ import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNo
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
+import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
@@ -244,6 +245,7 @@ import {
   ConflictReviewDialog,
   VersionComparePage,
   VersionMenu,
+  isVersionMergeIdentity,
 } from "./workbench/WorkspaceVersions";
 import {
   ProposalReviewDialog,
@@ -3276,6 +3278,20 @@ export function DesktopWorkspaceShell(props: {
       sidebarVisible: true,
     }));
   }, [mutateWb]);
+  const openConflictReview = useCallback(() => setConflictReviewOpen(true), []);
+  const versionMerges = useVersionMergeNotices({
+    workspaceId,
+    menuShown: captureAvailable,
+    reportShellFailure,
+    clearIdentity,
+    openHistory: openHistoryView,
+    openConflictReview,
+  });
+  const { settle: settleVersionMerges } = versionMerges;
+  const closeConflictReview = useCallback(() => {
+    setConflictReviewOpen(false);
+    settleVersionMerges();
+  }, [settleVersionMerges]);
   // Open History shows the timeline with the recovery change open beside it.
   const openCaptureRecovery = useCallback(
     (momentId: string, path: string) => {
@@ -5516,24 +5532,28 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
+        ...(error.paths ? { paths: error.paths } : {}),
         ...(error.command ? { command: error.command } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
           [error.tone ? "Notice" : "Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
+          ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
           ...(error.details ?? []),
           ...reportFacts(),
         ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         retryBusy: error.retryBusy,
+        ...(versionMerges.retryBlocked && isVersionMergeIdentity(error.identity) ? { retryBlocked: versionMerges.retryBlocked } : {}),
         ...(error.action ? { actionLabel: error.action.label } : {}),
+        ...(error.action?.afterRetry ? { actionAfterRetry: true } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
       })),
-    [shellErrors, reportFacts],
+    [shellErrors, reportFacts, versionMerges.retryBlocked],
   );
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
@@ -5862,7 +5882,11 @@ export function DesktopWorkspaceShell(props: {
             onOpenCompare={openVersionCompareTab}
             onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
             onError={reportFailureMessage}
-            clearError={clearIdentity}
+            clearError={versionMerges.clear}
+            onMergeNotice={versionMerges.report}
+            onMergeOpenChange={versionMerges.onMergeOpenChange}
+            mergeRetry={versionMerges.retry}
+            onOpenHistory={openHistoryView}
             onConflictError={reportShellError}
             {...(shareView
               ? {}
@@ -7088,7 +7112,7 @@ export function DesktopWorkspaceShell(props: {
           onError={reportShellError}
           beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-          onClose={() => setConflictReviewOpen(false)}
+          onClose={closeConflictReview}
         />
       ) : null}
       {sharedRestore.dialog}

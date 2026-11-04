@@ -555,7 +555,8 @@ export function createDesktopCliServer<State>(
               merge: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
                 const merged = await capture.mergeVersionIntoMain(versionId);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
-                return merged;
+                // The CLI reply carries the counts only.
+                return { mergedFileCount: merged.mergedFileCount, unchangedFileCount: merged.unchangedFileCount, conflictCount: merged.conflictCount };
               }, { done: () => ({}), failed: {} }),
               resolve: (conflictId, resolution) => dependencies.versionRound(workspace.workspaceId, async () => {
                 await capture.resolveConflict(conflictId, resolution.keep === "combined" ? { kind: "apply-merged", text: resolution.text }

@@ -51,7 +51,7 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     createVersion: vi.fn<Operations["createVersion"]>(async () => { steps.push("create"); return snapshot; }),
     switchVersion: vi.fn<Operations["switchVersion"]>(async () => { steps.push("switch"); return { activeVersionId: versionId, changedFileCount: 2 }; }),
     compareVersions: vi.fn<Operations["compareVersions"]>().mockResolvedValue({ files: [], nextAfterPath: null }),
-    mergeVersionIntoMain: vi.fn<Operations["mergeVersionIntoMain"]>(async () => { steps.push("merge"); return { mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1 }; }),
+    mergeVersionIntoMain: vi.fn<Operations["mergeVersionIntoMain"]>(async () => { steps.push("merge"); return { mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1, replacedProtectedPaths: [".env"] }; }),
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => { steps.push("conflicts"); return conflictPage; }),
     resolveConflict: vi.fn<Operations["resolveConflict"]>(async () => { steps.push("resolve"); return { conflict, remaining: conflictPage }; }),
     listKeptCopies: vi.fn<Operations["listKeptCopies"]>(async () => { steps.push("kept"); return { keptCopies: [keptCopy], more: false }; }),
@@ -198,7 +198,7 @@ describe("registered workspace version handlers", () => {
   it("reads one conflict page after a conflicted merge and preserves mixed sides", async () => {
     const h = harness();
     await expect(h.invoke(ops.mergeWorkspaceVersion.channel, { workspaceId, versionId })).resolves.toMatchObject({
-      mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1, nextAfterConflictId: "next-conflict",
+      mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1, replacedProtectedPaths: [".env"], nextAfterConflictId: "next-conflict",
       conflicts: [{ conflictId: "conflict", origin: "sync", contentKind: "binary", currentText: "current", incomingText: null, baseText: null, incomingBinary: { byteLength: 4, sha256: "b".repeat(64) } }],
     });
     expect(h.operations.mergeVersionIntoMain).toHaveBeenCalledExactlyOnceWith(versionId);
@@ -208,8 +208,8 @@ describe("registered workspace version handlers", () => {
 
   it("does not load unrelated conflicts after a clean merge", async () => {
     const h = harness();
-    h.operations.mergeVersionIntoMain.mockResolvedValue({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0 });
-    await expect(h.invoke(ops.mergeWorkspaceVersion.channel, { workspaceId, versionId })).resolves.toEqual({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0, conflicts: [], nextAfterConflictId: null });
+    h.operations.mergeVersionIntoMain.mockResolvedValue({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0, replacedProtectedPaths: [] });
+    await expect(h.invoke(ops.mergeWorkspaceVersion.channel, { workspaceId, versionId })).resolves.toEqual({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null });
     expect(h.operations.listOpenConflictsPage).not.toHaveBeenCalled();
   });
 

@@ -86,7 +86,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     listOpenConflictsPage: vi.fn<Capture["listOpenConflictsPage"]>(async () => ({ conflicts: [], nextAfterConflictId: null })),
     createVersion: vi.fn<Capture["createVersion"]>(async name => ({ versions: [{ id: "created", workspaceId: "workspace", kind: "named", name, createdAtMs: 1, forkPoint: { versionId: "main" } }], activeVersionId: "created" })),
     switchVersion: vi.fn<Capture["switchVersion"]>(async versionId => ({ activeVersionId: versionId, changedFileCount: 2 })),
-    mergeVersionIntoMain: vi.fn<Capture["mergeVersionIntoMain"]>(async () => ({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 0 })),
+    mergeVersionIntoMain: vi.fn<Capture["mergeVersionIntoMain"]>(async () => ({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 0, replacedProtectedPaths: [".env"] })),
     resolveConflict: vi.fn<Capture["resolveConflict"]>(),
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
@@ -571,7 +571,7 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionMerge", { version: "Nested" })).toEqual({ ok: false, reason: "Only versions made from Main can merge into Main." });
       expect(await mcp("versionMerge", { version: "Later" })).toEqual({ ok: false, reason: "No version is called Later. Run dohc version list to see them." });
       expect(f.capture.mergeVersionIntoMain).not.toHaveBeenCalled();
-      f.capture.mergeVersionIntoMain.mockResolvedValueOnce({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 3 });
+      f.capture.mergeVersionIntoMain.mockResolvedValueOnce({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 3, replacedProtectedPaths: [] });
       // The merge prints the conflicts it left, except the one at a path History does not track.
       expect((await cli("version", "merge", "Draft")).stdout)
         .toBe("Merged Draft into Main · 3 files merged · 3 conflicts\nc1 · merge · notes.md\nc2 · merge · logo.png · binary\n");
