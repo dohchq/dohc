@@ -2153,7 +2153,7 @@ impl ActorHandle {
             match store.write_with(&NoFaults, |tx| {
                 tx.execute("UPDATE sync_identity SET ordinary_pull_token=NULL WHERE workspace_id=?1 AND ordinary_pull_token=?2",
                     rusqlite::params![workspace_id, token])
-                    .map(|changed| changed > 0).map_err(SyncError::persist)
+                    .map(|changed| changed > 0).map_err(dohc_engine_storage::StorageError::persist_public)
             })? {
                 TxnOutcome::Committed(abandoned) => Ok(abandoned),
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
