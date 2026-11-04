@@ -349,6 +349,19 @@ function failedMoveNow(
   };
 }
 
+// Whether a listing shows any failed move made, or its destination's state changed.
+function failedMovesChanged(
+  failed: Iterable<FailedMove>,
+  files: Parameters<typeof listedMoveEnds>[1],
+  folders: Parameters<typeof listedMoveEnds>[2],
+) {
+  for (const one of failed) {
+    const now = failedMoveNow(one, files, folders);
+    if (now.made || now.taken !== one.destinationTaken) return true;
+  }
+  return false;
+}
+
 function groupsMountingNewDocument(
   current: WorkbenchState,
   next: WorkbenchState,
@@ -993,7 +1006,8 @@ export function DesktopWorkspaceShell(props: {
   // while it was still undoing a refused move. So a listing only raises the
   // question: when one shows a failed move's ends changed, the shell asks for
   // a full listing, which main walks anew, and only that answer decides. One
-  // asks at a time, and a question raised meanwhile asks once more after it.
+  // question is out at a time. If a listing lands while it is out, the newest
+  // listing is checked against the answer after, and a change there asks again.
   // A destination listed beside the source was taken, and counts only after
   // an answer shows it gone, since a deleted source would look the same.
   const listing = useRef({ files, folders });
@@ -1005,10 +1019,6 @@ export function DesktopWorkspaceShell(props: {
   }, [clearIdentity]);
   const confirming = useRef<"idle" | "asking" | "again">("idle");
   const confirmFailedMoves = useCallback(async () => {
-    if (confirming.current !== "idle") {
-      confirming.current = "again";
-      return;
-    }
     const id = workspaceId;
     do {
       confirming.current = "asking";
@@ -1022,16 +1032,16 @@ export function DesktopWorkspaceShell(props: {
         if (now.made) clearFailedMove(identity);
         else failed.destinationTaken = now.taken;
       }
-    } while (confirming.current === "again" && failedMoves.current.size > 0);
+    } while (
+      confirming.current === "again" &&
+      failedMovesChanged(failedMoves.current.values(), listing.current.files, listing.current.folders)
+    );
     confirming.current = "idle";
   }, [workspaceId, refreshFiles, clearFailedMove]);
   useEffect(() => {
     if (!fileListingCommit) return;
-    const changed = [...failedMoves.current.values()].some((failed) => {
-      const now = failedMoveNow(failed, files, folders);
-      return now.made || now.taken !== failed.destinationTaken;
-    });
-    if (changed) void confirmFailedMoves();
+    if (confirming.current !== "idle") confirming.current = "again";
+    else if (failedMovesChanged(failedMoves.current.values(), files, folders)) void confirmFailedMoves();
   }, [fileListingCommit, files, folders, confirmFailedMoves]);
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.

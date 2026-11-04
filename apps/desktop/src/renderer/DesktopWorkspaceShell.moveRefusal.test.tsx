@@ -266,6 +266,32 @@ it("a move that failed onto a taken name loses its row once that name is free an
   expect(await noticeRows(user, TAKEN_WORDS)).toEqual([]);
 });
 
+// The agent's move lands while the full listing that confirms the name is
+// free is still out. Its answer frees the name, and the newest listing,
+// checked again, shows the move made.
+it("a move that failed onto a taken name loses its row when an agent makes the move while the freed name is confirmed", async () => {
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), { moveWorkspacePath: vi.fn() });
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await failWhileListed(bridge, user, ["a.md", "b.md", "renamed.md"], TAKEN);
+  const confirm = deferred<ReturnType<typeof listing>>();
+  bridge.listWorkspaceFiles
+    .mockResolvedValueOnce(listing("a.md", "b.md", "d.md"))
+    .mockImplementationOnce(() => confirm.promise)
+    .mockResolvedValue(listing("renamed.md", "b.md", "e.md"));
+  // renamed.md is deleted.
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["renamed.md"] }));
+  await waitFor(() => expect(allowedCache(bridge).slice(-2)).toEqual([true, false]));
+  // The agent moves a.md to renamed.md.
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["a.md", "renamed.md"] }));
+  await waitFor(() => expect(listed("e.md")).toBe(true));
+  expect(await noticeRows(user, TAKEN_WORDS)).toHaveLength(1);
+  await act(async () => confirm.resolve(listing("a.md", "b.md", "d.md")));
+  await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+  expect(await noticeRows(user, TAKEN_WORDS)).toEqual([]);
+  expect(allowedCache(bridge).slice(-4)).toEqual([true, false, true, false]);
+});
+
 // After the person moves the file again from the tree, to any name, the
 // failed move's Try again would fail, so its row goes.
 it("a later move of the same file from the tree, to another name, takes the failed move's toast and Notices row", async () => {
