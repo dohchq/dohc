@@ -181,7 +181,7 @@ describe("desktop workspace windows", () => {
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
-      shareViewMarkerOf: async () => undefined,
+      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
       refreshNativeWorkspaceSurfaces: () => undefined,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });
@@ -573,7 +573,7 @@ describe("desktop native menus", () => {
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
-      shareViewMarkerOf: async () => undefined,
+      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });

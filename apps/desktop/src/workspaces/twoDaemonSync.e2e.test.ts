@@ -1618,52 +1618,6 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
     }
   }, 60_000);
 
-  // The folder's share view marker stays on this computer: the daemon's
-  // capture skips it, so no moment, relay op or joined copy carries it.
-  it("keeps a folder's share view marker out of History and sync", async () => {
-    const workspaceId = `two-daemon-share-marker-${randomUUID()}`;
-    const shareId = `share-marker-${randomUUID()}`;
-    const rootA = await createTestScratch("dohc-share-marker-a-");
-    const rootB = await createTestScratch("dohc-share-marker-b-");
-    const connection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
-    const markerPath = join(".dohc", "local", "share-view.json");
-    let daemonA: LiveDaemonCapture | null = null;
-    let daemonB: LiveDaemonCapture | null = null;
-    try {
-      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
-      await daemonA.relay.claim();
-      await daemonA.chats.ensureGeneralChannel({ workspaceId });
-      await pushUntilDrained(daemonA.relay);
-      await mkdir(join(rootA, ".dohc", "local"), { recursive: true });
-      await writeFile(join(rootA, markerPath), JSON.stringify({ version: 1, workspaceId, shareId }));
-      // A file written after it, so its moment shows capture saw both.
-      await writeAndCapture(daemonA, rootA, "notes/visible.md", "seen\n");
-      await daemonA.capture.flush();
-      const paths = (await daemonA.capture.listMoments({ limit: 1_000 })).moments.map(moment => String(moment.path));
-      expect(paths).toContain("notes/visible.md");
-      expect(paths.filter(path => path.startsWith(".dohc"))).toEqual([]);
-      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
-
-      const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
-      try {
-        const sent = JSON.stringify(relayDb.prepare("SELECT op_kind, payload_json FROM sync_relay_log WHERE workspace_id=?").all(workspaceId));
-        expect(sent).toContain("notes/visible.md");
-        expect(sent).not.toContain("share-view.json");
-        expect(sent).not.toContain(shareId);
-      } finally {
-        relayDb.close();
-      }
-
-      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
-      const receiver = daemonB;
-      await receiver.capture.runRelaySync(materializePage => receiver.relay.pull(materializePage));
-      expect(await readFile(join(rootB, "notes", "visible.md"), "utf8")).toBe("seen\n");
-      expect(existsSync(join(rootB, markerPath))).toBe(false);
-    } finally {
-      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
-    }
-  }, 60_000);
-
 });
 
 it.skipIf(engine.missing)(

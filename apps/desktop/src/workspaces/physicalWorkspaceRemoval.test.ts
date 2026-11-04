@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./physicalWorkspaceRemoval";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createJoinedWorkspaceRunner } from "./createJoinedWorkspace";
+import type { ForgottenShareViews } from "./forgottenShareViews";
 import type { RegistryEntry } from "./registryStore";
 import { createWorkspaceTrust } from "./workspaceTrust";
 
@@ -37,13 +38,15 @@ function harness(registeredInitially = true, confirmDraftRemoval?: (workspaceId:
     writeText: (file, text) => writeText(file, text),
   });
   const restrict = vi.spyOn(trust, "restrict");
+  const remember = vi.fn<ForgottenShareViews["remember"]>(async () => {});
   const forget = createWorkspaceForget({
     currentBinding: workspaceId => owner.currentBinding(workspaceId),
+    findWorkspace: () => registered,
     removePhysicalWorkspace: remove,
-    trust, clearNotices, notifyRenderer,
+    trust, forgottenShareViews: {remember}, clearNotices, notifyRenderer,
   });
   return {
-    workspace, owner, remove, forget, removeWorkspace, removeDrafts, onError, trust, restrict, writeText, files,
+    workspace, owner, remove, forget, removeWorkspace, removeDrafts, onError, trust, restrict, remember, writeText, files,
     clearNotices, notifyRenderer,
     trustIt: () => trust.trust(workspace, {folder: "folder"}),
     grants: () => (JSON.parse(files.get("workspace-trust.json") ?? '{"trusted":[]}') as {trusted: {workspaceId: string}[]})
@@ -220,4 +223,44 @@ it("leaves no grant behind when another window's Restrict fails while Forget run
   expect(await restricted).toBe(error);
   expect(h.grants()).toEqual([]);
   expect(h.current()).toBeNull();
+});
+
+const shareView = {
+  shareId: "share-1", granterEmail: "alex@example.com", genericChatWritable: false,
+  grantedSelector: {paths: ["itinerary.md"], versionId: null, access: "view" as const},
+  relayUrl: "https://relay.example.test", recipientUserId: "user-sam",
+};
+
+it("saves a share view's record after it closes and before its row goes, and saves none for a workspace", async () => {
+  const h = harness(true, vi.fn(async () => true));
+  h.setRegistered({...h.workspace, shareView});
+  await h.forget("workspace");
+  expect(h.remember).toHaveBeenCalledExactlyOnceWith({workspaceId: "workspace", rootPath: "root"}, shareView);
+  expect(h.restrict.mock.invocationCallOrder[1]).toBeLessThan(h.remember.mock.invocationCallOrder[0]!);
+  expect(h.remember.mock.invocationCallOrder[0]).toBeLessThan(h.removeWorkspace.mock.invocationCallOrder[0]!);
+
+  const plain = harness(true, vi.fn(async () => true));
+  await plain.forget("workspace");
+  expect(plain.remember).not.toHaveBeenCalled();
+  expect(plain.current()).toBeNull();
+});
+
+it("keeps a share view listed when its record can't be saved", async () => {
+  const h = harness(true, vi.fn(async () => true));
+  h.setRegistered({...h.workspace, shareView});
+  const error = new Error("profile file is busy");
+  h.remember.mockRejectedValueOnce(error);
+  await expect(h.forget("workspace")).rejects.toBe(error);
+  expect(h.current()).toEqual({...h.workspace, shareView});
+  expect(h.removeWorkspace).not.toHaveBeenCalled();
+  expect(h.clearNotices).not.toHaveBeenCalled();
+  expect(h.notifyRenderer).not.toHaveBeenCalled();
+});
+
+it("saves nothing when the person goes back", async () => {
+  const h = harness(true, vi.fn(async () => false));
+  h.setRegistered({...h.workspace, shareView});
+  await h.forget("workspace");
+  expect(h.remember).not.toHaveBeenCalled();
+  expect(h.current()).toEqual({...h.workspace, shareView});
 });

@@ -23,7 +23,6 @@ import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import type { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { setWorkspaceShareView } from "../workspaces/WorkspaceRegistry";
-import type { writeFolderShareViewMarker } from "../workspaces/folderShareViewMarker";
 import type { WorkspaceActivityScope } from "./workspaceActivityBroadcast";
 
 export function registerSharedViewsIpcHandlers<
@@ -55,7 +54,6 @@ export function registerSharedViewsIpcHandlers<
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
   createJoinedWorkspace: ReturnType<typeof createJoinedWorkspaceRunner>;
   setWorkspaceShareView: typeof setWorkspaceShareView;
-  writeShareViewMarker: typeof writeFolderShareViewMarker;
   refreshNativeWorkspaceSurfaces(): void;
   workspaceAuthorities: {
     attachmentRetirementSignal(workspaceId: string, attachmentId: symbol): AbortSignal;
@@ -83,7 +81,7 @@ export function registerSharedViewsIpcHandlers<
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     loadAndCacheCurrentCredentials, warmCredentialCache, currentCredentials, engineDaemonStartup,
     fetchShareViewInfo, usableRoot, readdir, mkdir, createJoinedWorkspace, setWorkspaceShareView,
-    writeShareViewMarker, refreshNativeWorkspaceSurfaces, workspaceAuthorities, canonicalWorkspaceFor,
+    refreshNativeWorkspaceSurfaces, workspaceAuthorities, canonicalWorkspaceFor,
     withStaleSensitiveWorkspaceOperation, shareViewFiles, receivedShareEngine,
     openWorkspaceActivity, requireWorkspace, notifyRenderer, recordShareViewStoreRefusal,
     recheckRemovedShares,
@@ -273,19 +271,6 @@ export function registerSharedViewsIpcHandlers<
         if (outcome.status === "ended") {
           throw new ShareUnavailableError();
         }
-        // Last, so a failed open never leaves it: after Forget, it is what
-        // lets Open folder register this folder as the share again.
-        await workspaceAuthorities.withBinding(authorityBinding, (lease) =>
-          writeShareViewMarker(canonicalWorkspaceFor(lease), {
-            workspaceId: created.workspaceId,
-            shareId: parsed.shareId,
-            recipientUserId: credentials.userId,
-            relayUrl: relay.baseUrl,
-            grantedSelector,
-            ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
-            ...(info.receivedIdentity ? { receivedIdentity: info.receivedIdentity } : {}),
-          }),
-        );
       },
       rollbackLabel: "open-share",
       cleanupFailureMessage:

@@ -8,7 +8,7 @@ import type {
   createWorkspaceFolderWithFreshness,
   FreshWorkspaceFolder,
 } from "../workspaces/createWorkspaceFolder";
-import type { RegistryEntry } from "../workspaces/registryStore";
+import type { ForgottenShareViews } from "../workspaces/forgottenShareViews";
 import type { Computer } from "../workspaces/syncHistory";
 import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import {
@@ -96,10 +96,10 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   openWorkspaceWindow(workspace: WorkspaceSummary): Promise<unknown>;
   openWorkspaceManager(): unknown;
   closeWindowOf(event: Event): void;
-  // The share view a folder's own marker names, so a forgotten share's
-  // folder opens as that share again. Undefined for an ordinary folder.
-  shareViewMarkerOf(workspace: CreatedWorkspace): Promise<RegistryEntry["shareView"]>;
-  registerPhysicalWorkspace(workspace: RegistryEntry): unknown;
+  registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
+  // Registers a folder Open folder chose, as the share the person forgot in
+  // it when this computer saved one.
+  forgottenShareViews: Pick<ForgottenShareViews, "reopen">;
   // New workspace's one default: a workspace made from nothing starts
   // trusted, in the folder that creation made. Every other way in starts in
   // Restricted Mode.
@@ -126,8 +126,8 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     openWorkspaceWindow,
     openWorkspaceManager,
     closeWindowOf,
-    shareViewMarkerOf,
     registerPhysicalWorkspace,
+    forgottenShareViews,
     trustNewWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -221,12 +221,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // workspaceId is untrusted input — an oversized or non-hostname-safe id
     // must fail the attach with a visible error, not brick the registry.
     WorkspaceSummary.parse(attached);
-    const shareView = await shareViewMarkerOf(attached);
-    const entry: RegistryEntry = shareView === undefined ? attached : { ...attached, shareView };
-    const summary = workspaceSummaryFor(entry);
-    registerPhysicalWorkspace(entry);
+    const entry = await forgottenShareViews.reopen(attached, registerPhysicalWorkspace);
     refreshNativeWorkspaceSurfaces();
-    return summary;
+    return workspaceSummaryFor(entry);
   });
 
   registerHandler(CHANNELS.forgetWorkspace, async (event, payload) => {

@@ -367,7 +367,6 @@ import {
   shareViewIdentityIsIntact,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
-import { shareViewFromFolderMarker, writeFolderShareViewMarker } from "./workspaces/folderShareViewMarker";
 import { shareViewWriteScopeOf, workspaceWriteRefusal } from "./workspaces/shareWriteGate";
 import {
   workspaceSummariesFrom,
@@ -568,6 +567,7 @@ import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
 import { confirmWorkspaceTrust, createWorkspaceTrust, folderIdentity } from "./workspaces/workspaceTrust";
+import { createForgottenShareViews } from "./workspaces/forgottenShareViews";
 import { workspaceTrustHandlers } from "./ipc/workspaceTrustIpc";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
@@ -644,6 +644,11 @@ const crashReports = createCrashReportStore({
 const workspaceTrust = createWorkspaceTrust({
   file: join(stateDir(), "workspace-trust.json"),
   onChange: (workspaceId, trusted) => agentTrustChanged(workspaceId, trusted),
+});
+// Share views the person forgot here, so their folders open as those shares
+// again. Main's own record, in this computer's dohc profile.
+const forgottenShareViews = createForgottenShareViews({
+  file: join(stateDir(), "forgotten-share-views.json"),
 });
 
 // Every trust change, from the dialog, Settings, Forget, or New workspace:
@@ -2109,11 +2114,13 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
 
 // Forget: close every handle the app holds on the workspace and drop its
 // registry row. The folder is untouched; opening it again re-adopts the
-// manifest and its identity.
+// manifest and its identity, and a share view's folder opens as that share.
 const forgetWorkspace = createWorkspaceForget({
   currentBinding: workspaceId => workspaceAuthorities.currentBinding(workspaceId),
+  findWorkspace,
   removePhysicalWorkspace,
   trust: workspaceTrust,
+  forgottenShareViews,
   clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
   notifyRenderer,
 });
@@ -6090,12 +6097,8 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
   register: async (rootPath) => {
     const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal", computer: thisComputer() });
     WorkspaceSummary.parse(created);
-    // As Open folder does: a forgotten share's folder opens as that share.
-    const shareView = await shareViewFromFolderMarker(created);
-    const entry: RegistryEntry = shareView === undefined ? created : { ...created, shareView };
-    const workspace = workspaceSummaryFor(entry);
-    registerPhysicalWorkspace(entry);
-    return workspace;
+    // As Open folder does: a share forgotten in this folder opens as that share.
+    return workspaceSummaryFor(await forgottenShareViews.reopen(created, registerPhysicalWorkspace));
   },
   activate: async (workspace, file, window) => {
     const shown = await sendWorkspaceActivated(window, workspace);
@@ -6443,8 +6446,8 @@ function registerIpcHandlers(): void {
       }),
     openWorkspaceManager: () => desktopWindows.showOrCreateManagerWindow(),
     closeWindowOf: (event) => BrowserWindow.fromWebContents(event.sender)?.close(),
-    shareViewMarkerOf: shareViewFromFolderMarker,
     registerPhysicalWorkspace,
+    forgottenShareViews,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
   });
@@ -7323,7 +7326,7 @@ function registerIpcHandlers(): void {
     },
     engineDaemonStartup: () => desktopEngine.startup,
     fetchShareViewInfo, fetchShareViewAccess, probeShareViewLog, usableRoot, readdir, mkdir, createJoinedWorkspace,
-    setWorkspaceShareView, writeShareViewMarker: writeFolderShareViewMarker, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
+    setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
     syncNotices: isCurrent => noticeStore().sync(isCurrent),

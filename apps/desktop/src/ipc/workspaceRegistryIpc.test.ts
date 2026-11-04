@@ -10,9 +10,7 @@ import {
   registerWorkspaceRegistryIpcHandlers,
 } from "./workspaceRegistryIpc";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
-import type { RegistryEntry } from "../workspaces/registryStore";
 import type { Computer } from "../workspaces/syncHistory";
-import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 
@@ -36,7 +34,7 @@ async function registryHarness() {
     const fresh = emptyFolders.has(input.rootPath) ? { folder: "7:42" } : null;
     return { workspace: { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) }, fresh };
   });
-  const register = vi.fn((workspace: RegistryEntry) => { steps.push("register"); summaries.push(workspaceSummaryFor(workspace)); });
+  const register = vi.fn((summary: WorkspaceSummary) => { steps.push("register"); summaries.push(summary); });
   const refresh = vi.fn(() => { steps.push("refresh"); });
   const pick = vi.fn(async () => ({ canceled: false, filePaths: [join(home, "picked")] }));
   const forget = vi.fn(async (_workspaceId: string) => { steps.push("forget"); });
@@ -51,7 +49,7 @@ async function registryHarness() {
     trustNewWorkspace: async (workspace, fresh) => { steps.push("trust"); trusted.push({ workspaceId: workspace.workspaceId, folder: fresh.folder }); },
     forgetWorkspace: forget, showItemInFolder: reveal,
     openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
-    shareViewMarkerOf: async () => undefined,
+    forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
     refreshNativeWorkspaceSurfaces: refresh,
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });

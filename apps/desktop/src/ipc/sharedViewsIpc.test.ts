@@ -336,43 +336,11 @@ describe("registered received-view handlers", () => {
     await started.promise; expect(h.mkdir).not.toHaveBeenCalled(); expect(h.registry.size).toBe(1);
     held.resolve(info);
     await expect(result).resolves.toMatchObject({ workspace: { rootPath: h.openPayload.rootPath, shareView: { access: "edit", genericChatWritable: true, granterEmail: info.granterEmail } } });
-    expect(h.steps).toEqual(["preflight", "mkdir", "create", "register", "pin", "surfaces", "identity", "reconcile", "marker", "open", "notify"]);
+    expect(h.steps).toEqual(["preflight", "mkdir", "create", "register", "pin", "surfaces", "identity", "reconcile", "open", "notify"]);
     expect(h.setView).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ grantedSelector: info.selector, relayUrl: credentials.relayUrl }));
     expect(h.relayFor).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: expect.any(Symbol) }));
     expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: info.selector });
     expect(h.open).toHaveBeenCalledWith(expect.objectContaining({ shareView: expect.objectContaining({ grantedSelector: info.selector }) }));
-  });
-
-  it("leaves the folder a marker naming the share, its server and account, and no names or token", async () => {
-    const h = await harness();
-    h.fetchInfo.mockResolvedValue({ ...info, receivedIdentity: { receivedSource: `share-source:v1:${"b".repeat(64)}`, grantId: "grant", generation: 3 } });
-    const { workspace } = await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload) as { workspace: { workspaceId: string } };
-    expect(h.writeMarker).toHaveBeenCalledOnce();
-    const [where, marker] = h.writeMarker.mock.calls[0]!;
-    expect(where).toMatchObject({ workspaceId: workspace.workspaceId, rootPath: h.openPayload.rootPath, attachmentId: expect.any(Symbol) });
-    expect(marker).toEqual({
-      workspaceId: workspace.workspaceId, shareId: "share", recipientUserId: credentials.userId,
-      relayUrl: credentials.relayUrl, grantedSelector: info.selector, granterUserId: info.granterUserId,
-      receivedIdentity: { receivedSource: `share-source:v1:${"b".repeat(64)}`, grantId: "grant", generation: 3 },
-    });
-    expect(JSON.stringify(marker)).not.toContain(credentials.token);
-    expect(JSON.stringify(marker)).not.toContain(info.granterEmail!);
-  });
-
-  it.each([
-    ["the first refresh fails", (h: Awaited<ReturnType<typeof harness>>) => h.reconcile.mockRejectedValue(new Error("pull failed"))],
-    ["the share ended", (h: Awaited<ReturnType<typeof harness>>) => h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } })],
-  ])("leaves no marker when %s and the open rolls back", async (_case, fail) => {
-    const h = await harness(); fail(h);
-    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow("Files remain in");
-    expect(h.writeMarker).not.toHaveBeenCalled();
-    expect(h.registry.size).toBe(1);
-  });
-
-  it("rolls the open back when the marker can't be written", async () => {
-    const h = await harness(); h.writeMarker.mockRejectedValue(new Error("not-opened"));
-    await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload)).rejects.toThrow("Files remain in");
-    expect(h.registry.size).toBe(1); expect(h.open).not.toHaveBeenCalled();
   });
 
   it("waits for daemon startup before creating a shared view", async () => {
@@ -456,7 +424,7 @@ describe("registered received-view handlers", () => {
     expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: pinned });
   });
 
-  it("fills the sharer's email on refresh for a share reopened from its folder", async () => {
+  it("fills the sharer's email on refresh for a share reopened after Forget", async () => {
     const h = await harness();
     Object.assign(h.workspace.shareView!, { granterEmail: null, subjectName: null, sharerName: null, unsavedPaths: null });
     await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
@@ -465,7 +433,7 @@ describe("registered received-view handlers", () => {
 
   it.each(["background", "manual"] as const)("asks the server nothing on a %s refresh while another account is signed in", async (trigger) => {
     const h = await harness();
-    // A share reopened from its folder's marker, which another account opened.
+    // A share reopened after Forget, which another account opened.
     Object.assign(h.workspace.shareView!, { recipientUserId: "someone-else", granterEmail: null, unsavedPaths: null });
     const result = await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing", trigger });
     if (trigger === "background") {
