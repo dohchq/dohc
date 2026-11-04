@@ -125,15 +125,26 @@ impl Checkpoints {
     }
 
     pub(crate) fn start(path: &Path) -> Result<Self, crate::StorageError> {
+        Self::start_observed(path, Arc::default(), Arc::default())
+    }
+
+    /// Replace this stopped worker. A wait taken from it watches the replacement.
+    pub(crate) fn restart(&self, path: &Path) -> Result<Self, crate::StorageError> {
+        Self::start_observed(path, Arc::clone(&self.running), Arc::clone(&self.completed))
+    }
+
+    fn start_observed(
+        path: &Path,
+        running: Arc<AtomicBool>,
+        completed: Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+    ) -> Result<Self, crate::StorageError> {
         let conn = Self::connection(path)?;
         let (requests, rx) = mpsc::sync_channel(1);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
         let full_requested = Arc::new(AtomicBool::new(false));
         let worker_full = full_requested.clone();
-        let running = Arc::new(AtomicBool::new(false));
         let worker_running = running.clone();
-        let completed = Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new()));
         let worker_completed = Arc::clone(&completed);
         let thread = std::thread::Builder::new()
             .name("dohc-wal-checkpoint".into())
@@ -1292,6 +1303,28 @@ mod tests {
         assert!(
             log < HELD_READER_WAL_FRAMES || log == backfilled,
             "{log} against {backfilled}"
+        );
+    }
+
+    #[test]
+    fn a_wait_taken_before_a_restart_watches_the_replacement() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let _store = store(&path);
+        let mut stopped = Checkpoints::start(&path).unwrap();
+        let wait = stopped.next_cycle();
+        stopped.stop_for_test();
+        let replacement = stopped.restart(&path).unwrap();
+        // No request is queued, so the idle replacement never touches this flag.
+        replacement.running.store(true, Ordering::Release);
+        assert!(matches!(wait(), CheckpointWait::Running));
+        replacement.running.store(false, Ordering::Release);
+        let before = replacement.completed_for_test();
+        replacement.request();
+        replacement.wait_for_completion_for_test(before);
+        assert_eq!(
+            stopped.completed_for_test(),
+            replacement.completed_for_test()
         );
     }
 

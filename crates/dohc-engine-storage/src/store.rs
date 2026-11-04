@@ -358,8 +358,8 @@ impl EngineStore {
     fn prepare_write(&mut self, background: bool) -> Result<(), StorageError> {
         #[cfg(feature = "fault-injection")]
         let _admission = crate::capture_phase::Measure::new("prepare_write");
-        if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
-            let replacement = crate::checkpoint::Checkpoints::start(&self.database_path)?;
+        if let Some(stopped) = self.checkpoints.as_ref().filter(|c| c.has_stopped()) {
+            let replacement = stopped.restart(&self.database_path)?;
             replacement.request();
             self.checkpoints.replace(replacement);
         }
