@@ -2132,6 +2132,24 @@ describe("CollectionRecordFieldWrite", () => {
     expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 5 });
   });
 
+  it("fails a write whose session a new version key replaced before it saved", () => {
+    const first = new Y.Doc();
+    first.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: first });
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
+    docMock.current = engineDocState({ available: true, doc: first, saveState: { kind: "saving" } });
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    // The key moved. The new session never carried the edit, and it opens saved.
+    const second = new Y.Doc();
+    second.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: second });
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(null);
+    expect(props.onSettled).not.toHaveBeenCalled();
+    expect(second.getMap("frontmatter").get("status")).toBeUndefined();
+  });
+
   it("reports a save error as a failure, never a settle", () => {
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
