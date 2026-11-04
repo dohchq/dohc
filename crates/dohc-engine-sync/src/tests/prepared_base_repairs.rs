@@ -99,9 +99,11 @@ fn remaining(store: &EngineStore) -> usize {
             conn.query_row(
                 "SELECT COUNT(*) FROM ydoc_base_relay_candidates",
                 [],
-                |row| row.get(0),
+                |row| row.get::<_, i64>(0),
             )
         })
+        .unwrap()
+        .try_into()
         .unwrap()
 }
 
@@ -328,9 +330,11 @@ fn prepared_deferred_repairs_share_the_byte_cap_and_resume_on_the_next_fetch() {
                 conn.query_row(
                     "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE relay_seq IS NULL",
                     [],
-                    |row| row.get(0),
+                    |row| row.get::<_, i64>(0),
                 )
             })
+            .unwrap()
+            .try_into()
             .unwrap()
     };
     let client = RelaySyncClient::new(relay);
