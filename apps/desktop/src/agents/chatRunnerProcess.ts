@@ -100,7 +100,7 @@ export function spawnOwnedRunner(
     command, args, windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
     cwd: options.cwd, env: options.env, input: options.input,
   }));
-  if (admission.byteLength > MAX_ADMISSION_BYTES) throw new Error("This chat is too long to send to an agent.");
+  if (admission.byteLength > MAX_ADMISSION_BYTES) throw new Error("This chat is too long to send to an agent. Start a new chat with the agent.");
   const child = spawnProcess(owner.executable, [owner.node, owner.relay, String(admission.byteLength)], {
     cwd: owner.root, env: ownerEnvironment(), windowsHide: true, stdio: options.stdio,
   });
@@ -300,7 +300,10 @@ export function createChatRunnerProcess(
   function runOwner(): WindowsProbeOwner {
     try {
       if (options.agentOwner) return options.agentOwner();
-    } catch {}
+    } catch (error) {
+      // The person gets the reinstall words; the log keeps what is missing.
+      reportError(error);
+    }
     throw new Error("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
   }
 
