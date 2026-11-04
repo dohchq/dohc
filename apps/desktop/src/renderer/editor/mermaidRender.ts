@@ -100,15 +100,19 @@ export function reconcileMermaidEntries(
   // inside it. There a fence keeps the id of an unplaced fence with the same
   // text.
   const used = new Set(placed)
-  const byText = new Map<string, MermaidWidgetEntry[]>()
+  const byText = new Map<string, { entries: MermaidWidgetEntry[]; next: number }>()
   for (const entry of previous) {
     if (used.has(entry)) continue
-    const list = byText.get(entry.text)
-    if (list) list.push(entry)
-    else byText.set(entry.text, [entry])
+    const bucket = byText.get(entry.text)
+    if (bucket) bucket.entries.push(entry)
+    else byText.set(entry.text, { entries: [entry], next: 0 })
+  }
+  const sameText = (text: string) => {
+    const bucket = byText.get(text)
+    return bucket && bucket.next < bucket.entries.length ? bucket.entries[bucket.next++] : undefined
   }
   return blocks.map((block, index) => {
-    const match = placed[index] ?? byText.get(block.text)?.shift()
+    const match = placed[index] ?? sameText(block.text)
     return { id: match?.id ?? nextId(), pos: block.pos, end: block.end, text: block.text }
   })
 }

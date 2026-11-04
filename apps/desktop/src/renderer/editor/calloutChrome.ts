@@ -1,5 +1,5 @@
 import { documentChange, stopEditorMouseEvent } from "./pmHelpers";
-import { ownersInRange, throughEdit, type OwnedBlock } from "./widgetOwnership";
+import { ownersInRange, throughEdit } from "./widgetOwnership";
 import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
@@ -413,23 +413,17 @@ export function makeCalloutChromePlugin() {
         const { range, mapping } = documentChange(tr.before, tr.doc);
         const decorations = old.map(mapping, tr.doc);
         if (!range) return decorations;
-        // Each callout by its header's position.
-        const headed = (doc: Node, from: number, to: number) => {
-          const callouts: OwnedBlock[] = [];
-          calloutsBetween(doc, from, to, (node, pos) => {
-            if (pos + 1 >= from && pos + 1 <= to) callouts.push({ at: pos + 1, node });
-          });
-          return callouts;
-        };
-        const callouts = headed(tr.doc, range.from, range.to);
+        const callouts: Array<{ node: Node; pos: number }> = [];
+        calloutsBetween(tr.doc, range.from, range.to, (node, pos) => {
+          if (pos + 1 >= range.from && pos + 1 <= range.to) callouts.push({ node, pos });
+        });
         const owners = ownersInRange(
           old.find(range.from, range.toBefore),
-          callouts,
+          callouts.map(({ pos }) => pos + 1),
           throughEdit(tr.mapping, mapping),
-          () => headed(tr.before, range.from, range.toBefore),
         );
-        const headers = callouts.map(({ node, at }) =>
-          calloutHeader(node, at - 1, owners.get(at) ?? nextOwnerKey()),
+        const headers = callouts.map(({ node, pos }) =>
+          calloutHeader(node, pos, owners.get(pos + 1) ?? nextOwnerKey()),
         );
         return decorations.remove(decorations.find(range.from, range.to)).add(tr.doc, headers);
       },
