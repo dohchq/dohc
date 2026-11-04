@@ -342,6 +342,15 @@ export function createChatRunnerProcess(
       isPackaged: options.isPackaged(),
       resourcesPath: options.resourcesPath?.(),
     });
+    const env = runnerEnvironment({
+      cliBin,
+      threadId: input.threadId,
+      runId: input.runId,
+      profile: input.profile,
+    });
+    // An npm-installed Codex starts behind cmd.exe, which can't carry double quotes.
+    const codexBehindCmd = input.profile?.tool === "codex"
+      && resolveSpawnCommand(input.profile.executable, [], { env, platform, cwd: input.rootPath }).windowsVerbatimArguments === true;
     const commandParts = input.profile
       ? [input.profile.executable, ...agentProfileArguments(input.profile, [
         ...replyServerArguments({
@@ -353,6 +362,7 @@ export function createChatRunnerProcess(
             runId: input.runId,
             platform,
             files: options.codexConfigFiles ? options.codexConfigFiles() : codexConfigFiles(process.env, platform),
+            behindCmd: codexBehindCmd,
           })
           : []),
       ])]
@@ -370,16 +380,9 @@ export function createChatRunnerProcess(
     //     every dispatch through a shimmed runner threw before it spawned.
     // stdin has neither limit and needs no escaping at all.
     const args = commandParts.slice(1);
-    const env = runnerEnvironment({
-      cliBin,
-      threadId: input.threadId,
-      runId: input.runId,
-      profile: input.profile,
-    });
     // An apostrophe in the folder's path puts double quotes in a Codex run's
-    // trust entry (codexRunConfig.ts), which cmd.exe can't carry.
-    if (input.profile?.tool === "codex" && args.some((arg) => arg.includes('"'))
-      && resolveSpawnCommand(executable, [], { env, platform, cwd: input.rootPath }).windowsVerbatimArguments) {
+    // trust entry (codexRunConfig.ts).
+    if (codexBehindCmd && args.some((arg) => arg.includes('"'))) {
       throw new Error("Codex can't start here because this folder's path has an apostrophe and Codex was installed with npm. Rename the folder, or install Codex with OpenAI's installer.");
     }
     const resolved = resolveSpawnCommand(executable, args, {
