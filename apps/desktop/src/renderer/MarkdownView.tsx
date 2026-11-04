@@ -123,6 +123,18 @@ const LazyPropertiesPanel = lazy(() =>
 // after the first toggle so later toggles reuse it.
 let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
 
+// How long Copy and Export wait for a note's source proof. After that they
+// use dohc's own Markdown, so a slow or stuck proof cannot hold them up. The
+// proof keeps running, and the next request reuses its answer.
+export const SOURCE_PROOF_WAIT_MS = 2_000;
+
+function sourceProofWithin(doc: Y.Doc): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("The source proof took too long.")), SOURCE_PROOF_WAIT_MS);
+    projectArtifactSource(doc).then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
 function loadImportExport(): Promise<typeof import("./editor/import-export")> {
   importExportPromise ??= import("./editor/import-export");
   return importExportPromise;
@@ -855,7 +867,7 @@ export function MarkdownView(props: {
     if (displayDoc) {
       if (wysiwygRef.current === null || displayDoc.isDestroyed) return null;
       if (canPreserveMarkdownSource(displayDoc.getMap('meta').get('dohcMarkdownSource'))) {
-        try {return await projectArtifactSource(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
+        try {return await sourceProofWithin(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
       }
       const {yDocToMarkdown} = await loadImportExport();
       return displayDoc.isDestroyed ? null : yDocToMarkdown(displayDoc);

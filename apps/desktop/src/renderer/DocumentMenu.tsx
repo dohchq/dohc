@@ -29,6 +29,13 @@ const CUSTOMIZE_ITEM = { id: "customize", label: "Customize…" } as const;
 // mirrors the code-block copy button's "copy" → "copied" swap
 // (editor/codeBlockChrome.tsx).
 export const FEEDBACK_MS = 1200;
+// How long a Copy runs before its row says it is still working.
+export const PROGRESS_DELAY_MS = 150;
+
+function writeClipboard(markdown: string): Promise<void> {
+  if (!navigator.clipboard) return Promise.reject(new Error("The clipboard is not available."));
+  return navigator.clipboard.writeText(markdown);
+}
 
 // What every action says when the document has no serializer: the editor is
 // not showing this document, so there is nothing honest to copy or export.
@@ -147,11 +154,22 @@ export function DocumentMenu(props: {
     } catch (error) {
       console.error(`${what} failed`, error);
       if (actions.isCurrent(action) && attempts.isCurrent(attempt)) showFeedback(id, failureLabel);
+      // A closed menu cancelled this Copy, so only an open one reports.
+      if (id === "copy-markdown" && actions.isCurrent(action) && attempts.isCurrent(attempt)) {
+        reportCopyFailure(error);
+      }
       return null;
     }
   }
 
   async function copyAsMarkdown(attempt: number, action: number) {
+    // Reading a large note can take a moment, and closing the menu cancels
+    // the Copy, so the row says it is still working. A quick Copy answers
+    // first, so its row never flashes. The answer's label clears this timer.
+    feedbackTimer.current = setTimeout(
+      () => setFeedback({ "copy-markdown": "Copying…" }),
+      PROGRESS_DELAY_MS,
+    );
     const serialized = await serializeOrFail(
       "copy-markdown",
       "Couldn't copy",
@@ -160,7 +178,15 @@ export function DocumentMenu(props: {
       attempt,
     );
     // Copy stays open for feedback; dismissal cancels pending serialization.
-    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) return;
+    if (!serialized || !actions.isCurrent(action) || !attempts.isCurrent(attempt)) {
+      // The document changed under an open menu. A failed serialization
+      // already answered, so only this case takes back the working label.
+      if (serialized && attempts.isCurrent(attempt)) {
+        if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+        setFeedback({});
+      }
+      return;
+    }
     const markdown = serialized.markdown;
     if (markdown === null) {
       showFeedback(
@@ -170,21 +196,18 @@ export function DocumentMenu(props: {
       );
       return;
     }
-    const write = navigator.clipboard?.writeText(markdown);
-    if (!write) return;
     let failure: unknown = null;
     try {
-      await write;
+      await writeClipboard(markdown);
     } catch (error) {
       failure = error ?? new Error("clipboard write failed");
     }
     if (attempts.isCurrent(attempt)) {
       showFeedback("copy-markdown", failure ? "Couldn't copy" : "Copied");
-      return;
     }
-    // A later attempt already answered. Its answer is what the menu shows,
-    // and this one describes a click the user has moved past. If instead the
-    // menu closed under this write, a failure still reaches the person.
+    // A later attempt that already answered speaks for the click the person
+    // moved on to, so only the newest action reports a failure. It reports
+    // with the menu open or closed, so its Try again outlasts the menu.
     if (failure && actions.isCurrent(action)) reportCopyFailure(failure);
   }
 
@@ -203,7 +226,7 @@ export function DocumentMenu(props: {
         const markdown = await props.getMarkdown();
         if (!actions.isCurrent(action)) return;
         if (markdown === null) throw new Error(REFUSAL_LABEL);
-        await navigator.clipboard?.writeText(markdown);
+        await writeClipboard(markdown);
         return;
       } catch (error) {
         failure = error ?? new Error("clipboard write failed");

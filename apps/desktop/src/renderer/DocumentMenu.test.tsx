@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DocumentMenu, FEEDBACK_MS } from "./DocumentMenu";
+import { DocumentMenu, FEEDBACK_MS, PROGRESS_DELAY_MS } from "./DocumentMenu";
 import { CustomizeContext } from "./settings/customize";
 import { deferred } from "../testing/deferred";
 // The HTML/PDF actions load ./editor/documentExport lazily, on demand — a
@@ -183,6 +183,51 @@ describe("DocumentMenu", () => {
       } finally {
         logged.mockRestore();
       }
+    });
+  });
+
+  describe("a Copy in progress", () => {
+    it("says it is still working once a Copy takes a moment", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const markdown = deferred<string>();
+      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => markdown.promise} />);
+      const row = () => screen.getByTestId("document-menu-item-copy-markdown");
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      vi.useFakeTimers();
+      try {
+        fireEvent.click(row());
+        await act(async () => { await vi.advanceTimersByTimeAsync(PROGRESS_DELAY_MS - 1); });
+        expect(row().textContent, "a quick Copy never flashes the working label").toBe("Copy as Markdown");
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(row().textContent).toBe("Copying…");
+        await act(async () => {
+          markdown.resolve(MARKDOWN);
+          await markdown.promise;
+        });
+        expect(row().textContent).toBe("Copied");
+        expect(writeText).toHaveBeenCalledExactlyOnceWith(MARKDOWN);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("reports a failed write with Try again while the menu is open", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const reportError = vi.fn();
+      render(<DocumentMenu workspaceId="ws-1" suggestedName="Plan" getMarkdown={() => MARKDOWN} reportError={reportError} />);
+      const failure = new Error("clipboard refused");
+      writeText.mockImplementationOnce(() => Promise.reject(failure));
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await act(async () => {});
+      expect(screen.getByTestId("document-menu-item-copy-markdown").textContent).toBe("Couldn't copy");
+      expect(reportError).toHaveBeenCalledExactlyOnceWith(
+        "dohc could not copy this document.",
+        failure,
+        expect.any(Function),
+      );
     });
   });
 
