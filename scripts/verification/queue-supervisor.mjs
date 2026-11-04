@@ -177,7 +177,7 @@ export async function holdSocket(path) {
  * Run the service under this supervisor until `signal` aborts or a signal stops the supervisor.
  * `stopLast` replaces stopping the last recorded service's processes, and `retryMs` the first wait before trying again, for tests.
  */
-export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats = 24, stopLast = stopRecorded, retryMs = 5000, signal: abort } = {}) {
+export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats = 24, stopLast = stopRecorded, retryMs = 5000, table = processTable, signal: abort } = {}) {
   root = resolve(root);
   const logPath = join(root, "supervisor.log");
   const log = line => {
@@ -234,13 +234,20 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
       child.stdin.on("error", () => {});
       // The record names the instance before the service may start anything.
       let known = new Map();
-      const row = processTable().find(candidate => candidate.pid === child.pid);
-      if (row) known = new Map([[row.pid, row.start]]);
-      writeTree(root, id, known);
+      try {
+        const row = table().find(candidate => candidate.pid === child.pid);
+        if (row) known = new Map([[row.pid, row.start]]);
+        writeTree(root, id, known);
+      } catch (error) {
+        // No record names this service, so no cleanup would find it. Without go it exits, and no other starts until it has.
+        child.stdin.end();
+        await exited;
+        throw error;
+      }
       child.stdin.end("go\n");
       // Apple's programs hide their environment, so each process below the service is recorded by its start time too.
       const follow = () => {
-        const found = members(processTable(), new Set(), known);
+        const found = members(table(), new Set(), known);
         if (found.size !== known.size || [...found].some(([pid, start]) => known.get(pid) !== start)) writeTree(root, id, found);
         known = found;
       };

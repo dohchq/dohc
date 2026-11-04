@@ -1188,7 +1188,10 @@ test("a record names its service's processes in the boot that wrote it, and stay
   assert.equal(existsSync(treePath(root)), false);
 });
 
-/** A stub service under `root`: it waits for go, runs `body`, records its pid, and heartbeats until the test process exits. */
+/**
+ * A stub service under `root`: it records its pid in spawned.log, then waits for go and exits without it, as the
+ * real service does. After go it runs `body`, records its pid in services.log, and heartbeats until the test process exits.
+ */
 function stubService(root, body = "") {
   const service = join(root, "service", "stub", "scripts", "verification");
   mkdirSync(service, { recursive: true });
@@ -1196,7 +1199,10 @@ function stubService(root, body = "") {
   writeFileSync(join(service, "queue-service.mjs"), `
     import { spawn } from "node:child_process";
     import { appendFileSync, writeFileSync } from "node:fs";
-    for await (const chunk of process.stdin) if (String(chunk).includes("go")) break;
+    appendFileSync(${JSON.stringify(join(root, "spawned.log"))}, process.pid + "\\n");
+    let go = false;
+    for await (const chunk of process.stdin) if ((go = String(chunk).includes("go"))) break;
+    if (!go) process.exit(1);
     ${body}
     // A test stopped midway must not leave this service running.
     setInterval(() => { try { process.kill(${process.pid}, 0); } catch { process.exit(0); } }, 1000);
@@ -1229,6 +1235,21 @@ test("the supervisor starts no service while the last one's processes cannot be 
   abort.abort();
   await supervising;
   assert.equal(running(service), false, "a stopped supervisor stops its service");
+});
+
+test("a service the supervisor could not record exits before the next one starts", { skip: process.platform === "win32" && "the Windows supervisor is queue-supervisor.ps1" }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "dohc-queue-unrecorded-")));
+  stubService(root);
+  const abort = new AbortController();
+  let reads = 0;
+  const table = () => { if (reads++ === 0) throw new Error("ps timed out"); return processTable(); };
+  const supervising = supervise(root, { stopLast: async () => [], table, signal: abort.signal });
+  t.after(async () => { abort.abort(); await supervising; for (const pid of logged(root, "spawned")) try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ } rmSync(root, { recursive: true, force: true }); });
+  const [second] = await waitFor(() => logged(root, "services").length ? logged(root, "services") : null, "the next service starts");
+  const [first, next] = logged(root, "spawned");
+  assert.equal(next, second);
+  assert.equal(running(first), false, "the service with no record is gone");
+  assert.match(readFileSync(join(root, "supervisor.log"), "utf8"), /service stub failed to start: ps timed out/u);
 });
 
 test("on a Mac, the supervisor stops everything a dead service started, whatever its session, parent, or folder, and a new supervisor stops what a killed one left", { skip: process.platform !== "darwin" && "launchd supervises the service on a Mac only" }, async t => {
