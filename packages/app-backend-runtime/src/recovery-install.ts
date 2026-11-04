@@ -122,12 +122,7 @@ export function createRecoveryInstaller<Context>(options: RecoveryInstallOptions
     status(input: DatasetScope & { transferId: string; authorize(): void }): RecoveryImportReceipt | null {
       return tx(() => { const row = find(input, input.transferId, input.authorize); return row && (row.phase === "installed" || row.phase === "claimed") ? receipt(row) : null; });
     },
-    /**
-     * `authorizeCleanup` checks the cleanup after a failed install, and
-     * defaults to `authorize`. A caller whose `authorize` also checks a
-     * request's signal passes one without it, so a cut-off install still
-     * clears its copy and a retry can start again.
-     */
+    /** `authorizeCleanup` authorizes the cleanup after a failed install. It defaults to `authorize`. */
     async install(context: Context, input: { transferId: string; manifestSha256: string; recovery: ValidatedDatasetRecovery; authorize(): void; authorizeCleanup?(): void }): Promise<RecoveryImportReceipt> {
       const { recovery } = input, scope = { workspaceId: recovery.manifest.cursor.workspaceId, datasetId: recovery.manifest.cursor.datasetId };
       const importId = identity(input.transferId), ownerToken = randomUUID();
