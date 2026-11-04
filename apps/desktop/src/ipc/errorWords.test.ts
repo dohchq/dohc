@@ -266,6 +266,8 @@ describe("error words", () => {
   const OTHER_OWNER_FOLDER = "Make it and everything in it yours again, then try again.";
   const MOVE_ASIDE = "Rename or move it, then try again.";
   const NOT_CHANGEABLE = "Give your account full control of this folder and everything in it, then try again.";
+  const ITEM_OTHER_OWNER = "Ask an administrator to make it yours, then try again.";
+  const ITEM_NOT_CHANGEABLE = "Ask an administrator to give your account full control of it, then try again.";
   it.each([
     ["link .dohc", `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`],
     ["link .dohc/engine/engine.db-journal", `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`],
@@ -282,6 +284,15 @@ describe("error words", () => {
     ["other-owner .dohc/local", `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`],
     ["not-changeable .dohc", `This workspace's .dohc has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`],
     ["not-changeable .dohc/local", `This workspace's .dohc/local has permissions dohc can't use, so dohc can't keep this computer's own data private. ${NOT_CHANGEABLE}`],
+    ["not-changeable .dohc/engine", `This workspace's .dohc/engine has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`],
+    ["other-owner .dohc/engine/ROOT_BINDING", `This workspace's .dohc/engine/ROOT_BINDING belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`],
+    ["other-owner .dohc/engine/displaced/worker-0", `This workspace's .dohc/engine/displaced/worker-0 belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`],
+    ["not-changeable .dohc/engine/secret.key", `This workspace's .dohc/engine/secret.key has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
+    ["not-changeable .dohc/engine/engine.db", `This workspace's .dohc/engine/engine.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
+    ["not-changeable .dohc/engine/displaced/worker-0/6a6f62.0", `This workspace's .dohc/engine/displaced/worker-0/6a6f62.0 has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
+    ["other-owner .dohc/local/ui-state.json", `This workspace's .dohc/local/ui-state.json belongs to another user, so dohc can't keep this computer's own data private. ${ITEM_OTHER_OWNER}`],
+    ["other-owner .dohc/engine/Café notes/año 2026.txt", `This workspace's .dohc/engine/Café notes/año 2026.txt belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`],
+    ["not-changeable .dohc/engine/copy [1] of 日誌.db", `This workspace's .dohc/engine/copy [1] of 日誌.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
   ])("names what keeps a workspace's History from being private, where, and the fix that keeps it: %s", (detail, words) => {
     const message = `engine-folder-not-private: ${detail}`;
     expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
@@ -299,9 +310,17 @@ describe("error words", () => {
       "constructor .dohc",
       "link /Users/me",
       "link .dohc/trash",
-      "other-owner .dohc/engine/ROOT_BINDING",
-      "link .dohc/engine/engine.db-wal/x",
-      "link .dohc/local/ui-state.json",
+      "other-owner .dohc/trash/x",
+      "other-owner .dohc/engineering/x",
+      "other-owner .dohc/localx/x",
+      "other-owner .dohc/engine/",
+      "other-owner .dohc/engine//engine.db",
+      "other-owner .dohc/engine/..",
+      "other-owner .dohc/engine/../../notes.md",
+      "other-owner .dohc/engine/./engine.db",
+      "other-owner .dohc/engine/..\\..\\notes.md",
+      "other-owner C:/Users/me/.dohc/engine/engine.db",
+      "other-owner /.dohc/engine/engine.db",
       "link ../.dohc",
     ]) {
       expect(readError(acrossIpc(refusal("INTERNAL", `engine-folder-not-private: ${detail}`))).words).toBeNull();
