@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -72,6 +72,17 @@ if (!runId || prompt.trim().length === 0 || !threadId) {
 
 if (mode === "silent-fail") {
   process.exit(3);
+}
+
+// Starts a process that outlives its parent, as an agent's tools can, then
+// works on (hold-tree) or exits (leave-tree). It writes the pids of its parent,
+// itself and that process to the file named after the mode.
+if (mode === "hold-tree" || mode === "leave-tree") {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true, detached: true });
+  writeFileSync(process.argv[3], JSON.stringify({ parent: process.ppid, runner: process.pid, child: child.pid }));
+  if (mode === "leave-tree") process.exit(0);
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
 }
 
 // Do what the prompt asks, as an installed tool would. The shell resolves dohc
