@@ -55,7 +55,7 @@ test("a collection saves edits, follows its folder rename, and closes on deletio
       page.getByRole("button", { name: "Open Launch plan" }),
     ).toBeVisible();
     await page.getByTestId("collection-page").getByRole("checkbox").click();
-    // The record opens before the edit saves, and the edit saves into it.
+    // A person may open the record while the edit saves. The edit still saves.
     await page.getByRole("button", { name: "Open Launch plan" }).click();
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
