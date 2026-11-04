@@ -173,9 +173,13 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.windows.activate).not.toHaveBeenCalled();
   });
 
-  it("starts platform CLI preparation after the engine and settings reads, before handlers", async () => {
+  it("opens the first window while platform CLI preparation is still running", async () => {
+    const refresh = deferred();
     const f = fixture();
-    vi.mocked(f.dependencies.bootstrap.prepareCli).mockImplementation(() => { f.log.push("cli"); });
+    vi.mocked(f.dependencies.bootstrap.prepareCli).mockImplementation(() => {
+      f.log.push("cli");
+      return refresh.promise;
+    });
     const ready = f.lifecycle.start();
     f.appReady.resolve();
     f.settings.resolve({ zoom: 2 });
@@ -183,6 +187,8 @@ describe("desktop bootstrap", () => {
     await ready;
     expect(f.log.indexOf("settings-read")).toBeLessThan(f.log.indexOf("cli"));
     expect(f.log.indexOf("cli")).toBeLessThan(f.log.indexOf("handlers"));
+    expect(f.log).toContain("first-window");
+    refresh.resolve();
   });
 
   it("opens launch paths before later intents and activates only after the renderer subscribes", async () => {
