@@ -1,8 +1,7 @@
 use dohc_engine_files::CancellationToken;
-use dohc_engine_runtime::{ActorHandle, RuntimeError};
+use dohc_engine_runtime::{CheckpointCycle, RuntimeError};
 use dohc_engine_storage::{CheckpointWait, StorageError};
-use std::cell::{Cell, OnceCell};
-use std::sync::Arc;
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(5);
@@ -11,27 +10,26 @@ const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(5);
 const BUSY_RETRY_CEILING: Duration = Duration::from_secs(15);
 const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-type CheckpointCycle = Arc<dyn Fn() -> CheckpointWait + Send + Sync>;
-
 /// Share a contention budget across the pass; a non-busy result ends the episode.
-/// Time while a checkpoint is still copying pages does not count against the
-/// limit, since only an idle or finished cycle shows persistent contention.
+/// The episode starts at its first busy result. Time while a checkpoint is
+/// still copying pages does not count against the limit, since only an idle or
+/// finished cycle shows persistent contention. The ceiling bounds it either way.
 #[derive(Default)]
 pub(super) struct CaptureBatchRetry {
     pub(super) cancel: CancellationToken,
-    actor: Option<ActorHandle>,
-    checkpoint: OnceCell<Option<CheckpointCycle>>,
+    checkpoint: Option<CheckpointCycle>,
     deadline: Cell<Option<Instant>>,
     ceiling: Cell<Option<Instant>>,
+    exhausted: Cell<bool>,
     #[cfg(test)]
     pub(super) wait: Option<Box<dyn Fn(Duration) + Send>>,
 }
 
 impl CaptureBatchRetry {
-    pub(super) fn new(cancel: CancellationToken, actor: ActorHandle) -> Self {
+    pub(super) fn new(cancel: CancellationToken, checkpoint: CheckpointCycle) -> Self {
         Self {
             cancel,
-            actor: Some(actor),
+            checkpoint: Some(checkpoint),
             ..Self::default()
         }
     }
@@ -40,53 +38,42 @@ impl CaptureBatchRetry {
         if !matches!(&result, Err(error) if crate::rpc::error::store_busy(error)) {
             self.deadline.set(None);
             self.ceiling.set(None);
+            self.exhausted.set(false);
         }
         result
-    }
-
-    fn exhausted(&self, now: Instant) -> bool {
-        [self.deadline.get(), self.ceiling.get()]
-            .into_iter()
-            .flatten()
-            .any(|limit| now >= limit)
     }
 
     /// Let healthy single-file work end contention even after the retry budget expires.
     pub(super) fn run_single<T>(
         &self,
-        mut attempt: impl FnMut() -> Result<T, RuntimeError>,
+        attempt: impl FnMut() -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
-        if self.cancel.is_cancelled() {
-            return self.observe(Err(RuntimeError::Cancelled));
-        }
-        match self.observe(attempt()) {
-            Err(error) if crate::rpc::error::store_busy(&error) => self.run(attempt),
-            result => result,
-        }
+        self.retry(true, attempt)
     }
 
     #[cfg(test)]
     pub(super) fn exhaust_for_test(&self) {
-        self.deadline.set(Some(Instant::now()));
+        self.exhausted.set(true);
     }
 
     pub(super) fn run<T>(
         &self,
         attempt: impl FnMut() -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
+        self.retry(false, attempt)
+    }
+
+    fn retry<T>(
+        &self,
+        probe: bool,
+        attempt: impl FnMut() -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
         let checkpoint = || {
-            // Fetched on the first busy result only. Without it, every wait
-            // counts, as it would with no checkpoint running.
-            let cycle = self.checkpoint.get_or_init(|| {
-                self.actor
-                    .as_ref()
-                    .and_then(|actor| actor.checkpoint_cycle_blocking().ok())
-            });
-            cycle
+            self.checkpoint
                 .as_ref()
                 .map_or(CheckpointWait::Finished, |cycle| cycle())
         };
-        self.run_with(attempt, Instant::now, checkpoint, |duration| {
+        self.run_with(probe, attempt, Instant::now, checkpoint, |duration| {
             #[cfg(test)]
             if let Some(wait) = &self.wait {
                 wait(duration);
@@ -96,8 +83,10 @@ impl CaptureBatchRetry {
         })
     }
 
+    /// `probe` makes one attempt even after the budget is spent.
     fn run_with<T>(
         &self,
+        mut probe: bool,
         mut attempt: impl FnMut() -> Result<T, RuntimeError>,
         now: impl Fn() -> Instant,
         checkpoint: impl Fn() -> CheckpointWait,
@@ -112,7 +101,11 @@ impl CaptureBatchRetry {
                 phase.finish("cancelled");
                 return self.observe(Err(RuntimeError::Cancelled));
             }
-            if self.exhausted(now()) {
+            // Only the ceiling is checked here. The limit is checked after the
+            // store says whether a checkpoint is still running.
+            let spent =
+                self.exhausted.get() || self.ceiling.get().is_some_and(|ceiling| now() >= ceiling);
+            if !std::mem::take(&mut probe) && spent {
                 #[cfg(feature = "harness")]
                 phase.finish("busy-budget-exhausted");
                 return Err(RuntimeError::Storage(StorageError::FileLocked));
@@ -123,18 +116,22 @@ impl CaptureBatchRetry {
                 Err(error) if crate::rpc::error::store_busy(&error) => {
                     #[cfg(feature = "harness")]
                     dohc_engine_storage::capture_phase::count("FileLocked_hits", 1);
-                    let ceiling = self.ceiling.get().unwrap_or_else(|| {
-                        let ceiling = now() + BUSY_RETRY_CEILING;
-                        self.ceiling.set(Some(ceiling));
-                        ceiling
-                    });
-                    let deadline = match (checkpoint(), self.deadline.get()) {
-                        (CheckpointWait::Finished, Some(deadline)) => deadline,
-                        _ => now() + BUSY_RETRY_LIMIT,
-                    };
+                    if self.exhausted.get() {
+                        #[cfg(feature = "harness")]
+                        phase.finish("busy-budget-exhausted");
+                        return Err(error);
+                    }
+                    let busy_at = now();
+                    let ceiling = self.ceiling.get().unwrap_or(busy_at + BUSY_RETRY_CEILING);
+                    let mut deadline = self.deadline.get().unwrap_or(busy_at + BUSY_RETRY_LIMIT);
+                    if matches!(checkpoint(), CheckpointWait::Running) {
+                        deadline = now() + BUSY_RETRY_LIMIT;
+                    }
+                    self.ceiling.set(Some(ceiling));
                     self.deadline.set(Some(deadline));
                     let remaining = deadline.min(ceiling).saturating_duration_since(now());
                     if remaining.is_zero() {
+                        self.exhausted.set(true);
                         #[cfg(feature = "harness")]
                         phase.finish("busy-budget-exhausted");
                         return Err(error);
@@ -193,6 +190,7 @@ mod tests {
             let attempts = Cell::new(0);
             retry
                 .run_with(
+                    false,
                     || {
                         attempts.set(attempts.get() + 1);
                         if attempts.get() == 1 {
@@ -219,6 +217,7 @@ mod tests {
         let attempts = Cell::new(0);
         assert!(matches!(
             retry.run_with(
+                false,
                 || {
                     attempts.set(attempts.get() + 1);
                     if attempts.get() == 1 {
@@ -238,6 +237,7 @@ mod tests {
         attempts.set(0);
         retry
             .run_with(
+                false,
                 || {
                     attempts.set(attempts.get() + 1);
                     if attempts.get() == 1 {
@@ -268,6 +268,7 @@ mod tests {
         for batch in 0..5 {
             assert!(matches!(
                 retry.run_with(
+                    false,
                     || {
                         attempts.set(attempts.get() + 1);
                         Err::<(), _>(RuntimeError::Storage(StorageError::FileLocked))
@@ -296,6 +297,7 @@ mod tests {
         let retry = CaptureBatchRetry::default();
         assert!(matches!(
             retry.run_with(
+                false,
                 || Err::<(), _>(RuntimeError::Storage(StorageError::FileLocked)),
                 || start,
                 || CheckpointWait::Finished,
@@ -314,6 +316,7 @@ mod tests {
         let start = Instant::now();
         let clock = Cell::new(start);
         let result = retry.run_with(
+            false,
             || {
                 if clock.get() - start < until {
                     Err(RuntimeError::Storage(StorageError::FileLocked))
@@ -364,5 +367,85 @@ mod tests {
             Err(RuntimeError::Storage(StorageError::FileLocked))
         ));
         assert_eq!(elapsed, BUSY_RETRY_CEILING);
+    }
+
+    #[test]
+    fn a_late_wake_during_a_running_checkpoint_asks_the_store_again() {
+        let retry = CaptureBatchRetry::default();
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let woke_late = Cell::new(false);
+        retry
+            .run_with(
+                false,
+                || {
+                    if clock.get() - start < Duration::from_secs(7) {
+                        Err(RuntimeError::Storage(StorageError::FileLocked))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || clock.get(),
+                || CheckpointWait::Running,
+                |wait| {
+                    // The sink thread resumes 6 s late once, past the limit.
+                    let late = if woke_late.replace(true) {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(6)
+                    };
+                    clock.set(clock.get() + wait.max(late));
+                },
+            )
+            .unwrap();
+        assert_eq!(clock.get() - start, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn the_wait_for_the_store_counts_against_the_limit() {
+        let retry = CaptureBatchRetry::default();
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let asked = Duration::from_millis(100);
+        assert!(matches!(
+            retry.run_with(
+                false,
+                || Err::<(), _>(RuntimeError::Storage(StorageError::FileLocked)),
+                || clock.get(),
+                || {
+                    clock.set(clock.get() + asked);
+                    CheckpointWait::Finished
+                },
+                |wait| clock.set(clock.get() + wait),
+            ),
+            Err(RuntimeError::Storage(StorageError::FileLocked))
+        ));
+        assert!(clock.get() - start < BUSY_RETRY_LIMIT + asked);
+    }
+
+    #[test]
+    fn a_single_file_probe_starts_the_ceiling() {
+        let retry = CaptureBatchRetry::default();
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let attempts = Cell::new(0);
+        assert!(matches!(
+            retry.run_with(
+                true,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    if attempts.get() == 2 {
+                        // The second actor attempt takes 4 s to answer.
+                        clock.set(clock.get() + Duration::from_secs(4));
+                    }
+                    Err::<(), _>(RuntimeError::Storage(StorageError::FileLocked))
+                },
+                || clock.get(),
+                || CheckpointWait::Running,
+                |wait| clock.set(clock.get() + wait),
+            ),
+            Err(RuntimeError::Storage(StorageError::FileLocked))
+        ));
+        assert_eq!(clock.get() - start, BUSY_RETRY_CEILING);
     }
 }

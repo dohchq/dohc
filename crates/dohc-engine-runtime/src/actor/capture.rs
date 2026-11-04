@@ -1604,19 +1604,6 @@ impl ActorHandle {
         result
     }
 
-    /// The store's bounded wait for its next checkpoint cycle, for a capture
-    /// retry that must tell a running checkpoint from steady contention.
-    pub fn checkpoint_cycle_blocking(
-        &self,
-    ) -> Result<Arc<dyn Fn() -> dohc_engine_storage::CheckpointWait + Send + Sync>, RuntimeError>
-    {
-        self.run_blocking(|store, _cache| {
-            let wait: Arc<dyn Fn() -> dohc_engine_storage::CheckpointWait + Send + Sync> =
-                Arc::new(store.checkpoint_cycle());
-            Ok(wait)
-        })
-    }
-
     /// Capture a binary file on the actor's writer, blocking the caller.
     pub fn capture_ingest_binary_blocking(
         &self,
