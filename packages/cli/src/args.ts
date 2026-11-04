@@ -936,7 +936,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
       { field: "reviewToken", from: "deletePreview", path: "reviewToken" },
     ],
     notes: [
-      "Archive the Collection first with dohc dataset archive.",
+      "Archive the Collection first with dohc dataset archive. Then run deletePreview, since archiving makes an earlier preview stale.",
       "This removes the Collection's private data and history.",
       "Set acknowledge to true.",
       "Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.",
