@@ -805,7 +805,7 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn an_empty_seed_edited_back_to_empty_cannot_be_retired() {
+    fn a_resolution_that_cannot_fold_retires_an_empty_seed_edited_back_to_empty() {
         let (_scratch, mut store, mut cache) = fixture();
         let path = "tasks/empty.md";
         let key = seed(&mut store, &mut cache, path, "");
@@ -833,21 +833,13 @@ mod collection_adoption_update_tests {
                 6,
             )
         });
+        // The lineage was never shared and projects no text, so retiring it
+        // loses nothing. The next open seeds from the chosen file.
+        assert!(result.is_ok(), "{result:?}");
         assert!(
-            matches!(
-                result,
-                Err(dohc_engine_sync::SyncError::InvalidInput {
-                    reason: "ydoc-resolution-not-representable"
-                })
-            ),
-            "{result:?}"
-        );
-        assert_eq!(
             dohc_engine_collab::read_marker(&store, &key)
                 .unwrap()
-                .unwrap()
-                .head_update_seq,
-            3
+                .is_none()
         );
     }
 

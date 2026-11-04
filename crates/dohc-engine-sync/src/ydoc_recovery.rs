@@ -799,7 +799,8 @@ pub(crate) fn create_recovery_in_tx(
 /// Keep text a closed lineage holds but never settled as an ordinary sibling
 /// of `original_path`, before a local write folds the lineage onto other
 /// text. The identity derives from the lineage and the text, so a write
-/// retried after a rollback lands on the same sibling.
+/// retried after a rollback lands on the same sibling. Text this lineage
+/// already recovered is in History, so it gives `None` instead of a copy.
 pub(crate) fn recover_unsettled_local_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -808,7 +809,7 @@ pub(crate) fn recover_unsettled_local_in_tx(
     markdown: &str,
     author_json: Option<&str>,
     now_ms: i64,
-) -> Result<CreatedRecovery, SyncError> {
+) -> Result<Option<CreatedRecovery>, SyncError> {
     // The identity and path helpers key on a 64-hex claim. An unclaimed local
     // lineage has none, so its coordinates stand in.
     let claim = lineage_claim_id.map_or_else(
@@ -824,6 +825,21 @@ pub(crate) fn recover_unsettled_local_in_tx(
         str::to_owned,
     );
     let correlation = format!("{LOCAL_RECOVERY_CORRELATION_PREFIX}{claim}");
+    let recovered: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM moments \
+               WHERE workspace_id=?1 AND metadata_correlation_id=?2 AND after_blob_sha256=?3)",
+            params![
+                key.workspace_id,
+                correlation,
+                dohc_engine_storage::hex_sha256(markdown.as_bytes()),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if recovered {
+        return Ok(None);
+    }
     let search_policy = search_policy_for_connection(tx);
     create_recovery_with_correlation_in_tx(
         tx,
@@ -838,6 +854,7 @@ pub(crate) fn recover_unsettled_local_in_tx(
         author_json,
         RecoveryCause::LocalUnsettled,
     )
+    .map(Some)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -266,7 +266,7 @@ fn settle(
             envelope,
             &payload,
             search_policy,
-            MomentApplyMode::Ordinary(tails),
+            MomentApplyMode::Ordinary(tails, None),
             false,
             None,
             None,

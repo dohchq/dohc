@@ -1846,7 +1846,7 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         scene_result,
         now_ms,
     } = replacement;
-    validate_successor_base(successor, scene_result)?;
+    let successor_doc = validate_successor_base(successor, scene_result)?;
     if successor.predecessor_state_vector_sha256 != expected_predecessor_state_vector_sha256 {
         return Err(CollabError::InvalidSuccessorBase {
             constraint: "predecessor state vector matches the successor CAS",
@@ -2012,6 +2012,18 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         ],
     )
     .map_err(map_sql)?;
+    if successor.content_kind == ContentKind::Richdoc {
+        dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &successor_doc.frontmatter_json(),
+        )
+        .map_err(|error| CollabError::Corrupt {
+            reason: format!("collection successor index update failed: {error}"),
+        })?;
+    }
     Ok(SuccessorInstallOutcome::Installed {
         predecessor_claim_id: expected_predecessor_claim_id.to_owned(),
         successor_claim_id: successor.lineage_claim_id.clone(),
@@ -2131,7 +2143,7 @@ fn load_exact_active_lineage(
 fn validate_successor_base(
     successor: &SuccessorBase,
     scene_result: Option<&str>,
-) -> Result<(), CollabError> {
+) -> Result<Ydoc, CollabError> {
     validate_update_bytes(&successor.update)?;
     let observed_claim = crate::hex_sha256(&successor.update);
     if observed_claim != successor.lineage_claim_id {
@@ -2228,7 +2240,7 @@ fn validate_successor_base(
             observed: observed_result,
         });
     }
-    Ok(())
+    Ok(doc)
 }
 
 /// A bounded replay cache borrowed from one transaction, never retained by its writer.

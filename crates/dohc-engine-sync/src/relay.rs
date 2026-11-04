@@ -2929,8 +2929,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
                 // ready, so the pass still commits and releases other work.
-                let unretained =
-                    crate::deferred::retain(store, identity, relay_namespace, &retained, faults)?;
+                // An origin a conflict holds says which conflict to resolve
+                // if its work passes the limit.
+                let conflict_waits: BTreeMap<String, Option<String>> = p
+                    .retryable_refusals
+                    .iter()
+                    .filter(|(_, reason)| *reason == crate::moment_apply::RESOLVE_EXISTING_CONFLICT)
+                    .map(|&(index, _)| {
+                        let op = &ordered[index];
+                        let path = op.payload["beforePath"]
+                            .as_str()
+                            .or(op.payload["path"].as_str());
+                        (op.origin_id.clone(), path.map(str::to_owned))
+                    })
+                    .collect();
+                let unretained = crate::deferred::retain_waiting(
+                    store,
+                    identity,
+                    relay_namespace,
+                    &retained,
+                    &conflict_waits,
+                    faults,
+                )?;
                 for op in retained {
                     if let Some(object_id) = crate::hosted::hosted_document(op)
                         .filter(|object_id| unretained.contains(*object_id))
@@ -5156,12 +5176,14 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past
-/// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to park. A hosted document that is not
-/// ready retains nothing.
+/// it: work behind a live session or an open conflict the person resolves,
+/// and a hosted moment or Y.Doc row whose path waits for a departed document
+/// to park. A hosted document that is not ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
-        crate::hosted::PATH_HELD_BY_DEPARTED => true,
+        crate::hosted::PATH_HELD_BY_DEPARTED | crate::moment_apply::RESOLVE_EXISTING_CONFLICT => {
+            true
+        }
         "ydoc-session-live" => {
             matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
         }
@@ -5240,6 +5262,7 @@ impl Holding {
                 crate::hosted::CONFLICT_PARENT_WITHHELD
                     | crate::hosted::PATH_HELD_IN_SCOPE
                     | crate::hosted::RELEASED_LINEAGE_UNSETTLED
+                    | crate::moment_apply::RESOLVE_EXISTING_CONFLICT
                     | "ydoc-resulting-head-pending"
             )
             && let Some(object_id) = crate::hosted::hosted_document(op)
