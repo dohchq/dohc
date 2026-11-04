@@ -990,9 +990,12 @@ pub fn compare_secret_files_page_keyless(
         for row in rows {
             let (t_path, t_iv, t_tag, t_ct, t_len, s_path, s_iv, s_tag, s_ct, s_len) =
                 row.map_err(DomainError::sql_corrupt)?;
-            let path = t_path.as_ref().or(s_path.as_ref()).ok_or(DomainError::StateCorrupt {
-                reason: "secret comparison row has no path",
-            })?;
+            let path = t_path
+                .as_ref()
+                .or(s_path.as_ref())
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "secret comparison row has no path",
+                })?;
             rows_fetched += 1;
             last_scanned_path = Some(path.clone());
             match (&t_path, &s_path) {
@@ -1012,18 +1015,38 @@ pub fn compare_secret_files_page_keyless(
                         reason: "secret comparison needs a missing data key",
                     })?;
                     let target = SealedSecret::from_base64(
-                        t_iv.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
-                        t_tag.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
-                        t_ct.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
-                        usize::try_from(t_len.ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?)
-                            .map_err(|_| DomainError::StateCorrupt { reason: "secret tip has a negative byte length" })?,
+                        t_iv.as_deref().ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?,
+                        t_tag.as_deref().ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?,
+                        t_ct.as_deref().ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?,
+                        usize::try_from(t_len.ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?)
+                        .map_err(|_| DomainError::StateCorrupt {
+                            reason: "secret tip has a negative byte length",
+                        })?,
                     )?;
                     let source = SealedSecret::from_base64(
-                        s_iv.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
-                        s_tag.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
-                        s_ct.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
-                        usize::try_from(s_len.ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?)
-                            .map_err(|_| DomainError::StateCorrupt { reason: "secret tip has a negative byte length" })?,
+                        s_iv.as_deref().ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?,
+                        s_tag.as_deref().ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?,
+                        s_ct.as_deref().ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?,
+                        usize::try_from(s_len.ok_or(DomainError::StateCorrupt {
+                            reason: "secret tip is incomplete",
+                        })?)
+                        .map_err(|_| DomainError::StateCorrupt {
+                            reason: "secret tip has a negative byte length",
+                        })?,
                     )?;
                     if aead::open(key, workspace_id, path, &target)?.as_bytes()
                         != aead::open(key, workspace_id, path, &source)?.as_bytes()
@@ -1039,7 +1062,9 @@ pub fn compare_secret_files_page_keyless(
         }
         Ok(SecretComparePage {
             entries,
-            next_after_path: (rows_fetched == limit).then_some(last_scanned_path).flatten(),
+            next_after_path: (rows_fetched == limit)
+                .then_some(last_scanned_path)
+                .flatten(),
         })
     })
 }
