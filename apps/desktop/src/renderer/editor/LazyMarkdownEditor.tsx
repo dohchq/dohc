@@ -52,22 +52,26 @@ export function preloadMarkdownEditor(): void {
 
 function liveEditorSettled(): boolean {
   return (
-    markdownEditorLoad.status !== "loading" &&
-    currentCollaborationExtensionsLoad().status !== "loading"
+    markdownEditorLoad.status === "failed" ||
+    (markdownEditorLoad.status === "ready" &&
+      currentCollaborationExtensionsLoad().status !== "loading")
   );
 }
 
 /** Whether a live note's editor can mount without loading rows: its code and
  *  the collaboration code have loaded, or one of them failed and the editor
- *  shows that failure. */
+ *  shows that failure. A failed editor shows it without waiting for the
+ *  collaboration code. */
 export function useLiveEditorSettled(wanted: boolean): boolean {
   const [settled, setSettled] = useState(liveEditorSettled);
   useEffect(() => {
     if (!wanted || settled) return;
     let current = true;
-    void Promise.allSettled([loadMarkdownEditor(), loadCollaborationExtensions()]).then(() => {
-      if (current) setSettled(true);
-    });
+    const settle = () => {
+      if (current && liveEditorSettled()) setSettled(true);
+    };
+    loadMarkdownEditor().then(settle, settle);
+    loadCollaborationExtensions().then(settle, settle);
     return () => {
       current = false;
     };
