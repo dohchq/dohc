@@ -18,10 +18,9 @@ sealed class FakeJob : IProbeJob {
     readonly int assign;
     readonly int[] terminate;
     readonly long[] query;
-    readonly Stopwatch clock = Stopwatch.StartNew();
     int terminated, queried;
-    // Milliseconds from creation to the first termination, or -1.
-    public long FirstTerminateMs = -1;
+    // Runs on the first termination, as a real job would end its processes then.
+    public Action FirstTerminate;
 
     public FakeJob(int assign, int[] terminate, long[] query) {
         this.assign = assign; this.terminate = terminate; this.query = query;
@@ -29,7 +28,7 @@ sealed class FakeJob : IProbeJob {
     public int Assign(IntPtr process) { Calls.Add("assign"); return assign; }
     public int Terminate() {
         Calls.Add("terminate");
-        if (FirstTerminateMs < 0) FirstTerminateMs = clock.ElapsedMilliseconds;
+        if (terminated == 0 && FirstTerminate != null) FirstTerminate();
         return terminate[Math.Min(terminated++, terminate.Length - 1)];
     }
     public int QueryActive(out uint active) {
@@ -130,13 +129,27 @@ static class AgentProbeOwnerTests {
             new FakeJob(0, new[] { 0 }, new long[] { 0 }), stdout);
         Check(code == 0 && Encoding.UTF8.GetString(stdout.ToArray()) == "the prompt", "a run's input reaches its command's stdin");
 
-        // The command exits at once and leaves a process that holds its output for 10 seconds.
+        // The command exits at once and leaves a process that holds its output until the job ends it.
         // Detached keeps that process out of the command's libuv job, which would end it with the command.
-        string leaves = "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { stdio: 'inherit', detached: true }).unref()";
+        // A process the job doesn't end removes its pid file and exits after 30 seconds, so a failing check
+        // finds no pid file and ends nothing else.
+        string holder = Path.Combine(scratch, "holder");
+        string leaves = "const held = require('child_process').spawn(process.execPath, " +
+            "['-e', 'setTimeout(() => require(\"fs\").unlinkSync(process.argv[1]), 30000)', process.argv[1]], " +
+            "{ stdio: 'inherit', detached: true }); require('fs').writeFileSync(process.argv[1], String(held.pid)); held.unref()";
         FakeJob left = new FakeJob(0, new[] { 0 }, new long[] { 0 });
-        code = Run(node, relay, Admission(node, scratch, "[\"-e\"," + Json(leaves) + "]", null), never, left, new MemoryStream());
-        Check(code == 0 && left.FirstTerminateMs >= 0 && left.FirstTerminateMs < 5000,
-            "the job ends what a command leaves running once the command exits (first termination at " + left.FirstTerminateMs + " ms)");
+        bool heldAtTermination = false;
+        left.FirstTerminate = () => {
+            try {
+                using (Process held = Process.GetProcessById(int.Parse(File.ReadAllText(holder)))) {
+                    held.Kill();
+                    heldAtTermination = true;
+                }
+            } catch (Exception) { } // Gone already: it released the output before the termination.
+        };
+        code = Run(node, relay, Admission(node, scratch, "[\"-e\"," + Json(leaves) + "," + Json(holder) + "]", null), never, left, new MemoryStream());
+        Check(code == 0 && heldAtTermination,
+            "the job ends what a command leaves running once the command exits, while it still holds the output");
 
         return failures == 0 ? 0 : 1;
     }
