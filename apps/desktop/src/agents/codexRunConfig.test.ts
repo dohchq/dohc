@@ -107,7 +107,7 @@ describe("a dohc Codex run", () => {
       rootPath: "C:\\Users\\Sam\\dohc\\personal", runId: "run_1", platform: "win32", files: { requirements: [], config: [SYSTEM, USER] }, readOnly: true, replyOnly: true, realPath: (path) => path,
       readConfig: (path) => ({
         [SYSTEM]: "[mcp_servers.org-docs]\ncommand = 'docs'\n",
-        [USER]: "notify = ['notifier']\n[mcp_servers.github]\ncommand = 'gh'\n[mcp_servers.org-docs]\nenabled = true\n[mcp_servers.dohc]\ncommand = 'old'\n",
+        [USER]: "notify = ['notifier']\napprovals_reviewer = 'auto_review'\n[mcp_servers.github]\ncommand = 'gh'\n[mcp_servers.org-docs]\nenabled = true\n[mcp_servers.dohc]\ncommand = 'old'\n",
       })[path] ?? missing(path),
     });
     const profile = entry(entries, "default_permissions=")!.slice("default_permissions=".length);
@@ -120,6 +120,7 @@ describe("a dohc Codex run", () => {
       "--config", "web_search='disabled'",
       "--config", "notify=[]",
       "--config", "agents.enabled=false",
+      "--config", "approvals_reviewer='user'",
       "--config", "projects={'c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'},'\\\\?\\c:\\users\\sam\\dohc\\personal'={trust_level='untrusted'}}",
       "--config", "windows.sandbox='unelevated'",
       "--config", "windows.allow_mxc=false",

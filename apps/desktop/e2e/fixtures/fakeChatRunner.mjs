@@ -109,10 +109,10 @@ function codexReplyServer(args) {
   const owners = [...config.keys()].filter((key) => /^mcp_servers\.[\w-]+\.enabled$/u.test(key));
   const tail = readOnly ? ["--ignore-rules", ...CODEX_TAIL] : CODEX_TAIL;
   const sandbox = process.platform === "win32" && (readOnly || config.has("windows.sandbox")) ? ["windows.sandbox", ...(readOnly ? ["windows.allow_mxc"] : [])] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled"] : []), "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"] : []), "projects", ...sandbox];
   if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
     owners.some((key) => key === "mcp_servers.dohc.enabled" || config.get(key) !== "false") ||
-    (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]" || config.get("agents.enabled") !== "false"))) {
+    (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]" || config.get("agents.enabled") !== "false" || config.get("approvals_reviewer") !== "'user'"))) {
     return null;
   }
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
