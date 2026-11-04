@@ -1,4 +1,4 @@
-import { isCodeBlockNode, normalizeLanguage } from "./pmHelpers";
+import { documentChange, isCodeBlockNode, normalizeLanguage } from "./pmHelpers";
 // Syntax highlighting inside WYSIWYG code blocks — a ProseMirror decoration
 // plugin, deliberately not a schema/nodeView change. The `codeBlock` schema
 // is contract-locked across the desktop and workspace-api packages (see
@@ -117,10 +117,36 @@ export function highlightSpans(language: string, text: string): HighlightSpan[] 
 
 type CodeHighlightRange = { from: number; to: number; className: string }
 
-/** Pure: walk the doc, resolve each codeBlock's spans (via `cache` when the
- *  node object is unchanged — ProseMirror nodes are immutable, so a cache
- *  hit means both identity and content are unchanged) and return absolute
- *  doc-coordinate ranges. */
+/** Adds one codeBlock's ranges, with its spans from `cache` when the node
+ *  object is unchanged — ProseMirror nodes are immutable, so a cache hit
+ *  means both identity and content are unchanged. */
+function addBlockRanges(
+  node: ProseMirrorNode,
+  pos: number,
+  cache: WeakMap<ProseMirrorNode, HighlightSpan[]>,
+  ranges: CodeHighlightRange[],
+): void {
+  if (!isCodeBlockNode(node)) return
+  const language = normalizeLanguage(node.attrs.language)
+  if (!isHighlightableLanguage(language)) return
+  const text = node.textContent
+  if (text.length === 0 || text.length > MAX_HIGHLIGHT_CHARS) return
+
+  let spans = cache.get(node)
+  if (!spans) {
+    spans = highlightSpans(language, text)
+    cache.set(node, spans)
+  }
+
+  const blockStart = pos + 1
+  for (const span of spans) {
+    if (span.end <= span.start) continue
+    ranges.push({ from: blockStart + span.start, to: blockStart + span.end, className: span.className })
+  }
+}
+
+/** Pure: walk the doc and return every codeBlock's absolute doc-coordinate
+ *  ranges. */
 export function computeCodeHighlightRanges(
   doc: ProseMirrorNode,
   cache: WeakMap<ProseMirrorNode, HighlightSpan[]>,
@@ -128,53 +154,41 @@ export function computeCodeHighlightRanges(
   const ranges: CodeHighlightRange[] = []
   doc.descendants((node, pos) => {
     if (!isCodeBlockNode(node)) return !node.isTextblock // inline content holds no codeBlock
-    const language = normalizeLanguage(node.attrs.language)
-    if (!isHighlightableLanguage(language)) return false
-    const text = node.textContent
-    if (text.length === 0 || text.length > MAX_HIGHLIGHT_CHARS) return false
-
-    let spans = cache.get(node)
-    if (!spans) {
-      spans = highlightSpans(language, text)
-      cache.set(node, spans)
-    }
-
-    const blockStart = pos + 1
-    for (const span of spans) {
-      if (span.end <= span.start) continue
-      ranges.push({ from: blockStart + span.start, to: blockStart + span.end, className: span.className })
-    }
+    addBlockRanges(node, pos, cache, ranges)
     return false // codeBlock content is plain text — nothing more to descend into
   })
   return ranges
 }
 
-function buildHighlightDecorations(
-  doc: ProseMirrorNode,
-  cache: WeakMap<ProseMirrorNode, HighlightSpan[]>,
-): DecorationSet {
-  const decorations = computeCodeHighlightRanges(doc, cache).map((range) =>
-    Decoration.inline(range.from, range.to, { class: range.className }),
-  )
-  return DecorationSet.create(doc, decorations)
+function highlightDecorations(ranges: CodeHighlightRange[]): Decoration[] {
+  return ranges.map((range) => Decoration.inline(range.from, range.to, { class: range.className }))
 }
 
 /** Build the plugin. A fresh WeakMap per instance caches lowlight's (fairly
- *  expensive) tokenizer pass per codeBlock node object — since codeBlock
- *  nodes are immutable, editing one block or changing its language produces
- *  a new node object for that block only, so unaffected blocks reuse their
- *  cached spans on every doc change instead of re-tokenizing. */
+ *  expensive) tokenizer pass per codeBlock node object, so an unchanged
+ *  block inside a changed range isn't tokenized again. */
 export function makeCodeHighlightPlugin() {
   const cache = new WeakMap<ProseMirrorNode, HighlightSpan[]>()
   return new Plugin({
     key: codeHighlightKey,
     state: {
       init(_, instance) {
-        return buildHighlightDecorations(instance.doc, cache)
+        return DecorationSet.create(instance.doc, highlightDecorations(computeCodeHighlightRanges(instance.doc, cache)))
       },
+      // Only the code blocks the transaction changed are highlighted again;
+      // the rest of the note's spans move with the edit.
       apply(tr, old) {
-        if (!tr.docChanged) return old.map(tr.mapping, tr.doc)
-        return buildHighlightDecorations(tr.doc, cache)
+        if (!tr.docChanged) return old
+        const { textblocks, mapping } = documentChange(tr.before, tr.doc)
+        const decorations = old.map(mapping, tr.doc)
+        const first = textblocks[0]
+        const last = textblocks.at(-1)
+        if (!first || !last) return decorations
+        const ranges: CodeHighlightRange[] = []
+        for (const { node, pos } of textblocks) addBlockRanges(node, pos, cache, ranges)
+        return decorations
+          .remove(decorations.find(first.pos + 1, last.pos + last.node.nodeSize - 1))
+          .add(tr.doc, highlightDecorations(ranges))
       },
     },
     props: {
