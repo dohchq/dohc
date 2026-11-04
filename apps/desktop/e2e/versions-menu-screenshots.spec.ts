@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { editorTabTestId } from "../src/testPins";
@@ -19,10 +19,10 @@ import {
 // a notice with Try again, and a failed merge in its dialog, with Details; each
 // merge stage, with and without the protected files a merge replaced; a merge
 // whose dialog closed while it ran, answering as a toast and a Notices row; the
-// Versions page with a conflict waiting, and its tooltip; the save-first
-// confirm; and keyboard focus on the disabled Merge row. Light and dark. Not a
-// regression test; it runs only when a shot directory is set, the way
-// ui-audit-screenshots.spec.ts does.
+// Versions page with a conflict waiting, at rest and under the pointer; the
+// save-first confirm; and keyboard focus on the disabled Merge row. Light and
+// dark. Not a regression test; it runs only when a shot directory is set, the
+// way ui-audit-screenshots.spec.ts does.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture versions menu screenshots");
 
@@ -114,32 +114,6 @@ async function shootParts(page: Page, name: string, parts: Locator[]): Promise<v
     await page.screenshot({ path: join(SHOT_DIR, `${name}-${theme}.png`), clip: { x: left, y: top, width: right - left, height: bottom - top } });
   }
   await setTheme(page, "light");
-}
-
-// The screen under the page's window, as PNG bytes. A native tooltip is a
-// window of its own, which page.screenshot never sees, so main captures it.
-async function screenUnderWindow(desktop: Desktop): Promise<Buffer> {
-  const windowId = await (await desktop.app.browserWindow(desktop.page)).evaluate((win) => win.id);
-  const base64 = await desktop.app.evaluate(async ({ BrowserWindow, desktopCapturer, screen }, id) => {
-    const win = BrowserWindow.fromId(id);
-    if (!win) throw new Error("the page's window is gone");
-    const bounds = win.getBounds();
-    const display = screen.getDisplayMatching(bounds);
-    const scale = display.scaleFactor;
-    const sources = await desktopCapturer.getSources({
-      types: ["screen"],
-      thumbnailSize: { width: Math.round(display.size.width * scale), height: Math.round(display.size.height * scale) },
-    });
-    const source = sources.find((item) => item.display_id === String(display.id)) ?? sources[0];
-    if (!source || source.thumbnail.isEmpty()) throw new Error("no screen to capture");
-    const size = source.thumbnail.getSize();
-    const x = Math.max(0, Math.round((bounds.x - display.bounds.x) * scale));
-    const y = Math.max(0, Math.round((bounds.y - display.bounds.y) * scale));
-    const width = Math.min(Math.round(bounds.width * scale), size.width - x);
-    const height = Math.min(Math.round(bounds.height * scale), size.height - y);
-    return source.thumbnail.crop({ x, y, width, height }).toPNG().toString("base64");
-  }, windowId);
-  return Buffer.from(base64, "base64");
 }
 
 async function shootMenu(page: Page, name: string): Promise<void> {
@@ -398,21 +372,13 @@ test("@ui-audit the versions menu and what it opens", async () => {
       .filter({ has: page.getByTestId("versions-page-name").getByText("Draft", { exact: true }) })
       .getByTestId("versions-page-conflicts");
     await expect(toDecide).toHaveText("1 to decide", { timeout: 30_000 });
+    await expect(toDecide).toHaveAttribute("title", "Open the conflicts");
     await page.mouse.move(4, 400);
     await shootWindow(page, "versions-page-conflicts");
-    for (const theme of ["light", "dark"] as const) {
-      await setTheme(page, theme);
-      await page.mouse.move(4, 400);
-      await toDecide.hover();
-      // A native tooltip shows after a delay the page can't observe.
-      await page.waitForTimeout(1_500);
-      try {
-        await writeFile(join(SHOT_DIR, `versions-page-conflicts-tooltip-${theme}.png`), await screenUnderWindow(app));
-      } catch (error) {
-        test.info().annotations.push({ type: "warning", description: `tooltip shot (${theme}): ${String(error)}` });
-      }
-    }
-    await setTheme(page, "light");
+    // The button under the pointer. Its native tooltip never shows here,
+    // because e2e windows take no OS mouse input.
+    await toDecide.hover();
+    await shootWindow(page, "versions-page-conflicts-hover");
     await page.mouse.move(4, 400);
     const versionsTab = page.getByTestId(editorTabTestId("tab://versions"));
     await versionsTab.hover();

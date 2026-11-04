@@ -216,7 +216,7 @@ describe("VersionMenu", () => {
     renderMenu();
     await openOn(user, "Main");
     await user.click(screen.getByTestId("version-new"));
-    expect(descriptionOf(screen.getByTestId("version-new-input"))).toBe(`Starts from Main ${same}`);
+    expect(descriptionOf(screen.getByTestId("version-new-input"))).toBe(`Starts from Main. ${same}`);
     expect(screen.getByTestId("version-new-same").textContent).toBe(same);
   });
 

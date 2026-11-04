@@ -442,7 +442,8 @@ test("a version merges cleanly a second time after it changes the same lines aga
       .poll(() => engineSnapshotText(temp.rootPath, "main", "plan.md"), { timeout: 30_000 })
       .toBe("first\n");
     await createVersionViaMenu(page, "Draft");
-    const draftId = engineVersionIdByName(temp.rootPath, "Draft") ?? "";
+    const draftId = engineVersionIdByName(temp.rootPath, "Draft");
+    if (draftId === null) throw new Error("the engine has no version named Draft");
 
     const editAndMerge = async (contents: string) => {
       await writeWorkspaceFiles(temp, [{ path: "plan.md", contents }]);

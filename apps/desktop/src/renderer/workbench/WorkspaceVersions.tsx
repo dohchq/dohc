@@ -777,13 +777,15 @@ export const SAME_IN_EVERY_VERSION =
 // Where a new version starts: it forks from the version you're in. Before the
 // first version, a second line says what every version leaves alone.
 export function NewVersionHint(props: { versions: Pick<WorkspaceVersions, "active" | "onMain">; first?: boolean }) {
-  const start = props.versions.onMain
-    ? <>Starts from Main</>
-    : <>Starts from <span className="font-medium">{props.versions.active?.name ?? "Main"}</span>, so it can't merge into Main.</>;
-  if (!props.first) return start;
+  if (!props.versions.onMain) {
+    return <>Starts from <span className="font-medium">{props.versions.active?.name ?? "Main"}</span>, so it can't merge into Main.</>;
+  }
+  if (!props.first) return <>Starts from Main</>;
+  // A screen reader reads the hint as one run, so a hidden full stop ends the
+  // first line's sentence.
   return (
     <>
-      {start}{" "}
+      Starts from Main<span className="sr-only">.</span>{" "}
       <span data-testid="version-new-same" className="block text-muted">{SAME_IN_EVERY_VERSION}</span>
     </>
   );
