@@ -6505,6 +6505,98 @@ fn file_successor_of_history_only_artifact_adopts_the_local_preimage() {
     assert_eq!(before, "local-head");
 }
 
+/// A conflict that names the history-only predecessor as its incoming side
+/// holds it only while the conflict is open. After a resolution, a successor
+/// of the equal preimage adopts the local head. An unequal preimage never does.
+#[test]
+fn file_successor_of_a_resolved_conflicts_incoming_side_adopts_the_local_preimage() {
+    for (status, before_text, adopts) in [
+        ("resolved", "agreed", true),
+        ("open", "agreed", false),
+        ("resolved", "other", false),
+    ] {
+        let label = format!("status={status} before={before_text}");
+        let (_scratch, mut store) = test_store();
+        seed_text_moment(
+            &mut store,
+            "object",
+            "same.md",
+            "agreed",
+            "local-head",
+            None,
+            true,
+        );
+        hydrate_texts(&mut store, &["next", "other"]);
+        let artifact = envelope(
+            "peer",
+            0,
+            "ws",
+            absent_text_payload("remote-artifact", "object", "same.md", "agreed"),
+        );
+        apply_moment_envelope(&mut store, &artifact, &NoFaults).unwrap();
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "INSERT INTO conflicts (workspace_id,conflict_id,path,target_version_id,\
+                     source_version_id,created_at_ms,updated_at_ms,status,chosen_from,\
+                     metadata_origin,base_exists,base_path,current_exists,current_path,\
+                     current_object_id,current_content_kind,current_blob_sha256,\
+                     current_latest_moment_id,incoming_exists,incoming_path,incoming_object_id,\
+                     incoming_content_kind,incoming_blob_sha256,incoming_latest_moment_id) \
+                     VALUES ('ws','conflict-artifact','same.md','main','main',1,1,?1,'incoming',\
+                     'sync',0,'same.md',1,'same.md','object','text',?2,'local-head',\
+                     1,'same.md','object','text',?2,'remote-artifact')",
+                    params![status, text_sha("agreed")],
+                )
+            })
+            .unwrap();
+        let next = envelope(
+            "peer",
+            1,
+            "ws",
+            present_text_payload(
+                "remote-next",
+                "object",
+                "write",
+                "same.md",
+                "same.md",
+                before_text,
+                "remote-artifact",
+                "next",
+            ),
+        );
+        apply_moment_envelope(&mut store, &next, &NoFaults).expect(&label);
+        let head = snapshot(&store, "object").unwrap().3;
+        if adopts {
+            assert_eq!(head, "remote-next", "{label}");
+            let before: String = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT before_latest_moment_id FROM moments \
+                         WHERE moment_id='remote-next'",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(before, "local-head", "{label}");
+        } else {
+            assert_eq!(head, "local-head", "{label}");
+            assert!(
+                store
+                    .read_with(|conn| conn.query_row(
+                        "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    ))
+                    .unwrap()
+                    >= 1,
+                "{label}"
+            );
+        }
+    }
+}
+
 #[test]
 fn moment_append_same_bytes_at_a_different_path_conflicts_instead_of_converging() {
     let (_scratch, mut store) = test_store();

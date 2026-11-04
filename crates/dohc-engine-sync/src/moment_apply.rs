@@ -1034,7 +1034,8 @@ fn apply_moment_append(
 
     // A text write or move that is not a Y.Doc settlement comes with no
     // rewrite of this object's lineage. Decide before the moment writes
-    // anything whether the lineage settles, retires, or meets it in a conflict.
+    // anything whether the lineage settles, retires, is archived, or meets it
+    // in a conflict. Only a write that continues the head can archive it.
     let ydoc_decision = if mode.ordinary()
         && protected.is_none()
         && owner_settlement.is_none()
@@ -1058,12 +1059,18 @@ fn apply_moment_append(
             reason: "moment.append Y.Doc coordinates are invalid",
         })?;
         let complete = crate::ydoc_apply::ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
+        let continues_head = payload.operation == "write"
+            && snapshot.path == payload.payload_after_path
+            && (Some(snapshot.latest_moment_id.as_str())
+                == payload.before_latest_moment_id.as_deref()
+                || recorded_preimage);
         let decision = crate::ydoc_apply::imported_text_head_in_tx(
             tx,
             &complete,
             &payload.payload_after_path,
             text,
             Some(&snapshot.digest),
+            continues_head,
             mode.resolver(),
         );
         // A diverged file can open a conflict without changing the active binding.
@@ -1112,7 +1119,7 @@ fn apply_moment_append(
         // file the head already holds leaves the lineage's later edits alone.
         if !matches!(
             decision,
-            ImportedTextHead::Settle | ImportedTextHead::Retire
+            ImportedTextHead::Settle | ImportedTextHead::Retire | ImportedTextHead::Archive { .. }
         ) {
             if same_branch.is_none() {
                 match decision {
@@ -1658,12 +1665,13 @@ fn recorded_preimage_matches(
     }
     // A history-only predecessor never became the head. Its successor adopts
     // the equal local preimage so rollback still returns to the actual head.
+    // An open conflict still holds the predecessor for the person to review.
     tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1 AND m.moment_id=?2 \
          AND m.version_id=?3 AND m.object_id=?4 AND m.operation='write' AND m.sync_record_only=1 \
          AND m.payload_after_path=?5 AND m.payload_after_content_kind=?6 AND m.payload_after_blob_sha256=?7 \
          AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.workspace_id=m.workspace_id \
-           AND c.incoming_latest_moment_id=m.moment_id))",
+           AND c.status='open' AND c.incoming_latest_moment_id=m.moment_id))",
         params![workspace,payload.before_latest_moment_id,payload.version_id,payload.object_id,
             snapshot.path,snapshot.kind.as_str(),snapshot.digest],
         |row| row.get(0),

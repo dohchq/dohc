@@ -4099,7 +4099,7 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
     match resulting {
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, complete),
         ResultingHead::Text { path, text } => {
-            match imported_text_head_in_tx(tx, complete, path, text, None, None)? {
+            match imported_text_head_in_tx(tx, complete, path, text, None, false, None)? {
                 ImportedTextHead::Conflict(_) | ImportedTextHead::Recover(_) => {
                     Err(SyncError::RetryableState {
                         reason: "ydoc-resulting-head-pending",
@@ -4121,6 +4121,14 @@ pub(crate) enum ImportedTextHead {
     /// No one else can hold the lineage's content. Retire it; the next open
     /// seeds a fresh lineage from the file.
     Retire,
+    /// The text continues the head, and the claimed lineage holds exactly
+    /// that head. Archive the lineage, so a late update to it becomes a
+    /// recovery copy. The next open seeds a fresh lineage from the file.
+    Archive {
+        claim_id: String,
+        state_vector_sha256: String,
+        projection_sha256: String,
+    },
     /// The lineage holds other content, which a conflict keeps beside the
     /// text. It names the projection to record as the head, or None when the
     /// head already shows the lineage's side.
@@ -4134,12 +4142,14 @@ pub(crate) enum ImportedTextHead {
 /// Decide what an imported text head does to a closed lineage, before the
 /// moment writes anything. `head_sha256` names the head the text meets.
 /// Without it, the lineage is never treated as a disposable seed.
+/// `continues_head` says the text's predecessor is proven to be that head.
 pub(crate) fn imported_text_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     complete: &CompleteYdocLineage,
     path: &str,
     text: &str,
     head_sha256: Option<&str>,
+    continues_head: bool,
     resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
 ) -> Result<ImportedTextHead, SyncError> {
     let key = &complete.key;
@@ -4173,6 +4183,29 @@ pub(crate) fn imported_text_head_in_tx(
         return Ok(ImportedTextHead::Retire);
     }
     if hex_sha256(projection.content.as_bytes()) == head {
+        // The lineage holds only the head the text continues, so the text
+        // replaces nothing. A lineage under an open conflict waits for it.
+        if continues_head && open_sync_conflict_id(tx, key)?.is_none() {
+            match marker.lineage_claim_status {
+                dohc_engine_collab::LineageClaimStatus::Exact
+                    if lineage_unbound_in_tx(tx, key)? =>
+                {
+                    return Ok(ImportedTextHead::Archive {
+                        claim_id: marker.lineage_claim_id.clone().ok_or_else(|| {
+                            local_corruption("exact Y.Doc lineage has no claim id")
+                        })?,
+                        state_vector_sha256: hex_sha256(&doc.encode_state_vector()),
+                        projection_sha256: head.to_owned(),
+                    });
+                }
+                dohc_engine_collab::LineageClaimStatus::Unclaimed
+                    if empty_seed_never_replicated_in_tx(tx, key)? =>
+                {
+                    return Ok(ImportedTextHead::Retire);
+                }
+                _ => {}
+            }
+        }
         return Ok(ImportedTextHead::Conflict(None));
     }
     // A lossy note's projection replaces its exact source only when the
@@ -4195,7 +4228,8 @@ pub(crate) fn imported_text_head_in_tx(
     Ok(ImportedTextHead::Conflict(Some(projection.content)))
 }
 
-/// Settle or retire the lineage as `decision` says. A conflict leaves it.
+/// Settle, retire, or archive the lineage as `decision` says. A conflict
+/// leaves it.
 pub(crate) fn apply_imported_text_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     complete: &CompleteYdocLineage,
@@ -4209,10 +4243,37 @@ pub(crate) fn apply_imported_text_head_in_tx(
             settle_ydoc_marker_to_text(tx, &complete.key, path, text, now_ms)
         }
         ImportedTextHead::Retire => retire_complete_ydoc_lineage_in_tx(tx, complete),
+        ImportedTextHead::Archive {
+            claim_id,
+            state_vector_sha256,
+            projection_sha256,
+        } => dohc_engine_collab::archive_active_lineage_in_tx(
+            tx,
+            &complete.key,
+            claim_id,
+            state_vector_sha256,
+            Some(projection_sha256.as_str()),
+            now_ms,
+        )
+        .map_err(map_collab_hard_error),
         ImportedTextHead::Settle | ImportedTextHead::Conflict(_) | ImportedTextHead::Recover(_) => {
             Ok(())
         }
     }
+}
+
+/// Whether no owner or live device binding names the object. An archive
+/// would leave a binding naming a lineage that is gone.
+fn lineage_unbound_in_tx(tx: &rusqlite::Transaction<'_>, key: &DocKey) -> Result<bool, SyncError> {
+    tx.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 \
+           AND main_version_id=?2 AND object_id=?3) \
+         AND NOT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 \
+           AND main_version_id=?2 AND object_id=?3)",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// Whether the lineage is still this device's untouched seed of the head,
