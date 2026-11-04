@@ -358,7 +358,7 @@ describe("registered received-view handlers", () => {
     const h = await harness(); h.reconcile.mockResolvedValue({ kind: "refresh", outcome: { ...outcome, status: "ended" } });
     const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
     await expect(result).rejects.toThrow("ended before it could be opened");
-    await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
+    await expect(result).rejects.toThrow(`Files stay in ${h.openPayload.rootPath}.`);
     await expect(result).rejects.toThrow("choose another empty folder");
     expect(h.cleanup).toHaveBeenCalledWith(expect.any(String));
     expect(h.registry.size).toBe(1); expect(h.open).not.toHaveBeenCalled();
@@ -368,7 +368,7 @@ describe("registered received-view handlers", () => {
   it("names the preserved folder and another empty folder when the share download fails", async () => {
     const h = await harness(); h.reconcile.mockRejectedValue(new Error("download interrupted"));
     const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
-    await expect(result).rejects.toThrow(`Files remain in ${h.openPayload.rootPath}.`);
+    await expect(result).rejects.toThrow(`Files stay in ${h.openPayload.rootPath}.`);
     await expect(result).rejects.toThrow("choose another empty folder");
     expect(h.registry.size).toBe(1);
   });
@@ -376,7 +376,7 @@ describe("registered received-view handlers", () => {
   it("retains the registered view and reports the recovery path if rollback cleanup fails", async () => {
     const h = await harness(); h.reconcile.mockRejectedValue(new Error("pull failed")); h.cleanup.mockRejectedValue(new Error("folder busy"));
     const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
-    await expect(result).rejects.toThrow("Files remain in");
+    await expect(result).rejects.toThrow("Files stay in");
     await expect(result).rejects.toThrow("choose Remove from list on its row in Manage workspaces before opening the share again");
     expect(h.registry.size).toBe(2); expect(h.open).not.toHaveBeenCalled();
   });

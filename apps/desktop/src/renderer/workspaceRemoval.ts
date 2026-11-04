@@ -5,6 +5,7 @@ import type { WorkspaceSummary } from "../ipc/bridgeContract";
 // only its place, so it is removed without asking.
 
 const SETTINGS_SYNC = "Settings › Sync and sharing";
+const READDED = "A share added again with its code arrives as a new folder.";
 
 // "A", "A and B", "A, B and C", then "A, B, C and 2 more".
 export function namesList(names: readonly string[]): string {
@@ -36,10 +37,10 @@ export function removalFacts(workspace: WorkspaceSummary): string[] {
   const mounts = (workspace.shareMounts ?? []).filter((mount) => !mount.ended && !mount.damaged);
   const [onlyMount] = mounts;
   if (mounts.length === 1 && onlyMount) {
-    facts.push(`Shared folder ${onlyMount.label} stops refreshing, and its files stay.`);
+    facts.push(`Shared folder ${onlyMount.label} stops refreshing, and its files stay. ${READDED}`);
   } else if (mounts.length > 1) {
     facts.push(
-      `Shared folders ${namesList(mounts.map((mount) => mount.label))} stop refreshing, and their files stay. A share added again with its code arrives as a new folder.`,
+      `Shared folders ${namesList(mounts.map((mount) => mount.label))} stop refreshing, and their files stay. ${READDED}`,
     );
   }
 

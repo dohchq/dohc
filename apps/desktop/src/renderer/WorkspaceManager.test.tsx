@@ -863,7 +863,7 @@ describe("workspace manager with registered workspaces", () => {
       "3 shared chats leave this workspace. In Chats, join groups again from Shared with you and direct messages from Message requests, unless their share has ended.",
     ]);
     expect(removalFacts({ ...base, shareMounts: [mount("Trip"), mount("Old", { ended: true })] })).toEqual([
-      "Shared folder Trip stops refreshing, and its files stay.",
+      "Shared folder Trip stops refreshing, and its files stay. A share added again with its code arrives as a new folder.",
     ]);
     expect(removalFacts({ ...base, shareMounts: [mount("Trip"), mount("Budget")] })).toEqual([
       "Shared folders Trip and Budget stop refreshing, and their files stay. A share added again with its code arrives as a new folder.",

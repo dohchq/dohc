@@ -1462,7 +1462,7 @@ const overflowMenuItems: MenuEntry[] = [
 ];
 const dangerMenuItems: MenuEntry[] = [
   { id: "reveal", label: "Reveal in folder", onSelect: noop },
-  { id: "remove", label: "Remove from list", onSelect: noop },
+  { id: "delete", label: "Delete", danger: true, onSelect: noop },
 ];
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
