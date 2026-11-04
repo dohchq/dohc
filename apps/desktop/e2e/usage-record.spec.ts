@@ -67,8 +67,29 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
     await expect(record(page)).toHaveAttribute("data-state", "on");
     await expect.poll(async () => (await saved()).enabled).toBe(true);
 
-    await record(page).getByTestId("usage-record-clear").click();
+    // Keyboard: Enter on Clear record opens the confirm with focus and its
+    // ring on the confirm button. The same Enter, held, clears nothing.
+    // ArrowLeft reaches Cancel, and Escape gives focus back to Clear record.
+    const clear = record(page).getByTestId("usage-record-clear");
     const confirm = page.getByTestId("usage-record-clear-confirm");
+    const clearAction = page.getByTestId("usage-record-clear-action");
+    await clear.focus();
+    await page.keyboard.down("Enter");
+    await expect(confirm).toBeVisible();
+    await expect(clearAction).toBeFocused();
+    await expect(clearAction).toHaveCSS("outline-style", "solid");
+    await page.keyboard.down("Enter");
+    await page.keyboard.up("Enter");
+    await expect(confirm).toBeVisible();
+    await expect(created(page).locator('[data-door="renderer"]')).toHaveText("1");
+    expect((await saved()).counts).not.toEqual([]);
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByTestId("usage-record-clear-cancel")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    await expect(clear).toBeFocused();
+
+    await clear.click();
     await expect(confirm).toBeVisible();
     await expect(confirm.getByTestId("usage-record-clear-copy")).toBeVisible();
     for (const colorScheme of ["light", "dark"] as const) {
