@@ -709,6 +709,43 @@ tracked = false
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_seen_before_a_widening_rebuild_keeps_the_label() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]
+path = \"private/**\"
+tracked = false
+",
+    );
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+
+    // Another file changes with the widen, so the old layer has a pass to
+    // run before the rebuild confirms the new rules.
+    write_file(scratch.path(), ".dohc/files.toml", b"");
+    write_file(scratch.path(), "other.md", b"other");
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, _) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sink_policy_hold_recovers_when_the_original_policy_bytes_return() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");

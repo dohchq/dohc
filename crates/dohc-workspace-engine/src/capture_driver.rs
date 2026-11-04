@@ -1343,6 +1343,7 @@ impl CaptureDriver {
                 no_atomic_placement_announced: false,
                 first_import: None,
                 unsettled: None,
+                rule_waits: 0,
             };
             let run = drive_loop(
                 &mut env,
@@ -1925,6 +1926,9 @@ enum TickIo {
     Cancelled,
     /// The layer was invalidated while this tick waited on the apply gate.
     RefreshRequired,
+    /// The rules on disk changed since the layer was built, so the pass
+    /// waits for the rebuild instead of applying.
+    AwaitingRebuild,
     /// Reconciled and applied one plan; `clean` is false when the apply
     /// reported failures or the scan itself was degraded.
     Applied { clean: bool },
@@ -1956,6 +1960,18 @@ pub(crate) struct FlushOutcome {
     /// Same meaning as [`DriverStatus::degraded`].
     pub(crate) degraded: bool,
 }
+
+/// Whether a pass waits for the rebuild of a rule change. The loop confirms
+/// a change on the pass after it first sees it, so one wait is usual. After
+/// `RULE_CHANGE_WAITS` waits in a row a pass applies anyway, so rules that
+/// never hold still cannot stop capture.
+fn rules_wait(current: Option<u64>, layer: Option<u64>, waits: &mut u32) -> bool {
+    let wait = current.is_some() && current != layer && *waits < RULE_CHANGE_WAITS;
+    *waits = if wait { *waits + 1 } else { 0 };
+    wait
+}
+
+const RULE_CHANGE_WAITS: u32 = 4;
 
 /// Decide whether a policy edit should rebuild the layer this tick.
 ///
@@ -2204,6 +2220,9 @@ async fn drive_loop<E: DriverEnv>(
                         outcome = Some(TickObservation::PolicyChanged);
                         break;
                     }
+                    // No health claim: the next pass confirms the change and
+                    // rebuilds.
+                    TickIo::AwaitingRebuild => break,
                     TickIo::Applied { clean } => {
                         all_clean &= clean;
                         outcome = Some(TickObservation::Healthy {
@@ -2323,6 +2342,8 @@ struct RealEnv {
     /// The startup baseline that ended unsettled, until a clean pass
     /// captures what it left.
     unsettled: Option<Arc<UnsettledPass>>,
+    /// Passes in a row that waited for a rule change's rebuild.
+    rule_waits: u32,
 }
 
 impl RealEnv {
@@ -2750,6 +2771,16 @@ impl DriverEnv for RealEnv {
         let _links_hold = self.actor.hold_link_drain();
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
+        }
+        // A pass on this layer would read rules changed since its build and
+        // record the files they add as ordinary edits. The rebuild that
+        // confirms the change records them as a rescan.
+        if rules_wait(
+            policy_fingerprint(&self.root),
+            layer.policy_fingerprint,
+            &mut self.rule_waits,
+        ) {
+            return TickIo::AwaitingRebuild;
         }
         let files = layer.files.handle();
         if offer_unrecorded_after_release(
