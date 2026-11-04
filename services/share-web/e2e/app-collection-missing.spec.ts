@@ -9,7 +9,7 @@ import {viewerPage} from "../viewer/src/pages";
 
 // Real browser, viewer bundle and share-web app handler. The account, summary and relay answers are fixtures;
 // sync-relay's tests check the relay's own 410.
-const viewer = "https://viewer.test", workspaceId = "ws_1", publicationId = "a".repeat(64);
+const viewer = "https://viewer.example.com", workspaceId = "ws_1", publicationId = "a".repeat(64);
 const words = LINK_REFUSALS.app_collection_missing.error, service = fileURLToPath(new URL("..", import.meta.url));
 
 async function serveViewer(page: Page) {
@@ -31,7 +31,7 @@ async function reloadAfterCollectionLost() {
   let missing = false;
   const bytes = Buffer.from("document.body.textContent='Fundraiser';");
   const file = {path: "bundle.js", sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, contentType: "text/javascript; charset=utf-8"};
-  const handler = createAppLaunchHandler({config: {viewerOrigin: viewer, appDomain: "apps.test"}, relayUrl: "https://relay.test",
+  const handler = createAppLaunchHandler({config: {viewerOrigin: viewer, appDomain: "example.net"}, relayUrl: "https://relay.example.org",
     fetchRelay: async () => {throw Error("Signed-in apps use their own transport.");},
     resolveMaterial: async () => {throw Error("Signed-in apps have no link session.");},
     resolveNamedMaterial: async () => ({ok: true, kind: "named", admissionKey: "alice", setCookie: null, fetchRelay: async request => {
