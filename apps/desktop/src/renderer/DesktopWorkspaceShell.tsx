@@ -5494,10 +5494,12 @@ export function DesktopWorkspaceShell(props: {
       : storeUpdateState.currentVersion
     : null;
   // Facts a person can paste into a report. The version comes from the
-  // updater's state; a bridge without it leaves the line out.
+  // updater's state; a bridge without it leaves the line out. A shared view
+  // goes by what it shares, so its share id rides beside the name.
   const reportFacts = useCallback(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
       ["Workspace", workspaceName(props.workspace)],
+      ["Share id", props.workspace.shareView?.shareId],
       ["Folder", props.workspace.rootPath],
       ["dohc", appVersion],
       ["Platform", bridge().platform],

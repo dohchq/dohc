@@ -19,7 +19,7 @@ import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
 import { inputCount } from "./ui/inputCount";
 import { COPY_FAILURE } from "./ui/CopyButton";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 // A data store the engine refuses gets a real recovery, not a dead
 // generic error. The notice explains what was found; the rebuild is explicit
@@ -1520,6 +1520,24 @@ describe("workspace shell errors", () => {
       "Detail: dohc is still reading this workspace's files. Try again when it finishes.",
       "Cause: DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
     ]);
+  });
+
+  // #2887: a shared view goes by what it shares. Whoever reads the report
+  // still needs its share id, so Copy keeps it on the line after the name.
+  it("copies a shared view's name and its share id when it does not open", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, subjectName: "Trip plans" } });
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    const name = copied.indexOf("Workspace: Trip plans");
+    expect(name).toBeGreaterThan(-1);
+    expect(copied[name + 1]).toBe("Share id: share-1");
   });
 
   it("names the engine folder another user owns, and keeps its path for Copy", async () => {
