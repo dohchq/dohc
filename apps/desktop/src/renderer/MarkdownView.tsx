@@ -954,6 +954,7 @@ export function MarkdownView(props: {
     ),
     [onMarkdownRendered, props.path, props.reopenKey, props.workspaceId, savedBody],
   );
+  const openThisNote = props.onOpenPath ? () => props.onOpenPath?.(props.path) : undefined;
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
     : undefined;
@@ -2173,7 +2174,7 @@ export function MarkdownView(props: {
               }}
               menu={{
                 workspaceId: props.workspaceId,
-                reportError: props.onButtonError,
+                onOpen: openThisNote,
                 suggestedName: filenameStem(props.path),
                 // Read the live Y.Doc at the action. The hidden mounted editor
                 // supplies the readiness guard while source view is shown.
@@ -2332,7 +2333,7 @@ export function MarkdownView(props: {
                 ? null
                 : {
                     workspaceId: props.workspaceId,
-                    reportError: props.onButtonError,
+                    onOpen: openThisNote,
                     suggestedName: filenameStem(props.path),
                     // The same rule the engine branch answers to: emit the
                     // document, or refuse. This branch shows the disk, and until
