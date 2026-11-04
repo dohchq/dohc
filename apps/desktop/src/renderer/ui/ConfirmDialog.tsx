@@ -1,11 +1,14 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
 import { Overlay } from "../Overlay";
 import { modalFocusableElements } from "../modalFocus";
 import { DangerButton, PrimaryButton, SecondaryButton } from "./controls";
 
 type ConfirmDialogProps = {
   title: string;
+  /** The sentences a screen reader reads after the title. */
   children: ReactNode;
+  /** Lists and controls under the sentences, left out of what is read. */
+  details?: ReactNode;
   confirmLabel: string;
   onCancel: () => void;
   onConfirm: () => void;
@@ -26,8 +29,10 @@ const FOCUS_RING = "focus-visible:outline-2 focus-visible:outline-focus";
 // The card alone. ConfirmDialog puts it in an Overlay; the states page
 // renders it over a frame with no keyboard behavior.
 export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref<HTMLButtonElement> }) {
-  const titleId = `${props.testId}-title`;
-  const bodyId = `${props.testId}-body`;
+  // The states page shows one card in each theme, so ids come from useId.
+  const id = useId();
+  const titleId = `${id}-title`;
+  const bodyId = `${id}-body`;
   const Confirm = props.intent === "danger" ? DangerButton : PrimaryButton;
   return (
     <div
@@ -43,6 +48,7 @@ export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref
           {props.title}
         </h3>
         <div id={bodyId}>{props.children}</div>
+        {props.details}
       </div>
       <div data-confirm-actions className="flex justify-end gap-2">
         <SecondaryButton data-testid={props.cancelTestId} className={FOCUS_RING} onClick={props.onCancel}>

@@ -2055,6 +2055,20 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             performDeletes(confirmDelete);
             setConfirmDelete(null);
           }}
+          details={
+            confirmDelete.length > 1 ? (
+              <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+                {confirmDelete.map((path) => (
+                  <li
+                    key={path}
+                    className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
+                  >
+                    <span className="break-all">{path}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null
+          }
         >
           <p className="m-0 mt-2 text-[13px] text-muted">
             {props.shareView
@@ -2065,18 +2079,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
               : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
           </p>
-          {confirmDelete.length > 1 ? (
-            <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
-              {confirmDelete.map((path) => (
-                <li
-                  key={path}
-                  className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
-                >
-                  <span className="break-all">{path}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
         </ConfirmDialog>
       ) : null}
     </>

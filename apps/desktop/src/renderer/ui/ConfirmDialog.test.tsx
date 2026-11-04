@@ -55,6 +55,31 @@ describe("ConfirmDialog intent", () => {
       }),
     ).toBeTruthy();
   });
+
+  // A list of every path, or a Copy button, is not read as the description.
+  it("leaves its details out of the description", () => {
+    render(
+      <ConfirmDialogCard
+        title="Delete 2 items?"
+        confirmLabel="Delete"
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+        testId="confirm"
+        cancelTestId="confirm-cancel"
+        confirmTestId="confirm-action"
+        details={
+          <ul>
+            <li>Research/a.md</li>
+            <li>Research/b.md</li>
+          </ul>
+        }
+      >
+        <p>They move to the system trash.</p>
+      </ConfirmDialogCard>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Delete 2 items?", description: "They move to the system trash." });
+    expect(dialog.textContent).toContain("Research/b.md");
+  });
 });
 
 function dialog(overrides: Partial<{ confirmDisabled: boolean; choice: boolean }> = {}) {
