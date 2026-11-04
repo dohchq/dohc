@@ -26,16 +26,22 @@ function loadAnalytics(): Promise<PostHog> {
       // list leaves out demo menus that open directly on <body>.
       autocapture: {
         css_selector_allowlist: ["body > header *", "body > main *", "body > footer *"],
-        css_selector_ignorelist: ["#desktop-demo"],
+        css_selector_ignorelist: ["#desktop-demo", "[data-sync-demo]"],
       },
       capture_pageview: true,
       capture_pageleave: true,
+      // privacy.html lists what a report holds. Scroll depth and the device
+      // model, which Chrome reveals only when asked, are not on it.
+      disable_scroll_properties: true,
+      disableDeviceModel: true,
       // The project records sessions for the desktop app. Not here.
       disable_session_recording: true,
       capture_heatmaps: false,
       capture_dead_clicks: false,
       capture_exceptions: false,
       capture_performance: false,
+      // Also skips remote config, so PostHog's servers can't switch on
+      // anything this list turns off, such as console log capture.
       advanced_disable_flags: true,
       disable_surveys: true,
       disable_product_tours: true,
