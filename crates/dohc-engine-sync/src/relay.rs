@@ -864,7 +864,11 @@ impl BaseRepairAnswers {
     ) -> Result<bool, RelayError> {
         let encoded = serde_json::to_vec(&(signature, decision))
             .map_err(|error| local(SyncError::corrupt(error)))?;
-        if encoded.len() + 1 > MAX_PREPARED_BASE_REPAIR_BYTES - self.encoded.len() {
+        // The first answer always fits, so an answer larger than the cap still
+        // goes through, alone in its batch, and every fetch makes progress.
+        if !self.encoded.is_empty()
+            && self.encoded.len() + encoded.len() + 1 > MAX_PREPARED_BASE_REPAIR_BYTES
+        {
             return Ok(false);
         }
         self.encoded.extend(encoded);

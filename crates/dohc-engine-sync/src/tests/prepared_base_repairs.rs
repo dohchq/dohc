@@ -173,6 +173,27 @@ fn prepared_repair_answers_over_the_byte_cap_wait_for_the_next_fetch() {
 }
 
 #[test]
+fn a_repair_answer_larger_than_the_byte_cap_goes_alone_in_its_batch() {
+    // Identifiers cap a real answer far below the cap; this pins progress anyway.
+    let mut answers = BaseRepairAnswers::default();
+    let wide = "x".repeat(MAX_PREPARED_BASE_REPAIR_BYTES);
+    assert!(
+        answers
+            .keep(wide.clone(), decision(0, "a".into(), "claim"))
+            .unwrap()
+    );
+    assert!(answers.encoded.len() > MAX_PREPARED_BASE_REPAIR_BYTES);
+    assert!(
+        !answers
+            .keep("0".repeat(64), decision(1, "b".into(), "claim"))
+            .unwrap()
+    );
+    let kept = answers.decode().unwrap();
+    assert_eq!(kept.len(), 1);
+    assert!(kept.contains_key(&wide));
+}
+
+#[test]
 fn prepared_repairs_replay_after_a_stop_before_apply() {
     let (_scratch, path, mut store) = open_store();
     let claim =
