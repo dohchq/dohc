@@ -57,6 +57,14 @@ pub enum RelayOperation {
         workspace_id: String,
         now_ms: i64,
     },
+    FetchPull {
+        workspace_id: String,
+    },
+    ApplyPull {
+        workspace_id: String,
+        page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
+        now_ms: i64,
+    },
     CommitCursor {
         workspace_id: String,
         cursor: RelayCursor,
@@ -186,6 +194,8 @@ impl RelayOperation {
         match self {
             Self::Push { workspace_id, .. }
             | Self::Pull { workspace_id, .. }
+            | Self::FetchPull { workspace_id }
+            | Self::ApplyPull { workspace_id, .. }
             | Self::CommitCursor { workspace_id, .. }
             | Self::Probe { workspace_id }
             | Self::Claim { workspace_id, .. }
@@ -215,6 +225,8 @@ impl RelayOperation {
             | Self::PullHosted { .. }
             | Self::CommitHostedCursor { .. } => Replicas::Hosted,
             Self::Pull { .. }
+            | Self::FetchPull { .. }
+            | Self::ApplyPull { .. }
             | Self::CommitCursor { .. }
             | Self::Probe { .. }
             | Self::Claim { .. }
@@ -1793,6 +1805,7 @@ mod deferred_relay_tests {
 #[derive(Debug)]
 pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
+    PullFetched(Arc<dohc_engine_sync::PreparedOrdinaryPull>),
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
         writer_cache_changed: bool,
@@ -2205,7 +2218,8 @@ impl ActorHandle {
             ..DeferredRelayTransport::default()
         };
         let _pull = match &operation {
-            RelayOperation::Pull { .. } | RelayOperation::PullHosted { .. } => {
+            RelayOperation::Pull { .. } | RelayOperation::FetchPull { .. }
+            | RelayOperation::ApplyPull { .. } | RelayOperation::PullHosted { .. } => {
                 Some(self.pulls.acquire(&token).await?)
             }
             _ => None,
@@ -2228,7 +2242,9 @@ impl ActorHandle {
                 .run_with_registrations(move |store, cache, registrations| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
-                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. });
+                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. }
+                        | RelayOperation::ApplyPull { .. });
+                    let is_fetch = matches!(&queued_operation, RelayOperation::FetchPull { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -2272,7 +2288,7 @@ impl ActorHandle {
                             ..
                         })
                     );
-                    if !is_push && !unchanged_commit && (!is_pull || pull_changed) {
+                    if !is_fetch && !is_push && !unchanged_commit && (!is_pull || pull_changed) {
                         cache.clear();
                     }
                     outcome
@@ -2282,6 +2298,9 @@ impl ActorHandle {
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
                     if reason == RELAY_IO_PENDING =>
                 {
+                    if matches!(&operation, RelayOperation::ApplyPull { .. }) {
+                        return Err(RuntimeError::Relay(RelayError::InvalidResponse));
+                    }
                     let request = transport
                         .take_pending()
                         .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
@@ -2705,6 +2724,8 @@ fn run_relay_operation(
         && !matches!(
             &operation,
             RelayOperation::Pull { .. }
+                | RelayOperation::FetchPull { .. }
+                | RelayOperation::ApplyPull { .. }
                 | RelayOperation::CommitCursor { .. }
                 | RelayOperation::AdoptJoinIdentity { .. }
         )
@@ -2756,6 +2777,14 @@ fn run_relay_operation(
             now_ms,
         } => client
             .pull_chat_workspace(store, doc_cache, &workspace_id, &NoFaults, leases, now_ms)
+            .map(RelayOperationOutcome::Sync)
+            .map_err(RuntimeError::from),
+        RelayOperation::FetchPull { workspace_id } => client
+            .fetch_pull(store, &workspace_id, &NoFaults)
+            .map(|page| RelayOperationOutcome::PullFetched(Arc::new(page)))
+            .map_err(RuntimeError::from),
+        RelayOperation::ApplyPull { workspace_id, page, now_ms } => client
+            .apply_pull(store, doc_cache, &workspace_id, &page, &NoFaults, leases, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::CommitCursor {

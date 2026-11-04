@@ -211,7 +211,8 @@ describe("the automation replicas", () => {
             case "sync.push": return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
             case "sync.materializePendingCursor": return { result: { materialized: true } };
             case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };
-            case "sync.pull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
+            case "sync.fetchPull": return { result: { pageToken: "fetched" } };
+            case "sync.applyPull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
               fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [],
               changedPaths: [{ versionId: "main", path: "Tasks/automations.yaml", operation: "write", contentKind: "text" }] } };
             default: throw new Error(`unexpected ${request.method}`);
@@ -505,10 +506,10 @@ describe("the automation replicas", () => {
     await expect(replica.sync()).rejects.toMatchObject({code: "OVERLOADED"});
     expect(replica.pulledHead).toBe(before);
     expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
-    const pulls = engine.methods().filter(method => method === "sync.pull").length;
+    const pulls = engine.methods().filter(method => method === "sync.applyPull").length;
     held = false;
     await running.settled();
-    expect(engine.methods().filter(method => method === "sync.pull").length).toBeGreaterThan(pulls);
+    expect(engine.methods().filter(method => method === "sync.applyPull").length).toBeGreaterThan(pulls);
     expect(replica.pulledHead).toBe(storage.automationWorkspaceLogHead(WORKSPACE));
     expect(running.failedSyncs().size).toBe(0);
   });
@@ -998,7 +999,7 @@ describe("the automation replicas", () => {
     await replica.sync();
     expect(calls).toEqual(["refresh", "refresh"]);
     expect(errors).toEqual([failure, failure]);
-    expect(engine.sent.slice(before).map(request => request.method).slice(0, 2)).toEqual(["sync.push", "sync.pull"]);
+    expect(engine.sent.slice(before).map(request => request.method).slice(0, 2)).toEqual(["sync.push", "sync.applyPull"]);
     expect(running.failedSyncs().size).toBe(0);
   });
 
@@ -1015,16 +1016,16 @@ describe("the automation replicas", () => {
     expect(open.params).toMatchObject({ workspaceId: WORKSPACE, captureMode: "none", reconcileCollections: true, rootDir: replica.root,
       relay: { baseUrl: "https://relay.example", bearerToken: deriveAutomationReplicaBearer(storage.currentAutomationWorkspace(WORKSPACE)!, { key, namespace }) } });
     expect(replica.metadataDir.startsWith(replica.root)).toBe(false);
-    expect(engine.methods()).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "sync.push", "sync.pull", "sync.materializePendingCursor", "sync.commitCursor"]);
+    expect(engine.methods()).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "sync.push", "sync.fetchPull", "sync.applyPull", "sync.materializePendingCursor", "sync.commitCursor"]);
 
     // Nothing changed at the relay: a pass pulls nothing.
     running.reconcile();
     await running.settled();
-    expect(engine.methods().filter((method) => method === "sync.pull")).toHaveLength(1);
+    expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(1);
     log(1);
     running.reconcile();
     await running.settled();
-    expect(engine.methods().filter((method) => method === "sync.pull")).toHaveLength(2);
+    expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(2);
   });
 
   it("runs direct and background sync while record draft delivery is held", async () => {
@@ -1093,7 +1094,7 @@ describe("the automation replicas", () => {
     log(1);
     running.reconcile(); await running.settled();
     expect(running.replica(WORKSPACE), "it waits a day to leave").toBeDefined();
-    expect(engine.methods().filter((method) => method === "sync.pull")).toHaveLength(1);
+    expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(1);
   });
 
   it("closes a replica whose workspace was deleted, and removes every folder no row names", async () => {
@@ -1265,7 +1266,7 @@ describe("the automation replicas", () => {
       .toBe(AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
 
     // A write to the good workspace still pulls it, and the broken one keeps being tried.
-    const pulls = () => engine.sent.filter((request) => request.method === "sync.pull" && request.workspace === running.replica(WORKSPACE)!.workspace).length;
+    const pulls = () => engine.sent.filter((request) => request.method === "sync.applyPull" && request.workspace === running.replica(WORKSPACE)!.workspace).length;
     // The first pass's joins asked for one more; after it only the broken one's retry is left.
     const second = nextPass();
     await vi.advanceTimersByTimeAsync(100);
@@ -1298,7 +1299,7 @@ describe("the automation replicas", () => {
       client.sendRequest.mockImplementation(async (request: Sent) => {
         const result = await send(request) as { result: Record<string, unknown> };
         if (request.method === "workspace.open" && request.params.workspaceId === "busy") busyHandle = result.result.workspace as string;
-        if (request.method === "sync.pull" && request.workspace === busyHandle && busyHandle !== undefined && opened) {
+        if (request.method === "sync.applyPull" && request.workspace === busyHandle && busyHandle !== undefined && opened) {
           return { result: { ...result.result, hasMore: true, nextCursor: ++cursor } };
         }
         return result;
@@ -1314,7 +1315,7 @@ describe("the automation replicas", () => {
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     // The busy one never catches up, and the quiet one still opens.
     await vi.waitFor(() => expect(running.replica(WORKSPACE)).toBeDefined(), { timeout: WAIT_TIMEOUT_MS });
-    const pulls = (handle: string) => engine.sent.filter((request) => request.method === "sync.pull" && request.workspace === handle).length;
+    const pulls = (handle: string) => engine.sent.filter((request) => request.method === "sync.applyPull" && request.workspace === handle).length;
     const busy = running.replica("busy")!, quiet = running.replica(WORKSPACE)!;
     const [busyBefore, quietBefore] = [pulls(busy.workspace), pulls(quiet.workspace)];
     const raw = inspectDatabase(storagePath(storage));

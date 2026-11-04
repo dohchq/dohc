@@ -34,15 +34,15 @@ class Child extends EventEmitter {
       while (buffered.length >= 12 && buffered.length >= 12 + buffered.readUInt32LE(8)) {
         const length = buffered.readUInt32LE(8), row = JSON.parse(buffered.subarray(12, 12 + length).toString());
         buffered = buffered.subarray(12 + length);
-        if (row.type === "hello") this.stdout.write(frame({ type: "helloAck", protocolVersion: 2, sessionGeneration: 1,
+        if (row.type === "hello") this.stdout.write(frame({ type: "helloAck", protocolVersion: 3, sessionGeneration: 1,
           capabilities: ["blobs"], limits: { maxFrameBytes: 14 * 1024 * 1024, maxStringBytes: 14 * 1024 * 1024,
             maxCollectionLen: 16_384, maxJsonDepth: 32, maxBatchLen: 64, maxBlobChunkBytes: 262_144 } }));
         else {
           this.requests.push(row);
-          if (row.method === "sync.pull" && this.limitOnPull) {this.finish(this.limitOnPull); return;}
+          if (row.method === "sync.applyPull" && this.limitOnPull) {this.finish(this.limitOnPull); return;}
           const result = row.method === "engine.ping" ? {ok: true, mode: this.mode, landlockAbi: this.abi} : row.method === "workspace.open" ? { workspace: "private-handle" } :
             row.method === "replica.frontiers" ? {revision: 1, logCursor: 3, journalCursor: 0} :
-            row.method === "sync.pull" ? this.pages.shift() : { adopted: true, committed: true };
+            row.method === "sync.fetchPull" ? {pageToken: "fetched"} : row.method === "sync.applyPull" ? this.pages.shift() : { adopted: true, committed: true };
           this.stdout.write(frame({ type: "response", id: row.id, result }));
         }
       }
@@ -64,12 +64,12 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
   try {
     expect(mocks.spawn.mock.calls[0]![1]).toEqual(["--replica"]);
     await replica.pull();
-    expect(child.requests.map(row => row.method)).toEqual(["engine.ping", "workspace.open", "sync.adoptJoinIdentity", "sync.pull", "sync.commitCursor", "sync.pull", "sync.commitCursor", "replica.frontiers"]);
+    expect(child.requests.map(row => row.method)).toEqual(["engine.ping", "workspace.open", "sync.adoptJoinIdentity", "sync.fetchPull", "sync.applyPull", "sync.commitCursor", "sync.fetchPull", "sync.applyPull", "sync.commitCursor", "replica.frontiers"]);
     expect(child.requests[1]!.params).toMatchObject({ rootDir: input().storeDir, storeMode: "passive", captureMode: "none",
       relay: { socketPath: `${input().storeDir}/relay.sock`, bearerToken: input().lease.bearer } });
     expect(child.requests.slice(2).every(row => row.workspace === "private-handle")).toBe(true);
-    expect(child.requests[4]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-2" });
-    expect(child.requests[6]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-3" });
+    expect(child.requests[5]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-2" });
+    expect(child.requests[8]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-3" });
     const [command, args, options] = mocks.spawn.mock.calls[0]!;
     expect(command).toBe(process.execPath); expect(args).toEqual(["--replica"]); expect(options.cwd).toBe(input().storeDir);
     expect(Object.keys(options.env).sort()).toEqual(["DOHC_ENGINE_AUTH_TOKEN", "TMPDIR"]);

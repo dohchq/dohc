@@ -923,7 +923,7 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
         host.error("sync.push").await,
         (ErrorCode::InvalidParams, "relay-origin-diverged".to_owned())
     );
-    for method in ["sync.recoverOrigin", "sync.pull"] {
+    for method in ["sync.recoverOrigin", "sync.applyPull"] {
         assert_eq!(
             host.error(method).await,
             (ErrorCode::InvalidParams, HOSTED_FEED_ONLY.to_owned()),
@@ -1001,7 +1001,7 @@ async fn ordinary_relay_rpcs_leave_a_hosted_replica_untouched() {
             "sync.adoptJoinIdentity",
             json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
         ),
-        ("sync.pull", workspace()),
+        ("sync.applyPull", workspace()),
         ("sync.recoverOrigin", workspace()),
         (
             "keys.upload",

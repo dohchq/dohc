@@ -51,7 +51,7 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
       resolve(exitFailure);
     }));
     const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
-    const client = new EngineClient(new DuplexEngineClientConnection(stream), { authToken, protocolVersion: 2,
+    const client = new EngineClient(new DuplexEngineClientConnection(stream), { authToken, protocolVersion: 3,
       capabilities: ["blobs"], connectTimeoutMs: deadlineMs, privateLiveApplication: {aggregateBytes: 1024 * 1024 * 1024, maxUploads: 1} }, () => child.kill("SIGKILL"), termination.then(() => {}));
     child.on("error", error => stream.destroy(error));
     child.on("close", (code, signal) => client.notifyProcessExit(code, signal));
@@ -90,7 +90,8 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
         let page: Record<string, unknown>;
         let previous: number | undefined;
         do {
-          page = await request("sync.pull", { workspaceId: lease.workspaceId });
+          const fetched = await request("sync.fetchPull", { workspaceId: lease.workspaceId });
+          page = await request("sync.applyPull", { workspaceId: lease.workspaceId, pageToken: fetched.pageToken });
           if (page.status !== "complete" || !Number.isSafeInteger(page.nextCursor) || typeof page.nextCursor !== "number" ||
               !page.pendingCursor || (previous !== undefined && (page.nextCursor < previous || (page.hasMore && page.nextCursor === previous)))) {
             throw new Error("Replica pull did not produce a progressing cursor.");

@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// Protocol compatibility version, negotiated in `hello`/`helloAck`.
 /// Distinct from the storage schema version (`schema_version = 2`).
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Client-assigned request id, unique within a session generation.
 /// Bounded by [`MAX_WIRE_INTEGER`] so TypeScript can use plain `number`.

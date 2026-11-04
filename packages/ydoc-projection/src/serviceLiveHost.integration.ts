@@ -29,7 +29,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
   mkdirSync(output, { recursive: true });
   const root = mkdtempSync(join(resolve(output), "case-")), workspace = join(root, "workspace");
   mkdirSync(workspace);
-  const seed = await createEngineClient({ command: executable, authToken: "service-proof-seed", protocolVersion: 2,
+  const seed = await createEngineClient({ command: executable, authToken: "service-proof-seed", protocolVersion: 3,
     capabilities: ["core"], connectTimeoutMs: 30_000 });
   let mainVersionId: string;
   try {

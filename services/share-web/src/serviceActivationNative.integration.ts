@@ -199,7 +199,7 @@ it("resumes a real configured service activation after a lost native adoption re
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
     const relayUrl = `http://127.0.0.1:${(relayHttp.address() as {port: number}).port}`;
     harness.relayUrl = relayUrl;
-    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 3, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}});
     let requestId = 1;
     const opened = await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId: "workspace", captureMode: "none",
@@ -331,7 +331,7 @@ it("resumes a real configured service activation after a lost native adoption re
       })).toBe(true);
     }, {timeout: 30000});
     for (let page = 0; page < 8; page++) {
-      const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
+      const pulled = await rpc("sync.applyPull", {...{workspaceId: "workspace"}, pageToken: (await rpc("sync.fetchPull", {workspaceId: "workspace"})).pageToken}); expect(pulled.refusals ?? []).toEqual([]);
       if (pulled.pendingCursor) await rpc("sync.commitCursor", {workspaceId: "workspace", pendingCursor: pulled.pendingCursor});
       if (!pulled.hasMore) break;
       if (page === 7) throw new Error("Owner pull exceeded its eight-page bound.");

@@ -39,7 +39,7 @@ type EngineView = { files: FileView[]; moments: Map<string, { path: string; oper
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 async function withEngine<T>(command: string, rootDir: string, work: (adapter: VersionedLiveAdapter, requester: WorkspaceDaemonRequester) => Promise<T>): Promise<T> {
-  const client = await createEngineClient({ command, authToken: "engine-upgrade", protocolVersion: 2, capabilities: [] });
+  const client = await createEngineClient({ command, authToken: "engine-upgrade", protocolVersion: 3, capabilities: [] });
   const requester = new WorkspaceDaemonRequester(client);
   let adapter: VersionedLiveAdapter | undefined;
   // The daemon always exits, and a failed shutdown never hides the failure that preceded it.

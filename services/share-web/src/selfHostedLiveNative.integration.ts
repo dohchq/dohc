@@ -257,7 +257,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     harness.relayUrl = relayUrl;
     const ownerConfigPath = join(root, "owner-ingress.json");
     writeFileSync(ownerConfigPath, JSON.stringify(profile.nativeIngress));
-    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 3, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value),
       privateLiveApplication: profile.nativeClient,
       env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: ownerConfigPath}});
@@ -389,7 +389,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       appendKey: "self-host-owner-concurrent", updateBytes: Y.encodeStateAsUpdate(concurrentOwner, beforeOwnerVector)});
     concurrentOwner.destroy();
     owner!.close(); await owner!.waitForExit();
-    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 3, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value),
       privateLiveApplication: profile.nativeClient,
       env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: ownerConfigPath}});
@@ -453,7 +453,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const unattributed = [{kind: "unattributed"}];
     await publication(baselineSettlement, unattributed);
     for (let page = 0; page < 8; page++) {
-      const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
+      const pulled = await rpc("sync.applyPull", {...{workspaceId: "workspace"}, pageToken: (await rpc("sync.fetchPull", {workspaceId: "workspace"})).pageToken}); expect(pulled.refusals ?? []).toEqual([]);
       if (pulled.pendingCursor) {
         const cursor = {workspaceId: "workspace", pendingCursor: pulled.pendingCursor};
         expect((await rpc("sync.materializePendingCursor", cursor)).materialized).toBe(true);
@@ -479,7 +479,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     writeFileSync(join(root, "owner-settled-authors.json"), JSON.stringify(results.ownerSettledAuthors, null, 2));
     expect(ownerAuthors).toEqual(unattributed);
     owner!.close(); await owner!.waitForExit();
-    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 3, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value),
       privateLiveApplication: profile.nativeClient,
       env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: ownerConfigPath}});
@@ -575,7 +575,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     };
     const pullAll = async (call: typeof rpc) => {
       for (let page = 0; page < 8; page++) {
-        const pulled = await call("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
+        const pulled = await call("sync.applyPull", {...{workspaceId: "workspace"}, pageToken: (await call("sync.fetchPull", {workspaceId: "workspace"})).pageToken}); expect(pulled.refusals ?? []).toEqual([]);
         if (pulled.pendingCursor) {
           const cursor = {workspaceId: "workspace", pendingCursor: pulled.pendingCursor};
           expect((await call("sync.materializePendingCursor", cursor)).materialized).toBe(true);
@@ -596,7 +596,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
 
     // A fresh ordinary peer imports the same credit without any live feed.
     const peerRoot = join(root, "peer"); mkdirSync(peerRoot);
-    peer = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+    peer = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 3, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "peer-stderr.log"), value),
       privateLiveApplication: profile.nativeClient,
       env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}});
@@ -731,7 +731,7 @@ async function openSelfHostProof(name: string) {
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
     const relayUrl = `http://127.0.0.1:${(relayHttp.address() as {port: number}).port}`;
     harness.relayUrl = relayUrl;
-    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 3, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
       onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value), privateLiveApplication: profile.nativeClient,
       env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}});
     let requestId = 1;

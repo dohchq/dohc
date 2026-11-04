@@ -93,6 +93,8 @@ pub(crate) struct OpenWorkspace {
     /// Version fences retain this gate through their destructive continuation,
     /// without stalling editor traffic in unrelated open workspaces.
     pub(super) session_ops: Arc<tokio::sync::Mutex<()>>,
+    /// One fetched batch, bound to this open handle and replaced by the next fetch.
+    pub(super) pending_pull: tokio::sync::Mutex<Option<super::relay::PendingPull>>,
     /// How many pending cursors of each kind this handle has issued, counted
     /// under the pending-cursor lock. A commit that did not land restores its
     /// token only if no newer cursor of its kind was issued since.
@@ -161,6 +163,7 @@ impl OpenWorkspace {
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
+            pending_pull: Default::default(),
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
             pulls_in_flight: Default::default(),
@@ -1370,6 +1373,7 @@ impl EngineService {
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
                 session_ops,
+                pending_pull: Default::default(),
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pulls_in_flight: Default::default(),
@@ -2007,7 +2011,8 @@ mod tests {
         }
         for method in [
             "sync.adoptJoinIdentity",
-            "sync.pull",
+            "sync.fetchPull",
+            "sync.applyPull",
             "sync.commitCursor",
             "versionedText.read",
             "workspace.close",

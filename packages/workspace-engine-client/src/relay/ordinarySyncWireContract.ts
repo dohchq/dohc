@@ -55,7 +55,8 @@ const OrdinarySyncResultSchemas = {
     ownerAdmissionPending: Schema.mutable(Schema.Array(OwnerAdmissionPending)),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
-  "sync.pull": mutableStruct({
+  "sync.fetchPull": mutableStruct({ pageToken: Text }),
+  "sync.applyPull": mutableStruct({
     status: Schema.Literal("complete"),
     fetched: Count,
     applied: Count,

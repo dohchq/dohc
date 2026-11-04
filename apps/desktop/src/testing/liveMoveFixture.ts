@@ -276,7 +276,7 @@ export async function openLiveMoveFixture(input: {
       return {
         rootPath, capture, relay, runNative,
         targetedPasses: () => targeted,
-        pull: () => capture.runRelaySync(materializePage => relay.pull(materializePage)),
+        pull: () => relay.pull(apply => capture.runRelaySync(apply)),
         async move(fromPath, toPath, { guarded }) {
           const record: MoveRecord = { catchUps: [] };
           if (guarded) lastGuarded = record;

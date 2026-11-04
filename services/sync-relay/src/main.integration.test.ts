@@ -135,7 +135,7 @@ childProcess.spawn = (command, args, options) => {
           const row = JSON.parse(pending.subarray(12, 12 + size).toString());
           pending = pending.subarray(12 + size);
           if (row.type === "hello") {
-            process.stdout.write(frame({type:"helloAck",protocolVersion:2,sessionGeneration:1,capabilities:["projection-only"],
+            process.stdout.write(frame({type:"helloAck",protocolVersion:3,sessionGeneration:1,capabilities:["projection-only"],
               limits:{maxFrameBytes:14680064,maxStringBytes:14680064,maxCollectionLen:16384,maxBatchLen:64,maxJsonDepth:32,maxBlobChunkBytes:262144}}));
           } else if (row.method === "engine.ping") {
             process.stdout.write(frame({type:"response",id:row.id,result:{ok:true,mode:"projection-only"}}));

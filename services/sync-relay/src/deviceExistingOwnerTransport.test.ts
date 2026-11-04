@@ -44,7 +44,7 @@ it.each(["markdown-write-held", "markdown-witness-check-pending"])("keeps simult
   const events = () => messages.filter(message => message.type === "event");
   try {
     await ready;
-    send({type: "hello", protocolVersion: 2, authToken: start.authToken, capabilities: ["blobs"], maxFrameBytes: 1_048_576, lastSessionGeneration: null});
+    send({type: "hello", protocolVersion: 3, authToken: start.authToken, capabilities: ["blobs"], maxFrameBytes: 1_048_576, lastSessionGeneration: null});
     send({type: "request", id: 1, method: "liveApplication.register", workspace: "handle", params: {binding, resumeAdoptionId: "adoption"}});
     await expect.poll(() => events().length).toBe(1);
     expect(events()[0]).toMatchObject({name: "liveApplication.ownerOutboxChanged"});
@@ -115,7 +115,7 @@ it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])
   };
   try {
     await started.promise;
-    await send({type:"hello",protocolVersion:2,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
+    await send({type:"hello",protocolVersion:3,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
     const registration = {binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
       currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1}};
     const staleRegistration = {binding:{...registration.binding,objectId:"stale-owner"}};
@@ -159,7 +159,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
         const value = JSON.parse(bytes.toString());
         if (value.type === "liveHost.transport") {
           peerConnection = new DeviceEngineConnection(relaySocket,limits,value.receive,2_000_000,() => undefined);
-          peer = new EngineClient(peerConnection,{ authToken: start.authToken,protocolVersion: 2,capabilities: ["blobs"],maxFrameBytes: 1_048_576,
+          peer = new EngineClient(peerConnection,{ authToken: start.authToken,protocolVersion: 3,capabilities: ["blobs"],maxFrameBytes: 1_048_576,
             privateLiveApplication: { aggregateBytes: 200_000_000,maxUploads: 2 } });
           ready();
         } else peerConnection!.credit(value.receivedBytes);
@@ -368,7 +368,7 @@ it("admits one registration per binding while an owner lookup waits, and counts 
   };
   try {
     await started.promise;
-    await send({type:"hello",protocolVersion:2,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
+    await send({type:"hello",protocolVersion:3,authToken:start.authToken,capabilities:["blobs"],maxFrameBytes:1_048_576,lastSessionGeneration:null});
     const binding = {workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
       currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1};
     const first = request(1,{binding});

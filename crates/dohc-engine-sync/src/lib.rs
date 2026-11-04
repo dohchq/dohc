@@ -119,7 +119,7 @@ pub use relay::{
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS,
     MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, ProbeRequest, ProbeResponse, PullContinuation,
-    PullRequest, PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
+    PreparedOrdinaryPull, PullRequest, PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
     RelaySyncClient, RelayTransport, SettlementPublicationRefusal, ShareBlobRequest,
     ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
     ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,

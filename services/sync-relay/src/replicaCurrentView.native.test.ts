@@ -14,7 +14,7 @@ afterEach(closeTestStorages);
 async function open(root:string,passive=true) {
   const child=spawn(binary.require(),passive?["--store-role","passive"]:[],{windowsHide:true,stdio:["pipe","pipe","pipe"],env:{DOHC_ENGINE_AUTH_TOKEN:"view-test",SystemRoot:process.env.SystemRoot}});
   const termination=new Promise<void>(resolve=>child.once("close",()=>resolve()));
-  const client=new EngineClient(new DuplexEngineClientConnection(Duplex.from({readable:child.stdout,writable:child.stdin})),{authToken:"view-test",protocolVersion:2,capabilities:["blobs"]},()=>child.kill("SIGKILL"),termination);
+  const client=new EngineClient(new DuplexEngineClientConnection(Duplex.from({readable:child.stdout,writable:child.stdin})),{authToken:"view-test",protocolVersion:3,capabilities:["blobs"]},()=>child.kill("SIGKILL"),termination);
   child.on("close",(code,signal)=>client.notifyProcessExit(code,signal));child.stderr.resume();let id=1,workspace:string|undefined;
   const request=async(method:string,params:Record<string,unknown>={})=>(await client.sendRequest({id:id++,method,workspace,deadlineMs:120_000,params:(method==="replica.cut"?{incarnation:"native",...params}:params) as never})).result as any;
   await client.ready();workspace=(await request("workspace.open",{rootDir:root,workspaceId:"w",captureMode:"none",...(passive?{storeMode:"passive"}:{})})).workspace;

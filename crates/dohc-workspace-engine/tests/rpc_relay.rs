@@ -465,6 +465,11 @@ async fn call(
     params: Value,
 ) -> Value {
     *id += 1;
+    if method == "sync.applyPull" {
+        return pull_batch(transport, RequestContext::unbounded(),
+            request(*id, "sync.fetchPull", Some(handle.clone()), params))
+            .await.unwrap_or_else(|error| panic!("pull batch failed: {error:?}")).result;
+    }
     call_with_busy_retry(
         transport,
         RequestContext::unbounded(),
@@ -980,7 +985,7 @@ async fn pull_and_commit(
         transport,
         handle,
         id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -1033,7 +1038,7 @@ async fn pull_materialize_and_commit(
         transport,
         handle,
         id,
-        "sync.pull",
+        "sync.applyPull",
         json!({"workspaceId":workspace}),
     )
     .await;
@@ -2427,7 +2432,7 @@ async fn every_relay_rpc_round_trips_through_dispatch_against_fake_transport() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2764,7 +2769,7 @@ async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization()
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2791,7 +2796,7 @@ async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization()
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2826,7 +2831,7 @@ async fn slow_relay_pull_does_not_block_a_concurrent_workspace_write() {
                 RequestContext::unbounded(),
                 request(
                     10_000,
-                    "sync.pull",
+                    "sync.fetchPull",
                     Some(pulling_handle),
                     json!({ "workspaceId": workspace_id }),
                 ),
@@ -2887,7 +2892,7 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2912,7 +2917,7 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -2971,7 +2976,7 @@ async fn commit_stopped_after_its_cursor_lands(expire: bool) {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3174,7 +3179,7 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3197,7 +3202,7 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3359,7 +3364,7 @@ async fn commit_cursor_accepts_only_the_server_issued_pending_token() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3464,7 +3469,7 @@ async fn newer_pull_token_supersedes_the_older_token_for_the_same_scope() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3472,7 +3477,7 @@ async fn newer_pull_token_supersedes_the_older_token_for_the_same_scope() {
         &transport,
         &handle,
         &mut id,
-        "sync.pull",
+        "sync.applyPull",
         json!({ "workspaceId": workspace_id }),
     )
     .await;
@@ -3517,7 +3522,8 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
     let handle = open_workspace(&transport, &scratch, &relay, 1, "bound-workspace").await;
     let methods = [
         ("sync.push", json!({ "workspaceId": "other" })),
-        ("sync.pull", json!({ "workspaceId": "other" })),
+        ("sync.fetchPull", json!({ "workspaceId": "other" })),
+        ("sync.applyPull", json!({ "workspaceId": "other", "pageToken": "foreign" })),
         ("sync.refusalNotices", json!({ "workspaceId": "other" })),
         (
             "sync.dismissRefusal",

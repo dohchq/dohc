@@ -198,7 +198,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     const root = join(f.directory, "workspace");
     await mkdir(root, { recursive: true });
     const client = await createEngineClient({ command: nativeEngine.require(), authToken: randomBytes(32).toString("base64url"),
-      protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: 30_000 });
+      protocolVersion: 3, capabilities: ["blobs"], connectTimeoutMs: 30_000 });
     cleanups.push(async () => { client.close(); await client.waitForExit(); });
     const adapter = await VersionedLiveAdapter.openWorkspace(client, { rootDir: root, workspaceId: "w", captureMode: "none", reconcileCollections: true,
       relay: { baseUrl: relayUrl, bearerToken: "owner", allowInsecureLoopbackForTests: true } });
@@ -213,7 +213,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     for (let more = true; more;) more = (await replication.push()).hasMore;
     const recipientRoot = join(f.directory, "recipient"); await mkdir(recipientRoot, { recursive: true });
     const recipientClient = await createEngineClient({ command: nativeEngine.require(), authToken: randomBytes(32).toString("base64url"),
-      protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: 30_000 });
+      protocolVersion: 3, capabilities: ["blobs"], connectTimeoutMs: 30_000 });
     cleanups.push(async () => { recipientClient.close(); await recipientClient.waitForExit(); });
     recipientEngine = await VersionedLiveAdapter.openWorkspace(recipientClient, { rootDir: recipientRoot, workspaceId: "recipient", captureMode: "none", projectCollections: true,
       relay: { baseUrl: relayUrl, bearerToken: "editor", allowInsecureLoopbackForTests: true } });

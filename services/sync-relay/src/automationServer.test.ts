@@ -1705,7 +1705,8 @@ describe("the owner's routes to the server's runs", () => {
           case "sync.push":
             if (failing) throw new Error("replica cannot push");
             return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
-          case "sync.pull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
+          case "sync.fetchPull": return { result: { pageToken: "fetched" } };
+            case "sync.applyPull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
             fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: [] } };
           case "sync.materializePendingCursor": return { result: { materialized: true } };
           case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };

@@ -53,7 +53,7 @@ export async function ownerBridge(native: EngineClient, workspace: string,
     else transport.credit(parseDeviceLiveHostCredit(JSON.parse(buffer.toString())));
   });
   await transportReady;
-  const client = new EngineClient(connection!, {authToken, protocolVersion: 2, capabilities: ["blobs"], maxFrameBytes: 4 * 1024 * 1024,
+  const client = new EngineClient(connection!, {authToken, protocolVersion: 3, capabilities: ["blobs"], maxFrameBytes: 4 * 1024 * 1024,
     privateLiveApplication: {aggregateBytes: 512 * 1024 * 1024, maxUploads: 2}, connectTimeoutMs: 120_000});
   await client.ready();
   return {client, async close() {

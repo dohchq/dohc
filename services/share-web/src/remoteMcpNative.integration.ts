@@ -43,7 +43,7 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
   expect(hash(readFileSync(executable))).toBe(expectedHash);
   mkdirSync(output, {recursive: true});
   const root = mkdtempSync(join(resolve(output), "mcp-native-")), workspace = join(root, "workspace"); mkdirSync(workspace);
-  const seed = await createEngineClient({command: executable, authToken: "mcp-proof-seed", protocolVersion: 2, capabilities: ["core"], connectTimeoutMs: 30000});
+  const seed = await createEngineClient({command: executable, authToken: "mcp-proof-seed", protocolVersion: 3, capabilities: ["core"], connectTimeoutMs: 30000});
   let mainVersionId: string;
   try {
     const opened = await seed.sendRequest({id: 1, method: "workspace.open", params: {rootDir: workspace, workspaceId: "workspace", captureMode: "none"}, deadlineMs: 30000});

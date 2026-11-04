@@ -24,14 +24,14 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 // exactly like the real capture implementation.
 const claimMock = vi.fn<() => Promise<void>>();
 const pushMock = vi.fn<RelaySyncOperations["push"]>();
-const pullMock = vi.fn<RelaySyncOperations["pull"]>();
+const pullMock = vi.fn<(materializePage: Parameters<Parameters<WorkspaceEngineCapture["runRelaySync"]>[0]>[0]) => Promise<PullWorkspaceFromRelayResult>>();
 const recoverMock = vi.fn<RelaySyncOperations["recoverOrigin"]>();
 
 function mockOperations(): RelaySyncOperations {
   return {
     claim: claimMock,
     push: pushMock,
-    pull: pullMock,
+    pull: (runBatch) => runBatch(pullMock),
     recoverOrigin: recoverMock,
   };
 }

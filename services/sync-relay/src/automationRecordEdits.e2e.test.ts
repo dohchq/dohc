@@ -106,7 +106,7 @@ async function computer(input: {
   const client = await createEngineClient({
     env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath, DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig()}, privateLiveApplication: profile.nativeClient,
     command: engine.require(), authToken: randomBytes(32).toString("base64url"),
-    protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: DEADLINE_MS,
+    protocolVersion: 3, capabilities: ["blobs"], connectTimeoutMs: DEADLINE_MS,
     onStderr: text => {stderrTail = (stderrTail + text).slice(-64 * 1024);},
     onExit: (code, signal) => {
       exitStatus = {code, signal, duringTeardown: teardownStarted};

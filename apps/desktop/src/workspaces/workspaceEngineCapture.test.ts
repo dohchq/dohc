@@ -3508,7 +3508,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `object-${index}`, path: `${index}.md`, text: "recorded before pull" });
       await write(root, `${index}.md`, "recorded before pull");
     }
-    // Like sync.pull, record the entire page before its disk projection.
+    // Like sync.applyPull, record the entire page before its disk projection.
     for (let index = 0; index < 500; index++) {
       const path = `${index}.md`;
       if (index < writeCount) loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `object-${index}`, path, text: "incoming", origin: "sync" });

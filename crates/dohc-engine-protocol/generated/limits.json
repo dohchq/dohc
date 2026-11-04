@@ -8,5 +8,5 @@
     "maxStringBytes": 14680064
   },
   "maxWireInteger": 9007199254740991,
-  "protocolVersion": 2
+  "protocolVersion": 3
 }

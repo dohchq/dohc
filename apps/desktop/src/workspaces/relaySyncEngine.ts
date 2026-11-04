@@ -6,7 +6,7 @@ import {
   RelayUnreachableError,
   RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
-  type MaterializeRelayPullPage,
+  type RunRelayPullBatch,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
   type SharingDeclined,
@@ -23,7 +23,7 @@ export interface RelaySyncOperations {
   claim(): Promise<void>;
   push(): Promise<PushWorkspaceToRelayResult>;
   pull(
-    materializePage: MaterializeRelayPullPage,
+    runBatch: RunRelayPullBatch,
   ): Promise<PullWorkspaceFromRelayResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
 }
@@ -490,18 +490,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
-    // Only the pull writes workspace files, so only the pull runs on the
-    // capture chain. The push and origin recovery wait on the relay without
-    // holding up capture, document opens or History.
-    const pull = () =>
-      options.capture.runRelaySync(async (materializePage) => {
-        const ended = options.pullStarting?.();
-        try {
-          return await operations.pull(materializePage);
-        } finally {
-          ended?.();
-        }
-      });
+    const pull = async () => {
+      const ended = options.pullStarting?.();
+      try {
+        return await operations.pull((apply) => options.capture.runRelaySync(apply));
+      } finally {
+        ended?.();
+      }
+    };
     // A join-bootstrap engine is pull-only until its first pull succeeds:
     // a fresh join must never append ops before it has the remote state.
     if (!bootstrapPass) {

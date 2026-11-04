@@ -17,7 +17,7 @@ function child() {
     for (const frame of decoder.push(bytes)) if (frame.kind === "control") {
       const envelope = JSON.parse(frame.payload.toString("utf8"));
       if (envelope.type === "hello") queueMicrotask(() => value.stdout.write(encodeFrame(1, 0,
-        Buffer.from(JSON.stringify({ type: "helloAck", protocolVersion: 2, sessionGeneration: 1, capabilities: ["core", "blobs"],
+        Buffer.from(JSON.stringify({ type: "helloAck", protocolVersion: 3, sessionGeneration: 1, capabilities: ["core", "blobs"],
           limits: { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 64 * 1024, maxStringBytes: 64 * 1024,
             maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32 } })), 1024 * 1024)));
     }
@@ -33,14 +33,14 @@ function child() {
 it.each([undefined, "explicit-host.json"])("passes only explicit native host configuration: %s", async config => {
   vi.stubEnv("DOHC_ENGINE_LIVE_HOST_CONFIG", "foreign-session.json");
   spawning.mockImplementation(child);
-  const client = await createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 2, capabilities: ["core", "blobs"],
+  const client = await createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 3, capabilities: ["core", "blobs"],
     env: config ? { DOHC_ENGINE_LIVE_HOST_CONFIG: config } : {}, privateLiveApplication: { aggregateBytes: 200_000_000, maxUploads: 1 } });
   try { expect(spawning.mock.calls[0]![2].env.DOHC_ENGINE_LIVE_HOST_CONFIG).toBe(config); }
   finally { client.close(); await client.waitForExit(); }
 });
 
 it("rejects invalid private upload budgets before creating a process", async () => {
-  await expect(createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 2, capabilities: ["core"],
+  await expect(createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 3, capabilities: ["core"],
     privateLiveApplication: { aggregateBytes: -1, maxUploads: 1 } })).rejects.toThrow();
   expect(spawning).not.toHaveBeenCalled();
 });
@@ -48,7 +48,7 @@ it("rejects invalid private upload budgets before creating a process", async () 
 it.each([undefined, '{"node":"/operator/node","bundle":"/operator/reader.cjs","manifest":"/operator/manifest.json"}'])("passes only explicit reader startup configuration: %s", async config => {
   vi.stubEnv("DOHC_ENGINE_READER_CONFIG", "foreign-reader");
   spawning.mockImplementation(child);
-  const client = await createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 2,
+  const client = await createEngineClient({ command: "owned-engine", authToken: "owned-token", protocolVersion: 3,
     capabilities: ["core", "blobs"], env: config ? { DOHC_ENGINE_READER_CONFIG: config } : {} });
   try { expect(spawning.mock.calls[0]![2].env.DOHC_ENGINE_READER_CONFIG).toBe(config); }
   finally { client.close(); await client.waitForExit(); }

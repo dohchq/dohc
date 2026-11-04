@@ -75,9 +75,9 @@ async function setup(maxListeners = 4, reserveBytes?: (size: number) => () => vo
   const minted = await tickets.mint({ objectId: binding.objectId }, scope);
   const ticket = (await tickets.redeem(minted!.token, scope))!;
   const peer = new Peer();
-  let client = new EngineClient(peer, { authToken: "test-parent-secret", protocolVersion: 2, capabilities: ["core", "blobs"],
+  let client = new EngineClient(peer, { authToken: "test-parent-secret", protocolVersion: 3, capabilities: ["core", "blobs"],
     connectTimeoutMs: 5000, privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 2 } });
-  peer.send({ type: "helloAck", protocolVersion: 2, sessionGeneration: 7, capabilities: ["core", "blobs"], limits: wireLimits });
+  peer.send({ type: "helloAck", protocolVersion: 3, sessionGeneration: 7, capabilities: ["core", "blobs"], limits: wireLimits });
   await client.ready(); cleanup.push(async () => { client.close(); });
   const changes = createNamedFrameChanges(maxListeners), invalidated = new AbortController();
   client = queueLiveHostRequests(client, {maxPendingReads: maxListeners, maxPendingWrites: maxListeners, deadlineMs: 5000,

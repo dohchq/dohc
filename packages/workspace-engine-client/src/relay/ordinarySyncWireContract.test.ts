@@ -21,7 +21,7 @@ describe("ordinary native sync contract", () => {
   });
 
   it("preserves producing versions, full refusal evidence and the issued token", () => {
-    expect(decodeOrdinarySyncResult("sync.pull", { ...pull, ignored: true,
+    expect(decodeOrdinarySyncResult("sync.applyPull", { ...pull, ignored: true,
       pendingCursor: { ...pull.pendingCursor, ignored: true } })).toEqual({ status: "complete", fetched: 2, applied: 1,
       refused: 1, skipped: 0, conflictsOpened: 0, hasMore: false, nextCursor: 9, pendingCursor: pull.pendingCursor,
       changedPaths: [change], refusals: [refusal], sharingDeclined: [decline] });
@@ -32,7 +32,7 @@ describe("ordinary native sync contract", () => {
       const incomplete: Partial<typeof decline> = { ...decline };
       delete incomplete[field];
       for (const [method, result] of [
-        ["sync.push", push], ["sync.pull", pull],
+        ["sync.push", push], ["sync.applyPull", pull],
         ["sync.commitCursor", { committed: true }],
       ] as const) {
         expect(() => decodeOrdinarySyncResult(method, { ...result, sharingDeclined: [incomplete] }))
@@ -54,8 +54,8 @@ describe("ordinary native sync contract", () => {
     { sharingDeclined: [{ ...decline, lineagePruned: "true" }] }, { sharingDeclined: [{ ...decline, path: "" }] }, { sharingDeclined: [{ ...decline, limitBytes: -1 }] },
     { sharingDeclined: [{ ...decline, observedBytes: Number.MAX_SAFE_INTEGER + 1 }] },
   ])("rejects an unusable pull result: %j", patch => {
-    expect(() => decodeOrdinarySyncResult("sync.pull", { ...pull, ...patch })).toThrow(ProtocolShapeError);
-    expect(() => decodeOrdinarySyncResult("sync.pull", { ...pull, ...patch })).toThrow("sync.pull result");
+    expect(() => decodeOrdinarySyncResult("sync.applyPull", { ...pull, ...patch })).toThrow(ProtocolShapeError);
+    expect(() => decodeOrdinarySyncResult("sync.applyPull", { ...pull, ...patch })).toThrow("sync.applyPull result");
   });
 
   it.each([
@@ -69,7 +69,7 @@ describe("ordinary native sync contract", () => {
   });
 
   it("accepts secret deletion and strips unrelated fields", () => {
-    expect(decodeOrdinarySyncResult("sync.pull", { ...pull,
+    expect(decodeOrdinarySyncResult("sync.applyPull", { ...pull,
       changedPaths: [{ ...change, operation: "delete", contentKind: "secret", ignored: true }] }).changedPaths)
       .toEqual([{ ...change, operation: "delete", contentKind: "secret" }]);
   });

@@ -60,6 +60,19 @@ pub(crate) struct PendingCursor {
     pub(super) issue: u64,
 }
 
+pub(super) struct PendingPull {
+    handle: WorkspaceHandle,
+    token: String,
+    page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplyPullParams {
+    workspace_id: String,
+    page_token: String,
+}
+
 #[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RelayOpenParams {
@@ -823,6 +836,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         // Only `sync.pullHosted` answers a pass, and `sync.commitCursor` a
         // hosted commit, each fit to its budget.
         RelayOperationOutcome::HostedPass { .. }
+        | RelayOperationOutcome::PullFetched(_)
         | RelayOperationOutcome::HostedCursorCommitted { .. } => {
             return Err(WireError::new(
                 ErrorCode::Internal,
@@ -1229,7 +1243,7 @@ impl EngineService {
         }
     }
 
-    pub(super) async fn sync_pull(
+    pub(super) async fn sync_fetch_pull(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
@@ -1238,6 +1252,50 @@ impl EngineService {
         let params: RelayWorkspaceParams = parse(params)?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let mut pending = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.fetchPull")),
+            guard = open.pending_pull.lock() => guard,
+        };
+        *pending = None;
+        let outcome = self.relay_execute(
+            ctx, &open, configuration,
+            RelayOperation::FetchPull { workspace_id: open.workspace_id.clone() },
+            "sync.fetchPull",
+        ).await?;
+        let RelayOperationOutcome::PullFetched(page) = outcome else {
+            return Err(WireError::new(ErrorCode::Internal, "unexpected pull fetch outcome"));
+        };
+        if !Arc::ptr_eq(&self.open(handle.as_ref())?, &open) {
+            return Err(workspace_unavailable());
+        }
+        let token = sync_identifier("pull")?;
+        *pending = Some(PendingPull { handle: bound_handle.clone(), token: token.clone(), page });
+        Ok(json!({ "pageToken": token }))
+    }
+
+    pub(super) async fn sync_apply_pull(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ApplyPullParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let mut pending = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.applyPull")),
+            guard = open.pending_pull.lock() => guard,
+        };
+        if !pending.as_ref().is_some_and(|page| {
+            page.handle == *bound_handle && page.token == params.page_token
+        }) {
+            return Err(WireError::new(ErrorCode::InvalidParams, "pull page token is stale or foreign"));
+        }
+        let page = pending.take().expect("validated pull page").page;
         // A Collections update already admitted under the gate runs before
         // this pull places a page, and none is admitted until the pull is
         // between pages or done. The gate is not held across the relay's I/O.
@@ -1245,7 +1303,7 @@ impl EngineService {
             let cancellation = OperationCancellation::new(ctx);
             let _apply = tokio::select! {
                 biased;
-                () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.pull")),
+                () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.applyPull")),
                 guard = open.capture_apply_gate.lock() => guard,
             };
             open.pulls_in_flight.fetch_add(1, Ordering::SeqCst);
@@ -1258,11 +1316,12 @@ impl EngineService {
                 ctx,
                 &open,
                 configuration,
-                RelayOperation::Pull {
+                RelayOperation::ApplyPull {
                     workspace_id: open.workspace_id.clone(),
+                    page,
                     now_ms: now_ms()?,
                 },
-                "sync.pull",
+                "sync.applyPull",
             )
             .await?;
         let passive = open.mode == super::workspace::WorkspaceOpenMode::Passive;
@@ -4144,18 +4203,22 @@ mod tests {
         (relay, f)
     }
 
-    /// A `sync.pull` that owns what it needs, so a test can poll or spawn it.
+    /// A `sync.applyPull` that owns what it needs, so a test can poll or spawn it.
     fn pull(
         f: &CursorFixture,
     ) -> impl std::future::Future<Output = Result<Value, WireError>> + Send + 'static {
         let (service, handle, workspace_id) =
             (Arc::clone(&f.service), f.handle.clone(), f.workspace_id);
         async move {
+            let fetched = service.sync_fetch_pull(
+                &RequestContext::unbounded(), Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            ).await?;
             service
-                .sync_pull(
+                .sync_apply_pull(
                     &RequestContext::unbounded(),
                     Some(handle),
-                    json!({ "workspaceId": workspace_id }),
+                    json!({ "workspaceId": workspace_id, "pageToken": fetched["pageToken"] }),
                 )
                 .await
         }

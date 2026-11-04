@@ -429,9 +429,9 @@ export function startExistingOwnerDeviceTransport(options: {
     const value = JSON.parse(frame.payload.toString("utf8")) as Record<string,unknown>;
     if (!ready) {
       const hello = configRecord(value,["type","protocolVersion","authToken","capabilities","maxFrameBytes","lastSessionGeneration"]);
-      if (hello.type !== "hello" || hello.protocolVersion !== 2 || hello.authToken !== start.authToken || !Array.isArray(hello.capabilities) || !hello.capabilities.includes("blobs")) throw new Error("Invalid owner handshake.");
+      if (hello.type !== "hello" || hello.protocolVersion !== 3 || hello.authToken !== start.authToken || !Array.isArray(hello.capabilities) || !hello.capabilities.includes("blobs")) throw new Error("Invalid owner handshake.");
       ready = true;
-      void send({ type: "helloAck",protocolVersion: 2,sessionGeneration: 1,capabilities: ["blobs"],limits: { maxFrameBytes: Math.min(integer(hello.maxFrameBytes,1_048_576),config.maxFrameBytes),maxBlobChunkBytes: 256*1024,maxStringBytes: 1_048_576,maxCollectionLen: 100_000,maxBatchLen: 1,maxJsonDepth: 32 } }).catch(stop);
+      void send({ type: "helloAck",protocolVersion: 3,sessionGeneration: 1,capabilities: ["blobs"],limits: { maxFrameBytes: Math.min(integer(hello.maxFrameBytes,1_048_576),config.maxFrameBytes),maxBlobChunkBytes: 256*1024,maxStringBytes: 1_048_576,maxCollectionLen: 100_000,maxBatchLen: 1,maxJsonDepth: 32 } }).catch(stop);
       return;
     }
     if (value.type === "cancel") { const operation = operations.get(integer(value.id,1)); operation?.signal.abort(new Error("Owner operation cancelled.")); return; }

@@ -327,12 +327,12 @@ async fn assert_note_recovery(restart: bool, workaround: bool, reader_state: Rea
         install_cold_reader(&a_scratch, &reader_root, &notes, reader_state).await;
         if workaround {
             a_id += 1;
-            let first = call_with_busy_retry(
+            let first = pull_batch(
                 &a_transport,
                 RequestContext::unbounded(),
                 request(
                     a_id,
-                    "sync.pull",
+                    "sync.applyPull",
                     Some(a.clone()),
                     json!({"workspaceId":workspace}),
                 ),

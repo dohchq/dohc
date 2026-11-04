@@ -707,7 +707,7 @@ function helloAck(
 ): Extract<Envelope, { type: "helloAck" }> {
   return {
     type: "helloAck",
-    protocolVersion: 2,
+    protocolVersion: 3,
     sessionGeneration: 7,
     capabilities,
     limits,
@@ -850,7 +850,7 @@ function client(
 ): EngineClient {
   return new EngineClient(peer, {
     authToken: "parent-secret",
-    protocolVersion: 2,
+    protocolVersion: 3,
     capabilities: ["core", "ydoc", "blobs"],
     connectTimeoutMs: 5_000,
     maxFrameBytes: LIMITS.maxFrameBytes,
@@ -875,7 +875,7 @@ function realStreamClient(connectTimeoutMs = 5_000): {
       new DuplexEngineClientConnection(duplex),
       {
         authToken: "parent-secret",
-        protocolVersion: 2,
+        protocolVersion: 3,
         capabilities: ["core"],
         connectTimeoutMs,
         maxFrameBytes: LIMITS.maxFrameBytes,
@@ -2415,7 +2415,7 @@ describe("EngineClient", () => {
     expect(peer.received).toEqual([
       {
         type: "hello",
-        protocolVersion: 2,
+        protocolVersion: 3,
         authToken: "parent-secret",
         capabilities: ["core", "ydoc", "blobs"],
         lastSessionGeneration: null,
@@ -3899,7 +3899,7 @@ describe("EngineClient", () => {
       wedged,
       {
         authToken: "parent-secret",
-        protocolVersion: 2,
+        protocolVersion: 3,
         capabilities: ["core"],
         connectTimeoutMs: 5_000,
         maxFrameBytes: LIMITS.maxFrameBytes,
@@ -3915,7 +3915,7 @@ describe("EngineClient", () => {
       shutdown,
       {
         authToken: "parent-secret",
-        protocolVersion: 2,
+        protocolVersion: 3,
         capabilities: ["core"],
         connectTimeoutMs: 5_000,
         maxFrameBytes: LIMITS.maxFrameBytes,
