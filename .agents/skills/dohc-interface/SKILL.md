@@ -397,6 +397,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
 - Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
+- While two or more rows are selected, each selected row uses `bg-selection text-ink`, the tint selected text uses, so the selection reads apart from the open row. The open row keeps `font-medium` in or out of the selection.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
 - Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
 - `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.

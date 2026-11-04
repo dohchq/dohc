@@ -590,6 +590,23 @@ export function livePageBody(action: LivePageAction): string {
   return `In Live documents, stop live editing for this page, then ${action} it again.`;
 }
 
+/** Up to three quoted names, then how many more. */
+export function namedList(names: readonly string[]): string {
+  const shown = names.slice(0, 3).map((name) => `"${name}"`);
+  const more = names.length - shown.length;
+  if (more > 0) return `${shown.join(", ")} and ${more} more`;
+  return shown.length < 2 ? shown.join("") : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+}
+
+/** Several pages one move or delete could not change, for live editing. */
+export function livePagesTitle(paths: readonly string[], action: "move" | "delete"): string {
+  return `dohc can't ${action} ${namedList(paths)} while they have live editing on`;
+}
+
+export function livePagesBody(action: "move" | "delete"): string {
+  return `In Live documents, stop live editing for these pages, then ${action} them again.`;
+}
+
 /** The change an Undo would reverse: a rename, a move, or a copy's creation. */
 export type LivePageUndone = "renaming" | "moving" | "creating";
 

@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -211,7 +211,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, sourcePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -968,14 +968,22 @@ export function DesktopWorkspaceShell(props: {
       reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
+  // Each Explorer notice that names several refused paths, by its identity.
+  // The shell keeps them with Notices, which outlive a hidden sidebar.
+  const refusedBatchesRef = useRef(new Map<string, ReadonlySet<string>>());
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that ran.
   const reportExplorerError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
+    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused,
+      refusedPaths?: readonly string[]) => {
+      if (refusedPaths && identity !== undefined) refusedBatchesRef.current.set(identity, new Set(refusedPaths));
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
-      const id = workspaceId, reveal = livePage?.path ?? null;
+      const id = workspaceId, reveal = livePage && "path" in livePage ? livePage.path : null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
-        ...(livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
+        ...(!livePage ? { message }
+          : "path" in livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) }
+          : { title: livePagesTitle(livePage.paths, livePage.action), message: livePagesBody(livePage.action),
+            details: livePage.paths.map((path) => ["File", path, path.length] as const) }),
         action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
@@ -3904,6 +3912,12 @@ export function DesktopWorkspaceShell(props: {
       for (const change of changes) {
         if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
         if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
+      }
+      // A notice naming several refused paths goes once one of them changes.
+      for (const [batch, paths] of refusedBatchesRef.current) {
+        if (!changes.some((change) => paths.has(sourcePath(change)))) continue;
+        refusedBatchesRef.current.delete(batch);
+        clearIdentity(batch);
       }
       // Set-aside drafts key by path, so recovery follows the same projection
       // as tabs and pins — a rename must not strand the
