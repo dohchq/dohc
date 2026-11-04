@@ -251,6 +251,7 @@ describe("a dohc Codex run", () => {
       // Codex swaps the run's reviewer for one the requirements choose.
       expect(refuses("allowed_approvals_reviewers = ['user', 'auto_review']\n", platform)).toBe(false);
       expect(refuses("allowed_approvals_reviewers = ['auto_review']\n", platform)).toBe(true);
+      expect(refuses("[auto_review]\nrequired_on_models = []\n", platform)).toBe(false);
       expect(refuses("[auto_review]\nrequired_on_models = ['gpt-5']\n", platform)).toBe(true);
       expect(refuses("[windows\n", platform)).toBe(true);
     }

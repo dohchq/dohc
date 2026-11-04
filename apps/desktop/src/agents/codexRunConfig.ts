@@ -97,7 +97,8 @@ export function codexRequirementsRefuseReadOnly(
   return tables.some(({ table }) => {
     if ("allowed_permission_profiles" in table || "config_server" in table) return true;
     if (lacks(table.allowed_approval_policies, "never") || lacks(table.allowed_approvals_reviewers, "user")) return true;
-    if (isTable(table.auto_review) && "required_on_models" in table.auto_review) return true;
+    const models = isTable(table.auto_review) ? table.auto_review.required_on_models : undefined;
+    if (models !== undefined && !(Array.isArray(models) && models.length === 0)) return true;
     if ([table.features, table.feature_requirements].some((features) =>
       isTable(features) && Object.entries(features).some(([key, on]) => on === true && disabled.has(key)))) return true;
     if (platform !== "win32" || !isTable(table.windows)) return false;
