@@ -1,5 +1,5 @@
 import { documentChange, stopEditorMouseEvent } from "./pmHelpers";
-import { ownersInRange, throughEdit } from "./widgetOwnership";
+import { ownersInRange, withSteps } from "./widgetOwnership";
 import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
@@ -410,9 +410,10 @@ export function makeCalloutChromePlugin() {
       // one to replace. It keeps its owner key when its callout survives.
       apply(tr, old) {
         if (!tr.docChanged) return old;
-        const { range, mapping } = documentChange(tr.before, tr.doc);
+        const { range: changed, mapping } = documentChange(tr.before, tr.doc);
         const decorations = old.map(mapping, tr.doc);
-        if (!range) return decorations;
+        if (!changed) return decorations;
+        const range = withSteps(changed, tr.mapping, tr.doc.content.size, tr.before.content.size);
         const callouts: Array<{ node: Node; pos: number }> = [];
         calloutsBetween(tr.doc, range.from, range.to, (node, pos) => {
           if (pos + 1 >= range.from && pos + 1 <= range.to) callouts.push({ node, pos });
@@ -420,7 +421,7 @@ export function makeCalloutChromePlugin() {
         const owners = ownersInRange(
           old.find(range.from, range.toBefore),
           callouts.map(({ pos }) => pos + 1),
-          throughEdit(tr.mapping, mapping),
+          tr.mapping,
           1,
         );
         const headers = callouts.map(({ node, pos }) =>

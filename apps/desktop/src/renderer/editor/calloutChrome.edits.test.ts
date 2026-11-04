@@ -169,6 +169,39 @@ describe("makeCalloutChromePlugin — edits", () => {
     expect(shown(state, plugin)).toEqual(expected(state.doc));
   });
 
+  it("keeps the focused callout's owner when the same edit adds a copy of it before an earlier callout and deletes it", () => {
+    const plugin = makeCalloutChromePlugin();
+    const a = callout("note", "Same", paragraph("a"));
+    const b = callout("note", "Same", paragraph("b"));
+    const c = callout("note", "Same", paragraph("c"));
+    const start = EditorState.create({ doc: doc(paragraph("lead"), b, a, paragraph("after")), plugins: [plugin] });
+    const [ownerB, ownerA] = headers(start, plugin).map(({ owner }) => owner);
+    const [posB] = calloutPositions(start.doc);
+
+    // A's title has focus. In one edit, C and a copy of A come before B, A
+    // goes, and the paragraph before them changes.
+    let tr = start.tr.insert(posB!, [c, a]);
+    const moved = posB! + c.nodeSize + a.nodeSize + b.nodeSize;
+    tr = tr.delete(moved, moved + a.nodeSize);
+    const state = start.apply(tr.insertText("x", 1));
+    const [shownC, shownA, shownB] = headers(state, plugin).map(({ owner }) => owner);
+    expect([shownA, shownB]).toEqual([ownerA, ownerB]);
+    expect([ownerA, ownerB]).not.toContain(shownC);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
+  it("keeps a header on its callout when an identical callout is inserted right before it", () => {
+    const plugin = makeCalloutChromePlugin();
+    const a = callout("note", "Same", paragraph("a"));
+    const start = EditorState.create({ doc: doc(paragraph("lead"), a, paragraph("after")), plugins: [plugin] });
+    const [ownerA] = headers(start, plugin).map(({ owner }) => owner);
+    const state = start.apply(start.tr.insert(calloutPositions(start.doc)[0]!, a));
+    const [shownCopy, shownA] = headers(state, plugin).map(({ owner }) => owner);
+    expect(shownA).toBe(ownerA);
+    expect(shownCopy).not.toBe(ownerA);
+    expect(shown(state, plugin)).toEqual(expected(state.doc));
+  });
+
   it("makes no header again when typing in a note with 2,000 callouts", () => {
     const plugin = makeCalloutChromePlugin();
     let state = EditorState.create({
