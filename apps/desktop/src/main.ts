@@ -6055,7 +6055,13 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await workspaceDatabaseWorker.dispose();
     },
     closeRelay: closeAllRelayTransportWorkspaces,
-    stopEngine: async () => { await desktopEngine.daemon?.stop(); },
+    stopEngine: async () => {
+      // As DOHC_TEST_WILL_QUIT: the quit e2e orders its reads against this.
+      if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && process.env.DOHC_TEST_QUIT_TIMING === "1") {
+        console.log(`DOHC_TEST_STOP_ENGINE:${process.hrtime.bigint()}`);
+      }
+      await desktopEngine.daemon?.stop();
+    },
     // The process exits right after this line, so it is written synchronously.
     reportQuit: (line) => { try { writeSync(1, `${line}\n`); } catch { /* No stdout to report to. */ } },
   },

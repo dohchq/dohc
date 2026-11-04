@@ -24,7 +24,8 @@ type Launched = Awaited<ReturnType<typeof launchDesktopApp>>;
 
 interface HeldRequest {
   line: string | null;
-  closedAtMs: number | null;
+  // The monotonic clock the app's DOHC_TEST_* quit marks use.
+  closedAt: bigint | null;
 }
 
 const REQUEST_LINE = /^(?:GET|POST|PUT|PATCH|DELETE) [^ \r\n]+ HTTP\/1\.[01]/gmu;
@@ -45,7 +46,7 @@ async function startSyncServer(relay: SyncRelayHandle, refused: string) {
     socket.on("error", () => undefined);
     if (mode === "hold") {
       heldSockets.add(socket);
-      const request: HeldRequest = { line: null, closedAtMs: null };
+      const request: HeldRequest = { line: null, closedAt: null };
       held.push(request);
       let head = "";
       socket.on("data", (chunk: Buffer) => {
@@ -55,7 +56,7 @@ async function startSyncServer(relay: SyncRelayHandle, refused: string) {
         if (end >= 0) request.line = head.slice(0, end);
       });
       socket.on("close", () => {
-        request.closedAtMs = performance.now();
+        request.closedAt = process.hrtime.bigint();
         heldSockets.delete(socket);
       });
       return;
@@ -172,11 +173,11 @@ test("quits within its budget while a push and the automation host read wait on 
     // A changed automation makes the executor check its subscriptions,
     // and it reads the host record again.
     await writeFile(join(temp.rootPath, "Tasks/automations.yaml"), automations("Add a to-do"));
-    await expect.poll(() => server?.held.some((request) => request.line?.startsWith(hostRead) && request.closedAtMs === null), {
+    await expect.poll(() => server?.held.some((request) => request.line?.startsWith(hostRead) && request.closedAt === null), {
       timeout: 60_000,
       message: "The automation host read waits on the server that never answers",
     }).toBe(true);
-    const read = server.held.find((request) => request.line?.startsWith(hostRead) && request.closedAtMs === null)!;
+    const read = server.held.find((request) => request.line?.startsWith(hostRead) && request.closedAt === null)!;
     const readLine = read.line!;
 
     // The measured quit: from asking the app to quit until its process exits, up to 30 s.
@@ -184,16 +185,27 @@ test("quits within its budget while a push and the automation host read wait on 
     const exited = new Promise<number>((resolve) => child.once("exit", () => resolve(performance.now())));
     const outputEnded = new Promise<true>((resolve) => child.once("close", () => resolve(true)));
     const started = performance.now();
-    await app.evaluate(({ app }) => { app.quit(); });
+    await app.evaluate(({ app }) => {
+      process.env.DOHC_TEST_QUIT_TIMING = "1";
+      app.quit();
+    });
     const exitedAtMs = await within(exited, 30_000);
     const quitMs = Math.round((exitedAtMs ?? performance.now()) - started);
     // The app writes its quit line just before it exits.
     await within(outputEnded, 5_000);
     const quitLine = logs.find((entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"))?.text.trim() ?? "no quit line";
-    console.log(`#2868 e2e push: ${exitedAtMs !== null ? `quit took ${quitMs} ms` : `app still running after ${quitMs} ms`}; ${quitLine}`);
+    // When the app starts stopping the engine, on the clock `closedAt` uses.
+    const stdout = logs.filter((entry) => entry.source === "main" && entry.level === "stdout").map((entry) => entry.text).join("");
+    const stopEngineMark = /DOHC_TEST_STOP_ENGINE:(\d+)/u.exec(stdout)?.[1];
+    const stopEngineAt = stopEngineMark === undefined ? null : BigInt(stopEngineMark);
+    const readOrder = read.closedAt === null ? "the read never closed"
+      : stopEngineAt === null ? "the app never started stopping the engine"
+      : `the read closed ${Number(stopEngineAt - read.closedAt) / 1e6} ms before the app started stopping the engine`;
+    console.log(`#2868 e2e push: ${exitedAtMs !== null ? `quit took ${quitMs} ms` : `app still running after ${quitMs} ms`}; ${quitLine}; ${readOrder}`);
     expect(exitedAtMs, "The app exits during an unanswered push").not.toBeNull();
-    expect(read.closedAtMs, "The app stops the automation host read before it exits").not.toBeNull();
-    expect(read.closedAtMs! - started, "The app stops the automation host read when the workspace closes, not when it exits").toBeLessThan(2_000);
+    expect(read.closedAt, "The app stops the automation host read before it exits").not.toBeNull();
+    expect(stopEngineAt, "The app starts stopping the engine").not.toBeNull();
+    expect(read.closedAt! < stopEngineAt!, "The app stops the automation host read when the workspace closes, before it stops the engine").toBe(true);
     expect(quitLine, "Quit finishes within its budget").not.toContain("ran past its");
     expect(quitLine, "Closing the workspace waits for no relay read").not.toContain("closeWorkspaces");
     // Within the 6 s budget only: the engine's own exit wait is fixed separately.
