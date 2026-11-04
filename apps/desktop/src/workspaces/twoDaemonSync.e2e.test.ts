@@ -33,7 +33,7 @@ import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/auto
 import { runCollectionAutomation } from "@dohc/automation-executor/collection-automation-run";
 import { undoCollectionAutomationRuns } from "../../../../packages/automation-executor/src/collectionAutomationUndo";
 import { createAutomationTargets } from "../../../../packages/automation-executor/src/automationTargets";
-import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
+import { openLiveDaemonWorkspace, type CloseStep } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
@@ -121,7 +121,7 @@ interface LiveDaemonCapture {
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
   // What the desktop does first at quit.
   beginShutdown(): void;
-  close(): Promise<void>;
+  close(step?: CloseStep): Promise<void>;
 }
 
 async function pushUntilDrained(relay: EngineRelayWorkspaceClient) {
@@ -168,11 +168,11 @@ async function openLiveDaemonCapture(input: {
       capture.beginShutdown();
       workspace.sessions.beginShutdown();
     },
-    close: async () => {
+    close: async (step: CloseStep = (_name, work) => work) => {
       try {
-        await capture.stop();
+        await step("capture.stop", capture.stop());
       } finally {
-        await workspace.close();
+        await workspace.close(step);
       }
     },
   };
@@ -237,11 +237,11 @@ async function openJoinedDaemonCapture(input: {
       capture.beginShutdown();
       workspace.sessions.beginShutdown();
     },
-    close: async () => {
+    close: async (step: CloseStep = (_name, work) => work) => {
       try {
-        await capture.stop();
+        await step("capture.stop", capture.stop());
       } finally {
-        await workspace.close();
+        await workspace.close(step);
       }
     },
   };
@@ -1710,6 +1710,80 @@ it.skipIf(engine.missing)(
   },
   120_000,
 );
+
+// The close follows the desktop quit (appLifecycle.ts and main.ts's shutdown):
+// beginEngineShutdown, then the workspace's capture close, then closeRelay and
+// stopEngine.
+describe.skipIf(engine.missing)("Quit while a save is in progress", () => {
+  // `running` names the close steps still awaited.
+  function quitLikeTheDesktop(device: LiveDaemonCapture) {
+    const running = new Set<string>();
+    const step: CloseStep = (name, work) => {
+      running.add(name);
+      const done = () => { running.delete(name); };
+      work.then(done, done);
+      return work;
+    };
+    device.beginShutdown();
+    const done = (async () => {
+      await step("capture.settleAndCloseAllLiveSessions", device.capture.settleAndCloseAllLiveSessions()).catch(() => undefined);
+      await device.close(step).catch(() => undefined);
+    })();
+    return { running, done };
+  }
+
+  // Resolves "closed", or names the steps still awaited at `limitMs`.
+  async function closedWithin(quit: ReturnType<typeof quitLikeTheDesktop>, limitMs: number): Promise<string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([quit.done.then(() => "closed"), new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve(`still waiting on ${[...quit.running].join(", ") || "an unlabelled step"}`), limitMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  // Quitting faster must never drop accepted work: a write the capture admitted
+  // before quit holds the close until it lands.
+  it("holds quit for a local write admitted before it, and keeps the write", async () => {
+    const workspaceId = "two-daemon-quit-held-write";
+    const root = await createTestScratch("dohc-quit-held-write-");
+    const relayRoot = await createTestScratch("dohc-quit-held-write-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
+    const person = { kind: "human", humanId: "local-person" } as const;
+    const admitted = deferred();
+    const release = deferred();
+    let daemon: LiveDaemonCapture | null = null;
+    let quit: ReturnType<typeof quitLikeTheDesktop> | undefined;
+    try {
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+      await daemon.relay.claim();
+      await daemon.chats.ensureGeneralChannel({ workspaceId });
+      const written = daemon.capture.writeAuthoredFile(join(root, "kept.md"), "kept\n", person, {
+        beforeWrite: async () => {
+          admitted.resolve();
+          await release.promise;
+        },
+      }).then(() => "written", (error: unknown) => error);
+      await admitted.promise;
+      quit = quitLikeTheDesktop(daemon);
+      daemon = null;
+      expect(await closedWithin(quit, 1_000), "Quit waits for the admitted write").toMatch(/^still waiting on /);
+      release.resolve();
+      expect(await written, "The admitted write lands during quit").toBe("written");
+      expect(await closedWithin(quit, REAL_DAEMON_DEADLINE_MS)).toBe("closed");
+
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+      await waitForPathMoments(daemon.capture, "kept.md", 1);
+      expect(await readFile(join(root, "kept.md"), "utf8")).toBe("kept\n");
+    } finally {
+      release.resolve();
+      await quit?.done;
+      await daemon?.close();
+      await relay.stop();
+    }
+  }, 120_000);
+});
 
 // A rename that changes only case reaches a peer as a delete of the old
 // spelling and a write of the new one. On a disk that ignores case, as macOS

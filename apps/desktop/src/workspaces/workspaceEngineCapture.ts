@@ -1933,7 +1933,7 @@ export function createWorkspaceEngineCapture(
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
-      captureWaitAbort.signal,
+      admittedCaptureWaitAbort.signal,
     );
     return liveStores;
   }
@@ -1948,6 +1948,9 @@ export function createWorkspaceEngineCapture(
   const durableLocalListeners = new Set<(path: string) => void>();
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
+  // Quit cancels capture waits at once, except in work dohc accepted before
+  // quit, so a save in progress at quit still reaches the disk.
+  const admittedCaptureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
@@ -2051,7 +2054,7 @@ export function createWorkspaceEngineCapture(
   // Whether capture still holds a change made outside dohc to this path.
   async function outsideWriteWaits(path: string): Promise<boolean> {
     const engine = await engineStore();
-    await engine.flushCapture?.();
+    await engine.flushCapture?.({ signal: captureWaitAbort.signal });
     return (await engine.watcherStatus?.())?.deferredWrites.includes(path) ?? false;
   }
   // Set-aside drafts of a deleted file's text that a newer draft or a save
@@ -6645,6 +6648,7 @@ export function createWorkspaceEngineCapture(
       shuttingDown = true;
       ydocOpenAbort.abort();
       captureWaitAbort.abort();
+      void chain.then(() => admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason));
     },
 
     settleAndCloseAllLiveSessions() {
@@ -8332,7 +8336,7 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("flush capture", async () => {
         const engine = await engineStore();
         await drainPendingCollectionAdoptions(engine);
-        await engine.flushCapture?.();
+        await engine.flushCapture?.({ signal: captureWaitAbort.signal });
         await drainPendingCollectionAdoptions(engine);
       });
     },
@@ -8355,7 +8359,7 @@ export function createWorkspaceEngineCapture(
             await drainPendingCollectionAdoptions(store);
             // Normal stop captures the last disk edits. Explicit shutdown
             // cancels convergence before session retirement and skips this wait.
-            if (!captureWaitAbort.signal.aborted) await store.flushCapture?.();
+            if (!captureWaitAbort.signal.aborted) await store.flushCapture?.({ signal: captureWaitAbort.signal });
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
@@ -8369,6 +8373,7 @@ export function createWorkspaceEngineCapture(
         }
       } finally {
         captureWaitAbort.abort();
+        admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason);
         await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every

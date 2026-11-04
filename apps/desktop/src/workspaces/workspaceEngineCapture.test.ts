@@ -1822,6 +1822,33 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(closeWorkspace).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a save accepted before shutdown and refuses one asked for after it", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const person = { kind: "human", humanId: "local-person" } as const;
+    const admitted = deferred<void>();
+    const release = deferred<void>();
+    try {
+      const kept = engine.writeAuthoredFile(join(root, "kept.md"), "kept\n", person, {
+        beforeWrite: async () => {
+          admitted.resolve();
+          await release.promise;
+        },
+      }).catch((error: unknown) => error);
+      await admitted.promise;
+      engine.beginShutdown();
+      const late = engine.writeAuthoredFile(join(root, "late.md"), "late\n", person).catch((error: unknown) => error);
+      release.resolve();
+      expect(await kept).toMatchObject({ materializeOutcome: "applied" });
+      expect(await late).toMatchObject({ name: "AbortError" });
+      expect(await readFile(join(root, "kept.md"), "utf8")).toBe("kept\n");
+      expect(existsSync(join(root, "late.md"))).toBe(false);
+    } finally {
+      release.resolve();
+      await engine.stop();
+    }
+  });
+
   it("closes both daemon stores without restarting convergence after shutdown begins", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
