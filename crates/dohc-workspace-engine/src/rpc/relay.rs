@@ -4352,7 +4352,10 @@ mod tests {
         // Between the pages the pull's token stands, so an owed update waits.
         f.open.collections_owed.store(true, Ordering::SeqCst);
         f.service.settle_owed_collections(&ctx, &f.open).await;
-        assert!(f.owed(), "an update between the pages waits for the terminal page");
+        assert!(
+            f.owed(),
+            "an update between the pages waits for the terminal page"
+        );
         assert_eq!(f.edges(), 1, "the update did not see page one alone");
         let page_two = pull(&f).await.expect("page two lands");
         assert_eq!(page_two["hasMore"], json!(false));
@@ -4370,7 +4373,10 @@ mod tests {
         assert_eq!(page_one["hasMore"], json!(true));
         assert!(f.owed(), "no update ran during the pull");
         let after = finish_half_pull(f, page_one).await;
-        assert_eq!(state, after, "the update's order leaves the same Collections");
+        assert_eq!(
+            state, after,
+            "the update's order leaves the same Collections"
+        );
     }
 
     /// A Collections update is admitted under the capture gate before a pull
