@@ -14,6 +14,7 @@ import { createShareRosterStore } from "./shareRosterStore";
 import type { ShareRoster } from "../automations/shareRoster";
 import type { RosterListing } from "@dohc/automation-executor/roster-listing";
 import { canonicalWorkspaceRoot, type CreatedWorkspace } from "./createWorkspaceFolder";
+import { folderIdentitySync, sameFolder, type FolderIdentity } from "./workspaceRootIdentity";
 import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
 import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
 
@@ -395,7 +396,14 @@ function withRealRoot(entry: RegistryEntry): RegistryEntry {
   }
 }
 
-export function createRegistryStore(registryFile: string) {
+export function createRegistryStore(
+  registryFile: string,
+  options: {
+    // Which folder a root is on disk, read fresh at each registration.
+    folderIdentity?(rootPath: string): FolderIdentity | null;
+  } = {},
+) {
+  const identityOf = options.folderIdentity ?? ((rootPath: string) => folderIdentitySync(rootPath));
   // The process exclusively owns this file (single-instance lock), so the
   // parsed registry is cached after first read and refreshed on write.
   let cache: RegistryFile | null = null;
@@ -518,6 +526,15 @@ export function createRegistryStore(registryFile: string) {
       const registry = read();
       if (registry.workspaces.some((w) => w.rootPath === workspace.rootPath)) {
         throw new Error(`Folder is already attached: ${workspace.rootPath}`);
+      }
+      // The same folder under other capitals, as Linux can spell a folder
+      // that ignores them. An unknown identity matches nothing.
+      const identity = identityOf(workspace.rootPath);
+      const sameFolderEntry = identity === null
+        ? undefined
+        : registry.workspaces.find((w) => sameFolder(identityOf(w.rootPath), identity));
+      if (sameFolderEntry) {
+        throw new Error(`Folder is already attached: ${sameFolderEntry.rootPath}`);
       }
       // Two roots with one workspaceId would make file operations silently
       // target whichever registered first (e.g., attaching a copied folder).
