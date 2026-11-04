@@ -101,6 +101,7 @@ function writeListWidth(width: number): void {
 
 const ROW_MENU_WIDTH = 176;
 const REMOVE_FAILED = "dohc could not remove this workspace from the list.";
+type RemovalDialog = { workspace: Workspace; busy: boolean; error: string | null };
 const ROW_ACTIONS = ["open", "reveal", "remove"] as const;
 type RowAction = (typeof ROW_ACTIONS)[number];
 const rowIdentity = (action: RowAction, workspaceId: string) => `workspace-row:${action}:${workspaceId}`;
@@ -188,7 +189,14 @@ export function WorkspaceManager(props: {
 }) {
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
-  const [removing, setRemoving] = useState<{ workspace: Workspace; busy: boolean; error: string | null } | null>(null);
+  const [removing, setRemovingState] = useState<RemovalDialog | null>(null);
+  // Written only with the state, so two requests in one turn see each other
+  // whenever React renders.
+  const removingRef = useRef<RemovalDialog | null>(null);
+  const setRemoving = (next: RemovalDialog | null) => {
+    removingRef.current = next;
+    setRemovingState(next);
+  };
   // The manager owns connection notices rather than the route that raised
   // them: a route change unmounts the panel, and the failure has to survive
   // it along with the way to try again.
@@ -239,8 +247,6 @@ export function WorkspaceManager(props: {
   // something the removal has to ask about.
   const workspacesRef = useRef(props.workspaces);
   workspacesRef.current = props.workspaces;
-  const removingRef = useRef(removing);
-  removingRef.current = removing;
 
   async function open(workspace: Workspace) {
     try {
@@ -298,7 +304,7 @@ export function WorkspaceManager(props: {
       return true;
     }
     if (removingRef.current) return false;
-    setRemoving((shown) => shown ?? { workspace, busy: false, error: null });
+    setRemoving({ workspace, busy: false, error: null });
     return true;
   }
 
