@@ -161,6 +161,36 @@ describe("JoinSyncedWorkspace", () => {
     expect(document.getElementById("join-sync-passphrase-error")).toBeNull();
   });
 
+  it("keeps both fields read-only while a join runs, so a wrong answer marks what was sent", async () => {
+    const user = userEvent.setup();
+    let rejectJoin: (error: Error) => void = () => undefined;
+    bridgeMock.cloudJoinWorkspace
+      .mockRejectedValueOnce(new Error("Passphrase required to unlock synced secrets."))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectJoin = reject; }));
+    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
+    await fillJoinForm(user);
+    await user.click(screen.getByTestId("join-workspace-start"));
+    const passphrase = (await screen.findByTestId("join-sync-passphrase")) as HTMLInputElement;
+    const code = screen.getByTestId("join-sync-code") as HTMLInputElement;
+    await user.type(passphrase, "sent");
+    bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/retry");
+    await user.click(screen.getByTestId("join-choose-folder"));
+    await user.click(screen.getByTestId("join-workspace-start"));
+
+    await waitFor(() => expect(passphrase.readOnly).toBe(true));
+    expect(code.readOnly).toBe(true);
+    await user.type(passphrase, " typed later");
+    await user.type(code, "x");
+    expect(passphrase.value).toBe("sent");
+    expect(code.value).toBe("dohc-sync:ws-joined:http://localhost:1788");
+
+    await act(async () => rejectJoin(new Error("Passphrase could not unlock synced secrets.")));
+    await waitFor(() => expect(passphrase.readOnly).toBe(false));
+    expect(code.readOnly).toBe(false);
+    expect(document.activeElement).toBe(passphrase);
+    expect(passphrase.value.slice(passphrase.selectionStart ?? 0, passphrase.selectionEnd ?? 0)).toBe("sent");
+  });
+
   it("drops the protected-file passphrase when the workspace code changes", async () => {
     const user = userEvent.setup();
     bridgeMock.cloudJoinWorkspace

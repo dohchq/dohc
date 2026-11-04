@@ -251,6 +251,8 @@ export function JoinSyncedWorkspace(props: {
             aria-describedby={fieldErrors.code ? "join-sync-code-error" : undefined}
             placeholder="dohc-sync:…"
             spellCheck={false}
+            // In view but fixed while a join runs, so its answer is about what shows.
+            readOnly={joining}
             onKeyDown={onEnter}
             className={`h-9 w-full rounded-md border bg-bg px-3 font-mono text-[13px] text-ink placeholder:text-subtle ${fieldErrors.code ? "border-danger focus:border-danger!" : "border-line focus:border-ink"}`}
           />
@@ -269,6 +271,7 @@ export function JoinSyncedWorkspace(props: {
                 value={passphrase}
                 type="password"
                 spellCheck={false}
+                readOnly={joining}
                 onChange={(event) => {
                   setPassphrase(event.currentTarget.value);
                   setFieldError("passphrase", undefined);

@@ -101,6 +101,9 @@ function writeListWidth(width: number): void {
 
 const ROW_MENU_WIDTH = 176;
 const REMOVE_FAILED = "dohc could not remove this workspace from the list.";
+const ROW_ACTIONS = ["open", "reveal", "remove"] as const;
+type RowAction = (typeof ROW_ACTIONS)[number];
+const rowIdentity = (action: RowAction, workspaceId: string) => `workspace-row:${action}:${workspaceId}`;
 
 function WorkspaceRow(props: {
   workspace: Workspace;
@@ -222,12 +225,26 @@ export function WorkspaceManager(props: {
   }, [handoffStatus.status]);
 
   // A failed row action is a toast and a Notices row with Try again: the list
-  // stays as it was, so the row is still there to act on.
+  // stays as it was, so the row is still there to act on. Each failure has an
+  // identity, so a repeat replaces its row and a later success takes it back.
+  const { reportError, clearIdentity } = connectionNotices;
+  const reportRowError = (action: RowAction, workspaceId: string, fallback: string, cause: unknown, retry: () => void) =>
+    reportError(fallback, cause, retry, undefined, rowIdentity(action, workspaceId));
+  // The removed row is gone, so none of its failures has anything to retry.
+  const clearRow = (workspaceId: string) => {
+    for (const action of ROW_ACTIONS) clearIdentity(rowIdentity(action, workspaceId));
+  };
+  // A retry reads the list as it is now: the row may have gone, or gained
+  // something the removal has to ask about.
+  const workspacesRef = useRef(props.workspaces);
+  workspacesRef.current = props.workspaces;
+
   async function open(workspace: Workspace) {
     try {
       await props.onOpenWorkspace(workspace);
+      clearIdentity(rowIdentity("open", workspace.workspaceId));
     } catch (cause) {
-      connectionNotices.reportError("dohc could not open this workspace.", cause, () => void open(workspace));
+      reportRowError("open", workspace.workspaceId, "dohc could not open this workspace.", cause, () => void open(workspace));
     }
   }
 
@@ -243,30 +260,34 @@ export function WorkspaceManager(props: {
   async function reveal(workspace: Workspace) {
     try {
       await bridge().revealWorkspaceFolder({ workspaceId: workspace.workspaceId });
+      clearIdentity(rowIdentity("reveal", workspace.workspaceId));
     } catch (cause) {
-      connectionNotices.reportError("dohc could not show this workspace's folder.", cause, () => void reveal(workspace));
+      reportRowError("reveal", workspace.workspaceId, "dohc could not show this workspace's folder.", cause, () => void reveal(workspace));
     }
   }
 
   // The row leaves the list, which is the result in view, so success says
   // nothing.
   async function removeFromList(workspace: Workspace) {
+    const { workspaceId } = workspace;
     try {
-      await bridge().forgetWorkspace({ workspaceId: workspace.workspaceId });
+      await bridge().forgetWorkspace({ workspaceId });
       await props.onForgot();
+      clearRow(workspaceId);
     } catch (cause) {
-      connectionNotices.reportError(
-        REMOVE_FAILED,
-        cause,
-        () => void removeFromList(workspace),
-      );
+      reportRowError("remove", workspaceId, REMOVE_FAILED, cause, () => {
+        const current = workspacesRef.current.find((row) => row.workspaceId === workspaceId);
+        if (current) requestRemoval(current);
+        else clearIdentity(rowIdentity("remove", workspaceId));
+      });
     }
   }
 
-  // A row that holds more than its place asks first and says what goes.
+  // A row that holds more than its place asks first and says what goes. An
+  // open dialog stays as it is.
   function requestRemoval(workspace: Workspace) {
     if (removalFacts(workspace).length === 0) void removeFromList(workspace);
-    else setRemoving({ workspace, busy: false, error: null });
+    else setRemoving((shown) => shown ?? { workspace, busy: false, error: null });
   }
 
   async function confirmRemoval(workspace: Workspace) {
@@ -274,6 +295,7 @@ export function WorkspaceManager(props: {
     try {
       await bridge().forgetWorkspace({ workspaceId: workspace.workspaceId });
       await props.onForgot();
+      clearRow(workspace.workspaceId);
       setRemoving(null);
     } catch (cause) {
       setRemoving({ workspace, busy: false, error: ipcErrorMessage(cause, REMOVE_FAILED) });

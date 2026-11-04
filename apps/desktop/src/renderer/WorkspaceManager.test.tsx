@@ -925,6 +925,73 @@ describe("workspace manager with registered workspaces", () => {
     await waitFor(() => expect(bridge.revealWorkspaceFolder).toHaveBeenCalledTimes(2));
   });
 
+  it("takes back a failed folder reveal when the row menu then shows it", async () => {
+    const user = userEvent.setup();
+    bridge.revealWorkspaceFolder.mockRejectedValueOnce(new Error("no file manager"));
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for personal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Show in file manager" }));
+    await screen.findByTestId("workspace-shell-error");
+
+    await user.click(screen.getByRole("button", { name: "More for personal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Show in file manager" }));
+    // The toast and its Notices row are both gone.
+    await waitFor(() => expect(screen.queryByTestId("connection-notices")).toBeNull());
+  });
+
+  it("asks on Try again when a row gained sync after its removal failed", async () => {
+    const user = userEvent.setup();
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    const view = render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await screen.findByTestId("workspace-shell-error");
+
+    const synced = [KNOWN[0], { ...KNOWN[1], sync: "on" as const }];
+    view.rerender(
+      <WorkspaceManager workspaces={synced} current={null} onForgot={async () => synced} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("workspace-remove-confirm")).toBeTruthy();
+    expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing on Try again when the row has left the list", async () => {
+    const user = userEvent.setup();
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    const view = render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await screen.findByTestId("workspace-shell-error");
+
+    view.rerender(
+      <WorkspaceManager workspaces={[KNOWN[0]]} current={null} onForgot={async () => [KNOWN[0]]} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(screen.queryByTestId("connection-notices")).toBeNull());
+    expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes back an earlier removal failure when the removal then succeeds", async () => {
+    const user = userEvent.setup();
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full"));
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(screen.getByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await waitFor(() => expect(screen.queryByTestId("connection-notices")).toBeNull());
+  });
+
   it("drives the row menu from the keyboard and returns focus to its trigger", async () => {
     const user = userEvent.setup();
     render(
