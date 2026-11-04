@@ -454,7 +454,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       return context;
     }
     const recovery = createLocalDatasetRecovery({workspaceId,maxBytes:maxStoredBytes+2*1024*1024,signal:lifetime.signal,assertCurrent,
-      prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input)});
+      prepare: input => host.prepareRecovery(owner,input),claim: input => host.claimRecovery(owner,input),
+      async discardUnfinished(datasetId) {
+        assertCurrent();
+        const row = db.prepare("SELECT import_id FROM dohc_dataset_imports WHERE workspace_id=? AND dataset_id=? AND phase NOT IN ('installed','claimed')").get(workspaceId, datasetId);
+        if (row) await host.discardRecovery(owner, {workspaceId, datasetId, transferId: String(row.import_id)});
+      }});
     // After a change to which rules a dataset runs, or whether it runs.
     const changed = <T>(value: T): T => { if (!closed) options.onDatasetsChanged?.(); return value; };
     const local = {

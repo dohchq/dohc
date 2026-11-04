@@ -17,9 +17,13 @@ export function createLocalDatasetRecovery(options: {
   workspaceId: string; maxBytes: number; signal: AbortSignal; assertCurrent(): void;
   prepare(input: { workspaceId: string; transferId: string; manifestSha256: string; stream: AsyncIterable<Uint8Array>; signal: AbortSignal }): Promise<Prepared>;
   claim(input: RecoveryImportReceipt & { workspaceId: string; datasetId: string; oldHostStopped: true; signal: AbortSignal }): RecoveryImportReceipt;
+  /** Discards the copy a restore of this Collection left unfinished, if any. */
+  discardUnfinished(datasetId: string): Promise<void>;
 }) {
   const pending = new Map<string, Prepared>();
   const claims = new Map<string, Promise<RecoveryImportReceipt>>();
+  // The Collections this host restores now. A copy of any other one is left from a restore dohc quit partway through.
+  const restoring = new Set<string>();
   const check = () => { options.signal.throwIfAborted(); options.assertCurrent(); };
   return {
     async prepare(input: { sourcePath: string; signal?: AbortSignal }): Promise<DatasetRecoveryPreparation> {
@@ -62,7 +66,11 @@ export function createLocalDatasetRecovery(options: {
         const prepared = pending.get(input.transferId);
         if (prepared) {
           if (prepared.manifestSha256 !== input.manifestSha256 || JSON.stringify(prepared.sourceCursor) !== JSON.stringify(input.sourceCursor)) throw new Error("The recovery approval changed. Choose the file again.");
-          await prepared.install();
+          const datasetId = prepared.sourceCursor.datasetId;
+          if (restoring.has(datasetId)) throw new Error("Another restore of this Collection is running. Wait for it to finish.");
+          restoring.add(datasetId);
+          try { await options.discardUnfinished(datasetId); await prepared.install(); }
+          finally { restoring.delete(datasetId); }
           pending.delete(input.transferId); await prepared.dispose();
         }
         check();
