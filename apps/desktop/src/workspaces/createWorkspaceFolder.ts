@@ -3,7 +3,9 @@ import {
   DISK_ROOT_REFUSAL,
   FILESYSTEM_ROOT_REFUSAL,
   HOME_FOLDER_REFUSAL,
+  holdsStateFolder,
   ReservedWorkspaceIdError,
+  stateFolderRefusal,
   createWorkspaceManifest,
   defaultWorkspaceMode,
   normalizeRootPath,
@@ -34,6 +36,16 @@ export interface CreatedWorkspace {
 // separators on Windows. Throws when the folder does not exist.
 export function canonicalWorkspaceRoot(rootPath: string): string {
   return rootSpelling(realpathSync.native(rootPath));
+}
+
+// dohc never makes or opens a workspace in a folder that is, or holds, its own
+// state folder, so the workspace's file tools can't reach dohc's settings.
+// `realRoot` is the folder's real path; the refusal names the folder as the
+// person picked it.
+export function assertNotStateFolder(picked: string, realRoot: string, stateDir: string): void {
+  if (holdsStateFolder(realRoot, canonicalWorkspaceRoot(stateDir), process.platform)) {
+    throw new Error(stateFolderRefusal(picked));
+  }
 }
 
 // Forward slashes on Windows, as the app spells paths there. Elsewhere the
@@ -188,6 +200,8 @@ export async function createWorkspaceFolderWithFreshness(input: {
   rootPath: string;
   // The home folder the root must not resolve to.
   homeDir: string;
+  // dohc's own state folder, which the root must not be or contain.
+  stateDir: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
   // Join flow (0P-C): a fresh folder adopting a synced workspace's identity
   // gets the sync id instead of a random one, so the local engine store and
@@ -213,6 +227,7 @@ export async function createWorkspaceFolderWithFreshness(input: {
   const rootCheck = validateWorkspaceRootChoice(rootPath, home.path, process.platform);
   if (!rootCheck.ok) throw new Error(rootCheck.reason);
   if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new Error(HOME_FOLDER_REFUSAL);
+  assertNotStateFolder(input.rootPath, rootPath, input.stateDir);
   if (await isFilesystemRoot(folder)) throw new Error(FILESYSTEM_ROOT_REFUSAL);
   if (await isDiskRoot(rootPath, folder)) throw new Error(DISK_ROOT_REFUSAL);
   const startedEmpty = (await readdir(rootPath)).length === 0;

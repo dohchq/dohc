@@ -261,6 +261,7 @@ import {
   titleBarOverlayOptions,
 } from "./window/createMainWindow";
 import {
+  assertNotStateFolder,
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
   createWorkspaceFolderWithFreshness,
@@ -2148,7 +2149,7 @@ const forgetWorkspace = createWorkspaceForget({
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   canonicalizeRoot: canonicalWorkspaceRoot,
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
-  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), computer: thisComputer() }),
+  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome(), stateDir: stateDir(), computer: thisComputer() }),
   register: registerReservedPhysicalWorkspace,
   remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
   release: (reservation, cleanup) =>
@@ -2619,9 +2620,11 @@ function withWorkspaceActivityState<Result>(
 // physical attachment and then works only with that authority-owned state.
 const activity = {
   open: (workspace: RegistryEntry) =>
-    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
-      workspaceActivity.open(canonicalWorkspaceFor(lease), lease.state.activity),
-    ),
+    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
+      const canonical = canonicalWorkspaceFor(lease);
+      assertNotStateFolder(workspace.rootPath, canonical.rootPath, stateDir());
+      return workspaceActivity.open(canonical, lease.state.activity);
+    }),
   close: (
     workspaceId: string,
     options?: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean; expectedRootPath?: string },
@@ -6110,7 +6113,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     }, folder);
   },
   register: async (rootPath) => {
-    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal", computer: thisComputer() });
+    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), stateDir: stateDir(), kind: "personal", computer: thisComputer() });
     WorkspaceSummary.parse(created);
     // As Open folder does: a share forgotten in this folder opens as that share.
     return workspaceSummaryFor(await forgottenShareViews.reopen(created, registerPhysicalWorkspace));
@@ -6446,6 +6449,7 @@ function registerIpcHandlers(): void {
     dialog,
     roots: workspaceRootApproval,
     effectiveHome,
+    stateDir,
     workspaceSummaries,
     prioritizePreferredWorkspace: (workspaces, event) =>
       prioritizePreferredWorkspace(workspaces, event.sender),

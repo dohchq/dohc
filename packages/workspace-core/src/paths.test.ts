@@ -3,6 +3,7 @@ import {
   classifyPath,
   mediaTypeForPath,
   defaultWorkspaceRoot,
+  holdsStateFolder,
   isReservedPath,
   validateAttachedFolder,
   validateWorkspaceRootChoice,
@@ -416,6 +417,26 @@ describe("workspace root choice", () => {
   it("rejects relative paths, and drive paths outside Windows", () => {
     expect(validateWorkspaceRootChoice("notes", "/home/sam", "linux").ok).toBe(false);
     expect(validateWorkspaceRootChoice("C:\\notes", "/home/sam", "linux").ok).toBe(false);
+  });
+});
+
+describe("a workspace root that holds dohc's state folder", () => {
+  // Where each system keeps an app's settings, and the folders above it a
+  // person could pick.
+  const cases = [
+    { platform: "win32", state: "C:/Users/sam/AppData/Roaming/dohc", holders: ["C:/Users/sam/AppData", "C:\\Users\\sam\\AppData\\Roaming", "c:/users/sam/appdata/roaming/DOHC"] },
+    { platform: "darwin", state: "/Users/sam/Library/Application Support/dohc", holders: ["/Users/sam/Library", "/Users/sam/Library/Application Support", "/users/sam/library/"] },
+    { platform: "linux", state: "/home/sam/.config/dohc", holders: ["/home/sam/.config", "/home/sam/.config/dohc", "/home/sam/.config/./"] },
+  ];
+
+  it.each(cases)("refuses the state folder and every folder above it on $platform", ({ platform, state, holders }) => {
+    for (const root of holders) expect(holdsStateFolder(root, state, platform), root).toBe(true);
+  });
+
+  it.each(cases)("allows a folder beside or inside the state folder on $platform", ({ platform, state }) => {
+    expect(holdsStateFolder(`${state}-notes`, state, platform)).toBe(false);
+    expect(holdsStateFolder(`${state}/workspaces/trip`, state, platform)).toBe(false);
+    expect(holdsStateFolder(`${state.slice(0, state.lastIndexOf("/"))}/notes`, state, platform)).toBe(false);
   });
 });
 

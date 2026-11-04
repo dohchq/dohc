@@ -120,6 +120,19 @@ export function validateWorkspaceRootChoice(
   return { ok: true, normalized };
 }
 
+export function stateFolderRefusal(folder: string): string {
+  return `dohc can't use ${folder} because it holds dohc's own settings. Choose a folder inside it.`;
+}
+
+// Whether a workspace root is, or contains, the folder where dohc keeps its
+// own settings and records. Callers pass both as real paths, so a link to
+// either is judged by where it leads. Case-insensitive, as the home check is.
+export function holdsStateFolder(rootPath: string, stateDir: string, platform: string): boolean {
+  const root = normalizeRootPath(rootPath, platform).toLowerCase();
+  const state = normalizeRootPath(stateDir, platform).toLowerCase();
+  return state === root || state.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
 export type PathClassification =
   | { kind: "database" }
   | { kind: "file" };
