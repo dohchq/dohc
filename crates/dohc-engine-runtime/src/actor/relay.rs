@@ -53,10 +53,6 @@ pub enum RelayOperation {
         now_ms: i64,
         max_read_bytes: usize,
     },
-    Pull {
-        workspace_id: String,
-        now_ms: i64,
-    },
     FetchPull {
         workspace_id: String,
         settle_repairs: bool,
@@ -194,7 +190,6 @@ impl RelayOperation {
     fn workspace_id(&self) -> &str {
         match self {
             Self::Push { workspace_id, .. }
-            | Self::Pull { workspace_id, .. }
             | Self::FetchPull { workspace_id, .. }
             | Self::ApplyPull { workspace_id, .. }
             | Self::CommitCursor { workspace_id, .. }
@@ -225,8 +220,7 @@ impl RelayOperation {
             Self::CreateHostedReplica { .. }
             | Self::PullHosted { .. }
             | Self::CommitHostedCursor { .. } => Replicas::Hosted,
-            Self::Pull { .. }
-            | Self::FetchPull { .. }
+            Self::FetchPull { .. }
             | Self::ApplyPull { .. }
             | Self::CommitCursor { .. }
             | Self::Probe { .. }
@@ -955,20 +949,20 @@ mod deferred_relay_tests {
 
     #[test]
     fn base_repair_probe_is_sent_once_across_pull_replays_without_cursor_advance() {
-        base_repair_probe_across_replays(false, false);
+        base_repair_probe_across_replays(false);
     }
 
     #[test]
     fn base_repair_push_between_pull_replays_keeps_stale_probe_safe() {
-        base_repair_probe_across_replays(true, false);
+        base_repair_probe_across_replays(true);
     }
 
     #[test]
     fn fetched_pull_defers_coordinate_repairs_until_offline_apply() {
-        base_repair_probe_across_replays(false, true);
+        base_repair_probe_across_replays(false);
     }
 
-    fn base_repair_probe_across_replays(push_between_replays: bool, prepared: bool) {
+    fn base_repair_probe_across_replays(push_between_replays: bool) {
         use dohc_engine_sync::{ReplicationEnvelope, SyncError};
         use rusqlite::params;
         let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
@@ -1019,16 +1013,9 @@ mod deferred_relay_tests {
         };
         let transport = DeferredRelayTransport::default();
         let mut cache = WriterDocCache::new();
-        let operation = if prepared {
-            RelayOperation::FetchPull {
-                workspace_id: "ws".into(),
-                settle_repairs: false,
-            }
-        } else {
-            RelayOperation::Pull {
-                workspace_id: "ws".into(),
-                now_ms: 1200,
-            }
+        let operation = RelayOperation::FetchPull {
+            workspace_id: "ws".into(),
+            settle_repairs: false,
         };
         let mut probes = 0;
         let mut lookups = 0;
@@ -1054,7 +1041,7 @@ mod deferred_relay_tests {
                         conn.query_row("SELECT base_relay_seq,ordinary_pull_token FROM ydoc_docs JOIN sync_identity USING (workspace_id) WHERE object_id='doc'", [],
                             |row| Ok((row.get(0)?, row.get(1)?)))
                     }).unwrap();
-                    assert_eq!(state, (None, None));
+                    assert_eq!(state, (None, Some(page.pull_token().to_owned())));
                     let offline = DeferredRelayTransport::default();
                     let applied = execute_relay_operation(
                         &mut store,
@@ -2262,6 +2249,34 @@ impl ActorHandle {
         .await
     }
 
+    #[cfg(test)]
+    async fn pull_with_io_for_test<F, Fut>(
+        &self,
+        native_settlements: bool,
+        (workspace_id, now_ms): (String, i64),
+        leases: LeaseRegistry,
+        token: CancellationToken,
+        reservation: Option<Arc<dyn Send + Sync>>,
+        execute_io: F,
+    ) -> Result<RelayOperationOutcome, RuntimeError>
+    where
+        F: Fn(RelayIoRequest, CancellationToken) -> Fut,
+        Fut: std::future::Future<Output = Result<RelayIoResponse, RelayError>>,
+    {
+        loop {
+            let fetched = self.relay_with_io(native_settlements,
+                RelayOperation::FetchPull { workspace_id: workspace_id.clone(), settle_repairs: false },
+                leases.clone(), token.clone(), reservation.clone(), &execute_io).await?;
+            let RelayOperationOutcome::PullFetched(page) = fetched else {
+                return Err(RuntimeError::Relay(RelayError::InvalidResponse));
+            };
+            let result = self.relay_with_io(native_settlements,
+                RelayOperation::ApplyPull { workspace_id: workspace_id.clone(), page, now_ms },
+                leases.clone(), token.clone(), reservation.clone(), &execute_io).await?;
+            if !matches!(result, RelayOperationOutcome::PullRetry) { return Ok(result); }
+        }
+    }
+
     async fn relay_with_io<F, Fut>(
         &self,
         native_settlements: bool,
@@ -2280,8 +2295,7 @@ impl ActorHandle {
             ..DeferredRelayTransport::default()
         };
         let _pull = match &operation {
-            RelayOperation::Pull { .. }
-            | RelayOperation::FetchPull { .. }
+            RelayOperation::FetchPull { .. }
             | RelayOperation::ApplyPull { .. }
             | RelayOperation::PullHosted { .. } => Some(self.pulls.acquire(&token).await?),
             _ => None,
@@ -2306,7 +2320,7 @@ impl ActorHandle {
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
                     let is_pull = matches!(
                         &queued_operation,
-                        RelayOperation::Pull { .. } | RelayOperation::ApplyPull { .. }
+                        RelayOperation::ApplyPull { .. }
                     );
                     let is_fetch = matches!(&queued_operation, RelayOperation::FetchPull { settle_repairs: false, .. });
                     let outcome = if queued_token.is_cancelled() {
@@ -2787,8 +2801,7 @@ fn run_relay_operation(
     if store.is_passive()
         && !matches!(
             &operation,
-            RelayOperation::Pull { .. }
-                | RelayOperation::FetchPull { .. }
+            RelayOperation::FetchPull { .. }
                 | RelayOperation::ApplyPull { .. }
                 | RelayOperation::CommitCursor { .. }
                 | RelayOperation::AdoptJoinIdentity { .. }
@@ -2836,13 +2849,6 @@ fn run_relay_operation(
                 .map(RelayOperationOutcome::Sync)
                 .map_err(RuntimeError::from)
         }
-        RelayOperation::Pull {
-            workspace_id,
-            now_ms,
-        } => client
-            .pull_chat_workspace(store, doc_cache, &workspace_id, &NoFaults, leases, now_ms)
-            .map(RelayOperationOutcome::Sync)
-            .map_err(RuntimeError::from),
         RelayOperation::FetchPull { workspace_id, settle_repairs } => (if settle_repairs {
             client.fetch_pull_settling_repairs(store, &workspace_id, &NoFaults)
         } else { client.fetch_pull(store, &workspace_id, &NoFaults) })
@@ -3784,9 +3790,9 @@ mod hosted_refusal_tests {
             access: ShareAccess::Edit,
         };
         let operations = [
-            RelayOperation::Pull {
+            RelayOperation::FetchPull {
                 workspace_id: ws(),
-                now_ms: 2_000,
+                settle_repairs: false,
             },
             RelayOperation::CommitCursor {
                 workspace_id: ws(),

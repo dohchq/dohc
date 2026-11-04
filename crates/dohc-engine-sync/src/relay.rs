@@ -815,12 +815,12 @@ pub struct PreparedOrdinaryPull {
     cursor: i64,
     has_more: bool,
     repairs: BaseRepairAnswers,
-    started_pull_token: Option<String>,
+    pull_token: String,
 }
 
 impl PreparedOrdinaryPull {
     pub fn pull_token(&self) -> &str {
-        self.started_pull_token.as_deref().expect("fetch started the pull")
+        &self.pull_token
     }
 }
 
@@ -2262,9 +2262,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Pull and apply replicated operations. The returned cursor remains
-    /// pending until the caller completes disk materialization and commits it.
-    pub fn pull_chat_workspace(
+    fn resume_ordinary_pull(
         &self,
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
@@ -2275,10 +2273,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     ) -> Result<SyncPassOutcome, RelayError> {
         let (fetch, progress) = match self.continuation.take(workspace_id) {
             Some((Fetched::Ordinary(fetch), progress)) => (fetch, progress),
-            _ => {
-                let prepared = self.fetch_pull_inner(store, workspace_id, faults, true)?;
-                self.begin_prepared_pull(store, workspace_id, &prepared, faults)?
-            }
+            _ => return Err(RelayError::InvalidResponse),
         };
         let pass = match self.apply_pulled(
             store,
@@ -2401,6 +2396,29 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn pull_chat_workspace(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+    ) -> Result<SyncPassOutcome, RelayError> {
+        if self.continuation.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some() {
+            return self.resume_ordinary_pull(store, cache, workspace_id, faults, leases, now_ms);
+        }
+        loop {
+            let prepared = self.fetch_pull(store, workspace_id, faults)?;
+            match self.apply_pull(store, cache, workspace_id, &prepared, faults, leases, now_ms) {
+                Err(RelayError::RepairPending) => continue,
+                result => return result,
+            }
+        }
+    }
+
     /// Fetch a bounded page while Collections work waits for the terminal commit.
     pub fn fetch_pull(
         &self,
@@ -2408,7 +2426,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<PreparedOrdinaryPull, RelayError> {
-        let result = self.fetch_pull_inner(store, workspace_id, faults, false);
+        let result = self.fetch_pull_inner(store, workspace_id, faults);
         if result.is_err() && !self.transport.request_pending() {
             crate::cursor::abandon_ordinary_pull(store, workspace_id, faults).map_err(local)?;
         }
@@ -2433,7 +2451,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         store: &mut EngineStore,
         workspace_id: &str,
         faults: &dyn FaultInjector,
-        immediate_repairs: bool,
     ) -> Result<PreparedOrdinaryPull, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
@@ -2455,13 +2472,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
-        let started_pull_token = Some(match ordinary_pull_token(store, workspace_id)? {
+        let pull_token = match ordinary_pull_token(store, workspace_id)? {
             Some(token) => token,
             None => match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
                 TxnOutcome::Committed(token) => token,
                 TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
             },
-        });
+        };
         let mut cursor = current.as_ref().map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
         let mut pages = 0_usize;
@@ -2497,9 +2514,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
-        if !queued.is_empty() {
-            crate::deferred::check_redelivery(store, &ops)?;
-        }
         let fetched_coordinates: BTreeSet<_> = ops
             .iter()
             .map(|op| (op.origin_id.clone(), op.origin_seq))
@@ -2511,9 +2525,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
                 .cloned(),
         );
-        if immediate_repairs {
-            preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
-        }
         let mut repairs = BaseRepairAnswers::default();
         self.repair_base_orders(
             store,
@@ -2521,11 +2532,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &identity,
             faults,
             &ops,
-            if immediate_repairs {
-                BaseRepairPhase::Immediate
-            } else {
-                BaseRepairPhase::Fetch(&mut repairs)
-            },
+            BaseRepairPhase::Fetch(&mut repairs),
         )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         ops.truncate(fetched_op_count);
@@ -2536,7 +2543,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             cursor,
             has_more,
             repairs,
-            started_pull_token,
+            pull_token,
         })
     }
 
@@ -2642,7 +2649,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             self.continuation
                 .keep(workspace_id, Fetched::Ordinary(fetch), progress);
         }
-        self.pull_chat_workspace(store, cache, workspace_id, faults, leases, now_ms)
+        self.resume_ordinary_pull(store, cache, workspace_id, faults, leases, now_ms)
     }
 
     /// Confirm the relay holds nothing of this hosted replica's own origin

@@ -200,12 +200,9 @@ async fn pull_of_own_echo_keeps_writer_cache_warm() {
         .await
         .unwrap();
     let outcome = actor
-        .relay_with_io(
+        .pull_with_io_for_test(
             false,
-            RelayOperation::Pull {
-                workspace_id: WORKSPACE.into(),
-                now_ms: 1200,
-            },
+            (WORKSPACE.into(), 1200),
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
@@ -301,12 +298,9 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
         .await
         .unwrap();
     let outcome = actor
-        .relay_with_io(
+        .pull_with_io_for_test(
             false,
-            RelayOperation::Pull {
-                workspace_id: WORKSPACE.into(),
-                now_ms: 1200,
-            },
+            (WORKSPACE.into(), 1200),
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
@@ -622,12 +616,9 @@ async fn full_cycle(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
     loop {
         let rows = state.clone();
         let outcome = actor
-            .relay_with_io(
+            .pull_with_io_for_test(
                 false,
-                RelayOperation::Pull {
-                    workspace_id: WORKSPACE.into(),
-                    now_ms: 2000,
-                },
+                (WORKSPACE.into(), 2000),
                 LeaseRegistry::default(),
                 CancellationToken::new(),
                 None,
@@ -890,12 +881,9 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
         .await
         .unwrap();
     let outcome = actor
-        .relay_with_io(
+        .pull_with_io_for_test(
             false,
-            RelayOperation::Pull {
-                workspace_id: WORKSPACE.into(),
-                now_ms: 2000,
-            },
+            (WORKSPACE.into(), 2000),
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
