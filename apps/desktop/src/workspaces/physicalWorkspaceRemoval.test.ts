@@ -180,7 +180,7 @@ it("leaves no grant behind when a Trust is given while Forget runs", async () =>
   expect(h.current()).toBeNull();
 });
 
-it("keeps the workspace listed when the restrict after it closes fails", async () => {
+it("keeps the workspace listed when the restrict after it closes fails, and Forget works on a second try", async () => {
   const h = harness(true, vi.fn(async () => true));
   await h.trustIt();
   const error = new Error("trust file is busy");
@@ -199,6 +199,10 @@ it("keeps the workspace listed when the restrict after it closes fails", async (
   expect(h.current()).toEqual(h.workspace);
   expect(h.removeWorkspace).not.toHaveBeenCalled();
   expect(h.clearNotices).not.toHaveBeenCalled();
+
+  await h.forget("workspace");
+  expect(h.grants()).toEqual([]);
+  expect(h.current()).toBeNull();
 });
 
 it("leaves no grant behind when another window's Restrict fails while Forget runs", async () => {
@@ -245,7 +249,7 @@ it("saves a share view's record after it closes and before its row goes, and sav
   expect(plain.current()).toBeNull();
 });
 
-it("keeps a share view listed when its record can't be saved", async () => {
+it("keeps a share view listed when its record can't be saved, and Forget works on a second try", async () => {
   const h = harness(true, vi.fn(async () => true));
   h.setRegistered({...h.workspace, shareView});
   const error = new Error("profile file is busy");
@@ -255,6 +259,10 @@ it("keeps a share view listed when its record can't be saved", async () => {
   expect(h.removeWorkspace).not.toHaveBeenCalled();
   expect(h.clearNotices).not.toHaveBeenCalled();
   expect(h.notifyRenderer).not.toHaveBeenCalled();
+
+  await h.forget("workspace");
+  expect(h.remember).toHaveBeenCalledTimes(2);
+  expect(h.current()).toBeNull();
 });
 
 it("saves nothing when the person goes back", async () => {

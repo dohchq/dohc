@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import type { RegistryEntry, ShareViewIdentity } from "./registryStore";
+import type { RegistryEntry, ShareSkippedOps, ShareViewIdentity } from "./registryStore";
 import type { ShareViewSelector } from "./shareViewInfo";
 import { recordedShareSelector } from "./shareViewRecords";
 import { receivedReferencePin, type ReceivedReferencePin } from "./workspaceFileReferenceScopes";
@@ -17,8 +17,8 @@ import { folderIdentity } from "./workspaceTrust";
 // The record lives in this computer's dohc profile, never in the workspace and
 // never synced, so no file in the workspace can make a folder open as a share.
 // Each record names the workspace's id, its folder's path, and the folder
-// itself: a moved or replaced folder, or another workspace, opens as an
-// ordinary workspace. It holds no token and no names.
+// itself: a folder moved or replaced after Forget, or another workspace, opens
+// as an ordinary workspace. It holds no token, email or display name.
 
 interface ForgottenShareView {
   workspaceId: string;
@@ -32,22 +32,36 @@ interface ForgottenShareView {
   grantedSelector: ShareViewSelector;
   granterUserId?: string;
   receivedIdentity?: ReceivedReferencePin;
-  forgottenAtMs: number;
+  // An ended share opens ended, and content its pulls skipped stays reported.
+  ended?: true;
+  skippedOps?: ShareSkippedOps;
 }
 
 const filled = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+
+// dohc wrote it, so, as the registry does, this checks only its shape.
+function skipRecord(value: unknown): ShareSkippedOps | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  return Array.isArray(raw.ops) && Number.isInteger(raw.more) && Number.isInteger(raw.generation)
+    ? value as ShareSkippedOps
+    : undefined;
+}
 
 function parseRecord(value: unknown): ForgottenShareView | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const grantedSelector = recordedShareSelector(raw.grantedSelector);
   const receivedIdentity = raw.receivedIdentity === undefined ? undefined : receivedReferencePin(raw.receivedIdentity);
+  const skippedOps = skipRecord(raw.skippedOps);
   if (!filled(raw.workspaceId) || !filled(raw.rootPath) || (raw.folder !== null && typeof raw.folder !== "string") ||
     !filled(raw.shareId) || !filled(raw.recipientUserId) || !filled(raw.relayUrl) || grantedSelector === null ||
     (raw.granterUserId !== undefined && !filled(raw.granterUserId)) ||
-    (raw.receivedIdentity !== undefined && receivedIdentity === undefined) || typeof raw.forgottenAtMs !== "number") {
+    (raw.receivedIdentity !== undefined && receivedIdentity === undefined) ||
+    (raw.ended !== undefined && raw.ended !== true)) {
     return null;
   }
+  // A damaged skip record costs its notice, not the share.
   return {
     workspaceId: raw.workspaceId,
     rootPath: raw.rootPath,
@@ -58,7 +72,8 @@ function parseRecord(value: unknown): ForgottenShareView | null {
     grantedSelector,
     ...(filled(raw.granterUserId) ? { granterUserId: raw.granterUserId } : {}),
     ...(receivedIdentity ? { receivedIdentity } : {}),
-    forgottenAtMs: raw.forgottenAtMs,
+    ...(raw.ended === true ? { ended: true } : {}),
+    ...(skippedOps ? { skippedOps } : {}),
   };
 }
 
@@ -68,21 +83,20 @@ const spelling = (rootPath: string) => normalizeRootPath(rootPath, process.platf
 export function createForgottenShareViews(dependencies: {
   file: string;
   identify?: (rootPath: string) => Promise<string | null>;
-  now?: () => number;
   // Tests replace the file system calls.
   readText?: (file: string) => Promise<string>;
   writeText?: (file: string, text: string) => Promise<void>;
   warn?: (message: string, error: unknown) => void;
 }) {
   const identify = dependencies.identify ?? folderIdentity;
-  const now = dependencies.now ?? Date.now;
   const readText = dependencies.readText ?? ((file: string) => readFile(file, "utf8"));
   const writeText = dependencies.writeText ?? (async (file: string, text: string) => {
     await mkdir(dirname(file), { recursive: true });
     await atomicReplaceFile(file, (temporary) => writeFile(temporary, text));
   });
   const warn = dependencies.warn ?? ((message: string, error: unknown) => console.warn(message, error));
-  // Writes go one at a time, so the last one lands last.
+  // Forget and Open run one at a time, so neither acts on a record the other
+  // has already replaced.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
     const result = queue.then(work);
@@ -130,47 +144,54 @@ export function createForgottenShareViews(dependencies: {
     }
   }
 
-  const remove = (workspaceId: string): Promise<void> =>
-    serial(async () => {
-      const records = await load();
-      if (!records.some((each) => each.workspaceId === workspaceId)) return;
-      await save(records.filter((each) => each.workspaceId !== workspaceId));
-    });
+  // The record a share view leaves at Forget, or null for one dohc can't
+  // read, one without its account or server, or a folder that is gone.
+  async function recordOf(
+    workspace: { workspaceId: string; rootPath: string },
+    shareView: ShareViewIdentity,
+  ): Promise<ForgottenShareView | null> {
+    const { shareId, recipientUserId, relayUrl, granterUserId } = shareView;
+    const grantedSelector = recordedShareSelector(shareView.grantedSelector);
+    const receivedIdentity = receivedReferencePin(shareView.receivedIdentity);
+    const skippedOps = skipRecord(shareView.skippedOps);
+    if (!filled(shareId) || !filled(recipientUserId) || !filled(relayUrl) || grantedSelector === null) return null;
+    let folder: string | null;
+    try {
+      folder = await identify(workspace.rootPath);
+    } catch {
+      return null;
+    }
+    return {
+      workspaceId: workspace.workspaceId,
+      rootPath: spelling(workspace.rootPath),
+      folder,
+      shareId,
+      recipientUserId,
+      relayUrl,
+      grantedSelector,
+      ...(filled(granterUserId) ? { granterUserId } : {}),
+      ...(receivedIdentity ? { receivedIdentity } : {}),
+      ...(shareView.ended === true ? { ended: true } : {}),
+      ...(skippedOps ? { skippedOps } : {}),
+    };
+  }
 
   return {
     /**
-     * Saves the share view a person forgets, with the access it has now.
-     * Throws when the profile file can't be read or written, so Forget can
-     * fail and keep the workspace listed. A share view dohc can't read, one
-     * without its account or server, or a folder that is gone saves nothing.
+     * Saves the share view a person forgets, with the access it has now, and
+     * drops any older record for the same workspace or folder. A share view
+     * dohc can't read, one without its account or server, or a folder that
+     * is gone leaves no record. Throws when the profile file can't be read or
+     * written, so Forget can fail and keep the workspace listed.
      */
     async remember(workspace: { workspaceId: string; rootPath: string }, shareView: ShareViewIdentity): Promise<void> {
-      const { shareId, recipientUserId, relayUrl, granterUserId } = shareView;
-      const grantedSelector = recordedShareSelector(shareView.grantedSelector);
-      const receivedIdentity = receivedReferencePin(shareView.receivedIdentity);
-      if (!filled(shareId) || !filled(recipientUserId) || !filled(relayUrl) || grantedSelector === null) return;
-      let folder: string | null;
-      try {
-        folder = await identify(workspace.rootPath);
-      } catch {
-        return;
-      }
+      const record = await recordOf(workspace, shareView);
       const rootPath = spelling(workspace.rootPath);
       await serial(async () => {
-        const kept = (await load()).filter((each) =>
-          each.workspaceId !== workspace.workspaceId && each.rootPath !== rootPath);
-        await save([...kept, {
-          workspaceId: workspace.workspaceId,
-          rootPath,
-          folder,
-          shareId,
-          recipientUserId,
-          relayUrl,
-          grantedSelector,
-          ...(granterUserId ? { granterUserId } : {}),
-          ...(receivedIdentity ? { receivedIdentity } : {}),
-          forgottenAtMs: now(),
-        }]);
+        const records = await load();
+        const kept = records.filter((each) => each.workspaceId !== workspace.workspaceId && each.rootPath !== rootPath);
+        if (record) await save([...kept, record]);
+        else if (kept.length < records.length) await save(kept);
       });
     },
     /**
@@ -179,33 +200,39 @@ export function createForgottenShareViews(dependencies: {
      * refresh, which runs only for the same account on the same server. Once
      * registered, the record goes; the next Forget saves it again.
      */
-    async reopen(workspace: CreatedWorkspace, register: (entry: RegistryEntry) => unknown): Promise<RegistryEntry> {
-      const record = await find(workspace);
-      if (!record) {
-        register(workspace);
-        return workspace;
-      }
-      const entry: RegistryEntry = {
-        ...workspace,
-        shareView: {
-          shareId: record.shareId,
-          ...(record.granterUserId ? { granterUserId: record.granterUserId } : {}),
-          granterEmail: null,
-          subjectName: null,
-          sharerName: null,
-          genericChatWritable: false,
-          grantedSelector: record.grantedSelector,
-          ...(record.receivedIdentity ? { receivedIdentity: record.receivedIdentity } : {}),
-          relayUrl: record.relayUrl,
-          recipientUserId: record.recipientUserId,
-          unsavedPaths: null,
-        },
-      };
-      register(entry);
-      await remove(workspace.workspaceId).catch((error: unknown) => {
-        warn("[desktop] could not remove a reopened share's record", error);
+    reopen(workspace: CreatedWorkspace, register: (entry: RegistryEntry) => unknown): Promise<RegistryEntry> {
+      return serial(async () => {
+        const record = await find(workspace);
+        if (!record) {
+          register(workspace);
+          return workspace;
+        }
+        const entry: RegistryEntry = {
+          ...workspace,
+          shareView: {
+            shareId: record.shareId,
+            ...(record.granterUserId ? { granterUserId: record.granterUserId } : {}),
+            granterEmail: null,
+            subjectName: null,
+            sharerName: null,
+            genericChatWritable: false,
+            grantedSelector: record.grantedSelector,
+            ...(record.receivedIdentity ? { receivedIdentity: record.receivedIdentity } : {}),
+            relayUrl: record.relayUrl,
+            recipientUserId: record.recipientUserId,
+            unsavedPaths: null,
+            ...(record.ended ? { ended: true } : {}),
+            ...(record.skippedOps ? { skippedOps: record.skippedOps } : {}),
+          },
+        };
+        register(entry);
+        try {
+          await save((await load()).filter((each) => each.workspaceId !== workspace.workspaceId));
+        } catch (error) {
+          warn("[desktop] could not remove a reopened share's record", error);
+        }
+        return entry;
       });
-      return entry;
     },
   };
 }

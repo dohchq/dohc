@@ -1146,6 +1146,21 @@ describe("workspace authority owner", () => {
     await retiring;
   });
 
+  it.each(["finalize", "removeBinding"] as const)("opens a workspace again when %s fails during removal", async step => {
+    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+    const binding = test.owner.currentBinding("workspace");
+    const error = new Error("profile file is busy");
+    await expect(test.owner.retireBinding(binding, {
+      ...(step === "finalize" ? { finalize: () => { throw error; } } : {}),
+      removeBinding: () => { if (step === "removeBinding") throw error; },
+    })).rejects.toBe(error);
+
+    expect(test.disposed).toEqual([binding.attachmentId]);
+    const reopened = test.owner.acquire("workspace");
+    expect(reopened.binding.attachmentId).not.toBe(binding.attachmentId);
+    reopened.release();
+  });
+
   it("keeps a blocking tombstone when cleanup fails", async () => {
     const registry = new Map<string, Workspace>([
       [

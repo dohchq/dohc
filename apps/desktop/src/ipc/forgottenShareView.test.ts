@@ -147,7 +147,7 @@ describe("Open folder on a forgotten share's folder", () => {
     expect(record).toEqual({
       workspaceId: "ws-share-view", rootPath: canonicalWorkspaceRoot(share.rootPath), folder: await folderIdentity(share.rootPath),
       shareId: "share-1", recipientUserId: "user-sam", relayUrl: "https://relay.example.test", grantedSelector,
-      granterUserId: "user-alex", receivedIdentity, forgottenAtMs: expect.any(Number),
+      granterUserId: "user-alex", receivedIdentity,
     });
     for (const name of ["alex@example.com", "Alex", "Trip"]) expect(JSON.stringify(record)).not.toContain(name);
 

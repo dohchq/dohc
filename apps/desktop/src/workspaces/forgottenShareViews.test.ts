@@ -60,6 +60,59 @@ describe("forgotten share views", () => {
     expect(await saved()).toEqual([expect.objectContaining({ workspaceId: "other" })]);
   });
 
+  it("drops an older record when Forget saves none", async () => {
+    const { file, workspace, saved } = await setup();
+    const store = createForgottenShareViews({ file });
+    await store.remember(workspace, shareView);
+    await store.remember(workspace, { ...shareView, recipientUserId: undefined });
+    expect(await saved()).toEqual([]);
+  });
+
+  it("opens an ended share ended, with the content its pulls skipped", async () => {
+    const { file, workspace, register, registered } = await setup();
+    const skippedOps = {
+      ops: [{ originId: "origin", originSeq: 4, opKind: "write", code: "outside_grant", detail: "notes.md", atMs: 1 }],
+      more: 0, generation: 1,
+    };
+    const store = createForgottenShareViews({ file });
+    await store.remember(workspace, { ...shareView, ended: true, skippedOps });
+    await store.reopen(workspace, register);
+    expect(registered[0]?.shareView).toMatchObject({ shareId: "share-1", ended: true, skippedOps });
+  });
+
+  it("runs Open and Forget one at a time, so an open that waits can't bring back an older record", async () => {
+    const { workspace } = await setup();
+    const files = new Map<string, string>();
+    let hold: Promise<void> | null = null;
+    let release!: () => void;
+    const store = createForgottenShareViews({
+      file: "forgotten.json",
+      identify: async () => "folder",
+      readText: async (file) => {
+        const text = files.get(file);
+        if (text === undefined) throw Object.assign(new Error("no file"), { code: "ENOENT" });
+        const wait = hold;
+        hold = null;
+        await wait;
+        return text;
+      },
+      writeText: async (file, text) => { files.set(file, text); },
+    });
+    const edit = { ...shareView, grantedSelector: { ...shareView.grantedSelector, access: "edit" as const } };
+    await store.remember(workspace, edit);
+    hold = new Promise((resolve) => { release = resolve; });
+    const registered: RegistryEntry[] = [];
+    const opening = store.reopen(workspace, (entry) => { registered.push(entry); });
+    const forgetting = store.remember(workspace, shareView);
+    // A Forget that doesn't wait for the open would finish in this turn.
+    await new Promise((resolve) => setImmediate(resolve));
+    release();
+    await Promise.all([opening, forgetting]);
+    expect(registered.map((entry) => entry.shareView?.grantedSelector.access)).toEqual(["edit"]);
+    expect((JSON.parse(files.get("forgotten.json")!) as { forgotten: unknown[] }).forgotten)
+      .toEqual([expect.objectContaining({ grantedSelector: shareView.grantedSelector })]);
+  });
+
   it.runIf(process.platform === "win32")("matches one folder spelled with forward slashes or backslashes", async () => {
     const { file, workspace, register, registered } = await setup();
     const store = createForgottenShareViews({ file });
