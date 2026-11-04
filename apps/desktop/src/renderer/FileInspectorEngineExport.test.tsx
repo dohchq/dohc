@@ -4,15 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
-// The editor module never resolves here, so `LazyMarkdownEditor` stays
-// loading for the whole file and `wysiwygRef.current` is null while the
-// engine document is live and bound. That is the state this file is about,
-// and it is a real one: the loading window on open, an editor chunk that
-// fails to load, and the error boundary a crashed editor falls back to all
-// leave the document header — and its export menu — over an unmounted
-// serializer. It is mocked at module scope because that is the only way to
-// hold the window open deterministically.
-vi.mock("./editor/MarkdownEditor", () => new Promise(() => {}));
+// The editor module fails to load here, so `wysiwygRef.current` is null while
+// the engine document is live and bound. That is the state this file is
+// about, and it is a real one: an editor chunk that fails to load, and the
+// error boundary a crashed editor falls back to, both leave the document
+// header — and its export menu — over an unmounted serializer. It is mocked
+// at module scope because the editor's load is shared by the whole file.
+vi.mock("./editor/MarkdownEditor", () => Promise.reject(new Error("editor chunk failed to load")));
 
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
@@ -117,8 +115,8 @@ describe("engine-mode export with no mounted serializer", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // The engine header is up (the document bound); the editor beneath it is
-    // still suspended, so there is nothing to serialize the Y.Doc.
+    // The engine header is up (the document bound); the editor beneath it
+    // failed to load, so there is nothing to serialize the Y.Doc.
     await screen.findByTestId("markdown-source-toggle");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
 
