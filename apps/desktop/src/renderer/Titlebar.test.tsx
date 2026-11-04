@@ -37,6 +37,13 @@ describe("workspaceName", () => {
     expect(workspaceName({ ...workspace, rootPath: "C:\\Users\\ice\\dohc\\" })).toBe("dohc");
     expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("workspace");
   });
+
+  // #2887: a shared view's folder is named after its share ID.
+  it("names a shared view after what it shares, and after its folder when the share has no name", () => {
+    const shared = { ...workspace, rootPath: "/home/sam/dohc/shared/k3x9q2m7" };
+    expect(workspaceName({ ...shared, shareView: { shareId: "k3x9q2m7", subjectName: "Trip plans", granterEmail: "sam@example.com" } })).toBe("Trip plans");
+    expect(workspaceName({ ...shared, shareView: { damaged: true, granterEmail: null } })).toBe("k3x9q2m7");
+  });
 });
 
 describe("Titlebar", () => {

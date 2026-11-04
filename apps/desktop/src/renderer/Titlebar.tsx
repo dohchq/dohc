@@ -9,8 +9,10 @@ import { Pill } from "./ui/controls";
 import { useDismiss } from "./ui/useDismiss";
 import { useWindowFullScreen } from "./windowFullScreen";
 
-// Workspace labels use the final folder name on either platform.
-export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath">): string {
+// Workspace labels use the final folder name on either platform. A shared
+// view's folder is named after its share ID, so it goes by what it shares.
+export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "shareView">): string {
+  if (workspace.shareView?.subjectName) return workspace.shareView.subjectName;
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
   return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
 }
