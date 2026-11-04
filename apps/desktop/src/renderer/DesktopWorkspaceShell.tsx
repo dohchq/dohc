@@ -420,6 +420,9 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
+// The Notices row of a shared view whose refresh can't read its collision record.
+const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
+
 // The commands that still run under the opening cover.
 const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
 
@@ -5022,6 +5025,20 @@ export function DesktopWorkspaceShell(props: {
           probeFailure = outcome.probed === true;
           if (outcome.changedPaths > 0) await bestEffortRepaint();
           if (!isCurrent()) return "stale";
+          if (outcome.errorKind === "collision-record") {
+            // The record keeps the person's own files apart while dohc can't
+            // read it, so its row has no ×. The next refresh that completes
+            // ends it. A background refusal toasts only when the row is new.
+            reportShellFailure({
+              message: outcome.errorMessage,
+              ...(outcome.errorCause ? { details: [["Cause", outcome.errorCause] as const] } : {}),
+              retry: () => { if (!workspaceAdmission.superseded) void refreshShareViewRef.current(); },
+              noDismiss: true,
+              identity: SHARE_COLLISION_RECORD_ROW,
+              repeat: background,
+            });
+            return "stale";
+          }
           if (background) throw Object.assign(new Error(outcome.errorMessage), { errorKind: outcome.errorKind });
           reportShellError(
             "Couldn't refresh the shared view.",
@@ -5030,10 +5047,14 @@ export function DesktopWorkspaceShell(props: {
           return "stale";
         }
         if (outcome.probed) return "current";
+        clearIdentity(SHARE_COLLISION_RECORD_ROW);
         if (outcome.collisionRecordQuarantined) {
           reportShellFailure({
             message:
-              "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+              "dohc could not read this share's record of your files with the same path as a shared file. " +
+              (outcome.takesLocalWrites
+                ? "A refresh can count them as your edits, so check Send changes before you send."
+                : "A refresh can replace them with the shared version, and dohc keeps no copy of yours."),
           });
         }
         if (outcome.status === "ended") {
