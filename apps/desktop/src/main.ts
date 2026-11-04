@@ -262,6 +262,7 @@ import {
 } from "./window/createMainWindow";
 import {
   assertNotStateFolder,
+  overlapsStateFolder,
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
   createWorkspaceFolderWithFreshness,
@@ -3125,6 +3126,7 @@ function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null
   }
   const lease = requireWorkspaceAuthority(workspaceId);
   try {
+    if (overlapsStateFolder(lease.binding.canonicalRootPath, stateDir())) return null;
     return {
       workspaceId: lease.binding.workspaceId,
       rootPath: lease.binding.canonicalRootPath,
@@ -3173,6 +3175,8 @@ function withEngineStoreRecoveredForAuthority<Result>(
   body: () => Promise<Result>,
 ): Promise<Result> {
   const workspace = canonicalWorkspaceFor(lease);
+  // Recovery writes in the workspace's .dohc, so a refused folder stops here.
+  assertNotStateFolder(workspace.rootPath, workspace.rootPath, stateDir(), "listed");
   return runInWorkspaceAuthorityLane(lease, "engine-store", () =>
     withEngineStoreRecoveredUnderEngineStoreLock(workspace, body, (rootPath) =>
       completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
@@ -3347,6 +3351,7 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 ): Promise<SyncStatusResult> {
   return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
     const canonicalWorkspace = canonicalWorkspaceFor(lease);
+    assertNotStateFolder(canonicalWorkspace.rootPath, canonicalWorkspace.rootPath, stateDir(), "listed");
     return withEngineStoreRecoveredUnderEngineStoreLock(
       canonicalWorkspace,
       () => ensureWorkspaceActivityOpenBody(lease, options),
@@ -5960,6 +5965,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
       for (const workspace of listWorkspaces()) {
         if (workspace.remote === undefined && workspace.shareView === undefined) continue;
+        if (overlapsStateFolder(workspace.rootPath, stateDir())) continue;
         void recordSyncedIfNeeded(workspace).catch((error: unknown) =>
           console.warn(`[desktop] Could not record that workspace "${workspace.workspaceId}" synced:`, error));
       }

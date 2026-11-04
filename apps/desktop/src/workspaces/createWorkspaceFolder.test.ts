@@ -252,16 +252,32 @@ describe("createWorkspaceFolder", () => {
     for (const rootPath of [appData, join(appData, "Roaming"), state, toAppData]) {
       // The refusal names the folder as the person picked it, link included.
       await expect(createWorkspaceFolder({ rootPath, homeDir, stateDir: state, computer, kind: "personal" }), rootPath)
-        .rejects.toThrow(stateFolderRefusal(rootPath, "new"));
+        .rejects.toThrow(stateFolderRefusal(rootPath, "holds", "new"));
     }
     // dohc may name its state folder through a link too.
     await expect(createWorkspaceFolder({ rootPath: appData, homeDir, stateDir: stateLink, computer, kind: "personal" }))
-      .rejects.toThrow(stateFolderRefusal(appData, "new"));
+      .rejects.toThrow(stateFolderRefusal(appData, "holds", "new"));
     expect(await readdir(appData)).toEqual(["Roaming"]);
     expect(await readdir(state)).toEqual(["dohc-settings.json"]);
     // A folder beside it is an ordinary choice.
     await expect(createWorkspaceFolder({ rootPath: join(appData, "notes"), homeDir, stateDir: state, computer, kind: "personal" }))
       .resolves.toMatchObject({ kind: "personal" });
+  });
+
+  it("refuses a folder inside dohc's state folder, by any path, and writes nothing there", async () => {
+    const state = join(base, "AppData", "Roaming", "dohc");
+    const inside = join(state, "cli-bin");
+    await mkdir(inside, { recursive: true });
+    const stateLink = join(base, "state-link");
+    await symlink(state, stateLink, linkType);
+    for (const rootPath of [inside, join(stateLink, "cli-bin")]) {
+      await expect(createWorkspaceFolder({ rootPath, homeDir, stateDir: state, computer, kind: "personal" }), rootPath)
+        .rejects.toThrow(stateFolderRefusal(rootPath, "inside", "new"));
+    }
+    // dohc may name its state folder through a link too.
+    await expect(createWorkspaceFolder({ rootPath: inside, homeDir, stateDir: stateLink, computer, kind: "personal" }))
+      .rejects.toThrow(stateFolderRefusal(inside, "inside", "new"));
+    expect(await readdir(inside)).toEqual([]);
   });
 
   it("refuses to open an already registered workspace that holds dohc's state folder, and leaves it as it was", async () => {
@@ -277,8 +293,11 @@ describe("createWorkspaceFolder", () => {
     const before = await readdir(appData);
     for (const picked of [registered.rootPath, link]) {
       // The list spells a root with forward slashes on Windows; the refusal uses the OS's.
-      expect(() => assertNotStateFolder(picked, canonicalWorkspaceRoot(picked), state, "listed")).toThrow(stateFolderRefusal(normalize(picked), "listed"));
+      expect(() => assertNotStateFolder(picked, canonicalWorkspaceRoot(picked), state, "listed")).toThrow(stateFolderRefusal(normalize(picked), "holds", "listed"));
     }
+    // A workspace registered inside the state folder is refused too.
+    const inside = await createWorkspaceFolder({ rootPath: join(state, "notes"), homeDir, stateDir, computer, kind: "personal" });
+    expect(() => assertNotStateFolder(inside.rootPath, inside.rootPath, state, "listed")).toThrow(stateFolderRefusal(normalize(inside.rootPath), "inside", "listed"));
     expect(await readdir(appData)).toEqual(before);
     expect(await readFile(join(state, "dohc-settings.json"), "utf8")).toBe("{}");
     // Another registered workspace opens as before.

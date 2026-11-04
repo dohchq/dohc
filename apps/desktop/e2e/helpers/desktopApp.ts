@@ -165,7 +165,10 @@ function launchEnv(input: {
     // The e2e relay is a local plain-http server; the daemon transport only
     // accepts it when this explicit flag is set (and the URL is loopback).
     DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "1",
+    // dohc keeps its state in the test home. The person's home folder, where
+    // a new workspace goes by default, is the folder that holds it.
     DOHC_TEST_HOME: input.workspace.homeDir,
+    DOHC_TEST_USER_HOME: dirname(input.workspace.homeDir),
     DOHC_TEST_PICK_PATH: input.workspace.rootPath,
     // The app's own home folder, so agent detection and the tools it runs
     // never read the tester's installs or sign-ins.

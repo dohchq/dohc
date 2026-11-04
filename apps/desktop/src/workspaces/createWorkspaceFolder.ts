@@ -2,8 +2,8 @@ import {
   checkManifest,
   DISK_ROOT_REFUSAL,
   HOME_FOLDER_REFUSAL,
-  holdsStateFolder,
   ReservedWorkspaceIdError,
+  stateFolderOverlap,
   stateFolderRefusal,
   createWorkspaceManifest,
   defaultWorkspaceMode,
@@ -37,19 +37,23 @@ export function canonicalWorkspaceRoot(rootPath: string): string {
   return rootSpelling(realpathSync.native(rootPath));
 }
 
-// dohc never makes or opens a workspace in a folder that is, or holds, its own
-// state folder, so the workspace's file tools can't reach dohc's settings.
-// `realRoot` is the folder's real path; the refusal names the folder as the
-// person picked it, with the OS's separators.
+// dohc never makes, opens or syncs a workspace in a folder that is, holds or
+// sits inside its own state folder, so the workspace's file tools can't reach
+// dohc's settings and records. `realRoot` is the folder's real path.
+export function overlapsStateFolder(realRoot: string, stateDir: string): boolean {
+  return stateFolderOverlap(realRoot, canonicalWorkspaceRoot(stateDir), process.platform) !== null;
+}
+
+// The refusal names the folder as the person picked it, with the OS's
+// separators.
 export function assertNotStateFolder(
   picked: string,
   realRoot: string,
   stateDir: string,
   workspace: "new" | "listed",
 ): void {
-  if (holdsStateFolder(realRoot, canonicalWorkspaceRoot(stateDir), process.platform)) {
-    throw new Error(stateFolderRefusal(normalize(picked), workspace));
-  }
+  const overlap = stateFolderOverlap(realRoot, canonicalWorkspaceRoot(stateDir), process.platform);
+  if (overlap !== null) throw new Error(stateFolderRefusal(normalize(picked), overlap, workspace));
 }
 
 // Forward slashes on Windows, as the app spells paths there. Elsewhere the

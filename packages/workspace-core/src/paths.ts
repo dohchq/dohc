@@ -119,19 +119,25 @@ export function validateWorkspaceRootChoice(
   return { ok: true, normalized };
 }
 
+export type StateFolderOverlap = "holds" | "inside";
+
 // A workspace already in the list can only be forgotten.
-export function stateFolderRefusal(folder: string, workspace: "new" | "listed"): string {
+export function stateFolderRefusal(folder: string, overlap: StateFolderOverlap, workspace: "new" | "listed"): string {
+  const where = overlap === "holds" ? "holds dohc's own settings" : "is inside the folder that holds dohc's own settings";
   const next = workspace === "listed" ? "Forget it, then choose another folder." : "Choose another folder.";
-  return `${folder} holds dohc's own settings, so it cannot be a workspace. ${next}`;
+  return `${folder} ${where}, so it cannot be a workspace. ${next}`;
 }
 
-// Whether a workspace root is, or contains, the folder where dohc keeps its
-// own settings and records. Callers pass both as real paths, so a link to
-// either is judged by where it leads. Case-insensitive, as the home check is.
-export function holdsStateFolder(rootPath: string, stateDir: string, platform: string): boolean {
+// How a workspace root overlaps the folder where dohc keeps its own settings
+// and records: it is or holds that folder, or sits inside it. Callers pass
+// both as real paths, so a link to either is judged by where it leads.
+// Case-insensitive, as the home check is.
+export function stateFolderOverlap(rootPath: string, stateDir: string, platform: string): StateFolderOverlap | null {
   const root = normalizeRootPath(rootPath, platform).toLowerCase();
   const state = normalizeRootPath(stateDir, platform).toLowerCase();
-  return state === root || state.startsWith(root.endsWith("/") ? root : `${root}/`);
+  const within = (path: string, folder: string) => path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
+  if (state === root || within(state, root)) return "holds";
+  return within(root, state) ? "inside" : null;
 }
 
 export type PathClassification =
