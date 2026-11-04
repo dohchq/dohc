@@ -178,7 +178,7 @@ export async function startEngineProjection(
       new DuplexEngineClientConnection(connection),
       {
         authToken: "",
-        protocolVersion: 3,
+        protocolVersion: 2,
         capabilities: ["projection-only"],
         maxFrameBytes: MAX_FRAME_BYTES,
         connectTimeoutMs: settings.deadlineMs,

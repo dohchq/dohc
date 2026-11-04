@@ -23,7 +23,7 @@ async function fixture(maxRestoreBytes: number | null = 1_000_000) {
         const value = JSON.parse(bytes.toString());
         if(value.type === "liveHost.transport") {
           connection = new DeviceEngineConnection(relaySocket,limits,value.receive,2_000_000,()=>undefined);
-          ready(new EngineClient(connection,{authToken:start.authToken,protocolVersion:3,capabilities:["blobs"],
+          ready(new EngineClient(connection,{authToken:start.authToken,protocolVersion:2,capabilities:["blobs"],
             maxFrameBytes:1_048_576,privateLiveApplication:{aggregateBytes:200_000_000,maxUploads:2}}));
         } else connection!.credit(value.receivedBytes);
       }

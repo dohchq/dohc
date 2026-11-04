@@ -85,7 +85,7 @@ it.skipIf(engineBinary.missing || process.platform !== "linux")("supervised repl
     const stream = Duplex.from({ readable: child.stdout!, writable: child.stdin! });
     const termination = new Promise<void>(done => child.once("close", () => done()));
     const client = new EngineClient(new DuplexEngineClientConnection(stream), { authToken: "supervisor-test-owner",
-      protocolVersion: 3, capabilities: ["blobs"] }, () => child.kill("SIGKILL"), termination);
+      protocolVersion: 2, capabilities: ["blobs"] }, () => child.kill("SIGKILL"), termination);
     child.on("close", (code, signal) => client.notifyProcessExit(code, signal)); child.stderr!.resume();
     const engine = { dir, child, client, workspace: "" }; engines.push(engine); await client.ready();
     engine.workspace = (await rpc(engine, "workspace.open", { rootDir: dir, workspaceId,

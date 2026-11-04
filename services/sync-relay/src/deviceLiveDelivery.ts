@@ -64,7 +64,7 @@ export function createDeviceLiveDelivery(options: {
   async function attach(peer: DeviceLiveHostReceive): Promise<void> {
     check();
     connection = new DeviceEngineConnection(ws, limits, peer, config.maxQueuedBytes, options.stop);
-    client = new EngineClient(connection, { authToken, protocolVersion: 3, capabilities: ["blobs"],
+    client = new EngineClient(connection, { authToken, protocolVersion: 2, capabilities: ["blobs"],
       maxFrameBytes: config.client.maxFrameBytes, connectTimeoutMs: config.client.connectTimeoutMs, privateLiveApplication: config.client });
     // Caller input retention and native upload buffers each have their own cap.
     if (changes) client = queueLiveHostRequests(client, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,

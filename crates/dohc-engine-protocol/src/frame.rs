@@ -10,7 +10,7 @@
 //!                    BlobChunk: bit0 = FIN (final chunk); rest must be 0.
 //! [6..8)   reserved  must be 0
 //! [8..12)  len       payload byte length
-//! [12..)   payload   Control: encoded envelope (JSON in protocol v3).
+//! [12..)   payload   Control: encoded envelope (JSON in protocol v2).
 //!                    BlobChunk: stream_id u64 LE, then raw bytes.
 //! ```
 //!

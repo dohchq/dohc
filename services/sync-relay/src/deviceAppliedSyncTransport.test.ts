@@ -44,7 +44,7 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
         const value = JSON.parse(bytes.toString());
         if (value.type === "liveHost.transport") {
           connection = new DeviceEngineConnection(relay, limits, value.receive, 2_000_000, () => undefined);
-          peer = new EngineClient(connection, {authToken: start.authToken, protocolVersion: 3, capabilities: ["blobs"], maxFrameBytes: 1_048_576,
+          peer = new EngineClient(connection, {authToken: start.authToken, protocolVersion: 2, capabilities: ["blobs"], maxFrameBytes: 1_048_576,
             privateLiveApplication: {aggregateBytes: 200_000_000, maxUploads: 2}});
           if (queued) peer = queueLiveHostRequests(peer, {maxPendingReads: 8, maxPendingWrites: 8, deadlineMs: 30_000,
             maxRetainedInputBytes: 200_000_000,

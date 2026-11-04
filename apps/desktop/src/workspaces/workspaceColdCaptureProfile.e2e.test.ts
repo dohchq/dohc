@@ -60,7 +60,7 @@ async function startClient(binary: string): Promise<EngineClient> {
     command: binary,
     cwd: dirname(binary),
     authToken: randomBytes(32).toString("hex"),
-    protocolVersion: 3,
+    protocolVersion: 2,
     capabilities: ["blobs"],
   });
 }

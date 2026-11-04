@@ -199,7 +199,7 @@ mod tests {
     fn only_one_projection_runs_even_with_pipelined_input() {
         let limits = WireLimits::default();
         let hello = Envelope::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 2,
             auth_token: String::new(),
             capabilities: vec![CAPABILITY.into()],
             last_session_generation: None,

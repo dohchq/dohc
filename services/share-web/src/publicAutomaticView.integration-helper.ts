@@ -55,7 +55,7 @@ export async function runPublicAutomaticView(options: Options) {
   const ownerRoot = join(h.root, "view-owner"), serviceRoot = join(h.root, "view-service"); mkdirSync(ownerRoot); mkdirSync(serviceRoot);
   const workspaceId = "public-view-workspace", path = "docs/view.md";
   mkdirSync(join(ownerRoot, "docs")); writeFileSync(join(ownerRoot, path), selected.baseline.markdown);
-  const owner = await createEngineClient({command: options.executable, authToken: randomUUID(), protocolVersion: 3, capabilities: ["core", "blobs"], connectTimeoutMs: h.timeoutMs,
+  const owner = await createEngineClient({command: options.executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: h.timeoutMs,
     env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}});
   const views: Awaited<ReturnType<Options["newView"]>>[] = [], peers: Awaited<ReturnType<PublicTransitionHarness["openLink"]>>[] = [];
   let socket: Awaited<ReturnType<typeof h.wire.connect>> | undefined;

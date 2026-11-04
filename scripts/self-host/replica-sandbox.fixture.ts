@@ -141,7 +141,7 @@ async function seedOwner() {
   const child = spawn(engineExecutable, [], {cwd: dir, env: {DOHC_ENGINE_AUTH_TOKEN: "owner"}, stdio: ["pipe", "pipe", "pipe"]});
   const exited = once(child, "close").then(() => {});
   const client = new EngineClient(new DuplexEngineClientConnection(Duplex.from({readable: child.stdout, writable: child.stdin})),
-    {authToken: "owner", protocolVersion: 3, capabilities: ["blobs"], connectTimeoutMs: 30_000}, () => child.kill("SIGKILL"), exited);
+    {authToken: "owner", protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: 30_000}, () => child.kill("SIGKILL"), exited);
   child.stderr.on("data", chunk => process.stderr.write(chunk)); child.on("close", (code, signal) => client.notifyProcessExit(code, signal));
   let id = 1, workspace: string | undefined;
   const rpc = async (method: string, params: Record<string, unknown>) => {try {return (await client.sendRequest({id: id++, method, workspace, deadlineMs: 30_000, params: params as never})).result as Record<string, unknown>;} catch (error) {console.error("owner RPC", method); throw error;}};
@@ -229,7 +229,7 @@ async function measure() {
       const child = spawn(sandbox ? "/app/engine" : "/app/control", ["--replica"], {cwd: store, env: {DOHC_ENGINE_AUTH_TOKEN: "bench", TMPDIR: store}, stdio: ["pipe", "pipe", "pipe"]});
       const exited = once(child, "close").then(() => {});
       const client = new EngineClient(new DuplexEngineClientConnection(Duplex.from({readable: child.stdout, writable: child.stdin})),
-        {authToken: "bench", protocolVersion: 3, capabilities: ["blobs"], connectTimeoutMs: 10_000}, () => child.kill("SIGKILL"), exited);
+        {authToken: "bench", protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: 10_000}, () => child.kill("SIGKILL"), exited);
       child.stderr.on("data", chunk => process.stderr.write(chunk)); child.on("close", (code, signal) => client.notifyProcessExit(code, signal));
       let id = 1, workspace: string | undefined;
       const rpc = async (method: string, params: Record<string, unknown>) => (await client.sendRequest({id: id++, method, workspace, deadlineMs: 10_000, params: params as never})).result as Record<string, unknown>;

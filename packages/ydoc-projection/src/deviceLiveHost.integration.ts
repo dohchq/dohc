@@ -39,7 +39,7 @@ it("delivers through the outbound TLS device pipe and replays a lost durable ack
   mkdirSync(output, { recursive: true });
   const root = mkdtempSync(join(resolve(output), "case-")), workspace = join(root, "workspace");
   mkdirSync(workspace);
-  const seed = await createEngineClient({ command: executable, authToken: "service-proof-seed", protocolVersion: 3,
+  const seed = await createEngineClient({ command: executable, authToken: "service-proof-seed", protocolVersion: 2,
     capabilities: ["core"], connectTimeoutMs: 30_000 });
   let mainVersionId: string;
   try {

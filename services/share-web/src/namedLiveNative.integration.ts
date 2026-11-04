@@ -92,7 +92,7 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
   expect(hash(readFileSync(executable))).toBe(expectedHash);
   mkdirSync(output, { recursive: true });
   const root = mkdtempSync(join(resolve(output), "named-network-")), workspace = join(root, "workspace"); mkdirSync(workspace);
-  const seed = await createEngineClient({ command: executable, authToken: "named-proof-seed", protocolVersion: 3, capabilities: ["core"], connectTimeoutMs: 30000 });
+  const seed = await createEngineClient({ command: executable, authToken: "named-proof-seed", protocolVersion: 2, capabilities: ["core"], connectTimeoutMs: 30000 });
   let mainVersionId: string;
   try {
     const opened = await seed.sendRequest({ id: 1, method: "workspace.open", params: { rootDir: workspace, workspaceId: "workspace", captureMode: "none" }, deadlineMs: 30000 });

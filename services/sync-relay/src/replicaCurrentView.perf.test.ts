@@ -106,7 +106,7 @@ it.skipIf(process.platform!=="linux"||binary.missing||process.env.DOHC_REPLICA_M
     const ownerDir=await tempRoot("view-perf-owner"),token="view-perf-owner";
     const processChild=spawn(binary.require(),[],{windowsHide:true,stdio:["pipe","pipe","pipe"],env:{DOHC_ENGINE_AUTH_TOKEN:token,SystemRoot:process.env.SystemRoot}});
     const exited=new Promise<void>(resolve=>processChild.once("close",()=>resolve()));
-    const client=new EngineClient(new DuplexEngineClientConnection(Duplex.from({readable:processChild.stdout,writable:processChild.stdin})),{authToken:token,protocolVersion:3,capabilities:["blobs"]},()=>processChild.kill("SIGKILL"),exited);
+    const client=new EngineClient(new DuplexEngineClientConnection(Duplex.from({readable:processChild.stdout,writable:processChild.stdin})),{authToken:token,protocolVersion:2,capabilities:["blobs"]},()=>processChild.kill("SIGKILL"),exited);
     processChild.on("close",(code,signal)=>client.notifyProcessExit(code,signal));processChild.stderr.resume();await client.ready();let requestId=1,workspace:string|undefined;
     const rpc=async(method:string,params:Record<string,unknown>={})=>(await client.sendRequest({id:requestId++,method,workspace,deadlineMs:120_000,params:params as never})).result as any;
     let previous:string|null=null;

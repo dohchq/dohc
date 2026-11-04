@@ -147,7 +147,7 @@ it.skipIf(engineBinary.missing)(
         new DuplexEngineClientConnection(stream),
         {
           authToken: "passive-test-token",
-          protocolVersion: 3,
+          protocolVersion: 2,
           capabilities: ["blobs"],
         },
         () => stream.end(),

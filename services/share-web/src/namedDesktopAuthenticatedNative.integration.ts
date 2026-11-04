@@ -75,7 +75,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     users.push((await auth.api.signUpEmail({ body: { email: `${name.toLowerCase()}@example.test`, password, name } })).user);
   }
   const ownerUser = (await auth.api.signUpEmail({body: {email: "owner@example.test", password, name: "Owner"}})).user;
-  const seed = await createEngineClient({ command: executable, env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}, authToken: "owner-proof-seed", protocolVersion: 3, capabilities: ["core"], connectTimeoutMs: 30000 });
+  const seed = await createEngineClient({ command: executable, env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: undefined}, authToken: "owner-proof-seed", protocolVersion: 2, capabilities: ["core"], connectTimeoutMs: 30000 });
   let mainVersionId: string;
   try {
     const opened = await seed.sendRequest({ id: 1, method: "workspace.open", params: { rootDir: workspace, workspaceId: "workspace", captureMode: "none" }, deadlineMs: 30000 });

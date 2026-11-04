@@ -75,7 +75,7 @@ class FakeChild extends EventEmitter {
           this.stdout.write(
             frame({
               type: "helloAck",
-              protocolVersion: 3,
+              protocolVersion: 2,
               sessionGeneration: 1,
               capabilities: ["projection-only"],
               limits,

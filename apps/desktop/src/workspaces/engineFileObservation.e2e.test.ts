@@ -16,7 +16,7 @@ describe("engine feed file operations", () => {
     let previous: FileObservationCursor | undefined;
     try {
       for (let launch = 0; launch < 2; launch++) {
-        const client = await createEngineClient({ command: engine.require(), authToken: "file-feed-relaunch", protocolVersion: 3, capabilities: [] });
+        const client = await createEngineClient({ command: engine.require(), authToken: "file-feed-relaunch", protocolVersion: 2, capabilities: [] });
         const requester = new WorkspaceDaemonRequester(client);
         let workspace: string | undefined;
         try {
@@ -38,7 +38,7 @@ describe("engine feed file operations", () => {
 
   it.skipIf(engine.missing).each(["none", "enabled"])("matches settled create, edit, rename, folder removal and WAL facts with capture %s", async captureMode => {
     const root = await mkdtemp(join(tmpdir(), "dohc-file-feed-parity-"));
-    const client = await createEngineClient({ command: engine.require(), authToken: "file-feed-parity", protocolVersion: 3, capabilities: [] });
+    const client = await createEngineClient({ command: engine.require(), authToken: "file-feed-parity", protocolVersion: 2, capabilities: [] });
     const requester = new WorkspaceDaemonRequester(client);
     let workspace: string | undefined;
     try {

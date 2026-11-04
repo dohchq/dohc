@@ -221,7 +221,7 @@ async function launch(
   );
   const client = new EngineClient(connection, {
     authToken: "consumer-fixture",
-    protocolVersion: 3,
+    protocolVersion: 2,
     capabilities: ["core", "ydoc", "blobs"],
     maxFrameBytes: 1024 * 1024,
     privateLiveApplication: {

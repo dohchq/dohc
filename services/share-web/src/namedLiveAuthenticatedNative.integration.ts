@@ -120,7 +120,7 @@ it("authenticates two accounts through the production browser transport and pres
   for (const name of ["Alice", "Bob"]) {
     users.push((await auth.api.signUpEmail({ body: { email: `${name.toLowerCase()}@example.test`, password, name } })).user);
   }
-  const seed = await createEngineClient({ command: executable, authToken: "named-proof-seed", protocolVersion: 3, capabilities: ["core"], connectTimeoutMs: 30000 });
+  const seed = await createEngineClient({ command: executable, authToken: "named-proof-seed", protocolVersion: 2, capabilities: ["core"], connectTimeoutMs: 30000 });
   let mainVersionId: string;
   try {
     const opened = await seed.sendRequest({ id: 1, method: "workspace.open", params: { rootDir: workspace, workspaceId: "workspace", captureMode: "none" }, deadlineMs: 30000 });

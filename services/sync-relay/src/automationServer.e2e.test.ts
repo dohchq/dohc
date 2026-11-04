@@ -54,7 +54,7 @@ async function computer(input: {
   await mkdir(input.root, { recursive: true });
   const client = await createEngineClient({
     command: engine.require(), authToken: randomBytes(32).toString("base64url"),
-    protocolVersion: 3, capabilities: ["blobs"], connectTimeoutMs: DEADLINE_MS,
+    protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: DEADLINE_MS,
   });
   let requestId = 0;
   const nextRequestId = () => ++requestId;

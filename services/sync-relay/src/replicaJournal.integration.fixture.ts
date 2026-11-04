@@ -139,7 +139,7 @@ async function openHost(configured = true) {
     env: {...process.env, DOHC_ENGINE_AUTH_TOKEN: "integration-owner", ...(configured && mode === "service" ? {DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig} : {DOHC_ENGINE_OWNER_HOST_CONFIG: ownerConfig, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined})}});
   const termination = new Promise<void>(resolve => hostProcess.once("close", () => resolve()));
   const stream = Duplex.from({readable: hostProcess.stdout!, writable: hostProcess.stdin!});
-  client = new EngineClient(new DuplexEngineClientConnection(stream), {authToken: "integration-owner", protocolVersion: 3, capabilities: ["blobs"],
+  client = new EngineClient(new DuplexEngineClientConnection(stream), {authToken: "integration-owner", protocolVersion: 2, capabilities: ["blobs"],
     privateLiveApplication: {aggregateBytes: 512 * 1024 * 1024, maxUploads: 2}, connectTimeoutMs: 120_000}, () => hostProcess.kill("SIGKILL"), termination);
   hostProcess.on("close", (code, signal) => client.notifyProcessExit(code, signal)); hostProcess.stderr!.pipe(process.stderr);
   await client.ready();

@@ -34,7 +34,7 @@ class Child extends EventEmitter {
       while (buffered.length >= 12 && buffered.length >= 12 + buffered.readUInt32LE(8)) {
         const length = buffered.readUInt32LE(8), row = JSON.parse(buffered.subarray(12, 12 + length).toString());
         buffered = buffered.subarray(12 + length);
-        if (row.type === "hello") this.stdout.write(frame({ type: "helloAck", protocolVersion: 3, sessionGeneration: 1,
+        if (row.type === "hello") this.stdout.write(frame({ type: "helloAck", protocolVersion: 2, sessionGeneration: 1,
           capabilities: ["blobs"], limits: { maxFrameBytes: 14 * 1024 * 1024, maxStringBytes: 14 * 1024 * 1024,
             maxCollectionLen: 16_384, maxJsonDepth: 32, maxBatchLen: 64, maxBlobChunkBytes: 262_144 } }));
         else {
