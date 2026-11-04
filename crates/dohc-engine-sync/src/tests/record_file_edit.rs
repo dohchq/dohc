@@ -1498,60 +1498,9 @@ fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
     }
 }
 
-/// The last sequence number B journaled.
-fn b_journaled_seq(b: &EngineStore) -> i64 {
-    count(
-        b,
-        "SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log \
-         WHERE workspace_id='ws' AND imported=0",
-    )
-}
-
-/// Deliver to A what B journaled after `after_seq`, with B's text blobs, as
-/// the relay does. A holds no lineage of its own.
-fn a_receives_from_b(a: &mut EngineStore, b: &EngineStore, after_seq: i64) {
-    let (ops, texts) = b
-        .read_with(|conn| {
-            let ops = conn
-                .prepare(
-                    "SELECT origin_id,origin_seq,op_kind,payload_json,recorded_at_ms \
-                     FROM replication_log WHERE workspace_id='ws' AND imported=0 \
-                       AND origin_seq>?1 AND op_kind IN ('conflict.resolve','moment.append') \
-                     ORDER BY origin_seq",
-                )?
-                .query_map([after_seq], |row| {
-                    Ok(ReplicationEnvelope {
-                        settlement_admission: None,
-                        admitted_author_snapshot: None,
-                        workspace_id: "ws".into(),
-                        origin_id: row.get(0)?,
-                        origin_seq: row.get(1)?,
-                        op_kind: row.get(2)?,
-                        payload: serde_json::from_str(&row.get::<_, String>(3)?)
-                            .expect("journaled payload"),
-                        recorded_at_ms: row.get(4)?,
-                        relay_seq: None,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            let texts = conn
-                .prepare("SELECT text FROM blobs")?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, rusqlite::Error>((ops, texts))
-        })
-        .expect("B's journal");
-    assert!(!ops.is_empty(), "B journaled its resolution");
-    hydrate(a, &texts.iter().map(String::as_str).collect::<Vec<_>>());
-    for op in &ops {
-        deliver(a, op, &NoLiveLeases).expect("A applies B's resolution");
-    }
-}
-
-/// After B takes A's flown file and the resolution reaches A, A's next saves
-/// build on the choice. They come in without a conflict, after a restart and
-/// a redelivery too. B's lineage is its own, so A takes the resolution
-/// without holding it.
+/// After B takes A's flown file, A's next saves build on the choice. They come
+/// in without a conflict, after a restart and a redelivery too. A keeps the
+/// flown file, so it needs nothing from B to build on the choice.
 #[test]
 fn saves_that_build_on_an_applied_incoming_file_of_an_unclaimed_record_come_in() {
     let (planned, flown, landed, recovered_text) =
@@ -1564,17 +1513,9 @@ fn saves_that_build_on_an_applied_incoming_file_of_an_unclaimed_record_come_in()
     let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
     hydrate(&mut b, &[&flown, &landed, &recovered_text]);
     assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-    let journaled = b_journaled_seq(&b);
     resolve(&mut b, ResolveConflictKind::ApplyIncoming);
     assert_eq!(head_text(&b, RECORD), Some(flown.clone()));
 
-    a_receives_from_b(&mut a, &b, journaled);
-    assert_eq!(
-        head_text(&a, RECORD),
-        Some(flown.clone()),
-        "A holds the choice"
-    );
-    assert!(open_conflicts(&a).is_empty(), "A has nothing to review");
     let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
     assert_conflicts_opened(
         deliver(&mut b, &landed_op, &NoLiveLeases).expect("apply A's save"),
