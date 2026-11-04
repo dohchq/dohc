@@ -206,3 +206,30 @@ it("refuses an in-flight launch after its publication is deleted", async () => {
   f.handler.deleteAccount("deleted-owner", [], [publicationId]); release();
   expect((await pending).status).toBe(404);
 });
+
+it('shows opening and a stopped session as a centered dohc message in both themes', async () => {
+  const {html} = await launch(fixture()), style = /<style>([^<]+)<\/style>/.exec(html)?.[1] ?? '';
+  expect(html).toContain('<meta name="color-scheme" content="light dark">');
+  expect(style).toContain(':root{color-scheme:light dark;--bg:#faf9f5;--ink:#1c1b18;--muted:#55524a;--danger:#a43e2a}');
+  expect(style).toContain('@media (prefers-color-scheme:dark){:root{--bg:#131211;--ink:#f6f4ee;--muted:#a9a599;--danger:#e08065}}');
+  expect(style).toContain('font:14px/1.5 system-ui,"Segoe UI",sans-serif');
+  expect(style).toContain('align-items:center;justify-content:center;gap:16px;padding:24px 16px;text-align:center');
+  expect(html).toMatch(/<body data-state="opening"><main id="message"><svg id="mark"[^>]* aria-hidden="true">.*<\/svg><p id="status" role="status">Opening app<\/p><\/main><script>/);
+  expect(style).toContain('#mark{display:none;color:var(--danger)}[data-state=stopped] #mark{display:block}');
+  expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent='This app session ended. Reopen the share link.';");
+  expect(html).toContain("document.body.dataset.state='running';document.getElementById('status').textContent='';");
+  expect(style).toContain('[data-state=running] #message{display:none}');
+  expect(html).not.toMatch(/style="|<link|@import|@font-face|url\(/);
+});
+it('keeps the launch page policy strict and its words free of link and workspace details', async () => {
+  const app = await launch(fixture()), csp = app.response.headers.get('content-security-policy') ?? '';
+  expect(csp.replace(/script-src [^;]+;/, 'script-src HASHES;')).toBe("default-src 'none'; script-src HASHES; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  expect(app.html.match(/<script/g)).toHaveLength(1);
+  const script = /<script>([\s\S]*)<\/script>/.exec(app.html)?.[1] ?? '';
+  expect(csp).toContain(`script-src 'sha256-${createHash('sha256').update(script).digest('base64')}' `);
+  const words = [/<title>([^<]*)</, /role="status"[^>]*>([^<]*)</, /frame\.title='([^']*)'/].map(pattern => pattern.exec(app.html)?.[1]);
+  words.push(...[...app.html.matchAll(/textContent=(?:'([^']*)'|"([^"]*)")/g)].map(match => match[1] ?? match[2]));
+  expect(words).toEqual(['Shared app', 'Opening app', 'Shared app', 'This app session ended. Reopen the share link.', "This app can't find its data. Ask the person who shared it with you.", '']);
+  for (const detail of [publicationId, 'abcdefghijkl', 'server-capability', 'server-profile', 'viewer=session', 'relay.example.org', 'viewer.example.com'])
+    expect(app.html).not.toContain(detail);
+});
