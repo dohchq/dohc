@@ -28,40 +28,53 @@ export function throughEdit(steps: Mappable, range: Mappable): Mappable {
   return { mapResult, map: (pos, assoc) => mapResult(pos, assoc).pos };
 }
 
+export type OwnedBlock = { at: number; node: Node };
+
+// Equal blocks have the same attributes, size and text, so only blocks that
+// share this key are compared.
+const sameKey = (node: Node) => `${JSON.stringify(node.attrs)}:${node.nodeSize}:${node.textContent}`;
+
 /** The owners of the widgets an edit draws again, by their new position. A
  *  widget keeps its owner where `mapping` moves it. A remote update replaces
  *  the whole document, so its steps place nothing: there a block keeps the
- *  owner of the next unplaced block that was equal to it, in order. A block
- *  that changed or is new gets no owner. */
+ *  owner of an unplaced block that was equal to it. A block that changed or
+ *  is new gets no owner. `blocksBefore` lists the range's blocks in the old
+ *  document; it is read only when a widget is left unplaced. */
 export function ownersInRange(
   previous: readonly Decoration[],
-  blocks: readonly { at: number; node: Node }[],
+  blocks: readonly OwnedBlock[],
   mapping: Mappable,
-  blockBefore: (from: number) => Node | null,
+  blocksBefore: () => readonly OwnedBlock[],
 ): Map<number, string> {
-  const owned = previous
-    .filter((decoration) => typeof decoration.spec.ownerKey === "string")
-    .sort((a, b) => a.from - b.from);
   const wanted = new Set(blocks.map(({ at }) => at));
   const owners = new Map<number, string>();
-  const unplaced: Decoration[] = [];
-  for (const decoration of owned) {
+  const unplaced = new Map<number, string>();
+  for (const decoration of previous) {
+    const ownerKey = decoration.spec.ownerKey;
+    if (typeof ownerKey !== "string") continue;
     const mapped = mapping.mapResult(decoration.from, 1);
     if (!mapped.deleted && wanted.has(mapped.pos) && !owners.has(mapped.pos)) {
-      owners.set(mapped.pos, decoration.spec.ownerKey as string);
+      owners.set(mapped.pos, ownerKey);
     } else {
-      unplaced.push(decoration);
+      unplaced.set(decoration.from, ownerKey);
     }
   }
-  let next = 0;
+  if (unplaced.size === 0) return owners;
+  const candidates = new Map<string, OwnedBlock[]>();
+  for (const block of blocksBefore()) {
+    if (!unplaced.has(block.at)) continue;
+    const key = sameKey(block.node);
+    const list = candidates.get(key);
+    if (list) list.push(block);
+    else candidates.set(key, [block]);
+  }
   for (const { at, node } of blocks) {
     if (owners.has(at)) continue;
-    for (let index = next; index < unplaced.length; index += 1) {
-      if (!blockBefore(unplaced[index]!.from)?.eq(node)) continue;
-      owners.set(at, unplaced[index]!.spec.ownerKey as string);
-      next = index + 1;
-      break;
-    }
+    const list = candidates.get(sameKey(node));
+    const index = list ? list.findIndex((old) => old.node.eq(node)) : -1;
+    if (index < 0) continue;
+    const [old] = list!.splice(index, 1);
+    owners.set(at, unplaced.get(old!.at)!);
   }
   return owners;
 }
