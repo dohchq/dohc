@@ -91,13 +91,14 @@ export const AGENT_TOOLS = [
 // runArguments holds what one run adds: the dohc MCP server it replies
 // through and, for Codex, its sandbox and trust (codexRunConfig.ts). The
 // person's own flags come right after the subcommand, so where they set an
-// option dohc sets too, dohc's later one wins.
+// option dohc sets too, dohc's later one wins. A reply-only run leaves them
+// out, as it leaves out the person's saved approvals and hooks.
 // A read-only Claude Code run has only the built-in tools that read and only
 // the run's dohc server; a read-only Codex run gets that from codexRunConfig,
 // and loads none of the person's saved command rules. `codex mcp list`
 // takes no --ignore-rules, so it stays out of runArguments.
 export function agentProfileArguments(profile: AgentLaunchProfile, runArguments: readonly string[] = [], readOnly = false): string[] {
-  const own = profile.arguments ?? [];
+  const own = readOnly ? [] : profile.arguments ?? [];
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   // mcp__dohc allows every tool the run's dohc server offers.
