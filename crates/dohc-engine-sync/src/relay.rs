@@ -814,12 +814,106 @@ pub struct PreparedOrdinaryPull {
     cursor: i64,
     has_more: bool,
     repairs: BaseRepairAnswers,
+    started_pull_token: Option<String>,
 }
 
-#[derive(Debug, Default)]
+// Keep validated decisions instead of full envelopes, including for wide base groups.
+// The encoded buffer bounds all repair answers retained between fetch and apply.
+const MAX_PREPARED_BASE_REPAIR_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+#[path = "tests/prepared_base_repairs.rs"]
+mod prepared_base_repair_tests;
+
+#[derive(Debug)]
 struct BaseRepairAnswers {
-    own_relay_max: Option<i64>,
-    coordinates: BTreeMap<(String, i64), LogCoordinateResponse>,
+    encoded: Vec<u8>,
+}
+
+impl Default for BaseRepairAnswers {
+    fn default() -> Self {
+        Self { encoded: Vec::with_capacity(MAX_PREPARED_BASE_REPAIR_BYTES) }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum BaseRepairDecision {
+    Base {
+        version_id: String,
+        object_id: String,
+        lineage_claim_id: String,
+        origin_id: String,
+        origin_seq: i64,
+        relay_seq: Option<i64>,
+        recorded_at_ms: i64,
+    },
+    Deferred { origin_id: String, origin_seq: i64, relay_seq: i64 },
+}
+
+impl BaseRepairAnswers {
+    fn keep(&mut self, signature: String, decision: BaseRepairDecision) -> Result<bool, RelayError> {
+        let encoded = serde_json::to_vec(&(signature, decision))
+            .map_err(|error| local(SyncError::corrupt(error)))?;
+        if encoded.len() + 1 > MAX_PREPARED_BASE_REPAIR_BYTES - self.encoded.len() {
+            return Ok(false);
+        }
+        self.encoded.extend(encoded);
+        self.encoded.push(b'\n');
+        Ok(true)
+    }
+
+    fn decode(&self) -> Result<BTreeMap<String, BaseRepairDecision>, RelayError> {
+        self.encoded.split(|byte| *byte == b'\n').filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).map_err(|error| local(SyncError::corrupt(error))))
+            .collect()
+    }
+}
+
+fn base_repair_signature<'a>(pushed_seq: i64, repairs: impl Iterator<Item = &'a PendingBaseRelayRepair>) -> String {
+    let rows: Vec<_> = repairs.map(|repair| serde_json::json!({
+        "version": repair.key.version_id, "object": repair.key.object_id,
+        "claim": repair.lineage_claim_id, "origin": repair.origin_id, "seq": repair.origin_seq,
+        "kind": repair.op_kind, "payload": repair.payload, "time": repair.recorded_at_ms,
+    })).collect();
+    dohc_engine_storage::hex_sha256(serde_json::json!([pushed_seq, rows]).to_string().as_bytes())
+}
+
+fn deferred_repair_signature(pushed_seq: i64, repair: &PendingDeferredRelayRepair) -> String {
+    dohc_engine_storage::hex_sha256(serde_json::json!([
+        pushed_seq, repair.origin_id, repair.origin_seq, repair.op_kind, repair.payload, repair.recorded_at_ms
+    ]).to_string().as_bytes())
+}
+
+impl BaseRepairDecision {
+    fn apply(&self, store: &mut EngineStore, workspace_id: &str, faults: &dyn FaultInjector) -> Result<(), RelayError> {
+        match store.write_with(faults, |tx| {
+            match self {
+                Self::Base { version_id, object_id, lineage_claim_id, origin_id, origin_seq, relay_seq, recorded_at_ms } => {
+                    let key = dohc_engine_collab::DocKey::new(workspace_id, version_id, object_id)
+                        .map_err(base_repair_collab_error)?;
+                    dohc_engine_collab::record_base_coordinate_in_tx(tx, dohc_engine_collab::BaseCoordinateRecord {
+                        key: &key, lineage_claim_id, origin_id, origin_seq: *origin_seq,
+                        relay_seq: *relay_seq, now_ms: *recorded_at_ms,
+                    }).map_err(base_repair_collab_error)?;
+                    if relay_seq.is_none() {
+                        dohc_engine_collab::mark_base_coordinate_absent_in_tx(tx, &key, lineage_claim_id,
+                            origin_id, *origin_seq, *recorded_at_ms).map_err(base_repair_collab_error)?;
+                    }
+                    tx.execute("DELETE FROM ydoc_base_relay_candidates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        params![workspace_id, version_id, object_id]).map_err(SyncError::persist)?;
+                }
+                Self::Deferred { origin_id, origin_seq, relay_seq } => {
+                    let changed = tx.execute("UPDATE ydoc_deferred_updates SET relay_seq=?4 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND relay_seq IS NULL",
+                        params![workspace_id, origin_id, origin_seq, relay_seq]).map_err(SyncError::persist)?;
+                    if changed != 1 { return Err(SyncError::CoordinateDiverged); }
+                }
+            }
+            Ok(())
+        }).map_err(local)? {
+            TxnOutcome::Committed(()) => Ok(()),
+            TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+        }
+    }
 }
 
 enum BaseRepairPhase<'a> {
@@ -1284,8 +1378,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }) || deferred.iter().any(|(origin_id, origin_seq, ..)| {
             origin_id == &identity.origin_id && *origin_seq > local_pushed_seq
         });
-        let relay_origin_max = if let BaseRepairPhase::Apply(answers) = &phase {
-            answers.own_relay_max.unwrap_or(local_pushed_seq)
+        let relay_origin_max = if matches!(&phase, BaseRepairPhase::Apply(_)) {
+            local_pushed_seq
         } else if needs_confirmation && !passive {
             let hosted = store
                 .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
@@ -1300,9 +1394,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         } else {
             local_pushed_seq
         };
-        if let BaseRepairPhase::Fetch(answers) = &mut phase {
-            answers.own_relay_max = Some(relay_origin_max);
-        }
         // A same-device push during reruns can make this maximum stale, as between main's lookup and push.
         // Today's callers push before pulling.
         let own_relay_bound = local_pushed_seq.max(relay_origin_max);
@@ -1338,6 +1429,22 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 ))
                 .or_default()
                 .push(repair);
+        }
+        if let BaseRepairPhase::Apply(answers) = &phase {
+            let decisions = answers.decode()?;
+            for group in groups.values() {
+                let signature = base_repair_signature(local_pushed_seq, group.iter());
+                if let Some(decision) = decisions.get(&signature) {
+                    decision.apply(store, workspace_id, faults)?;
+                }
+            }
+            for repair in &deferred {
+                let signature = deferred_repair_signature(local_pushed_seq, repair);
+                if let Some(decision) = decisions.get(&signature) {
+                    decision.apply(store, workspace_id, faults)?;
+                }
+            }
+            return Ok(());
         }
         let mut chunks = Vec::new();
         let mut chunk = BaseRelayRepairChunk::default();
@@ -1387,33 +1494,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 })
                 .collect::<Vec<_>>();
             let mut responses = BTreeMap::new();
-            // A group wider than one batch retains its answers across replay and commits whole.
-            if let BaseRepairPhase::Apply(answers) = &phase {
-                // New coordinates wait for the next fetch. Never infer absence from a missing answer.
-                if requests.iter().any(|request| {
-                    !answers
-                        .coordinates
-                        .contains_key(&(request.origin_id.clone(), request.origin_seq))
-                }) {
-                    continue;
+            // Validate a complete base group before retaining its one decision.
+            for requests in requests.chunks(MAX_BASE_REPAIR_LOOKUPS) {
+                let answers = self.transport.lookup_log_coordinates(requests.to_vec())?;
+                if answers.len() != requests.len() {
+                    return Err(RelayError::InvalidResponse);
                 }
-                for request in &requests {
-                    let key = (request.origin_id.clone(), request.origin_seq);
-                    responses.insert(key.clone(), answers.coordinates[&key].clone());
+                for (request, answer) in requests.iter().zip(answers) {
+                    responses.insert((request.origin_id.clone(), request.origin_seq), answer);
                 }
-            } else {
-                for requests in requests.chunks(MAX_BASE_REPAIR_LOOKUPS) {
-                    let answers = self.transport.lookup_log_coordinates(requests.to_vec())?;
-                    if answers.len() != requests.len() {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                    for (request, answer) in requests.iter().zip(answers) {
-                        responses.insert((request.origin_id.clone(), request.origin_seq), answer);
-                    }
-                }
-            }
-            if let BaseRepairPhase::Fetch(answers) = &mut phase {
-                answers.coordinates.extend(responses.clone());
             }
             let lookup = |origin_id: &str, origin_seq: i64| {
                 if let Some(op) = page_coordinates.get(&(origin_id, origin_seq)) {
@@ -1431,6 +1520,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
             };
             let mut deferred_repairs = Vec::new();
+            let mut prepared_deferred = Vec::new();
             for repair in deferred {
                 let response = lookup(&repair.origin_id, repair.origin_seq)?;
                 let relay_seq = match response {
@@ -1458,6 +1548,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     LogCoordinateResponse::Absent => None,
                 };
                 if let Some(relay_seq) = relay_seq {
+                    if matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                        prepared_deferred.push((deferred_repair_signature(local_pushed_seq, &repair),
+                            BaseRepairDecision::Deferred { origin_id: repair.origin_id.clone(), origin_seq: repair.origin_seq, relay_seq }));
+                    }
                     deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
                 }
             }
@@ -1516,7 +1610,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if grouped.is_empty() && deferred_repairs.is_empty() {
                 continue;
             }
-            if matches!(&phase, BaseRepairPhase::Fetch(_)) {
+            if let BaseRepairPhase::Fetch(answers) = &mut phase {
+                for candidates in grouped.values() {
+                    let signature = base_repair_signature(local_pushed_seq, candidates.iter().map(|(repair, ..)| repair));
+                    let resolved = candidates.iter().filter_map(|(repair, seq, _)| seq.map(|seq| (repair, seq)))
+                        .min_by_key(|(_, seq)| *seq);
+                    let (chosen, relay_seq) = match resolved {
+                        Some((repair, seq)) => (repair, Some(seq)),
+                        None => (&candidates[0].0, None),
+                    };
+                    if !answers.keep(signature, BaseRepairDecision::Base {
+                        version_id: chosen.key.version_id.clone(), object_id: chosen.key.object_id.clone(),
+                        lineage_claim_id: chosen.lineage_claim_id.clone(), origin_id: chosen.origin_id.clone(),
+                        origin_seq: chosen.origin_seq, relay_seq, recorded_at_ms: chosen.recorded_at_ms,
+                    })? { return Ok(()); }
+                }
+                for (signature, decision) in prepared_deferred {
+                    if !answers.keep(signature, decision)? { return Ok(()); }
+                }
                 continue;
             }
             match store
@@ -2056,7 +2167,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let (fetch, progress) = match self.continuation.take(workspace_id) {
             Some((Fetched::Ordinary(fetch), progress)) => (fetch, progress),
             _ => {
-                let prepared = self.fetch_pull(store, workspace_id, faults)?;
+                let prepared = self.fetch_pull_inner(store, workspace_id, faults, true)?;
                 self.begin_prepared_pull(store, workspace_id, &prepared, faults)?
             }
         };
@@ -2188,6 +2299,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<PreparedOrdinaryPull, RelayError> {
+        self.fetch_pull_inner(store, workspace_id, faults, false)
+    }
+
+    fn fetch_pull_inner(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        immediate_repairs: bool,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -2257,6 +2378,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
                 .cloned(),
         );
+        let started_pull_token = if immediate_repairs {
+            preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
+            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+                TxnOutcome::Committed(token) => Some(token),
+                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+            }
+        } else { None };
         let mut repairs = BaseRepairAnswers::default();
         self.repair_base_orders(
             store,
@@ -2264,7 +2392,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &identity,
             faults,
             &ops[..fetched_op_count],
-            BaseRepairPhase::Fetch(&mut repairs),
+            if immediate_repairs { BaseRepairPhase::Immediate } else { BaseRepairPhase::Fetch(&mut repairs) },
         )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         ops.truncate(fetched_op_count);
@@ -2275,6 +2403,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             cursor,
             has_more,
             repairs,
+            started_pull_token,
         })
     }
 
@@ -2324,11 +2453,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
             })
             .map_err(local)?;
-        let pull_token =
-            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+        let pull_token = match &prepared.started_pull_token {
+            Some(token) => token.clone(),
+            None => match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
                 TxnOutcome::Committed(token) => token,
                 TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
-            };
+            },
+        };
         let ordered = merge_by_origin(ops);
         let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
         Ok((
