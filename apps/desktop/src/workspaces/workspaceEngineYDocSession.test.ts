@@ -377,6 +377,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await capture?.stop().catch(() => undefined);
   await sessions?.closeAll().catch(() => undefined);
   if (root) await rm(root, { recursive: true, force: true });
@@ -1396,21 +1397,13 @@ it.each([
   await session.close({settle: false});
 });
 
-// A close reads the disk before its first retry, so real I/O gets a turn
-// between steps of the faked retry delays.
-const realSetImmediate = setImmediate;
 async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  vi.setTimerTickMode("nextTimerAsync");
   try {
-    let settled = false;
-    const assertion = expect(operation().finally(() => { settled = true; })).rejects.toThrow(message);
-    // 200 steps of 100 ms: twice the 10 s busy budget.
-    for (let step = 0; !settled; step += 1) {
-      if (step === 200) throw new Error("The busy-store operation did not finish within 20 s of faked retry delays.");
-      await new Promise((resolve) => realSetImmediate(resolve));
-      await vi.advanceTimersByTimeAsync(100);
-    }
-    await assertion;
+    const startedAt = Date.now();
+    await expect(operation()).rejects.toThrow(message);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(10_000);
   } finally { vi.useRealTimers(); }
 }
 
