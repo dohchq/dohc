@@ -54,7 +54,7 @@ const EXPORT_STYLE_CSS = `
     --subtle: #7f7b6e;
     --accent: #2d342e;
     --success: #38684e;
-    --warning: #8a6420;
+    --warning: #855f1e;
     --danger: #a43e2a;
     --match: #326fce;
   }
