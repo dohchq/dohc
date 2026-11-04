@@ -1865,12 +1865,17 @@ describe.skipIf(engine.missing)("History while a pull waits on a server that doe
         if (pass === "bootstrap pull") expect(pushed).toEqual([]);
         else expect(pushed[0]).toBeGreaterThan(0);
 
+        // The measured wait: how long History takes to list, up to 15 s.
+        const started = performance.now();
         const history = device.capture.listMoments({ limit: 1 }).then(() => "listed", (error: unknown) => error);
         const outcome = await Promise.race([history, new Promise<string>((resolve) => {
-          timer = setTimeout(() => resolve("held"), 2_000);
+          timer = setTimeout(() => resolve("still waiting"), 15_000);
         })]);
+        const waited = Math.round(performance.now() - started);
+        console.log(`#2709 ${pass}: History ${String(outcome)} after ${waited} ms, pull ${pulling ? "still waiting" : "ended"}`);
         expect(pulling, "The pull ended before History was checked").toBe(true);
         expect(outcome, "History waited on the pending pull").toBe("listed");
+        expect(waited, "History waited on the pending pull").toBeLessThan(2_000);
       } finally {
         clearTimeout(timer);
         // Shutdown rejects the held pull, so the pass and the chain end.
@@ -1982,7 +1987,10 @@ describe.skipIf(engine.missing)("Quit with a sync server that does not answer (#
         quit = quitLikeTheDesktop(daemonA, sync);
         daemonA = null;
         const outcome = await closedWithin(quit, 1_000);
-        expect(outcome, `Quit during an unanswered ${pass}, ${Math.round(performance.now() - started)} ms`).toBe("closed");
+        // The measured wait: the steps open at 1,000 ms, then the whole close, up to 15 s.
+        const total = outcome === "closed" ? outcome : await closedWithin(quit, 14_000);
+        console.log(`#2868 ${pass}: at 1,000 ms ${outcome}; ${total} after ${Math.round(performance.now() - started)} ms`);
+        expect(outcome, `Quit during an unanswered ${pass}`).toBe("closed");
 
         for (const socket of held) socket.destroy();
         silent.close();
