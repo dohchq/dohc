@@ -19,14 +19,15 @@ pnpm --filter @dohc/site dev
 ## Deploy
 
 The site is a Cloudflare Worker, `dohc-site`, that serves `dist` as static
-files (`wrangler.jsonc`). The [Site deploy workflow](../../.github/workflows/site-deploy.yml)
+files (`wrangler.jsonc`). Its script, `src/worker.ts`, forwards `/ingest/*` to
+PostHog for the analytics that `src/analytics.ts` loads. The [Site deploy workflow](../../.github/workflows/site-deploy.yml)
 tests, builds and deploys it after a change on `main` reaches the site, the
 desktop source its demo imports, or a shared package.
 
 The workflow runs only while the repository variable `SITE_DEPLOY_ENABLED` is
 `true`. A build job without secrets tests and builds the site. A deploy job
 receives only the built files and runs wrangler, with the commit's
-`wrangler.jsonc`, using `CLOUDFLARE_API_TOKEN` and
+`wrangler.jsonc` and `src/worker.ts`, using `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID` from the `site` environment. The token needs Workers
 Scripts: Edit on the dohc account, which can change every Worker in that
 account.

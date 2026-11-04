@@ -13,6 +13,10 @@ const KNOWN_HOSTS = new Set([
   "docs.github.com",
   "dohc.computer",
   "loops.so",
+  "posthog.com",
+  "us.posthog.com",
+  "us.i.posthog.com",
+  "us-assets.i.posthog.com",
   "www.cloudflare.com",
   "www.w3.org",
 ]);
