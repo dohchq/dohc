@@ -899,9 +899,24 @@ const {
   collectionAutomationsOf: (state) => state.collectionAutomations,
 });
 
-// The AppImage's stable MCP launcher. Startup doesn't wait for it, because its
-// first copy of dohc's Node.js is about 120 MB. A config request waits instead.
-let linuxStableCliBinDir: Promise<string | undefined> = Promise.resolve(undefined);
+// The AppImage's stable MCP launcher. Its first copy of dohc's Node.js is about
+// 120 MB, and writing it during startup held up the first workspace shell on a
+// slow disk. The refresh starts once the launch settles, or sooner when a
+// config request needs it. Agent runs use the launcher inside the AppImage.
+let linuxStableCliBinRefresh: Promise<string | undefined> | undefined;
+function linuxStableCliBinDir(): Promise<string | undefined> {
+  if (!app.isPackaged || process.platform !== "linux" || !isAppImageBoot()) return Promise.resolve(undefined);
+  linuxStableCliBinRefresh ??= refreshLinuxStableCliBin({
+    resourcesCliBinDir: resolveDohcCliBinDirectory({
+      appRoot: desktopPackageRootInDev(),
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
+    targetDir: join(stateDir(), "cli-bin"),
+    onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
+  });
+  return linuxStableCliBinRefresh;
+}
 
 const executeAppPreview = createAppPreviewExecution({
   get shareViewFiles() { return shareViewFiles; },
@@ -2215,7 +2230,7 @@ async function mcpConfigFor(
   const command = resolveDohcMcpCommand({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
-    linuxStableCliBinDir: await linuxStableCliBinDir,
+    linuxStableCliBinDir: await linuxStableCliBinDir(),
   });
   if (command === null) {
     return {
@@ -5921,18 +5936,6 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       applyThemeMode(settings.appearance.themeMode);
       session.defaultSession.setSpellCheckerEnabled(settings.editor.spellcheck);
     },
-    prepareCli: () => {
-      if (!app.isPackaged || process.platform !== "linux" || !isAppImageBoot()) return;
-      linuxStableCliBinDir = refreshLinuxStableCliBin({
-        resourcesCliBinDir: resolveDohcCliBinDirectory({
-          appRoot: desktopPackageRootInDev(),
-          isPackaged: app.isPackaged,
-          resourcesPath: process.resourcesPath,
-        }),
-        targetDir: join(stateDir(), "cli-bin"),
-        onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
-      });
-    },
     registerHandlers: () => {
       nativeTheme.on("updated", refreshTrayIcon);
       // A backoff can outlast a sleep. On wake, try each failing sync now.
@@ -5997,7 +6000,13 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     updateAfterStartupFailure: () => updateAfterFailure("startup"),
     updateAfterWindowLoadFailure: () => updateAfterFailure("window-load"),
   },
-  launch: { finished: finishLaunch, settled: () => desktopEngine.launchSettled() },
+  launch: {
+    finished: finishLaunch,
+    settled: () => {
+      desktopEngine.launchSettled();
+      void linuxStableCliBinDir();
+    },
+  },
   beforeQuit: beforeQuitWithTypingRecovery,
   beforeQuitWithoutWindows: beforeQuitWithTypingRecovery,
   shutdown: {
