@@ -1797,6 +1797,96 @@ describe.skipIf(engine.missing)("Quit while a save is in progress", () => {
   }, 120_000);
 });
 
+// #2709: a pull runs on the capture chain, network wait included, so History
+// waits for a server that does not answer. A join's first pass only pulls; an
+// ordinary pass pulls after its push.
+describe.skipIf(engine.missing)("History while a pull waits on a server that does not answer (#2709)", () => {
+  it.each(["bootstrap pull", "pull after a push"] as const)(
+    "lists History while the %s waits",
+    async (pass) => {
+      const workspaceId = `two-daemon-held-pull-${pass.replaceAll(" ", "-")}`;
+      const token = `test:${workspaceId}`;
+      const rootA = await createTestScratch("dohc-held-pull-a-");
+      const relayRoot = await createTestScratch("dohc-held-pull-relay-");
+      const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+      const connection = { baseUrl: relay.baseUrl, token };
+      const held = new Set<Socket>();
+      const silent = createServer((socket) => {
+        held.add(socket);
+        socket.on("error", () => undefined);
+      });
+      const reached = once(silent, "connection") as Promise<[Socket]>;
+      // The silent server takes the relay's port, so the next request waits.
+      let holding: Promise<void> | undefined;
+      const holdRelay = () => holding ??= (async () => {
+        await relay.stop();
+        silent.listen(relay.port, "127.0.0.1");
+        await once(silent, "listening");
+      })();
+      let daemonA: LiveDaemonCapture | null = null;
+      let daemonB: LiveDaemonCapture | null = null;
+      let sync: CloudSyncEngine | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let pulling = false;
+      const pushed: number[] = [];
+      try {
+        daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+        await daemonA.relay.claim();
+        await daemonA.chats.ensureGeneralChannel({ workspaceId });
+        await pushUntilDrained(daemonA.relay);
+        await writeAndCapture(daemonA, rootA, "notes.md", "body\n");
+        let device = daemonA, root = rootA;
+        if (pass === "bootstrap pull") {
+          expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+          root = await createTestScratch("dohc-held-pull-b-");
+          device = daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+          await holdRelay();
+        }
+        const operations = device.relay;
+        sync = createRelaySyncEngine({
+          rootDir: root, relay: connection, capture: device.capture, onChange: () => undefined,
+          joinBootstrap: pass === "bootstrap pull",
+          // The push reaches the working relay; only the pull meets the silent server.
+          operations: { ...operations, push: async () => {
+            const result = await operations.push();
+            pushed.push(result.pushed);
+            await holdRelay();
+            return result;
+          } },
+          pullStarting: () => {
+            pulling = true;
+            return () => { pulling = false; };
+          },
+        });
+        void sync.start().catch(() => undefined);
+        const [socket] = await reached;
+        await once(socket, "data");
+        await vi.waitFor(() => expect(pulling).toBe(true), { timeout: REAL_DAEMON_DEADLINE_MS });
+        if (pass === "bootstrap pull") expect(pushed).toEqual([]);
+        else expect(pushed[0]).toBeGreaterThan(0);
+
+        const history = device.capture.listMoments({ limit: 1 }).then(() => "listed", (error: unknown) => error);
+        const outcome = await Promise.race([history, new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve("held"), 2_000);
+        })]);
+        expect(pulling, "The pull ended before History was checked").toBe(true);
+        expect(outcome, "History waited on the pending pull").toBe("listed");
+      } finally {
+        clearTimeout(timer);
+        // Shutdown rejects the held pull, so the pass and the chain end.
+        daemonB?.beginShutdown();
+        daemonA?.beginShutdown();
+        for (const socket of held) socket.destroy();
+        if (silent.listening) silent.close();
+        await sync?.stop();
+        await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+        await relay.stop();
+      }
+    },
+    120_000,
+  );
+});
+
 // A rename that changes only case reaches a peer as a delete of the old
 // spelling and a write of the new one. On a disk that ignores case, as macOS
 // and Windows do by default, writing `Notes.md` rewrites the existing
