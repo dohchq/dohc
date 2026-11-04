@@ -352,9 +352,7 @@ describe("chat runner process", () => {
 
   it.each(["all", "reply"] as const)("refuses a Windows Codex run with %s dohc tools only when it is reply-only and the requirements rule out its sandbox", async (dohcTools) => {
     const requirements = join(await createTestScratch("dohc-codex-requirements-"), "requirements.toml");
-    writeFileSync(requirements, "[windows]
-require_mxc = true
-");
+    writeFileSync(requirements, "[windows]\nrequire_mxc = true\n");
     const { calls, checks, spawn } = await runnerFixture("win32", false, "x64", { codexConfigFiles: () => ({ requirements: [requirements], config: [] }) });
     const started = spawn("", undefined, { tool: "codex", executable: process.execPath }, dohcTools);
     if (dohcTools === "all") {

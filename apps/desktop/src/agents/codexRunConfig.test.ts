@@ -221,51 +221,37 @@ describe("a dohc Codex run", () => {
         .filter((value, index, entries) => entries[index - 1] === "--config" && value.startsWith("windows."));
     const unelevated = ["windows.sandbox='unelevated'", "windows.allow_mxc=false"];
     expect(windows({})).toEqual(unelevated);
-    expect(windows({ [USER]: "[windows]
-sandbox = 'elevated'
-allow_mxc = true
-" })).toEqual(unelevated);
-    expect(windows({ [USER]: "[features]
-prefer_mxc = true
-" })).toEqual(unelevated);
-    expect(windows({ [REQUIREMENTS]: "[windows]
-allowed_sandbox_implementations = ['elevated', 'unelevated']
-" })).toEqual(unelevated);
-    expect(windows({ [USER]: "[windows
-" })).toEqual(unelevated);
+    expect(windows({ [USER]: "[windows]\nsandbox = 'elevated'\nallow_mxc = true\n" })).toEqual(unelevated);
+    expect(windows({ [USER]: "[features]\nprefer_mxc = true\n" })).toEqual(unelevated);
+    expect(windows({ [REQUIREMENTS]: "[windows]\nallowed_sandbox_implementations = ['elevated', 'unelevated']\n" })).toEqual(unelevated);
+    expect(windows({ [USER]: "[windows\n" })).toEqual(unelevated);
     expect(windows({}, null)).toEqual(unelevated);
     expect(windows({}, NONE, "linux")).toEqual([]);
   });
 
-  it("refuses a read-only Windows run where the requirements rule out the unelevated sandbox, or can't be read", () => {
+  it("refuses a read-only run where the system requirements would override it, or can't be read", () => {
     const refuses = (text: string | null, platform: NodeJS.Platform = "win32") =>
       codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [SYSTEM, USER] }, platform, (path) => path === REQUIREMENTS && text !== null ? text : missing(path));
-    expect(refuses(null)).toBe(false);
-    expect(refuses("model = 'gpt-5'
-")).toBe(false);
-    expect(refuses("[windows]
-allowed_sandbox_implementations = ['elevated', 'unelevated']
-")).toBe(false);
-    expect(refuses("[windows]
-allow_mxc = false
-require_mxc = false
-")).toBe(false);
-    expect(refuses("[windows]
-allowed_sandbox_implementations = ['elevated']
-")).toBe(true);
-    expect(refuses("[windows]
-allowed_sandbox_implementations = []
-")).toBe(true);
-    expect(refuses("[windows]
-require_mxc = true
-")).toBe(true);
-    expect(refuses("[windows
-")).toBe(true);
+    for (const platform of ["win32", "linux"] as const) {
+      expect(refuses(null, platform)).toBe(false);
+      expect(refuses("model = 'gpt-5'\n", platform)).toBe(false);
+      expect(refuses("[features]\nshell_tool = false\ncode_mode_host = true\n", platform)).toBe(false);
+      // Codex swaps a profile the list leaves out for the required one.
+      expect(refuses("default_permissions = ':read-only'\n[allowed_permission_profiles]\n':read-only' = true\n", platform)).toBe(true);
+      // A required feature wins over --disable, under any name Codex reads.
+      expect(refuses("[features]\nshell_tool = true\n", platform)).toBe(true);
+      expect(refuses("[feature_requirements]\nview_image = true\n", platform)).toBe(true);
+      expect(refuses("[features]\ncollab = true\n", platform)).toBe(true);
+      expect(refuses("[windows\n", platform)).toBe(true);
+    }
+    expect(refuses("[windows]\nallowed_sandbox_implementations = ['elevated', 'unelevated']\n")).toBe(false);
+    expect(refuses("[windows]\nallow_mxc = false\nrequire_mxc = false\n")).toBe(false);
+    expect(refuses("[windows]\nallowed_sandbox_implementations = ['elevated']\n")).toBe(true);
+    expect(refuses("[windows]\nallowed_sandbox_implementations = []\n")).toBe(true);
+    expect(refuses("[windows]\nrequire_mxc = true\n")).toBe(true);
+    expect(refuses("[windows]\nrequire_mxc = true\n", "linux")).toBe(false);
     expect(codexRequirementsRefuseReadOnly({ requirements: [REQUIREMENTS], config: [] }, "win32", () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); })).toBe(true);
-    expect(codexRequirementsRefuseReadOnly(null, "win32")).toBe(true);
-    expect(refuses("[windows]
-require_mxc = true
-", "linux")).toBe(false);
+    expect(codexRequirementsRefuseReadOnly(null, "linux")).toBe(true);
   });
 
   it("carries the person's network access into the run's profile", () => {
