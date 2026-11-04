@@ -112,7 +112,7 @@ import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
-import { ShellErrorReporter, useShellError } from "./shell/useShellError";
+import { ShellErrorReporter, ShellNoticeClear, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useDisconnectedLinkAgents, useShareRemovalNotices } from "./shell/useShareRemovalNotices";
@@ -6276,6 +6276,7 @@ export function DesktopWorkspaceShell(props: {
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
     <ShellErrorReporter.Provider value={reportShellFailure}>
     <MessageLinks.Provider value={makeMessageLink}>
+    <ShellNoticeClear.Provider value={clearIdentity}>
     <div
       data-testid="workspace-shell"
       ref={focusRoot}
@@ -7821,6 +7822,7 @@ export function DesktopWorkspaceShell(props: {
       <ExternalLinkConfirm workspaceId={workspaceId} />
       {retainedCopiesDialog}
     </div>
+    </ShellNoticeClear.Provider>
     </MessageLinks.Provider>
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>

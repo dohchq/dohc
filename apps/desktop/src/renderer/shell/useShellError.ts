@@ -143,9 +143,12 @@ export type ReportShellFailure = (failure: {
   message: string;
   cause?: unknown;
   retry?: (() => void) | null;
+  action?: ShellError["action"];
   identity?: string;
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
+// Takes back the row of one identity, once what it named has worked.
+export const ShellNoticeClear = createContext<((identity: string) => void) | null>(null);
 
 export function useShellError(workspaceId: string, retrySharedView?: () => void) {
   const currentWorkspace = useRef(workspaceId);
