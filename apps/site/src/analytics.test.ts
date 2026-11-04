@@ -34,6 +34,16 @@ it("loads PostHog cookieless and without replay, only once the page is idle", as
   });
 });
 
+it("asks PostHog not to look up a location for any event", async () => {
+  await vi.runAllTimersAsync();
+  const { before_send } = posthog.init.mock.calls[0]![1];
+  if (typeof before_send !== "function") throw new Error("before_send is not one function");
+  for (const event of ["$pageview", "$pageleave", "$autocapture", "download_clicked"]) {
+    const sent = before_send({ uuid: "u", event, properties: { $current_url: "https://dohc.computer/" } });
+    expect(sent?.properties).toEqual({ $current_url: "https://dohc.computer/", $geoip_disable: true });
+  }
+});
+
 it("autocaptures the site's own elements, not the demo's", async () => {
   await vi.runAllTimersAsync();
   const { autocapture } = posthog.init.mock.calls[0]![1];
