@@ -683,6 +683,7 @@ impl EngineService {
             }
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
+            "capture.retry" => self.capture_retry(&ctx, request.workspace).await?,
             "capture.retryHeld" => {
                 self.capture_retry_held(&ctx, request.workspace, request.params)
                     .await?
@@ -1605,6 +1606,7 @@ mod tests {
             "capture.hold",
             "capture.moveFile",
             "capture.reconcile",
+            "capture.retry",
             "capture.retryHeld",
             "capture.release",
             "capture.renew",

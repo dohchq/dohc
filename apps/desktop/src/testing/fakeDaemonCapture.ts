@@ -311,9 +311,11 @@ export function createFakeDaemonCapture(input: {
       const params = (request.params ?? {}) as JsonObject;
       switch (request.method) {
         case "capture.flush":
-        case "capture.reconcile": {
+        case "capture.reconcile":
+        case "capture.retry": {
           await ingest(await activeVersionId());
-          return { id: request.id, result: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] } };
+          const result = { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] };
+          return { id: request.id, result: request.method === "capture.retry" ? { ...result, restarted: false } : result };
         }
         case VERSIONED_METHOD.textWrite:
         case VERSIONED_METHOD.textWriteBlob:

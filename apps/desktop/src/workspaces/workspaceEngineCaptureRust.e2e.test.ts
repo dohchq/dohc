@@ -1257,9 +1257,9 @@ const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 // workspace notices on (dohc#2342). `health` first has the engine scan the
 // folder, so it counts a change whether or not the watcher has reported it.
 // Then it reads the newest moment as the shell does, which waits for capture
-// to settle and fails as "dohc could not check whether open files changed"
-// while History is still updating. Last, it answers the outcome of the first
-// health poll, which raises History paused unless it is null.
+// to settle and answers "still updating" while History is still updating.
+// Last, it answers the outcome of the first health poll, which raises History
+// paused unless it is null.
 async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}, existingRoot?: string) {
   const root = existingRoot ?? await createTestScratch(`dohc-${workspaceId}-`);
   const workspace = { workspaceId, rootPath: root, attachmentId: Symbol(workspaceId) };

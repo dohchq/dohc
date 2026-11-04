@@ -1018,8 +1018,9 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
-  it("shows the persistent history-capture-failure notice while capture is failing", async () => {
-    const onOpenHistory = vi.fn();
+  // The shell reports History that stopped recording as a workspace error,
+  // with its toast and Try again; the status alone files no second row.
+  it("files no row of its own for a history-capture failure", async () => {
     renderNotices({
       syncStatus: {
         state: "synced",
@@ -1031,60 +1032,10 @@ describe("notice center", () => {
         engineStoreRefused: null,
         historyCaptureFailed: true,
       },
-      onOpenHistory,
     });
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const center = screen.getByTestId("notice-center");
-    expect(within(center).getByTestId("notice-center-count").textContent).toBe("1");
-    const notice = within(center).getByTestId("notice-history-capture-failed");
-    expect(notice.textContent).toContain("History paused");
-    expect(notice.textContent).toContain(
-      "dohc couldn't record history for this workspace. Your files are safe on disk, but recent changes may be missing from History.",
-    );
-    await userEvent.click(
-      within(center).getByRole("button", { name: "Open History" }),
-    );
-    expect(onOpenHistory).toHaveBeenCalledOnce();
-  });
-
-  it("clears the history-capture-failure notice when the status reports recovery", async () => {
-    const failedStatus = {
-      state: "synced" as const,
-      pendingChangeCount: 0,
-      lastSyncedAtMs: null,
-      liveSessionsGeneration: 0,
-      historyRecordingUnavailable: false,
-      historyShareView: false,
-      engineStoreRefused: null,
-      historyCaptureFailed: true as const,
-    };
-    const { rerender } = renderNotices({ syncStatus: failedStatus });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(
-      within(screen.getByTestId("notice-center")).getByTestId(
-        "notice-history-capture-failed",
-      ),
-    ).toBeTruthy();
-
-    const {
-      historyCaptureFailed: _historyCaptureFailed,
-      engineStoreRefused: _engineStoreRefused,
-      ...recoveredStatus
-    } = failedStatus;
-    rerender(
-      <NoticeCenter
-        workspaceId="ws-status-test"
-        syncStatus={recoveredStatus}
-        agentActive={false}
-        conflictSummaries={[]}
-        onOpenHistory={() => {}}
-        onOpenConflicts={() => {}}
-        onRefreshShareView={() => {}}
-        onOpenSettings={() => {}}
-        onRebuildEngineStore={() => {}}
-      />,
-    );
+    expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 

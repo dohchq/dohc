@@ -1003,6 +1003,7 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
   ["capture.retryHeld" as WorkspaceMethod, { deferredWrites: [], settled: true, running: true, degraded: false, retried: true }],
   [WORKSPACE_METHOD.captureFlush, { deferredWrites: [], settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.captureReconcile, { deferredWrites: [], settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.captureRetry, { deferredWrites: [], settled: true, running: true, degraded: false, restarted: true }],
   [WORKSPACE_METHOD.watcherStatus, {
     running: true,
     degraded: false,

@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -908,6 +908,7 @@ export function DesktopWorkspaceShell(props: {
     showRetainedCopies,
     showSavedTabsNotice,
     reportRecoveryUnavailable,
+    showHistoryPaused,
     showTabLimitError,
     clearTabLimitError,
     showSingletonTabSplitError,
@@ -2311,7 +2312,6 @@ export function DesktopWorkspaceShell(props: {
         readNewestMomentOrder(
           workspaceId,
           () => latestMomentRequest.current === token && !workspaceAdmission.superseded,
-          () => syncStatusLane.latest()?.historyCaptureFailed === true,
         ),
         (order) => order ?? latestMomentLane.latest(),
         (error) =>
@@ -5214,6 +5214,8 @@ export function DesktopWorkspaceShell(props: {
   const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
   // History stopped recording, so the panel says so in place of taking in changes.
   const historyPaused = isHistoryPaused(syncStatus);
+  const historyPausedRef = useRef(historyPaused);
+  historyPausedRef.current = historyPaused;
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -5712,6 +5714,32 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus?.recoveryUnavailable === undefined) return;
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
+  // History stopped recording. Try again keeps its row, busy, until the
+  // restart answers: one that runs again clears the row, and a failure shows
+  // it again with its toast.
+  const retryHistoryCapture = useCallback((): false => {
+    const askedFor = workspaceId;
+    if (workspaceIdRef.current !== askedFor || !setShellRetryBusy(`history-capture:${askedFor}`, true)) return false;
+    void bridge().retryHistoryCapture({ workspaceId: askedFor }).then(() => {
+      if (workspaceIdRef.current !== askedFor) return;
+      showHistoryPaused(null);
+    }, (error: unknown) => {
+      // A healthy status that arrived first already cleared the row.
+      if (workspaceIdRef.current !== askedFor || !historyPausedRef.current) return;
+      const { cause } = readError(error);
+      const paths = liveEditingStoppedPaths(error);
+      showHistoryPaused({
+        retry: retryHistoryCapture, openHistory: openHistoryView, toast: true,
+        stillPaused: isHistoryCatchingUp(error) ? "catching-up" : { paths },
+        ...(paths.length ? { reasons: paths.map(path => ["File", path, path.length] as const) } : {}),
+        ...(cause ? { cause } : {}),
+      });
+    });
+    return false;
+  }, [workspaceId, setShellRetryBusy, showHistoryPaused, openHistoryView]);
+  useEffect(() => {
+    showHistoryPaused(historyPaused ? { retry: retryHistoryCapture, openHistory: openHistoryView } : null);
+  }, [historyPaused, showHistoryPaused, retryHistoryCapture, openHistoryView]);
   const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
   useEffect(() => {
     if (syncStatus?.outsideWriteCopies === undefined) return;
