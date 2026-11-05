@@ -337,14 +337,14 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
   const model = props.reported?.model;
   return (
     <>
-      <span className="grid gap-0.5">
+      <span className="grid gap-1">
         <span className="text-[11px] text-muted">Command</span>
         <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
           {props.run.command}
         </code>
       </span>
       {product ? (
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Product</span>
           <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
             {product} {AS_REPORTED}
@@ -352,7 +352,7 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
         </span>
       ) : null}
       {model ? (
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Model</span>
           <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
             {model} {AS_REPORTED}
@@ -360,7 +360,7 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
         </span>
       ) : null}
       <span className="grid grid-cols-2 gap-2">
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Started</span>
           <time
             data-testid="chats-run-started"
@@ -370,14 +370,14 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
             {started.label}
           </time>
         </span>
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Exit code</span>
           <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
             {props.run.exitCode ?? "—"}
           </span>
         </span>
       </span>
-      <span className="grid gap-0.5">
+      <span className="grid gap-1">
         <span className="text-[11px] text-muted">Log</span>
         <span className="flex min-w-0 items-center gap-1.5">
           <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
