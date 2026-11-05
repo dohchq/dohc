@@ -328,8 +328,8 @@ export function PostCard(props: {
                 <span
                   data-testid="chats-post-decision-open"
                   role="img"
-                  aria-label="Poll open"
-                  title="Poll open"
+                  aria-label="Unanswered"
+                  title="Unanswered"
                   className="inline-flex text-muted"
                 >
                   <CircleHelp size={13} strokeWidth={1.9} aria-hidden />

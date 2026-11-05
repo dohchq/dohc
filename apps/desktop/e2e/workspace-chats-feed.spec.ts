@@ -204,7 +204,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
       "agent",
     );
     await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-open")).toHaveText(
-      "Poll open",
+      "Unanswered",
     );
 
     // The feed summary reflects the same open decision, and reopening keeps
@@ -212,14 +212,14 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
     await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveAccessibleName(
-      "Poll open",
+      "Unanswered",
     );
     await decisionCard.click();
     await expect(agentComment).toBeVisible();
 
     await ownBubble(agentComment).getByTestId("chats-comment-decision-resolve").click();
     await expect(view.getByTestId("chats-resolving-mode")).toContainText(
-      "Answering the poll",
+      "Answering the question",
     );
     await composer.fill(resolutionBody);
     await composer.press("Enter");

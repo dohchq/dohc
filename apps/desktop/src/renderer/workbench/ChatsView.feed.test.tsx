@@ -908,8 +908,8 @@ describe("ChatsView hybrid feed", () => {
     expect(commentCount?.getAttribute("aria-label")).toBe("2 comments");
     const poll = screen.getByTestId("chats-post-decision-open");
     expect(poll.textContent).toBe("");
-    expect(poll.getAttribute("aria-label")).toBe("Poll open");
-    expect(poll.getAttribute("title")).toBe("Poll open");
+    expect(poll.getAttribute("aria-label")).toBe("Unanswered");
+    expect(poll.getAttribute("title")).toBe("Unanswered");
     expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
     expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
     expect(cards[1]?.getAttribute("data-author-kind")).toBe("agent");

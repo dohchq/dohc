@@ -440,6 +440,10 @@ Give every agent mark a text alternative, as `AgentBadge` does.
 `AgentName` and `AgentBadge` color the name and sparkle beside an avatar to match it. An agent label with no avatar uses `text-agent`.
 A running agent shows a 6px round `bg-agent` dot.
 
+### Chat
+
+A question's status is words and an icon, never a pill. An open question without options shows Answer beside it.
+
 ### Motion
 
 - Hover and press: `transition-colors` at 75 to 100ms.

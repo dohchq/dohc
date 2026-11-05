@@ -18,6 +18,7 @@ import { COLLECTION_CHANGE_FILE, readCollectionChangeProposal } from "../collect
 import { basenameOf } from "../path";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { SecondaryButton } from "../ui/controls";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
@@ -148,7 +149,7 @@ export function DecisionStatus(props: {
       <span className="flex min-w-0 flex-1 flex-col">
         <span
           data-testid={`${props.testIdPrefix}-decision-resolved`}
-          className="inline-flex w-fit items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success"
+          className="inline-flex items-center gap-1 text-[11px] text-success"
         >
           <CircleCheck size={11} strokeWidth={2} aria-hidden />
           Answered
@@ -162,20 +163,19 @@ export function DecisionStatus(props: {
       <span className="inline-flex flex-wrap items-center gap-1.5">
         <span
           data-testid={`${props.testIdPrefix}-decision-open`}
-          className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning"
+          className="inline-flex items-center gap-1 text-[11px] text-warning"
         >
           <CircleHelp size={11} strokeWidth={2} aria-hidden />
-          Poll open
+          Unanswered
         </span>
         {props.onResolve && !hasOptions ? (
-          <button
-            type="button"
+          <SecondaryButton
+            size="compact"
             data-testid={`${props.testIdPrefix}-decision-resolve`}
             onClick={() => props.onResolve?.()}
-            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink"
           >
             Answer
-          </button>
+          </SecondaryButton>
         ) : null}
       </span>
       <PollOptions

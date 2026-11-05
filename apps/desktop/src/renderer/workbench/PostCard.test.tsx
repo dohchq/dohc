@@ -82,11 +82,11 @@ describe("PostCard as a feed row", () => {
     expect(screen.getByTestId("chats-post-excerpt").className).toContain("text-muted");
   });
 
-  it("shows an open poll and the comment count as glyphs a screen reader names", () => {
+  it("shows an unanswered question and the comment count as glyphs a screen reader names", () => {
     row({ messageCount: 5, openDecisionCount: 1 }, "Launch checklist");
     const meta = screen.getByTestId("chats-post-footer");
-    expect(meta.querySelector('[role="img"][aria-label="Poll open"]')).not.toBeNull();
-    expect(screen.queryByText("Poll open")).toBeNull();
+    expect(meta.querySelector('[role="img"][aria-label="Unanswered"]')).not.toBeNull();
+    expect(screen.queryByText("Unanswered")).toBeNull();
     const comments = screen.getByRole("img", { name: "4 comments" });
     expect(comments.textContent).toBe("4");
   });

@@ -2301,10 +2301,7 @@ export function ChatsView(props: {
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
       if (result.resolveFailure) {
-        props.onError(
-          ipcErrorMessage(result.resolveFailure, "Your reply was sent, but the decision is still open."),
-          result.resolveFailure,
-        );
+        props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
@@ -4493,7 +4490,7 @@ export function ChatsView(props: {
                     <ComposerModeBar
                       testId="chats-resolving-mode"
                       cancelTestId="chats-resolving-cancel"
-                      cancelLabel="Cancel resolving decision"
+                      cancelLabel="Cancel answer"
                       onCancel={() => {
                         if (replyTarget?.messageId === resolveTargetMessageId) {
                           setReplyTarget(null);
@@ -4503,8 +4500,8 @@ export function ChatsView(props: {
                       }}
                     >
                       {resolveChosenOption
-                        ? `Answering the poll · ${resolveChosenOption}`
-                        : "Answering the poll"}
+                        ? `Answering the question · ${resolveChosenOption}`
+                        : "Answering the question"}
                     </ComposerModeBar>
                   ) : null}
                   {replyTarget ? (

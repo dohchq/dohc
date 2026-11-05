@@ -49,7 +49,7 @@ describe("ChatsView decisions", () => {
     expect(await screen.findByTestId("chats-message-decision-open")).toBeTruthy();
     await user.click(screen.getByTestId("chats-message-decision-resolve"));
     expect(screen.getByTestId("chats-resolving-mode").textContent).toContain(
-      "Answering the poll",
+      "Answering the question",
     );
     expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
       "Replying to You",
@@ -67,6 +67,30 @@ describe("ChatsView decisions", () => {
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
     expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
+  });
+
+  it("says a reply that posted left its question open, with no Try again", async () => {
+    const user = userEvent.setup();
+    const opening = message();
+    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "resolution-message", parentMessageId: opening.id, body: "Resolved ✓" }),
+      resolveFailure: "Error: Your server session changed. Try again.",
+    });
+    const { onError } = renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click(screen.getByTestId("chats-send"));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "Sent your reply. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
+    expect(onError.mock.lastCall?.[2]).toBeUndefined();
+    expect(screen.getByTestId("chats-message-decision-open")).toBeTruthy();
   });
 
   it("answers a poll by picking a choice, and the choice travels with the answer", async () => {

@@ -42,16 +42,18 @@ export function ThreadedChat(props: {
   composer: (inset: "stream" | "narrow") => ReactNode;
   // Shown in a thread instead of its composer, when the reader can't reply.
   replyNotice?: ReactNode;
-  // Sends a reply in a message's thread; true once it's sent.
-  onSendReply: (rootId: string, body: string) => Promise<boolean>;
+  // Sends a reply in a message's thread; true once it's sent. `answers` is
+  // the question the reply answers, after the reader pressed its Answer.
+  onSendReply: (rootId: string, body: string, answers?: string) => Promise<boolean>;
   replyDisabled?: boolean;
   mentionCandidates: readonly MentionCandidate[];
   fileCandidates?: readonly FileMentionCandidate[];
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   reactionControls?: ChatReactionControls;
-  // More under a message, such as its poll.
-  renderMessageFooter?: (message: ChatMessageRecord) => ReactNode;
+  // More under a message, such as its poll. `answer` opens the message's
+  // thread with the reply box focused, and makes that reply its answer.
+  renderMessageFooter?: (message: ChatMessageRecord, answer: () => void) => ReactNode;
   // The run behind each agent reply, by message, for its Run details.
   runs?: Readonly<Record<string, ChatRunRecord>>;
   // An agent at work, and the message it answers.
@@ -64,6 +66,8 @@ export function ThreadedChat(props: {
 }) {
   const { testIdPrefix: prefix, listRef } = props;
   const [openRootId, setOpenRootId] = useState<string | null>(null);
+  // The question the open thread's next reply answers.
+  const [answering, setAnswering] = useState<{ rootId: string; messageId: string } | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<ReadonlyMap<string, string>>(new Map());
   const [replying, setReplying] = useState(false);
   // The message whose run details show under it.
@@ -123,6 +127,11 @@ export function ThreadedChat(props: {
   const rootOfReply = useMemo(() => new Map([...threads.replies].flatMap(([rootId, replies]) =>
     replies.map((reply) => [reply.id, rootId] as const))), [threads]);
   const pendingJump = useRef<string | null>(null);
+  // Shows a thread, or none. A question's Answer holds only while its thread stays open.
+  const showThread = useCallback((rootId: string | null) => {
+    setOpenRootId(rootId);
+    setAnswering((current) => (current?.rootId === rootId ? current : null));
+  }, []);
   useImperativeHandle(listRef, () => ({
     scrollToEnd: () => streamListRef.current?.scrollToEnd(),
     getScrollableNode: () => streamListRef.current?.getScrollableNode() ?? null,
@@ -131,20 +140,38 @@ export function ThreadedChat(props: {
       if (rootId === undefined) return streamListRef.current?.scrollToMessage(messageId) ?? false;
       if (rootId === openRootId) return threadListRef.current?.scrollToMessage(messageId) ?? false;
       pendingJump.current = messageId;
-      setOpenRootId(rootId);
+      showThread(rootId);
       return true;
     },
-  }), [openRootId, rootOfReply]);
+  }), [openRootId, rootOfReply, showThread]);
   useEffect(() => {
     const messageId = pendingJump.current;
     if (messageId && threadListRef.current?.scrollToMessage(messageId)) pendingJump.current = null;
   });
 
-  const openThread = useCallback((messageId: string) => setOpenRootId(messageId), []);
+  const openThread = useCallback((messageId: string) => showThread(messageId), [showThread]);
   const closeThread = useCallback(() => {
     pendingJump.current = null;
-    setOpenRootId(null);
-  }, []);
+    showThread(null);
+  }, [showThread]);
+  // Answer puts the cursor in its thread's reply box, once. A reply still
+  // sending locks the box, so the cursor goes there when the send ends,
+  // unless the person has put it somewhere else since pressing Answer.
+  const answerFocus = useRef<{ from: Element | null } | null>(null);
+  const answer = useCallback((messageId: string) => {
+    const rootId = rootOfReply.get(messageId) ?? messageId;
+    answerFocus.current = { from: document.activeElement };
+    setAnswering({ rootId, messageId });
+    setOpenRootId(rootId);
+  }, [rootOfReply]);
+  useEffect(() => {
+    const request = answerFocus.current;
+    if (request === null || answering === null || answering.rootId !== openRootId || replying) return;
+    answerFocus.current = null;
+    const active = document.activeElement;
+    if (active !== request.from && active !== null && active !== document.body) return;
+    rootRef.current?.querySelector<HTMLTextAreaElement>("[data-thread-composer] textarea")?.focus();
+  }, [answering, openRootId, replying]);
   const replyDraft = openRootId ? replyDrafts.get(openRootId) ?? "" : "";
   const setReplyDraft = useCallback((value: string) => {
     if (!openRootId) return;
@@ -155,9 +182,11 @@ export function ThreadedChat(props: {
     const rootId = openRootId;
     const body = (rootId ? replyDrafts.get(rootId) ?? "" : "").trim();
     if (!rootId || body.length === 0 || replying) return;
+    const answers = answering?.rootId === rootId ? answering.messageId : undefined;
     setReplying(true);
     try {
-      if (!(await onSendReply(rootId, body)) || !mounted.current) return;
+      if (!(await onSendReply(rootId, body, answers)) || !mounted.current) return;
+      if (answers) setAnswering((current) => (current?.messageId === answers ? null : current));
       threadListRef.current?.scrollToEnd();
       setReplyDrafts((drafts) => {
         const next = new Map(drafts);
@@ -167,7 +196,7 @@ export function ThreadedChat(props: {
     } finally {
       if (mounted.current) setReplying(false);
     }
-  }, [onSendReply, openRootId, replyDrafts, replying]);
+  }, [answering, onSendReply, openRootId, replyDrafts, replying]);
 
   // The thread the working agent answers in, if it was asked in one.
   const workingRootId = useMemo(() => {
@@ -203,22 +232,22 @@ export function ThreadedChat(props: {
   ) : null, [detailsId, runs]);
   const renderThreadFooter = useCallback((message: ChatMessageRecord) => (
     <>
-      {renderMessageFooter?.(message)}
+      {renderMessageFooter?.(message, () => answer(message.id))}
       {runDetails(message)}
     </>
-  ), [renderMessageFooter, runDetails]);
+  ), [answer, renderMessageFooter, runDetails]);
   // Under a stream message: its poll, its thread, and the agent answering in it.
   const renderStreamFooter = useCallback((message: ChatMessageRecord) => {
     const replies = threads.replies.get(message.id);
     return (
       <>
-        {renderMessageFooter?.(message)}
+        {renderMessageFooter?.(message, () => answer(message.id))}
         {runDetails(message)}
         {replies ? <ThreadSummary testIdPrefix={prefix} replies={replies} mentionCandidates={mentionCandidates} onOpen={() => openThread(message.id)} /> : null}
         {working && workingRootId === message.id && openRootId !== message.id ? <WorkingLine testIdPrefix={prefix} working={working} /> : null}
       </>
     );
-  }, [mentionCandidates, openRootId, openThread, prefix, renderMessageFooter, runDetails, threads.replies, working, workingRootId]);
+  }, [answer, mentionCandidates, openRootId, openThread, prefix, renderMessageFooter, runDetails, threads.replies, working, workingRootId]);
   const streamActions = useCallback((message: ChatMessageRecord) => (
     <>
       <button

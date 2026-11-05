@@ -326,8 +326,8 @@ export function ChatLane(props: {
   }, [channelId, composer, load, loading, onError, poll, props.locked, props.onAgentWaitsForTrust, reactions, sending, threadId, workspaceId]);
 
   // A reply goes under the message the thread hangs from. A reply to an
-  // earlier post goes on in that post.
-  const sendReply = useCallback(async (rootId: string, body: string) => {
+  // earlier post goes on in that post. A reply after Answer answers its question.
+  const sendReply = useCallback(async (rootId: string, body: string, answers?: string) => {
     const post = messages.find((message) => message.id === rootId && message.threadId !== threadId)?.threadId;
     const target = post ?? threadId;
     if (!target || props.locked) return false;
@@ -340,12 +340,16 @@ export function ChatLane(props: {
         body,
         ...(post ? {} : { parentMessageId: rootId }),
         ...(references.length > 0 ? { fileReferences: references } : {}),
+        ...(answers ? { resolves: { messageId: answers } } : {}),
       });
       if (current !== token.current) return false;
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       loadSequence.current += 1;
       const reply = post ? { ...result.message, parentMessageId: rootId } : result.message;
       setMessages((existing) => existing.some(message => message.id === reply.id) ? existing : [...existing, reply]);
+      const resolved = result.resolved;
+      if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === resolved.messageId ? resolved : entry));
+      if (result.resolveFailure) onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
       void load(true);
       return true;
     } catch (error) {
@@ -362,13 +366,15 @@ export function ChatLane(props: {
     if (!target || sending || loading || props.locked) return;
     const parentMessageId = post ? undefined : asked?.parentMessageId;
     const current = token.current;
+    const input = {
+      workspaceId, threadId: target, body: option,
+      ...(parentMessageId ? { parentMessageId } : {}),
+      resolves: { messageId: decision.messageId, chosenOption: option },
+    };
+    const stayedOpen = (failure: unknown) => onError("Sent your choice. dohc could not mark the question answered.", failure);
     setSending(true);
     try {
-      const result = await bridge().sendChatMessage({
-        workspaceId, threadId: target, body: option,
-        ...(parentMessageId ? { parentMessageId } : {}),
-        resolves: { messageId: decision.messageId, chosenOption: option },
-      });
+      const result = await bridge().sendChatMessage(input);
       if (current !== token.current) return;
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
       loadSequence.current += 1;
@@ -376,10 +382,17 @@ export function ChatLane(props: {
       setMessages(existing => existing.some(message => message.id === result.message.id) ? existing : [...existing, result.message]);
       const resolved = result.resolved;
       if (resolved) setDecisions(existing => existing.map(entry => entry.messageId === decision.messageId ? resolved : entry));
-      if (result.resolveFailure) onError(ipcErrorMessage(result.resolveFailure, "Could not answer that poll."), result.resolveFailure);
+      if (result.resolveFailure) stayedOpen(result.resolveFailure);
     } catch (error) {
       if (current !== token.current) return;
-      onError(ipcErrorMessage(error, "Could not answer that poll."), error);
+      // A send can fail after main saved the choice, so sending it again could
+      // post it twice, and the conversation reloads instead. A question that
+      // now shows this choice answered needs no message.
+      const now = await bridge().listChatThreadDecisions({ workspaceId, threadId: decision.threadId }).catch(() => null);
+      if (current !== token.current) return;
+      const landed = now?.decisions.some(entry =>
+        entry.messageId === decision.messageId && entry.state === "resolved" && entry.chosenOption === option);
+      if (!landed) onError("dohc could not tell whether your choice was sent.", error);
     } finally {
       if (current === token.current) {
         setSending(false);
@@ -487,8 +500,9 @@ export function ChatLane(props: {
 
   const decisionsByMessage = useMemo(() => new Map(decisions.map(decision => [decision.messageId, decision])), [decisions]);
   const failedEnd = useMemo(() => failedRun ? failedRunEnd(failedRun, runs, messages) : null, [failedRun, messages, runs]);
-  // Under a message: its poll, and why the agent didn't answer it.
-  const renderFooter = useCallback((message: ChatMessageRecord) => {
+  // Under a message: its question, and why the agent didn't answer it. A
+  // choice answers at once. Answer starts a reply in the question's thread.
+  const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void) => {
     const decision = decisionsByMessage.get(message.id);
     const asked = decision ? changeFileOf(message) : undefined;
     const appliedBy = decision?.state === "resolved" ? messages.find((reply) => reply.id === decision.resolvedByMessageId) : undefined;
@@ -496,6 +510,10 @@ export function ChatLane(props: {
     const changeFile = asked === undefined ? undefined : (appliedBy && changeFileOf(appliedBy)) ?? asked;
     const undoneBy = changeFile === undefined ? undefined : messages.filter((reply) => reply.id !== appliedBy?.id &&
       reply.createdAtMs > message.createdAtMs && reply.authorKind === "human" && changeFileOf(reply) === changeFile).at(-1);
+    const resolve = props.locked ? undefined
+      : !decision?.options?.length ? answer
+        : sending ? undefined
+          : (option?: string) => { if (option) void chooseOption(decision, option); };
     return <>
       {changeFile !== undefined ? <CollectionChangeCard
         key={`${workspaceId}:${message.id}:${asked}`}
@@ -512,9 +530,7 @@ export function ChatLane(props: {
       /> : decision ? <DecisionStatus
         decision={decision}
         testIdPrefix="chats-lane"
-        {...(!props.locked && !sending && decision.options?.length ? {
-          onResolve: (option?: string) => { if (option) void chooseOption(decision, option); },
-        } : {})}
+        {...(resolve ? { onResolve: resolve } : {})}
       /> : null}
       {failedRun && message.id === failedEnd ? <FailedRunLine
         testIdPrefix="chats-lane"
