@@ -824,7 +824,10 @@ mod deferred_relay_tests {
                     let RelayIoRequest::Push(request) = request else {
                         panic!("unexpected request: {request:?}");
                     };
-                    assert!(request.ops.is_empty(), "the first push enrolls the workspace");
+                    assert!(
+                        request.ops.is_empty(),
+                        "the first push enrolls the workspace"
+                    );
                     assert_eq!(request.after_seq, -1);
                     started.notify_one();
                     release.notified().await;
