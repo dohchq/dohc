@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { WorkspaceSummary } from "../../ipc/bridgeContract";
 import { useShareMounts } from "./useShareMounts";
+import { shareUnjournalableNotice } from "../shareUnjournalableNotice";
 
 afterEach(cleanup);
 
@@ -149,7 +150,7 @@ function mountRows() {
     ),
     { initialProps: { shareMounts: mounts } },
   );
-  return { ...hook, reportShellError, reportShellFailure, clearIdentity };
+  return { ...hook, reportShellError, showSuccessNotice, reportShellFailure, clearIdentity };
 }
 
 const refused = { shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" };
@@ -197,7 +198,6 @@ it("keeps a share's collision-record refusal in Notices until that share refresh
   vi.unstubAllGlobals();
 });
 
-// Mounts always get the replace words: a mount never takes the person's writes.
 it("tells the person when dohc set aside a share's collision record", async () => {
   vi.stubGlobal("dohcDesktop", {
     refreshShareMounts: vi.fn().mockResolvedValue({
@@ -210,8 +210,9 @@ it("tells the person when dohc set aside a share's collision record", async () =
   expect(reportShellFailure).toHaveBeenCalledWith({
     message:
       "dohc could not read its record of your files with the same path as a file in alex. " +
-      "A refresh can replace them with the shared version, and dohc keeps no copy of yours.",
+      "dohc keeps these files apart.",
     identity: "share-mount-collision-record-set-aside:share-1",
+    tone: "warning",
   });
   expect(clearIdentity).toHaveBeenCalledWith("share-mount-collision-record:share-1");
 
@@ -274,4 +275,112 @@ it("files an older refresh's set-aside row", async () => {
     identity: "share-mount-collision-record-set-aside:share-1",
   }));
   vi.unstubAllGlobals();
+});
+
+
+it.each([false, true])("reports kept mount paths and clears them after refresh (%s)", async (announce) => {
+  const refresh = vi.fn()
+    .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0,
+      unjournalablePaths: [
+        { path: "docs/blocked/a.md", reason: "local-collision", owner: "docs/blocked" },
+        { path: "docs/blocked/b.md", reason: "local-collision", owner: "docs/blocked" },
+      ] }] })
+    .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0 }] });
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const { result, showSuccessNotice, reportShellFailure, clearIdentity } = mountRows();
+  try {
+    await act(async () => { await result.current.refreshShareMounts(announce); });
+    expect(reportShellFailure).toHaveBeenCalledWith({
+      message: "dohc could not receive shared-with-me/alex/docs/blocked. A file from this machine already uses this path. Move or rename the file, then refresh.",
+      identity: "share-mount-kept-paths:share-1",
+      tone: "warning",
+      retry: expect.any(Function),
+      paths: [
+        "shared-with-me/alex/docs/blocked",
+        "shared-with-me/alex/docs/blocked/a.md",
+        "shared-with-me/alex/docs/blocked/b.md",
+      ],
+      noDismiss: true,
+      ...(announce ? { quiet: true } : { repeat: true }),
+    });
+    expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-kept-paths:share-1");
+    showSuccessNotice.mockClear();
+    const retry = reportShellFailure.mock.calls[0]![0].retry as () => void;
+    await act(async () => { retry(); });
+    await vi.waitFor(() => expect(clearIdentity).toHaveBeenCalledWith("share-mount-kept-paths:share-1"));
+    expect(refresh).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1" });
+    expect(showSuccessNotice).toHaveBeenCalledWith(expect.stringContaining("Shares refreshed"), undefined, "share-refresh");
+    expect(reportShellFailure).toHaveBeenCalledOnce();
+    expect(shareUnjournalableNotice([
+      { path: "notes.md", reason: "local-collision" },
+      { path: "docs/blocked/a.md", reason: "local-collision", owner: "docs/blocked" },
+      { path: "docs/blocked/b.md", reason: "local-collision", owner: "docs/blocked" },
+    ])).toBe(
+      "dohc could not receive notes.md, docs/blocked. Files from this machine already use these paths. Move or rename the files, then refresh.",
+    );
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("includes both spellings in notice details", async () => {
+  vi.stubGlobal("dohcDesktop", {
+    refreshShareMounts: vi.fn().mockResolvedValue({ results: [{
+      shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0,
+      unjournalablePaths: [{ path: "docs/Notes.md", reason: "spelling-collision", owner: "docs/notes.md" }],
+    }] }),
+  });
+  const { result, reportShellFailure } = mountRows();
+  try {
+    await act(async () => { await result.current.refreshShareMounts(); });
+    expect(reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({
+      message: "dohc could not receive shared-with-me/alex/docs/Notes.md. This machine treats shared-with-me/alex/docs/Notes.md and shared-with-me/alex/docs/notes.md as the same name. Ask the person who shared the files to rename one of them.",
+      paths: ["shared-with-me/alex/docs/Notes.md", "shared-with-me/alex/docs/notes.md"],
+    }));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("includes every kept mount path in notice details", async () => {
+  const paths = ["docs/a.md", "docs/b.md", "docs/c.md", "docs/d.md"];
+  vi.stubGlobal("dohcDesktop", {
+    refreshShareMounts: vi.fn().mockResolvedValue({ results: [{
+      shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0,
+      unjournalablePaths: paths.map(path => ({ path, reason: "local-collision" })),
+    }] }),
+  });
+  const { result, reportShellFailure } = mountRows();
+  try {
+    await act(async () => { await result.current.refreshShareMounts(); });
+    expect(reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({
+      message: "dohc could not receive shared-with-me/alex/docs/a.md, shared-with-me/alex/docs/b.md, shared-with-me/alex/docs/c.md, and 1 more. Files from this machine already use these paths. Move or rename the files, then refresh.",
+      paths: paths.map(path => `shared-with-me/alex/${path}`),
+    }));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps the latest mount path notice when an earlier refresh finishes", async () => {
+  let finishOlder!: (value: unknown) => void;
+  const refresh = vi.fn()
+    .mockReturnValueOnce(new Promise(done => { finishOlder = done; }))
+    .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0,
+      unjournalablePaths: [{ path: "docs/a.md", reason: "local-collision" }] }] });
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const { result, reportShellFailure, clearIdentity } = mountRows();
+  try {
+    let older!: Promise<void>;
+    act(() => { older = result.current.refreshShareMounts(); });
+    await act(async () => { await result.current.refreshShareMounts(); });
+    expect(reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({ identity: "share-mount-kept-paths:share-1" }));
+    await act(async () => {
+      finishOlder({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0 }] });
+      await older;
+    });
+    expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-kept-paths:share-1");
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
+import * as sharedView from "../workspaces/sharedView";
 import { RelayConflictError, SharedFileReadOnlyError, ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
 import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { shareProposalOperations } from "./shareOperations";
@@ -61,7 +62,7 @@ async function harness() {
   const readText = vi.fn<Dependencies["readOwnedWorkspaceTextFor"]>(async () => ({ text: "current", truncated: false, contentHash: "hash" }));
   const queue = vi.fn();
   const reconcile = vi.fn<Dependencies["shareViewFiles"]["reconcile"]>(async () => ({
-    kind: "settle", capturedPaths: 2, repairedPaths: 1, unjournalablePaths: [], collisionRecordQuarantined: false,
+    kind: "settle", capturedPaths: 2, repairedPaths: 1, unjournalablePaths: [],
   }));
   const submit = vi.fn<EngineRelayWorkspaceClient["submitShareProposal"]>(async () => ({ submitted: 1, proposalId: "proposal", skippedOutsideShare: 0, morePending: false }));
   const pushDirect = vi.fn<EngineRelayWorkspaceClient["pushDirectWrites"]>(async () => ({ writes: [], morePending: false }));
@@ -106,7 +107,10 @@ async function harness() {
     afterHandler: (work: () => void) => { afterHandler = work; } };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("registered share proposal handlers", () => {
   it.each(Object.values(shareProposalOperations))("rejects an untrusted sender on $channel before parsing or work", async row => {
@@ -434,7 +438,7 @@ describe("registered share proposal handlers", () => {
     h.reconcile.mockImplementation(() => { started.resolve(); return held.promise; });
     const result = h.invoke(shareProposalOperations.submitShareChanges.channel);
     await started.promise; h.recipient("view");
-    held.resolve({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: false });
+    held.resolve({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] });
     await expect(result).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
   });
 
@@ -453,9 +457,16 @@ describe("registered share proposal handlers", () => {
 
   it("refuses unsafe reconciliation and reports a raced withdrawal honestly", async () => {
     const h = await harness(); h.recipient();
-    h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [], collisionRecordQuarantined: true });
-    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow("damaged shared file recovery");
-    h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [{ path: "docs/file", reason: "unreadable" }], collisionRecordQuarantined: false });
+    const refusal = new Error("record unreadable");
+    vi.spyOn(sharedView, "isCollisionRecordRefusal").mockImplementation(error => error === refusal);
+    h.reconcile.mockRejectedValue(refusal);
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(
+      "dohc could not read this share's record of your files with the same path as a shared file. Refresh, then send your changes again.",
+    );
+    const unrelated = new Error("store unavailable");
+    h.reconcile.mockRejectedValue(unrelated);
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toBe(unrelated);
+    h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [{ path: "docs/file", reason: "unreadable" }] });
     await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
     h.withdraw.mockResolvedValue({ proposalId: "proposal", state: "accepted" });
     await expect(h.invoke(shareProposalOperations.withdrawShareChanges.channel, { workspaceId: "workspace", proposalId: "proposal" })).rejects.toThrow("already answered");

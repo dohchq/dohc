@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import {
   lstat,
@@ -25,6 +26,7 @@ import {
 } from "../testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
+  type EngineRelayWorkspaceClient,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
@@ -68,6 +70,7 @@ interface Harness {
   engineWorkspace: EngineWorkspace;
   store: CaptureVersionedTextStore;
   sessions: EngineWorkspaceSessions;
+  directClient?: EngineRelayWorkspaceClient;
 }
 
 const lifecycles: EngineDaemonLifecycle[] = [];
@@ -99,7 +102,7 @@ afterEach(async () => {
 async function harness(
   prefix: string,
   access?: "comment" | "edit",
-  options: { chatFirst?: boolean } = {},
+  options: { chatFirst?: boolean; relayUrl?: string } = {},
 ): Promise<Harness> {
   const rootPath = await createTestScratch(prefix);
   roots.push(rootPath);
@@ -141,11 +144,13 @@ async function harness(
       sessions,
     }).ensureOpen();
   }
+  let directClient: EngineRelayWorkspaceClient | undefined;
   if (access) {
     const client = receivedShareEngine.relayFor({
       ...receivedShareLocation,
-      relay: { baseUrl: "http://127.0.0.1:9", token: "share-view-test-token" },
+      relay: { baseUrl: options.relayUrl ?? "http://127.0.0.1:9", token: "share-view-test-token" },
     });
+    directClient = client;
     await client.recordShareViewIdentity({
       grantedSelector: { paths: ["docs"], versionId: null, access },
     });
@@ -153,7 +158,7 @@ async function harness(
   const store = access
     ? receivedShareEngine.storeFor(receivedShareLocation)
     : createCaptureLiveStores(workspace, sessions).store;
-  return { workspaceId, rootPath, engineWorkspace, store, sessions };
+  return { workspaceId, rootPath, engineWorkspace, store, sessions, directClient };
 }
 
 async function flushCapture(harnessed: Harness) {
@@ -550,6 +555,72 @@ async function exists(path: string): Promise<boolean> {
 }
 
 describe("share-view file operations through the real store", () => {
+  it.skipIf(engine.missing)("keeps a Collection file apart after rebuilding its saved list", async () => {
+    const written: string[][] = [];
+    const server = createServer((request, response) => {
+      void (async () => {
+        if (request.method === "POST" && request.url === `/sync/shares/${SHARE_ID}/collection-writes`) {
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { changes: Array<{ afterPath?: string }> };
+          const paths = body.changes.flatMap(change => change.afterPath === undefined ? [] : [change.afterPath]);
+          written.push(paths);
+          response.writeHead(200, { "content-type": "application/json", connection: "close" });
+          response.end(JSON.stringify({ paths }));
+        } else if (request.method === "PUT" && request.url?.startsWith(`/sync/shares/${SHARE_ID}/blobs/`)) {
+          for await (const chunk of request) void chunk;
+          response.writeHead(200, { connection: "close" });
+          response.end();
+        } else {
+          response.writeHead(500, { connection: "close" });
+          response.end("Unexpected request");
+        }
+      })().catch((error: unknown) => {
+        response.writeHead(500, { connection: "close" });
+        response.end(error instanceof Error ? error.message : String(error));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("No relay address");
+      const view = await harness("dohc-kept-collection-", "edit", { relayUrl: `http://127.0.0.1:${address.port}` });
+      if (!view.directClient) throw new Error("No share client");
+      const path = "docs/packing/collection.yaml";
+      const controlPath = "docs/packing/automations.yaml";
+      await seedSharedFiles(view, [{ path, text: "fields: {}\n" }, { path: controlPath, text: "actions: []\n" }]);
+      await writeFile(join(view.rootPath, path), "my own file", "utf8");
+      const record = join(view.rootPath, ".dohc", "local", "share-refresh", "share-collision-record.json");
+      await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+      await writeFile(record, "not json", { mode: 0o600 });
+      const owner = shareViewFilesOwner(view, view.store);
+      for (let pass = 0; pass < 2; pass += 1) {
+        await withStaleSensitiveWorkspaceOperation(view.rootPath,
+          lease => owner.files.reconcile(lease, owner.requested, "refresh"));
+      }
+      const grantedSelector = { paths: ["docs"], versionId: null, access: "edit" as const };
+      await expect(view.directClient.pushDirectWrites({ shareId: SHARE_ID, grantedSelector }))
+        .resolves.toEqual({ writes: [], morePending: false });
+      expect(written).toEqual([]);
+      expect(await readFile(join(view.rootPath, path), "utf8")).toBe("my own file");
+      expect(JSON.parse(await readFile(record, "utf8"))).toEqual({ shareId: SHARE_ID, paths: [path] });
+
+      const main = await view.store.ensureMainVersion({ workspaceId: view.workspaceId });
+      await view.store.writeTextFile({ workspaceId: view.workspaceId, versionId: main.id, path: controlPath,
+        text: "actions: []\n# updated\n", metadata: { origin: "api" } });
+      await expect(view.directClient.pushDirectWrites({ shareId: SHARE_ID, grantedSelector }))
+        .resolves.toMatchObject({ writes: [{ paths: [controlPath], result: "written" }] });
+      expect(written).toEqual([[controlPath]]);
+    } finally {
+      errorLog.mockRestore();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  }, 60_000);
+
   it.skipIf(engine.missing)(
     "opens an access-bearing received share with capture disabled",
     async () => {
@@ -585,7 +656,6 @@ describe("share-view file operations through the real store", () => {
         settleShareViewThroughOwner(view, view.store),
       ).resolves.toEqual({
         capturedPaths: 1,
-        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -698,7 +768,6 @@ describe("share-view file operations through the real store", () => {
         settleShareViewThroughOwner(view, view.store),
       ).resolves.toEqual({
         capturedPaths: 0,
-        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -852,7 +921,6 @@ describe("share-view file operations through the real store", () => {
       ).toBe(false);
       expect(captured).toEqual({
         capturedPaths: 0,
-        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -1892,7 +1960,6 @@ describe("share-view file operations through the real store", () => {
         settleShareViewThroughOwner(view, view.store),
       ).resolves.toEqual({
         capturedPaths: 0,
-        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });

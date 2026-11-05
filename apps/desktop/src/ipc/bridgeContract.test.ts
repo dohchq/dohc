@@ -1,7 +1,7 @@
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
+import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure, ShareMountStatusRow } from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
 import { ImportWorkspaceFilesResult } from "./bridgeContract";
 import { OwnerLiveDocumentsResult } from "./bridgeContract";
@@ -1451,13 +1451,21 @@ describe("shared view refresh IPC contract", () => {
       changedPaths: 0,
       errorMessage: "relay failed",
       collisionRecordQuarantined: true,
-      takesLocalWrites: false,
     };
     expect(RefreshSharedViewResult.parse(failed)).toEqual(failed);
+    expect(RefreshSharedViewResult.parse({ ...failed, takesLocalWrites: false })).toEqual(failed);
   });
 });
 
 describe("share mount refresh IPC contract", () => {
+  it("carries the paths kept apart by a mount", () => {
+    const row = { shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0,
+      unjournalablePaths: [{ path: "docs/a.md", reason: "local-collision" }] };
+    expect(ShareMountStatusRow.parse(row)).toEqual(row);
+    expect(ShareMountStatusRow.safeParse({ ...row, unjournalablePaths: [{ path: "docs/a.md", reason: "unknown" }] }).success).toBe(false);
+    expect(ShareMountStatusRow.safeParse({ ...row, unjournalablePaths: [{ path: 1, reason: "local-collision" }] }).success).toBe(false);
+  });
+
   it("carries the rows of a refresh that stopped, with why it stopped", () => {
     const stopped = {
       results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }],

@@ -3,6 +3,7 @@ import type {
   RefreshShareMountsResult,
   WorkspaceSummary,
 } from "../../ipc/bridgeContract";
+import { shareNoticePaths, shareUnjournalableNotice } from "../shareUnjournalableNotice";
 import { bridge } from "../bridge";
 import type { ShellErrorKind } from "./useShellError";
 import type { PendingTreeChange } from "../workbench/file-tree-optimistic";
@@ -18,6 +19,8 @@ const collisionRecordPath = (label: string) =>
   `shared-with-me/${label}/.dohc/local/share-refresh/share-collision-record.json`;
 const collisionRecordRefusal = (shareId: string) =>
   `share-mount-collision-record:${shareId}`;
+const keptPathsNotice = (shareId: string) =>
+  `share-mount-kept-paths:${shareId}`;
 const collisionRecordSetAside = (shareId: string) =>
   `share-mount-collision-record-set-aside:${shareId}`;
 
@@ -36,6 +39,8 @@ export function useShareMounts(
   showSuccessNotice: (message: string, undo?: () => void, kind?: ShellErrorKind) => void,
   reportShellFailure: (failure: {
     message: string;
+    tone?: "success" | "warning";
+    paths?: readonly string[];
     retry?: (() => void) | null;
     noDismiss?: boolean;
     kind?: ShellErrorKind;
@@ -80,6 +85,7 @@ export function useShareMounts(
       for (const mount of shareMountsRef.current) {
         if (!next.some((candidate) => candidate.shareId === mount.shareId)) {
           clearIdentity(collisionRecordRefusal(mount.shareId));
+          clearIdentity(keptPathsNotice(mount.shareId));
         }
       }
       setShareMounts(next);
@@ -114,8 +120,8 @@ export function useShareMounts(
   );
   // A refresh the person starts has one toast, its summary, so these rows go
   // into Notices unread. A polled refresh has no summary: a refusal toasts
-  // only when its row is new. Every refresh files its set-aside rows: the
-  // record is gone, so a newer refresh has none to report.
+  // only when its row is new. Every refresh reports its completed rebuilds,
+  // even if a later refresh has already finished.
   const reportCollisionRecords = useCallback(
     (results: RefreshShareMountsResult["results"], announce: boolean, newest: boolean) => {
       for (const row of results) {
@@ -135,12 +141,33 @@ export function useShareMounts(
         } else if (newest && row.status !== "failed" && row.status !== "damaged") {
           clearIdentity(collisionRecordRefusal(row.shareId));
         }
+        if (newest && (row.status === "updated" || row.status === "unchanged" || row.status === "ended")) {
+          const paths = row.status === "ended" ? [] : row.unjournalablePaths ?? [];
+          if (paths.length === 0) {
+            clearIdentity(keptPathsNotice(row.shareId));
+          } else {
+            reportShellFailure({
+              message: shareUnjournalableNotice(paths.map(entry => ({
+                ...entry,
+                path: `shared-with-me/${row.label}/${entry.path}`,
+                ...(entry.owner === undefined ? {} : { owner: `shared-with-me/${row.label}/${entry.owner}` }),
+              }))),
+              identity: keptPathsNotice(row.shareId),
+              tone: "warning",
+              retry: () => void refreshShareMountsRef.current(true),
+              paths: shareNoticePaths(paths).map(path => `shared-with-me/${row.label}/${path}`),
+              noDismiss: true,
+              ...(announce ? { quiet: true } : { repeat: true }),
+            });
+          }
+        }
         if (row.collisionRecordQuarantined) {
           reportShellFailure({
             message:
               `dohc could not read its record of your files with the same path as a file in ${row.label}. ` +
-              "A refresh can replace them with the shared version, and dohc keeps no copy of yours.",
+              "dohc keeps these files apart.",
             identity: collisionRecordSetAside(row.shareId),
+            tone: "warning",
             ...(announce ? { quiet: true } : {}),
           });
         }

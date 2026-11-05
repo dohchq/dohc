@@ -18,6 +18,7 @@ import {
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import { relayUrlsMatch } from "../workspaces/syncCode";
+import { isCollisionRecordRefusal } from "../workspaces/sharedView";
 import { assertShareChangesJournalable } from "../workspaces/shareViewRecords";
 import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
@@ -462,17 +463,19 @@ export function createShareProposalsIpc<
                 workspaceId: beforeReconcile.workspaceId,
               },
               "settle",
-            ),
+            ).catch((error: unknown) => {
+              if (isCollisionRecordRefusal(error)) {
+                throw new Error(
+                  "dohc could not read this share's record of your files with the same path as a shared file. Refresh, then send your changes again.",
+                );
+              }
+              throw error;
+            }),
         );
         operation.assert(beforeReconcile);
         const scope = operation.resolve();
         if (reconciled.kind !== "settle") {
           throw new Error("Shared file settlement returned an invalid result.");
-        }
-        if (reconciled.collisionRecordQuarantined) {
-          throw new Error(
-            "dohc found a damaged shared file recovery record. Refresh shared files. Then send your changes again.",
-          );
         }
         assertShareChangesJournalable(reconciled.unjournalablePaths);
         // The engine owns the submit: it reads this replica's own journal, so it

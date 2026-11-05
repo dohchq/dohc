@@ -562,6 +562,7 @@ export function shareMountResultRow(input: {
   changedPaths: number;
   errorKind?: ShareMountStatusRow["errorKind"];
   collisionRecordQuarantined?: true;
+  unjournalablePaths?: ShareMountStatusRow["unjournalablePaths"];
 }): ShareMountStatusRow | null {
   // A count that is not a number claims the minimum rather than carrying a
   // value the schema refuses — NaN and Infinity both survive `Math.trunc`
@@ -576,6 +577,7 @@ export function shareMountResultRow(input: {
     changedPaths,
     ...(input.errorKind ? { errorKind: input.errorKind } : {}),
     ...(input.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
+    ...(input.unjournalablePaths?.length ? { unjournalablePaths: input.unjournalablePaths } : {}),
   });
   return parsed.success ? parsed.data : null;
 }

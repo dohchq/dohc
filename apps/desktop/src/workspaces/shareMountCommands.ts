@@ -465,7 +465,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           mount: unknown,
           status: ShareMountStatusRow["status"],
           changedPaths: number,
-          collisionRecord?: Pick<ShareMountStatusRow, "errorKind" | "collisionRecordQuarantined">,
+          collisionRecord?: Pick<ShareMountStatusRow, "errorKind" | "collisionRecordQuarantined" | "unjournalablePaths">,
         ): void => {
           if (!record(mount)) return;
           const row = shareMountResultRow({
@@ -526,9 +526,10 @@ export function createShareMountCommands<WorkspaceSummary>(
                 mount,
                 reconciled.outcome.status,
                 reconciled.outcome.changedPaths,
-                reconciled.outcome.collisionRecordQuarantined
-                  ? { collisionRecordQuarantined: true }
-                  : undefined,
+                {
+                  ...(reconciled.outcome.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
+                  unjournalablePaths: reconciled.outcome.unjournalablePaths,
+                },
               );
             } catch (thrown) {
               // A refresh that set the record aside before it failed says so

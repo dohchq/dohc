@@ -334,6 +334,55 @@ const unusedReconcilePorts: Pick<
 };
 
 describe("ShareViewFiles", () => {
+  it("gives a refresh instruction when a change finds an unreadable saved list", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "docs/a.md";
+    const text = "shared file\n";
+    const registered = { ...target(rootPath), grantedSelector: { paths: ["docs"], versionId: null, access: "edit" } };
+    const store = mutableTextStore({ initial: [{ path, text }] });
+    await mkdir(join(rootPath, "docs"));
+    await writeFile(join(rootPath, path), text);
+    const record = await writeRecord(rootPath, "share-collision-record.json", "not json");
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    const change = { kind: "save" as const, path, text: "changed\n", expectedContentHash: createHash("sha256").update(text).digest("hex") };
+    const save = () => withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested, change));
+
+    await expect(save()).rejects.toThrow(
+      "dohc could not read this share's record of your files with the same path as a shared file. Refresh, then try the change again.",
+    );
+    expect(await readFile(record, "utf8")).toBe("not json");
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+    const refusal = new Error("store unavailable");
+    vi.mocked(store.listTextFileMetadata).mockRejectedValueOnce(refusal);
+    await expect(save()).rejects.toBe(refusal);
+  });
+
+  it("keeps an untracked preserved file apart after access narrows", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "docs/mine.md";
+    const registered = { ...target(rootPath), unsavedPaths: [path] as string[] | null,
+      grantedSelector: { paths: ["docs"], versionId: null, access: "edit" as "edit" | "view" } };
+    const store = mutableTextStore();
+    await mkdir(join(rootPath, "docs"));
+    await writeFile(join(rootPath, path), "my own file");
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+      updateUnsavedPaths: async (_target, paths) => { registered.unsavedPaths = paths; } });
+    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.narrow(lease, requested, () => undefined, async paths => {
+      registered.grantedSelector.access = "view";
+      registered.unsavedPaths = paths ?? null;
+    }));
+    const refreshed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+
+    expect(refreshed).toMatchObject({ kind: "refresh", outcome: { ok: true,
+      unjournalablePaths: [{ path, reason: "local-collision" }] } });
+    expect(await readFile(join(rootPath, path), "utf8")).toBe("my own file");
+    expect(await store.readTextFile({ workspaceId: registered.storeWorkspaceId, versionId: "main", path })).toBeNull();
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+    expect(registered.unsavedPaths).toEqual([path]);
+  });
+
   // On a disk that ignores case, notes.md owns the one file and Notes.md is
   // held behind it (#2416). Saving, deleting or moving Notes.md would write
   // over notes.md's file, so each change is refused and nothing changes.
@@ -654,9 +703,9 @@ describe("ShareViewFiles", () => {
             ok: false,
             errorMessage: expect.stringContaining(failing === "relay" ? "Sign in to your server first." : "relay unavailable"),
             collisionRecordQuarantined: true,
-            takesLocalWrites: false,
           },
         });
+        expect(failed).not.toHaveProperty("outcome.takesLocalWrites");
         await expect(lstat(record)).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
         errorLog.mockRestore();
@@ -689,9 +738,9 @@ describe("ShareViewFiles", () => {
           ok: false,
           errorMessage: expect.stringContaining("could not save the ended share"),
           collisionRecordQuarantined: true,
-          takesLocalWrites: false,
         },
       });
+      expect(failed).not.toHaveProperty("outcome.takesLocalWrites");
       expect(retireTarget).not.toHaveBeenCalled();
       await expect(lstat(record)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
@@ -1873,6 +1922,7 @@ describe("ShareViewFiles", () => {
         capturedPaths: 0,
         repairedPaths: 0,
       });
+      await expect(reconciling).resolves.not.toHaveProperty("collisionRecordQuarantined");
       expect(await readFile(join(rootPath, path), "utf8")).toBe(
         "saved in app\n",
       );
@@ -1971,11 +2021,11 @@ describe("ShareViewFiles", () => {
     expect(outcome).toMatchObject({
       kind: "repair",
       repairedPaths: 0,
-      collisionRecordQuarantined: false,
       unjournalablePaths: [
         { path: "docs/note.md", reason: "non-file-replacement" },
       ],
     });
+    expect(outcome).not.toHaveProperty("collisionRecordQuarantined");
     await expect(readFile(join(trackedPath, "mine.md"), "utf8")).resolves.toBe(
       "recipient\n",
     );
@@ -2071,7 +2121,7 @@ describe("ShareViewFiles", () => {
     ).resolves.toBe("canonical\n");
   });
 
-  it("keeps mounted recipient data after quarantining a malformed collision record", async () => {
+  it("keeps a mounted file apart across refreshes", async () => {
     const rootPath = await workspaceRoot();
     const path = "docs/collision.md";
     await mkdir(join(rootPath, "docs"), { recursive: true });
@@ -2135,10 +2185,10 @@ describe("ShareViewFiles", () => {
         }),
       ).resolves.toEqual({
         state: "pending",
-        pendingPathCount: 1,
-        pendingPaths: [path],
-        collisionPathCount: 0,
-        collisionPaths: [],
+        pendingPathCount: 0,
+        pendingPaths: [],
+        collisionPathCount: 1,
+        collisionPaths: [path],
         pullInFlight: false,
       });
       expect(result).toMatchObject({
@@ -2148,6 +2198,7 @@ describe("ShareViewFiles", () => {
           changedPaths: 1,
           excludedPaths: [path],
           collisionRecordQuarantined: true,
+          unjournalablePaths: [{ path, reason: "local-collision" }],
         },
       });
 
@@ -2159,8 +2210,62 @@ describe("ShareViewFiles", () => {
         ),
       );
       await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
+        "recipient data\n",
+      );
+      await expect(
+        readSharedViewProjectionDebt(rootPath, "share-a"),
+      ).resolves.toMatchObject({ collisionPaths: new Set([path]) });
+      await expect(
+        files.projectionStatus({
+          kind: "mount",
+          workspaceId: "host-a",
+          shareId: "share-a",
+        }),
+      ).resolves.toEqual({
+        state: "pending",
+        pendingPathCount: 0,
+        pendingPaths: [],
+        collisionPathCount: 1,
+        collisionPaths: [path],
+        pullInFlight: false,
+      });
+
+      const refreshed = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "refresh",
+        ),
+      );
+      expect(refreshed).toMatchObject({
+        kind: "refresh",
+        outcome: {
+          unjournalablePaths: [{ path, reason: "local-collision" }],
+        },
+      });
+      expect(refreshed).not.toHaveProperty("outcome.collisionRecordQuarantined");
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
+        "recipient data\n",
+      );
+      await expect(
+        readSharedViewProjectionDebt(rootPath, "share-a"),
+      ).resolves.toMatchObject({ collisionPaths: new Set([path]) });
+
+      await rm(join(rootPath, path));
+      // One more refresh restores the absent file and clears its kept path.
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "refresh",
+        ),
+      );
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
         "granter new\n",
       );
+      await expect(
+        readSharedViewProjectionDebt(rootPath, "share-a"),
+      ).resolves.toMatchObject({ collisionPaths: new Set() });
       await expect(
         files.projectionStatus({
           kind: "mount",
@@ -2695,7 +2800,7 @@ describe("ShareViewFiles", () => {
       JSON.stringify({ shareId: "share-old", paths: ["notes/stale.md"] }),
     ],
   ])(
-    "leaves %s collision record untouched for capture to quarantine",
+    "refuses to settle with %s saved list of kept paths and keeps it",
     async (_recordKind, serialized) => {
       const rootPath = await workspaceRoot();
       const metadataPath = recordsDir(rootPath);
@@ -2741,19 +2846,17 @@ describe("ShareViewFiles", () => {
               "settle",
             ),
           ),
-        ).resolves.toMatchObject({
-          kind: "settle",
-          collisionRecordQuarantined: true,
-        });
-        expect(errorLog).toHaveBeenCalledOnce();
+        ).rejects.toThrow(
+          "dohc did not update these shared files because it could not read .dohc/local/share-refresh/share-collision-record.json. " +
+            "It keeps a refresh from replacing your own files.",
+        );
+        expect(errorLog).not.toHaveBeenCalled();
       } finally {
         errorLog.mockRestore();
       }
-      await expect(lstat(collisionPath)).rejects.toMatchObject({
-        code: "ENOENT",
-      });
+      await expect(readFile(collisionPath, "utf8")).resolves.toBe(serialized);
       expect(await readdir(metadataPath)).toEqual([
-        expect.stringMatching(/^share-collision-record\.json\.invalid-\d+$/),
+        "share-collision-record.json",
       ]);
     },
   );

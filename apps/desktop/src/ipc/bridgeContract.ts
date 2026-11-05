@@ -5678,6 +5678,22 @@ export type AutomationRunSettledEvent = PressSettled & { workspaceId: string };
 /** Main to the pressing window: the run waits, and why. */
 export type AutomationRunWaitingEvent = { workspaceId: string; claimId: string; reason: PressWaitReason };
 
+const UnjournalableSharePaths = z.array(
+  z.object({
+    path: z.string(),
+    reason: z.enum([
+      "oversized-text",
+      "oversized-binary",
+      "non-utf8",
+      "non-file-replacement",
+      "local-collision",
+      "spelling-collision",
+      "unreadable",
+    ]),
+    owner: z.string().optional(),
+  }),
+);
+
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
   probed: z.literal(true).optional(),
@@ -5686,25 +5702,8 @@ const RefreshSharedViewSuccessResult = z.object({
   status: z.enum(["updated", "unchanged", "ended"]),
   changedPaths: z.number().int().nonnegative(),
   excludedPaths: z.array(z.string()),
-  unjournalablePaths: z.array(
-    z.object({
-      path: z.string(),
-      reason: z.enum([
-        "oversized-text",
-        "oversized-binary",
-        "non-utf8",
-        "non-file-replacement",
-        "local-collision",
-        "spelling-collision",
-        "unreadable",
-      ]),
-      owner: z.string().optional(),
-    }),
-  ),
+  unjournalablePaths: UnjournalableSharePaths,
   collisionRecordQuarantined: z.boolean().optional(),
-  // Set with collisionRecordQuarantined: whether this view's refreshes count
-  // the person's changed files as their edits, which the notice says.
-  takesLocalWrites: z.boolean().optional(),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
   refusedOps: z.number().int().nonnegative(),
@@ -5727,7 +5726,6 @@ const RefreshSharedViewFailureResult = z.object({
   // This refresh set the record aside before it failed, so the person hears
   // of it all the same.
   collisionRecordQuarantined: z.boolean().optional(),
-  takesLocalWrites: z.boolean().optional(),
 });
 
 export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
@@ -5802,6 +5800,7 @@ export const ShareMountStatusRow = z.object({
   errorKind: z.literal("collision-record").optional(),
   // dohc set that record aside because it could not read it.
   collisionRecordQuarantined: z.literal(true).optional(),
+  unjournalablePaths: UnjournalableSharePaths.optional(),
 });
 export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
 

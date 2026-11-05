@@ -1325,3 +1325,33 @@ it("keeps an earlier mount's set-aside row when a later one finds the session ex
   });
   expect(h.files.reconcile).toHaveBeenCalledTimes(2);
 });
+
+
+it("carries kept mount paths after rebuilding their saved list", async () => {
+  const h = harness();
+  const path = "docs/a.md";
+  const hash = "0".repeat(64);
+  let file = "";
+  const { record } = await mountOnDisk(h, (_record, mountRoot) => {
+    file = join(mountRoot, path);
+    return {
+      resolveRelay: async () => null,
+      openStore: () => ({
+        ensureMainVersion: async () => ({ id: "main" }),
+        listTextFileMetadata: async () => [{ path, objectId: "a", contentKind: "text", byteLength: 1, sha256: hash,
+          updatedAtMs: 0, latestMomentId: "a", hasYdocMarker: false }],
+      } as unknown as import("./shareViewFiles").ShareViewFilesStore),
+    };
+  });
+  await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, "my own file");
+  await writeFile(record, "not json");
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result.results).toEqual([{ shareId: SHARE_ID, label: "alex", status: "unchanged", changedPaths: 0,
+    collisionRecordQuarantined: true, unjournalablePaths: [{ path, reason: "local-collision" }] }]);
+  expect(await readFile(file, "utf8")).toBe("my own file");
+  expect(JSON.parse(await readFile(record, "utf8"))).toEqual({ shareId: SHARE_ID, paths: [path] });
+});

@@ -37,7 +37,6 @@ import type {
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
   MyShareChangeRow,
-  RefreshSharedViewResult,
   RebuildEngineStoreResult,
   ShareAccess,
   ShareHandoffStatus,
@@ -59,11 +58,6 @@ import {
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
 import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
-import {
-  formatSize,
-  MAX_ENGINE_CAPTURE_BINARY_BYTES,
-  MAX_ENGINE_CAPTURE_TEXT_BYTES,
-} from "../workspaces/workspaceEngineCaptureLimits";
 import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
@@ -106,6 +100,7 @@ import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { reportInstallationFailure, useInstallationNotices } from "./shell/installationNotices";
 import type { CloudSettings } from "./settings/CloudSyncSettings";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
+import { shareNoticePaths, shareUnjournalableNotice, type UnjournalableSharePath } from "./shareUnjournalableNotice";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
@@ -429,13 +424,8 @@ const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
 
 // What a refresh that set a shared view's collision record aside tells the
 // person, whether the refresh then completed or failed.
-function collisionRecordSetAsideMessage(takesLocalWrites: boolean | undefined): string {
-  return (
-    "dohc could not read this share's record of your files with the same path as a shared file. " +
-    (takesLocalWrites
-      ? "A refresh can count them as your edits, so check Send changes before you send."
-      : "A refresh can replace them with the shared version, and dohc keeps no copy of yours.")
-  );
+function collisionRecordSetAsideMessage(): string {
+  return "dohc could not read this share's record of your files with the same path as a shared file. dohc keeps these files apart.";
 }
 
 // The commands that still run under the opening cover.
@@ -563,90 +553,6 @@ function InvalidSitePathFallback({
   }, [activeTab, onClose]);
 
   return null;
-}
-
-type UnjournalableSharePath = Extract<
-  RefreshSharedViewResult,
-  { ok: true }
->["unjournalablePaths"][number];
-
-function namedUnjournalablePaths(paths: readonly UnjournalableSharePath[]): string {
-  const named = paths.slice(0, 3).map((entry) => entry.path).join(", ");
-  return paths.length > 3 ? `${named}, and ${paths.length - 3} more` : named;
-}
-
-function shareUnjournalableNotice(
-  paths: readonly UnjournalableSharePath[],
-): string {
-  const groups = new Map<
-    UnjournalableSharePath["reason"],
-    UnjournalableSharePath[]
-  >();
-  for (const path of paths) {
-    const group = groups.get(path.reason) ?? [];
-    group.push(path);
-    groups.set(path.reason, group);
-  }
-  const lines: string[] = [];
-  for (const reason of [
-    "oversized-text",
-    "oversized-binary",
-    "non-utf8",
-    "non-file-replacement",
-    "local-collision",
-    "spelling-collision",
-    "unreadable",
-  ] as const) {
-    const group = groups.get(reason);
-    if (!group || group.length === 0) continue;
-    const names = namedUnjournalablePaths(group);
-    const one = group.length === 1;
-    if (reason === "oversized-text") {
-      lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text limit. ` +
-          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
-      );
-    } else if (reason === "oversized-binary") {
-      lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary limit. ` +
-          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
-      );
-    } else if (reason === "non-utf8") {
-      lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "This file is" : "These files are"} not readable as text. ` +
-          `Save ${one ? "the file" : "the files"} as UTF-8 text, then refresh.`,
-      );
-    } else if (reason === "non-file-replacement") {
-      lines.push(
-        `dohc could not track changes in ${names}. ` +
-          `${one ? "A folder or another entry replaces this file" : "Folders or other entries replace these files"}. ` +
-          `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
-      );
-    } else if (reason === "local-collision") {
-      lines.push(
-        `dohc could not receive ${names}. ` +
-          `${one ? "A file from this machine already uses this path" : "Files from this machine already use these paths"}. ` +
-          `Move or remove ${one ? "the file" : "the files"}, then refresh.`,
-      );
-    } else if (reason === "spelling-collision") {
-      const owner = one ? group[0]!.owner : undefined;
-      lines.push(
-        `dohc could not receive ${names}. ` +
-          (owner === undefined
-            ? "This machine treats each name as the same as another shared file's. Ask the person who shared the files to rename them."
-            : `This machine treats ${names} and ${owner} as the same name. Ask the person who shared the files to rename one of them.`),
-      );
-    } else {
-      lines.push(
-        `dohc could not read ${names}. ` +
-          `Close anything using ${one ? "the file" : "the files"}, or wait, then refresh.`,
-      );
-    }
-  }
-  return lines.join(" ");
 }
 
 // Lists the drafts main keeps for the workspace again. A failed read files a
@@ -5085,7 +4991,7 @@ export function DesktopWorkspaceShell(props: {
           if (outcome.changedPaths > 0) await bestEffortRepaint();
           if (!isCurrent()) return "stale";
           if (outcome.collisionRecordQuarantined) {
-            reportShellFailure({ message: collisionRecordSetAsideMessage(outcome.takesLocalWrites) });
+            reportShellFailure({ message: collisionRecordSetAsideMessage(), tone: "warning" });
           }
           if (outcome.errorKind === "collision-record") {
             // The record keeps the person's own files apart while dohc can't
@@ -5112,7 +5018,7 @@ export function DesktopWorkspaceShell(props: {
         if (outcome.probed) return "current";
         clearIdentity(SHARE_COLLISION_RECORD_ROW);
         if (outcome.collisionRecordQuarantined) {
-          reportShellFailure({ message: collisionRecordSetAsideMessage(outcome.takesLocalWrites) });
+          reportShellFailure({ message: collisionRecordSetAsideMessage(), tone: "warning" });
         }
         if (outcome.status === "ended") {
           shareViewEndedRef.current = true;
@@ -6206,7 +6112,7 @@ export function DesktopWorkspaceShell(props: {
           {shareExcludedPaths.length > 0 ? (
             <span
               data-testid="shared-view-excluded"
-              title={shareExcludedPaths.map((entry) => entry.path).join("\n")}
+              title={shareNoticePaths(shareExcludedPaths).join("\n")}
               className="flex min-w-0 max-w-[280px] shrink items-center gap-1.5 truncate rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
             >
               {shareUnjournalableNotice(shareExcludedPaths)}

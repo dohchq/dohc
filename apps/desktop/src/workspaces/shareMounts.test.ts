@@ -6,7 +6,7 @@ import {
 import { SharePinInvalidError } from "./shareViewRecords";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
+import { readFile, rename, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -48,6 +48,7 @@ const PINNED_SELECTOR = {
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
 import { readLocalStateFrom } from "./workspaceLocalState";
+import { readSharedViewProjectionDebt } from "./sharedView";
 
 const SHARE_ID = "share-1";
 const HOST_WORKSPACE = "host-workspace-1";
@@ -919,6 +920,7 @@ describe("refreshShareMount", () => {
     expect(healed.status).toBe("updated");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v3");
     expect(existsSync(join(elsewhere, "brief.md"))).toBe(false);
+    expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
   });
 
   it("repairs local tampering on refresh even when the relay has nothing new", async () => {
@@ -1045,27 +1047,41 @@ describe("refreshShareMount", () => {
     expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
   });
 
-  it("heals a FILE squatting on an ancestor directory path", async () => {
+  it.each(["present", "absent"] as const)("keeps a mount's folder path apart with %s saved state", async savedState => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
+    const mount = { shareId: SHARE_ID, label: "alex" };
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMount(harness, {
-      hostRoot: host,
-      mount: { shareId: SHARE_ID, label: "alex" },
-    });
+    await refreshShareMount(harness, { hostRoot: host, mount });
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
-
-    // Replace the docs DIRECTORY with a plain file; the next refresh must
-    // rebuild the real chain instead of wedging on ENOTDIR.
-    await rm(join(mountRoot, "docs"), { recursive: true, force: true });
-    await writeFile(join(mountRoot, "docs"), "squatter");
-    const healed = await refreshShareMount(harness, {
-      hostRoot: host,
-      mount: { shareId: SHARE_ID, label: "alex" },
+    await mkdir(join(mountRoot, "notes"));
+    await writeFile(join(mountRoot, "notes/mine.md"), "my own file");
+    relay.addWrite("notes/mine.md", "shared file");
+    await refreshShareMount(harness, { hostRoot: host, mount });
+    await expect(readSharedViewProjectionDebt(mountRoot, SHARE_ID)).resolves.toMatchObject({
+      collisionPaths: new Set(["notes/mine.md"]),
     });
-    expect(healed.status).toBe("updated");
+    if (savedState === "absent") {
+      await writeFile(join(mountRoot, "notes/mine.md"), "shared file");
+      await rm(join(mountRoot, ".dohc/local/share-refresh/share-collision-record.json"));
+    }
+    await rename(join(mountRoot, "docs"), join(mountRoot, "kept-folder"));
+    await writeFile(join(mountRoot, "docs"), "my own blocking file");
+
+    for (let pass = 0; pass < 2; pass += 1) {
+      const kept = await refreshShareMount(harness, { hostRoot: host, mount });
+      expect(kept).toMatchObject({ status: "unchanged",
+        unjournalablePaths: expect.arrayContaining([{ path: "docs/brief.md", reason: "local-collision", owner: "docs" }]) });
+      expect(await readFile(join(mountRoot, "docs"), "utf8")).toBe("my own blocking file");
+      expect((await readSharedViewProjectionDebt(mountRoot, SHARE_ID)).collisionPaths).toContain("docs/brief.md");
+    }
+
+    await rename(join(mountRoot, "docs"), join(mountRoot, "my-file"));
+    const restored = await refreshShareMount(harness, { hostRoot: host, mount });
+    expect(restored.status).toBe("updated");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v1");
+    expect((await readSharedViewProjectionDebt(mountRoot, SHARE_ID)).collisionPaths).not.toContain("docs/brief.md");
   });
 
   it("routes DELETE ops through the same real-parent containment", async () => {

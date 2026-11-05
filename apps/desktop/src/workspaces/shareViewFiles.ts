@@ -34,8 +34,10 @@ import {
 } from "./workspaceFiles";
 import {
   createShareViewLifecycle,
+  isCollisionRecordRefusal,
   readSharedViewProjectionDebt,
   type CaptureSharedViewLocalDivergenceOutcome,
+  type CaptureSharedViewRefreshOutcome,
   type RefreshSharedViewOutcome,
   setAsideCollisionRecord,
   standaloneShareViewFailureOutcome,
@@ -171,13 +173,11 @@ export type ShareViewReconcileOutcome =
       capturedPaths: number;
       repairedPaths: number;
       unjournalablePaths: CaptureSharedViewLocalDivergenceOutcome["unjournalablePaths"];
-      collisionRecordQuarantined: boolean;
     }
   | {
       kind: "repair";
       repairedPaths: number;
       unjournalablePaths: CaptureSharedViewLocalDivergenceOutcome["unjournalablePaths"];
-      collisionRecordQuarantined: boolean;
       // Paths a best-effort capture gave up on. A store write may have landed first.
       failedPaths: string[];
     }
@@ -740,13 +740,15 @@ export function createShareViewFiles(
         paths: divergenceScopes,
         preservedPaths: target.unsavedPaths,
         workspaceLease: lease,
+      }).catch((error: unknown) => {
+        if (isCollisionRecordRefusal(error)) {
+          throw new Error(
+            "dohc could not read this share's record of your files with the same path as a shared file. Refresh, then try the change again.",
+          );
+        }
+        throw error;
       });
       await recordRecoveredPaths(target, captured);
-      if (captured.collisionRecordQuarantined) {
-        throw new Error(
-          "The shared view's recovery record was damaged and has been set aside. Retry the change.",
-        );
-      }
       assertShareChangesJournalable(captured.unjournalablePaths);
       assertHeldSpellingsUnchanged(captured.unjournalablePaths);
     }
@@ -903,7 +905,7 @@ export function createShareViewFiles(
     const capture = () =>
       target.kind === "standalone"
         ? lifecycle.captureStandalone(standaloneCaptureInput())
-        : lifecycle.captureShared({
+        : (request === "refresh" ? lifecycle.captureSharedRefresh : lifecycle.captureShared)({
             rootDir: target.rootPath,
             workspaceId: target.storeWorkspaceId,
             store,
@@ -922,7 +924,7 @@ export function createShareViewFiles(
       return { kind: "settle", ...captured };
     }
 
-    let recovered: CaptureSharedViewLocalDivergenceOutcome;
+    let recovered: CaptureSharedViewRefreshOutcome;
     if (target.kind === "standalone" && request === "refresh") {
       const captureOutcome = await lifecycle.captureStandaloneRefresh(
         standaloneCaptureInput(),
@@ -942,7 +944,6 @@ export function createShareViewFiles(
         kind: "repair",
         repairedPaths: localChanges,
         unjournalablePaths: recovered.unjournalablePaths,
-        collisionRecordQuarantined: recovered.collisionRecordQuarantined,
         failedPaths: recovered.failedPaths ?? [],
       };
     }
@@ -955,8 +956,7 @@ export function createShareViewFiles(
         changedPaths: localChanges,
         excludedPaths: [],
         unjournalablePaths: recovered.unjournalablePaths,
-        collisionRecordQuarantined: recovered.collisionRecordQuarantined,
-        ...(recovered.collisionRecordQuarantined ? { takesLocalWrites: recovered.takesLocalWrites ?? false } : {}),
+        collisionRecordQuarantined: recovered.collisionRecordQuarantined ?? false,
         refusedOps: 0,
         refusedDetail: null,
       };
@@ -1069,8 +1069,6 @@ export function createShareViewFiles(
           preservedPaths: target.unsavedPaths,
           bestEffort: true,
         });
-        // If a recovery record cannot identify its paths, preserve the full copy.
-        if (captured.collisionRecordQuarantined) return null;
         return [...new Set([
           ...(captured.remainingPreservedPaths ?? target.unsavedPaths ?? []),
           ...(captured.failedPaths ?? []),

@@ -294,7 +294,7 @@ describe("refreshing shares added to this workspace", () => {
   it("says a share's record was set aside when its refresh stops because the session expired", async () => {
     const setAside =
       "dohc could not read its record of your files with the same path as a file in alex. " +
-      "A refresh can replace them with the shared version, and dohc keeps no copy of yours.";
+      "dohc keeps these files apart.";
     const expired = "Your server session expired. Sign in again, then refresh shares.";
     const bridge = makeBridge(Promise.resolve(null));
     const refresh = vi.fn<() => Promise<RefreshShareMountsResult>>()

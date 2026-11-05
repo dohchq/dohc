@@ -416,7 +416,6 @@ describe("share-view text writes through the real store", () => {
         }),
       ).resolves.toEqual({
         capturedPaths: 0,
-        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
