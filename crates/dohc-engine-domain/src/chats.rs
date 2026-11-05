@@ -558,6 +558,8 @@ pub struct ChatAgentReadState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentUnreadThreadRow {
     pub thread: ChatThread,
+    pub last_read_created_at_ms: i64,
+    pub last_read_message_id: String,
     pub latest_created_at_ms: i64,
     pub latest_message_id: String,
 }
@@ -4186,7 +4188,9 @@ impl<'a> LinkedChatStore<'a> {
                             EXISTS(SELECT 1 FROM chat_channels c \
                               WHERE c.workspace_id = t.workspace_id \
                                 AND c.channel_id = t.channel_id), \
-                            latest.created_at_ms, latest.message_id \
+                            latest.created_at_ms, latest.message_id, \
+                            COALESCE(ars.last_read_created_at_ms, 0), \
+                            COALESCE(ars.last_read_message_id, '') \
                      FROM chat_threads t \
                      JOIN chat_messages latest \
                        ON latest.workspace_id = t.workspace_id \
@@ -4224,8 +4228,12 @@ impl<'a> LinkedChatStore<'a> {
                         let thread = map_thread_row(row)?;
                         let latest_created_at_ms = row.get(12)?;
                         let latest_message_id = row.get(13)?;
+                        let last_read_created_at_ms = row.get(14)?;
+                        let last_read_message_id = row.get(15)?;
                         Ok(thread.map(|thread| AgentUnreadThreadRow {
                             thread,
+                            last_read_created_at_ms,
+                            last_read_message_id,
                             latest_created_at_ms,
                             latest_message_id,
                         }))

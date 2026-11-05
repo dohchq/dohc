@@ -556,6 +556,8 @@ fn agent_unread_tie_breaks_equal_timestamps_by_message_id() {
         rows[0].latest_message_id, "b",
         "compare timestamp only -> equal-time message b is missed."
     );
+    assert_eq!(rows[0].last_read_created_at_ms, 10);
+    assert_eq!(rows[0].last_read_message_id, "a");
 }
 
 #[test]

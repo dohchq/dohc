@@ -3994,6 +3994,39 @@
       }
     },
     {
+      "name": "dohc_wait_for_messages",
+      "description": "Wait for the outside-run agent inbox without marking messages read. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1048576
+          },
+          "group": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "thread": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 25000
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_workspace_status",
       "description": "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.",
       "inputSchema": {

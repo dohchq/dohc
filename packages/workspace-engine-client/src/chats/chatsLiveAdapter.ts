@@ -6,7 +6,7 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
-import type { ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type { LinkedChatStore, ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -566,9 +566,9 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string, runId?: string): Promise<ChatThread[]> {
+  async listAgentUnreadThreads(workspaceId: string, runId?: string): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
     this.assertWorkspace(workspaceId);
-    const rows: ChatThread[] = [];
+    const rows: Awaited<ReturnType<LinkedChatStore["listAgentUnreadThreads"]>> = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(

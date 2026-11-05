@@ -2285,7 +2285,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
           right.latest.createdAtMs - left.latest.createdAtMs ||
           compareText(right.latest.id, left.latest.id),
       )
-      .map((entry) => entry.thread);
+      .map((entry) => {
+        const read = state.agentReads.get(agentReadKey(reader, entry.thread.id));
+        return { ...entry.thread, lastRead: {
+          createdAtMs: read?.lastReadCreatedAtMs ?? 0,
+          messageId: read?.lastReadMessageId ?? "",
+        } };
+      });
     const result = page(rows, params, `${workspace}\0agentUnread\0${runId ?? ""}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
   }

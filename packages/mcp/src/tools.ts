@@ -111,6 +111,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_import_data: ["data.import"],
   dohc_query_database: ["data.query"],
   dohc_list_file_chats: ["file.chats.list"],
+  dohc_wait_for_messages: ["chat.inbox.read"],
   dohc_read_chat: ["chat.read"],
   dohc_list_groups: ["group.list"],
   dohc_start_group_chat: ["chat.post"],
@@ -143,7 +144,7 @@ export interface ToolContext {
   tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
-  request?: (request: CliRequestWithoutToken) => Promise<unknown>;
+  request?: (request: CliRequestWithoutToken, options?: { signal?: AbortSignal }) => Promise<unknown>;
 }
 
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
@@ -1915,6 +1916,7 @@ async function requestCli<Verb extends CliVerb>(
   ctx: ToolContext,
   verb: Verb,
   args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+  signal?: AbortSignal,
 ): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
   const request = {
     protocolVersion: CLI_PROTOCOL_VERSION,
@@ -1927,8 +1929,8 @@ async function requestCli<Verb extends CliVerb>(
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
-    if (ctx.request) return parseCliResult(verb, await ctx.request(request));
-    return await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
+    if (ctx.request) return parseCliResult(verb, await (signal ? ctx.request(request, { signal }) : ctx.request(request)));
+    return await sendCliRequest(request, { stateDir: ctx.home, ...(signal ? { signal } : {}), ...(verb === "watch" ? { timeoutMs: 30_000 } : {}), ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
@@ -1996,6 +1998,15 @@ export async function dataset(ctx: ToolContext, input: unknown) {
   if (parsed.data.action === "prepareRecovery" && !parsed.data.sourcePath) return {ok:false as const,reason:"Collection recovery requires an explicit sourcePath ending in .dohc-recovery."};
   if (parsed.data.action === "export" && !parsed.data.savePath) return {ok:false as const,reason:"Collection export requires an explicit absolute savePath outside the workspace ending in .dohc-recovery."};
   return requestCli(ctx, "dataset", {request:parsed.data});
+}
+
+export async function waitForMessages(
+  ctx: ToolContext,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: "watch" }>["args"], "cwd" | "actor">,
+  signal?: AbortSignal,
+) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Chat waits require the owning workspace." };
+  return requestCli(ctx, "watch", args, signal);
 }
 
 export async function listFileChats(ctx: ToolContext, args: { path: string }) {

@@ -504,6 +504,19 @@ List the dohc Chats linked to a workspace file. Chats follow the file's stable d
 
 Returns `{ ok: true, path, fileObjectId, threads: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }[] } | { ok: false, reason }`.
 
+### `dohc_wait_for_messages`
+
+Wait for the outside-run agent inbox without marking messages read. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.
+
+The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.
+
+- `cursor`: `string`
+- `group`: `string`
+- `thread`: `string`
+- `timeoutMs`: `integer`
+
+Returns `{ messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
+
 ### `dohc_read_chat`
 
 Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
@@ -996,6 +1009,22 @@ dohc chat threads <group> [options]
 List the threads in a Group.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? }, threads: { lane?, id, title, commentCount, openDecisionCount, unread, updatedAtMs }[] }`.
+
+#### `dohc chat watch`
+
+```sh
+dohc chat watch [options]
+```
+
+Wait for the agent's unread messages. Repeat until interrupted; never mark messages read.
+
+- `--cursor <cursor>`: Continue from the cursor returned by watch.
+- `--group <group>`: Wait only for messages in this Group.
+- `--thread <thread>`: Wait only for messages in this thread.
+- `--timeout <seconds>`: Wait up to this many seconds per batch. The default and maximum are 25.
+- `--once`: Return after one batch, including an empty batch at the timeout.
+
+With `--json`, prints `{ schemaVersion, messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
 
 #### `dohc chat inbox`
 

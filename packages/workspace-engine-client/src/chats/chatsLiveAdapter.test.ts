@@ -1534,6 +1534,15 @@ describe("local chat actor key transport", () => {
   });
 });
 
+it("preserves the agent read position on unread threads", async () => {
+  const requests: Request[] = [];
+  const thread = { id: "thread", workspaceId: "workspace", title: "Thread", createdAtMs: 1, updatedAtMs: 3,
+    lastRead: { createdAtMs: 2, messageId: "read-message" } };
+  const adapter = new ChatsLiveAdapter(mockDaemon(requests, () => ({ threads: [thread], nextCursor: null })), WORKSPACE, { workspaceId: "workspace" });
+  expect(await adapter.listAgentUnreadThreads("workspace")).toEqual([thread]);
+  expect(requests[0]).toMatchObject({ method: CHATS_METHOD.agentReadListUnreadThreads });
+});
+
 it("returns exactly one chat mention page even when an empty filtered page has a continuation",async()=>{
   const requests: Request[]=[];
   const page={versionId:"main",subject:null,entries:[],unchecked:[],complete:false,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:2,nextCursor:"sealed-next"};

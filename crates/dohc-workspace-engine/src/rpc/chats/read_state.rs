@@ -215,7 +215,14 @@ impl EngineService {
         let values: Vec<Value> = rows
             .iter()
             .take(page_limit as usize)
-            .map(|row| thread_b2_json(&row.thread))
+            .map(|row| {
+                let mut thread = thread_b2_json(&row.thread);
+                thread["lastRead"] = json!({
+                    "createdAtMs": row.last_read_created_at_ms,
+                    "messageId": row.last_read_message_id,
+                });
+                thread
+            })
             .collect();
         let included = bounded_chat_page_len(&values)?;
         let next_cursor = if rows.len() > included {

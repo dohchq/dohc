@@ -40,6 +40,7 @@ import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
+import * as chatWriteSignals from "../workspaces/chatWriteSignals";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import { createLocalAuthorship } from "../workspaces/localAuthorship";
 import { deferred } from "../testing/deferred";
@@ -559,6 +560,120 @@ describe("CLI socket server", () => {
     sessions = null;
     store = null;
     await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it("returns unread messages immediately, carries a cursor, and leaves them unread", async () => {
+    const posted = await post({ group: "general", actor: "human", body: "Could @agent check this?" });
+    const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
+    expect(batch.messages).toEqual([expect.objectContaining({ messageId: posted.messageId, text: "Could @agent check this?" })]);
+    expect((await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions).toHaveLength(1);
+    expect(await invoke("watch", { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor, timeoutMs: 0 })).toEqual({ messages: [], cursor: batch.cursor });
+  });
+
+  it("wakes a wait when a local message arrives", async () => {
+    const queried = deferred<void>();
+    const list = store!.listMentionsForHandle.bind(store!);
+    const spy = vi.spyOn(store!, "listMentionsForHandle").mockImplementation(async (...args) => {
+      const rows = await list(...args);
+      queried.resolve();
+      return rows;
+    });
+    try {
+      const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent" });
+      await queried.promise;
+      const posted = await post({ group: "general", actor: "human", body: "@agent a new message" });
+      expect((await pending).messages.map(message => message.messageId)).toEqual([posted.messageId]);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("narrows to a Group and thread without widening the inbox", async () => {
+    const ordinary = await post({ group: "general", actor: "human", body: "An ordinary message" });
+    const mentioned = await post({ group: "general", actor: "human", body: "@agent check this thread" });
+    await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const dm = await post({ group: "my-agent", actor: "human", body: "Please check this DM" });
+    const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: mentioned.threadId, timeoutMs: 0 });
+    expect(batch.messages.map(message => message.messageId)).toEqual([mentioned.messageId]);
+    const other = await invoke("watch", { cwd: workspaceRoot, actor: "agent", thread: ordinary.threadId, timeoutMs: 0 });
+    expect(other.messages).toEqual([]);
+    expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", thread: dm.threadId, timeoutMs: 0 })).messages).toHaveLength(1);
+    const changedScope = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor, timeoutMs: 0 } });
+    expect(changedScope).toMatchObject({ ok: false, error: expect.stringContaining("cursor") });
+  });
+
+  it("keeps the outside-run inbox while dohc has a different agent run open", async () => {
+    const posted = await post({ group: "general", actor: "human", body: "@agent a connected agent's message" });
+    dispatchedRun = "codex";
+    dispatchedRunId = "unrelated-run";
+    expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 })).messages.map(message => message.messageId)).toEqual([posted.messageId]);
+  });
+
+  it("does not replay acknowledged DM history when a newer unread message arrives", async () => {
+    await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const first = await post({ group: "my-agent", actor: "human", body: "Earlier" });
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target: first.threadId, peek: false });
+    await invoke("reply", { cwd: workspaceRoot, actor: "human", thread: first.threadId, body: "Later", attachments: [], needsDecision: false });
+    const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
+    expect(batch.messages.map(message => message.text)).toEqual(["Later"]);
+  });
+
+  it("wakes for a synced message even if its time predates the cursor", async () => {
+    const first = await post({ group: "general", actor: "human", body: "@agent first" });
+    const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
+    const queried = deferred<void>();
+    const original = store!.listMentionsForHandle.bind(store!);
+    const spy = vi.spyOn(store!, "listMentionsForHandle").mockImplementation(async (...args) => {
+      const rows = await original(...args); queried.resolve(); return rows;
+    });
+    try {
+      const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor });
+      await queried.promise;
+      const threads = await store!.listThreads({ workspaceId: WORKSPACE_ID });
+      const thread = threads.find(thread => cliThreadId(thread.id) === first.threadId)!;
+      const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
+      const older = { ...messages[0]!, id: "synced-message", createdAtMs: 0, body: "@agent synced" };
+      const messageSpy = vi.spyOn(store!, "listMessages").mockImplementation(async input => input.threadId === thread.id ? [...messages, older] : []);
+      spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, handle: "agent", authorKind: "human" as const, createdAtMs: 0 }]);
+      try {
+        chatWriteSignals.signalChatWrite(WORKSPACE_ID);
+        expect((await pending).messages.map(message => message.text)).toEqual([older.body]);
+      } finally { messageSpy.mockRestore(); }
+    } finally { spy.mockRestore(); }
+  });
+
+  it("removes a socket wait's subscription when its client disconnects", async () => {
+    if (!server) return;
+    const subscribed = deferred<void>();
+    const removed = deferred<void>();
+    const original = chatWriteSignals.subscribeChatWrites;
+    const spy = vi.spyOn(chatWriteSignals, "subscribeChatWrites").mockImplementation((workspaceId, listener) => {
+      const unsubscribe = original(workspaceId, listener);
+      subscribed.resolve();
+      return () => { unsubscribe(); removed.resolve(); };
+    });
+    const socket = createConnection(server.socketPath);
+    try {
+      socket.on("error", () => undefined);
+      socket.on("connect", () => socket.write(`${JSON.stringify({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { cwd: workspaceRoot, actor: "agent" } })}\n`));
+      await subscribed.promise;
+      socket.destroy();
+      await removed.promise;
+    } finally { socket.destroy(); spy.mockRestore(); }
+  });
+
+  it("cancels a wait when its workspace attachment is replaced", async () => {
+    const cancellation = new AbortController();
+    context.signal = cancellation.signal;
+    const subscribed = deferred<void>();
+    const original = chatWriteSignals.subscribeChatWrites;
+    const spy = vi.spyOn(chatWriteSignals, "subscribeChatWrites").mockImplementation((workspaceId, listener) => {
+      const unsubscribe = original(workspaceId, listener); subscribed.resolve(); return unsubscribe;
+    });
+    try {
+      const pending = rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { cwd: workspaceRoot, actor: "agent" } });
+      await subscribed.promise;
+      cancellation.abort();
+      expect(await pending).toMatchObject({ ok: false, error: expect.stringContaining("cancelled") });
+    } finally { spy.mockRestore(); }
   });
 
   it("uses the Access owner's paced window on read-only sockets and refuses caller scope", async () => {

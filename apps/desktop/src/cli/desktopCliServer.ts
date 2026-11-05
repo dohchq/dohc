@@ -293,6 +293,7 @@ export function createDesktopCliServer<State>(
         return work(operation);
       });
     return {
+      signal: publicationAttachment,
       workspaceId: workspace.workspaceId,
       historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory, {agent: true})),
       historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
