@@ -6,6 +6,8 @@ type Waiting = NonNullable<SyncStatusResult["collectionsWaitingForSync"]>;
 // `failed` when the reopen after a pause failed, rather than a wait.
 type CollectionsWaitingNotice = { title: string; message: string; toast: boolean; failed: boolean };
 
+export const COLLECTIONS_WAITING_TITLE = "Collection updates are waiting";
+
 export function collectionsWaitingMessage(waiting: Waiting): string {
   return waiting === "sync"
     ? "They continue once sync finishes. To work offline, pause sync in Settings."
@@ -59,7 +61,7 @@ export function useCollectionsWaitingNotice(input: {
     (forWorkspace: string, state: Waiting, toast: boolean) => {
       filedRef.current = `${forWorkspace}\0${state}`;
       report(
-        { title: "Collection updates are waiting", message: collectionsWaitingMessage(state), toast, failed: state === "reopen" },
+        { title: COLLECTIONS_WAITING_TITLE, message: collectionsWaitingMessage(state), toast, failed: state === "reopen" },
         () => retryRef.current(),
         openSyncSettings,
       );
