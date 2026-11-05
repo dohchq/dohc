@@ -945,7 +945,7 @@ describe("workspace manager with registered workspaces", () => {
       "Shared folders Trip and Budget stop refreshing, and their files stay. A share added again with its code arrives as a new folder.",
     ]);
     expect(removalFacts({ ...base, shareView: { shareId: "s", granterEmail: null, access: "view" } })).toEqual([
-      "Its folder stays but stops refreshing. To open the share again, use its share code.",
+      "Its folder stays but stops refreshing. To open the share again, choose that folder in Open folder, or use its share code.",
     ]);
     expect(removalFacts({ ...base, shareView: { shareId: "s", granterEmail: null, ended: true } })).toEqual([]);
     expect(namesList(["A", "B", "C"])).toBe("A, B and C");

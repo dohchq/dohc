@@ -45,7 +45,7 @@ export function removalFacts(workspace: WorkspaceSummary): string[] {
   }
 
   if (workspace.shareView && !workspace.shareView.ended && !workspace.shareView.damaged) {
-    facts.push("Its folder stays but stops refreshing. To open the share again, use its share code.");
+    facts.push("Its folder stays but stops refreshing. To open the share again, choose that folder in Open folder, or use its share code.");
   }
   return facts;
 }
