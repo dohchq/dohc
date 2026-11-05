@@ -1983,7 +1983,7 @@ export function DesktopWorkspaceShell(props: {
   shareViewWritableRef.current = shareViewWritable;
   const shareHadEditRef = useRef(shareView?.access === "edit");
   if (shareViewWritable) shareHadEditRef.current = true;
-  const shareReopenMessage = "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
+  const shareReopenMessage = "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays.";
   const shareWriteRefusal = shareViewEnded ? "Your access to this share ended."
     : shareViewDamaged ? !shareView?.recipientUserId || needsReopenFor === shareView ? shareReopenMessage
       : "dohc can't read what this share grants. Open the share again to restore it."
@@ -4910,7 +4910,7 @@ export function DesktopWorkspaceShell(props: {
       ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
         ? !shareView.recipientUserId || needsReopenFor === shareView
-          ? "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files."
+          ? "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays."
           : "dohc can't read what this share grants. Open the share again to restore it."
         : shareViewWritable
           ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`

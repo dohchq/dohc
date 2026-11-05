@@ -6,7 +6,7 @@ import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { FolderSheets } from "./FolderSheets";
 import { ipcErrorMessage } from "./ipcError";
-import { GhostButton, PrimaryButton } from "./ui/controls";
+import { FieldError, GhostButton, PrimaryButton } from "./ui/controls";
 import { PathLine } from "./ui/PathLine";
 import { useRequestSequence } from "./useRequestSequence";
 
@@ -27,9 +27,13 @@ export function displayPath(path: string): string {
   return isWindows() ? path.replaceAll("/", "\\") : path;
 }
 
-function validFolderName(name: string): boolean {
+// dohc creates the folder under the trimmed name, so that is the name it checks.
+function folderNameError(name: string, platform: string): string | null {
   const trimmed = name.trim();
-  return trimmed.length > 0 && trimmed !== "." && trimmed !== ".." && !/[\\/]/.test(trimmed);
+  if (!trimmed) return "Enter a workspace name.";
+  if (trimmed === "." || trimmed === "..") return 'Choose a name other than "." or "..".';
+  if (/[\\/]/.test(trimmed)) return "Use a name without slashes.";
+  return workspaceNameError(trimmed, platform);
 }
 
 export function NewWorkspaceCard(props: {
@@ -39,6 +43,9 @@ export function NewWorkspaceCard(props: {
   const [folderName, setFolderName] = useState(DEFAULT_FOLDER_NAME);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The name's error as of its last check, when focus left the field or the
+  // person pressed Create. Typing clears it until the next check.
+  const [nameError, setNameError] = useState<string | null>(null);
   // A picked location shows once its suggested name arrives; until then
   // Create would use the location still on screen.
   const [placing, setPlacing] = useState(false);
@@ -114,12 +121,22 @@ export function NewWorkspaceCard(props: {
     if (root === null) suggestDefaultRoot();
   }
 
-  // A blank name only leaves Create off; any other name is checked as typed.
-  const nameError = folderName.trim() ? workspaceNameError(folderName, window.dohcDesktop?.platform ?? "") : null;
-  const canCreate = root !== null && !placing && !creating && !nameError && validFolderName(folderName);
+  // Create waits for a location, never for a valid name: pressing it checks
+  // the name and shows what to fix.
+  const canCreate = root !== null && !placing && !creating;
+
+  function checkName(): string | null {
+    const found = folderNameError(folderName, window.dohcDesktop?.platform ?? "");
+    setNameError(found);
+    return found;
+  }
 
   async function createWorkspace() {
     if (!root || !canCreate) return;
+    if (checkName()) {
+      nameField.current?.focus();
+      return;
+    }
     setCreating(true);
     setError(null);
     try {
@@ -139,80 +156,97 @@ export function NewWorkspaceCard(props: {
 
   return (
     <form
-      className="relative isolate mt-5 flex w-full flex-col"
+      noValidate
+      className="mt-5 flex w-full flex-col"
       onSubmit={(event) => {
         event.preventDefault();
         void createWorkspace();
       }}
     >
-      <FolderSheets />
-      {/* The card's top-left corner is square so the tab sits on it, and
-          the tab's bottom edge matches the card fill to hide the seam. The
-          tab stops at 60% of the card, so a long name scrolls inside it and
-          two sheets always show. */}
-      <label className="relative z-3 -mb-px flex h-8 w-fit max-w-[60%] cursor-text items-center gap-2 rounded-t-lg border border-line border-b-panel bg-panel pl-4 pr-3.5">
-        <input
-          ref={nameField}
-          aria-label="Workspace name"
-          value={folderName}
-          onChange={(event) => {
-            nameTyped.current = true;
-            setFolderName(event.currentTarget.value);
-          }}
-          // A long name scrolls to its caret; at rest the tab shows its start.
-          onBlur={(event) => { event.currentTarget.scrollLeft = 0; }}
-          aria-invalid={nameError ? true : undefined}
-          aria-describedby={nameError ? "new-workspace-error" : undefined}
-          placeholder={DEFAULT_FOLDER_NAME}
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          className={`field-sizing-content min-w-0 border-0 bg-transparent p-0 text-ellipsis text-sm font-medium text-ink placeholder:text-subtle ${nameError ? "shadow-[inset_0_-1px_0_var(--dohc-danger)] focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : ""}`}
-        />
-        <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+      <label htmlFor="new-workspace-name" className="mb-2 w-fit text-[12px] text-muted">
+        Workspace name
       </label>
-      {/* The open path sits over the tab, so the card rises above it. */}
-      <div className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}>
-        <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
-          <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
-          <span data-testid="new-workspace-location" className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted">
-            {path ? <PathLine path={path} /> : <span className="truncate">{error ? "Choose a folder" : "…"}</span>}
-          </span>
-          {/* It stays live when no default arrived, so the person can still
-              choose a folder by hand. */}
-          <GhostButton
-            aria-label="Change location"
-            {...locationTooltip.focusProps}
-            onClick={() => void chooseFolder()}
-            className="-mr-2 shrink-0"
-          >
-            Change
-          </GhostButton>
-          {/* The path opens above its line, as wide as the card, so a long
-              one takes few lines and covers only the tab. Clicks go through
-              it, and it closes once the pointer leaves the line. The shared
-              Tooltip opens below its holder, at most 16rem wide. */}
-          <span
-            id={locationTooltip.tooltipProps.id}
-            role="tooltip"
-            hidden={!pathShown}
-            className="pointer-events-none absolute -inset-x-5 bottom-full pb-1"
-          >
-            <span className="dohc-popover block rounded-lg border border-line bg-panel px-2 py-1 text-left text-[12px] text-ink wrap-anywhere">
-              {path}
+      <div className="relative isolate flex flex-col">
+        <FolderSheets />
+        {/* The card's top-left corner is square so the tab sits on it, and
+            the tab's bottom edge matches the card fill to hide the seam. The
+            tab stops at 60% of the card, so a long name scrolls inside it and
+            two sheets always show. */}
+        <label className="relative z-3 -mb-px flex h-8 w-fit max-w-[60%] cursor-text items-center gap-2 rounded-t-lg border border-line border-b-panel bg-panel pl-4 pr-3.5">
+          <input
+            ref={nameField}
+            id="new-workspace-name"
+            aria-label="Workspace name"
+            value={folderName}
+            onChange={(event) => {
+              nameTyped.current = true;
+              setFolderName(event.currentTarget.value);
+              setNameError(null);
+            }}
+            onBlur={(event) => {
+              // A long name scrolls to its caret; at rest the tab shows its start.
+              event.currentTarget.scrollLeft = 0;
+              checkName();
+            }}
+            aria-invalid={nameError ? true : undefined}
+            aria-describedby={nameError ? "new-workspace-name-error" : undefined}
+            placeholder={DEFAULT_FOLDER_NAME}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            className={`field-sizing-content min-w-0 border-0 bg-transparent p-0 text-ellipsis text-sm font-medium text-ink placeholder:text-subtle ${nameError ? "shadow-[inset_0_-1px_0_var(--dohc-danger)] focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : ""}`}
+          />
+          <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+        </label>
+        {/* The open path sits over the tab, so the card rises above it. */}
+        <div className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}>
+          {/* The name's error sits right under its tab. */}
+          {nameError ? (
+            <FieldError id="new-workspace-name-error" className="-mb-2">
+              {nameError}
+            </FieldError>
+          ) : null}
+          <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
+            <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
+            <span data-testid="new-workspace-location" className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted">
+              {path ? <PathLine path={path} /> : <span className="truncate">{error ? "Choose a folder" : "…"}</span>}
             </span>
-          </span>
+            {/* It stays live when no default arrived, so the person can still
+                choose a folder by hand. */}
+            <GhostButton
+              aria-label="Change location"
+              {...locationTooltip.focusProps}
+              onClick={() => void chooseFolder()}
+              className="-mr-2 shrink-0"
+            >
+              Change
+            </GhostButton>
+            {/* The path opens above its line, as wide as the card, so a long
+                one takes few lines and covers only the tab. Clicks go through
+                it, and it closes once the pointer leaves the line. The shared
+                Tooltip opens below its holder, at most 16rem wide. */}
+            <span
+              id={locationTooltip.tooltipProps.id}
+              role="tooltip"
+              hidden={!pathShown}
+              className="pointer-events-none absolute -inset-x-5 bottom-full pb-1"
+            >
+              <span className="dohc-popover block rounded-lg border border-line bg-panel px-2 py-1 text-left text-[12px] text-ink wrap-anywhere">
+                {path}
+              </span>
+            </span>
+          </div>
+
+          {error ? (
+            <p id="new-workspace-error" role="alert" className="-mt-2 text-xs leading-relaxed text-danger">
+              {error}
+            </p>
+          ) : null}
+
+          <PrimaryButton type="submit" disabled={!canCreate}>
+            {creating ? "Creating…" : "Create workspace"}
+          </PrimaryButton>
         </div>
-
-        {nameError || error ? (
-          <p id="new-workspace-error" role="alert" className="-mt-2 text-xs leading-relaxed text-danger">
-            {nameError ?? error}
-          </p>
-        ) : null}
-
-        <PrimaryButton type="submit" disabled={!canCreate}>
-          {creating ? "Creating…" : "Create workspace"}
-        </PrimaryButton>
       </div>
     </form>
   );

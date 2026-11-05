@@ -302,6 +302,12 @@ export const WorkspaceSummary = z.object({
   mode: MODE_ENUM,
   // Epoch ms of the last open in any window; absent when never stamped.
   lastOpenedAt: z.number().int().nonnegative().optional(),
+  // This device's sync link: on, or paused and kept for resuming. Absent
+  // when the workspace has none.
+  sync: z.enum(["on", "paused"]).optional(),
+  // Shared chats joined into this workspace that the person has not left.
+  // Absent when there are none.
+  joinedChatCount: z.number().int().positive().optional(),
   // Present only on a shared VIEW received through a relay share grant:
   // the workspace is read-only, refreshed from the share, and
   // carries who shared it for honest copy. `ended` marks a revoked share.
@@ -3808,9 +3814,6 @@ export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload
 
 export const CloudJoinWorkspaceResult = z.object({
   workspace: WorkspaceSummary,
-  // Set when the workspace was added but its first sync did not finish —
-  // the workspace exists locally and sync keeps retrying.
-  warning: z.string().min(1).max(500).optional(),
 });
 export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 

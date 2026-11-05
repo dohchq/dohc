@@ -250,7 +250,7 @@ describe("registered cloud handlers", () => {
       : h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
     const expected = action === "enable"
       ? "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again."
-      : `This drive can't store the workspace's secret key safely. Files remain in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
+      : `This drive can't store the workspace's secret key safely. Files stay in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
     const failure = await result.catch(error => error);
     expect(failure).toMatchObject({ message: expected });
     const channel = action === "enable" ? CHANNELS.cloudEnableSync : CHANNELS.cloudJoinWorkspace;
@@ -602,8 +602,8 @@ describe("registered cloud handlers", () => {
     h.enable.mockRejectedValue(new Error("download interrupted"));
     h.cleanup.mockRejectedValue(new Error("relay still in use"));
     const result = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
-    await expect(result).rejects.toThrow(`Files remain in ${h.joinPayload.rootPath}.`);
-    await expect(result).rejects.toThrow("choose Forget from its menu before joining again");
+    await expect(result).rejects.toThrow(`Files stay in ${h.joinPayload.rootPath}.`);
+    await expect(result).rejects.toThrow("choose Remove from list on its row in Manage workspaces before joining again");
     expect(h.registry.has("joined")).toBe(true);
     await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow("already on this machine");
     expect(h.bootstrap).toHaveBeenCalledTimes(1);
@@ -613,7 +613,7 @@ describe("registered cloud handlers", () => {
     const h = await harness();
     h.bootstrap.mockRejectedValue(new Error(message));
     const result = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
-    await expect(result).rejects.toThrow(`Files remain in ${h.joinPayload.rootPath}.`);
+    await expect(result).rejects.toThrow(`Files stay in ${h.joinPayload.rootPath}.`);
     await expect(result).rejects.toThrow(/choose another empty folder/i);
     if (message.startsWith("Passphrase")) await expect(result).rejects.toThrow("Passphrase required");
     expect(h.cleanup).toHaveBeenCalledWith("joined");

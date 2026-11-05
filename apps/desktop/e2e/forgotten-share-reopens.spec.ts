@@ -12,9 +12,9 @@ const GRANTER_TOKEN = "test:e2e-granter";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
 
-// A person opens a share into a folder, forgets it, and later chooses that
-// folder in Open folder. It opens as the same share, read-only, and the
-// server still decides what it shows.
+// A person opens a share into a folder, removes it from the list, and later
+// chooses that folder in Open folder. It opens as the same share, read-only,
+// and the server still decides what it shows.
 test("a forgotten share's folder opens again as that share", async () => {
   test.setTimeout(180_000);
   const temp = await createTempWorkspace();
@@ -49,13 +49,15 @@ test("a forgotten share's folder opens again as that share", async () => {
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("shared-view-banner")).toContainText("read-only");
 
-    // Forget it from the workspace manager. The folder stays.
+    // Remove it from the workspace manager's list. The folder stays.
     await page.getByTestId("workspace-switcher").click();
     const managerOpened = app.waitForEvent("window");
     await page.getByTestId("workspace-switcher-manage").click();
     const manager = await managerOpened;
     await manager.getByRole("button", { name: "More for workspace", exact: true }).click();
-    await manager.getByRole("menuitem", { name: "Forget", exact: true }).click();
+    await manager.getByRole("menuitem", { name: "Remove from list", exact: true }).click();
+    // A shared view asks first.
+    await manager.getByTestId("workspace-remove-confirm-button").click();
     await expect(manager.getByTestId("workspace-manager-row")).toHaveCount(0);
 
     // The workspace windows that show the share's banner, whichever window

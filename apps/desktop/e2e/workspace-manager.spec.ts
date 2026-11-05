@@ -5,7 +5,7 @@ import { revealInFileManagerLabel } from "../src/workspaces/explorerMenu";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
 
-test("workspace manager creates another window and forgets a workspace without deleting its files", async ({}, testInfo) => {
+test("workspace manager creates another window and removes a workspace from the list without deleting its files", async ({}, testInfo) => {
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -82,7 +82,7 @@ test("workspace manager creates another window and forgets a workspace without d
     const reopenedManager = await reopened;
     await expect(reopenedManager.getByTestId("workspace-manager-row")).toHaveCount(2);
     await reopenedManager.getByRole("button", { name: "More for second", exact: true }).click();
-    await reopenedManager.getByRole("menuitem", { name: "Forget", exact: true }).click();
+    await reopenedManager.getByRole("menuitem", { name: "Remove from list", exact: true }).click();
     await expect(reopenedManager.getByTestId("workspace-manager-row")).toHaveCount(1);
     await expect.poll(async () => second.evaluate(async () => {
       if (!window.dohcDesktop) throw new Error("Desktop bridge is unavailable");
@@ -136,10 +136,10 @@ test("workspace manager keeps bottom-row menus reachable by keyboard and follows
     await trigger.focus();
     await manager.keyboard.press("Enter");
     const reveal = manager.getByRole("menuitem", { name: revealInFileManagerLabel(process.platform), exact: true });
-    const forget = manager.getByRole("menuitem", { name: "Forget", exact: true });
+    const remove = manager.getByRole("menuitem", { name: "Remove from list", exact: true });
     await expect(reveal).toBeFocused();
-    await expect(forget).toBeInViewport();
-    await forget.click({ trial: true });
+    await expect(remove).toBeInViewport();
+    await remove.click({ trial: true });
     await manager.screenshot({ path: testInfo.outputPath("bottom-row-menu.png") });
     await manager.keyboard.press("Escape");
     await expect(reveal).not.toBeVisible();

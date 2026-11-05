@@ -187,7 +187,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 - A field edited in place, such as a rename in the tree, a page title or a property pill, uses its place as its label. It still needs an accessible name. For a required name, such as a file or folder, a blur with nothing typed cancels, and Enter with nothing typed shows the error. A page title or a property value can be left empty.
 - A placeholder shows an example value or nothing. It never holds the instruction or the label.
 - Check a field when focus leaves it or the person presses the primary. Never check on each key. A length limit can count down while they type.
-- Show the error under the field in `text-danger`, after a 12px `CircleAlert`. Say what is wrong and how to fix it: `Enter a name for the version.`
+- Show the error under the field with `FieldError`: `text-danger`, after a 12px `CircleAlert` on its first line. Say what is wrong and how to fix it: `Enter a name for the version.`
 - Give the field `aria-invalid`, and point its `aria-describedby` at the error.
 - Do not disable the primary to show that a field is empty or wrong. Pressing it shows the errors and focuses the first one.
 - A disabled control says why, beside it or on its second line.
@@ -270,7 +270,7 @@ The look in one line: warm paper, quiet graphite, one sans for every word of the
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
 
-Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
+Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, `RetryRow`, and `FieldError`.
 To inline a control's classes, copy them from that file.
 Use the recipes below only for parts it does not cover.
 
