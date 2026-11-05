@@ -9,7 +9,7 @@ function renderStatus(props: { syncStatus: SyncStatusResult | null; failedSaves?
   return render(<WorkspaceSyncStatus failedSaves={0} {...props} />);
 }
 
-// The dot's kind: saved, working, waiting or attention.
+// The dot's kind: saved, working, waiting, off or attention.
 const dotOf = () => screen.getByTestId("sync-status").querySelector("[data-dot]")?.getAttribute("data-dot");
 // Whether the label shows beside the dot, or only names it.
 const worded = () => !screen.getByTestId("sync-status").querySelector("span:not([data-dot])")?.classList.contains("sr-only");
@@ -123,14 +123,14 @@ describe("sync status surface", () => {
   });
 
   // The server isn't the cause, so the title bar never names it. Signed out
-  // is a choice, so it waits on a ring; an account dohc can't confirm, or an
-  // expired sign-in, needs the person, so it takes the attention mark. Neither borrows the other's
-  // words.
+  // is a choice, so it shows sync off, not a fault; an account dohc can't
+  // confirm, or an expired sign-in, needs the person, so it takes the
+  // attention mark. None borrows another's words.
   const BLOCKED_TITLE_BAR = {
     "not-connected": {
       words: "Connect server to sync",
       description: "Not syncing. Connect your server to sync this workspace.",
-      dot: "waiting",
+      dot: "off",
     },
     "account-unconfirmed": {
       words: "Couldn't confirm account",

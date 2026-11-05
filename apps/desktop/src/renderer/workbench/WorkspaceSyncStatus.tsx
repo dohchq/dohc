@@ -1,4 +1,4 @@
-import { TriangleAlert } from "lucide-react";
+import { CloudOff, TriangleAlert } from "lucide-react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 // A pass in flight is syncing, never saving: the files are already on disk.
@@ -24,10 +24,11 @@ const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
 };
 
 // The dot's shape says the kind of state before its color does: filled is
-// settled, a ring is still working or waiting, a triangle needs the person.
-// A state that needs the person shows its words, and so does a wait only the
-// person can end; the rest keep them for the accessible name and the tooltip.
-type DotKind = "saved" | "working" | "waiting" | "attention";
+// settled, a ring is still working or waiting, a crossed-out cloud is sync
+// off until the person connects, and a triangle needs the person. The cloud
+// and the triangle show their words; the rest keep them for the accessible
+// name and the tooltip.
+type DotKind = "saved" | "working" | "waiting" | "off" | "attention";
 
 const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
   synced: "saved",
@@ -35,8 +36,8 @@ const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
   "local-changes": "working",
   conflict: "attention",
   "sync-failed": "attention",
-  // Disconnecting is a choice, not a fault.
-  "not-connected": "waiting",
+  // Disconnecting is a choice, not a fault, and it won't change by itself.
+  "not-connected": "off",
   "account-unconfirmed": "attention",
   "sign-in-expired": "attention",
   "update-required": "attention",
@@ -50,6 +51,8 @@ function Dot(props: { kind: DotKind }) {
       return <span aria-hidden data-dot="working" className="size-2 shrink-0 rounded-full border-[1.5px] border-warning" />;
     case "waiting":
       return <span aria-hidden data-dot="waiting" className="size-2 shrink-0 rounded-full border-[1.5px] border-subtle" />;
+    case "off":
+      return <CloudOff aria-hidden data-dot="off" size={12} className="shrink-0 text-subtle" />;
     case "attention":
       return <TriangleAlert aria-hidden data-dot="attention" size={12} className="shrink-0 text-danger" />;
   }
@@ -134,9 +137,9 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
     : state
       ? SYNC_DOT[state]
       : "waiting";
-  // A state that needs the person says so in words beside the dot, and so
-  // does a state waiting on the person rather than on dohc.
-  const worded = dot === "attention" || (dot === "waiting" && state !== undefined);
+  // A state that needs the person, or waits on the person to connect, says
+  // so in words beside the mark.
+  const worded = dot === "attention" || dot === "off";
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either. Live editing waits on a server the
   // title bar already names.
