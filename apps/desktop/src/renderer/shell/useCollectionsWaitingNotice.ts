@@ -4,12 +4,12 @@ import type { SyncStatusResult } from "../../ipc/bridgeContract";
 type Waiting = NonNullable<SyncStatusResult["collectionsWaitingForSync"]>;
 
 // `failed` when the reopen after a pause failed, rather than a wait.
-type CollectionsWaitingNotice = { message: string; toast: boolean; failed: boolean };
+type CollectionsWaitingNotice = { title: string; message: string; toast: boolean; failed: boolean };
 
 export function collectionsWaitingMessage(waiting: Waiting): string {
   return waiting === "sync"
-    ? "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings."
-    : "dohc paused sync but could not reopen this workspace. Collection updates wait until it reopens.";
+    ? "They continue once sync finishes. To work offline, pause sync in Settings."
+    : "dohc paused sync but could not reopen this workspace. They continue once it reopens.";
 }
 
 // What one wait has shown, per workspace. Module state, because the shell
@@ -59,7 +59,7 @@ export function useCollectionsWaitingNotice(input: {
     (forWorkspace: string, state: Waiting, toast: boolean) => {
       filedRef.current = `${forWorkspace}\0${state}`;
       report(
-        { message: collectionsWaitingMessage(state), toast, failed: state === "reopen" },
+        { title: "Collection updates are waiting", message: collectionsWaitingMessage(state), toast, failed: state === "reopen" },
         () => retryRef.current(),
         openSyncSettings,
       );
