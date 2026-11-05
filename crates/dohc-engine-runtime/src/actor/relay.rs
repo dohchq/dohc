@@ -2477,8 +2477,11 @@ impl ActorHandle {
             _ => None,
         };
         let answer = async {
-            // Relay writes run to the end so the request answers with what landed.
-            // A fetch only shields its repair probe; later reads stay cancellable.
+            // Each step and each effect-free read stops on cancellation until a
+            // request that may change the relay goes out. From then on the operation
+            // runs to its end so it answers with what landed. A fetch's only such
+            // request is its repair probe, which stores nothing, so only the probe
+            // runs to its answer and the fetch stays cancellable.
             let mut preparation_attempt = 0;
             loop {
                 if token.is_cancelled() {
