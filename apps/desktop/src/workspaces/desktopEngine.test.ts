@@ -137,7 +137,7 @@ function fixture(options: {ownerLiveReleases?: UnwrittenReleases} = {}) {
     findWorkspace: id => rows.get(id) ?? null,
     app: { isPackaged: false, getAppPath: vi.fn(() => "app-root") },
     dialog: { showErrorBox: vi.fn() },
-    process: { env: {}, resourcesPath: "resources" },
+    process: { env: {}, resourcesPath: "resources", platform: "win32" },
     createRustEngineDaemon: vi.fn((input) => {
       daemonOptions = input;
       const daemon = createRustEngineDaemon({ ...input,

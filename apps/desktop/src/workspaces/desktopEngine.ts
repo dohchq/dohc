@@ -110,7 +110,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath">;
   dialog: Pick<Dialog, "showErrorBox">;
-  process: { env: NodeJS.ProcessEnv; resourcesPath?: string };
+  process: { env: NodeJS.ProcessEnv; resourcesPath?: string; platform: NodeJS.Platform };
   createRustEngineDaemon: typeof createRustEngineDaemonImplementation;
   defaultEngineBinaryPath: typeof defaultEngineBinaryPathImplementation;
   isQuitting(): boolean;
