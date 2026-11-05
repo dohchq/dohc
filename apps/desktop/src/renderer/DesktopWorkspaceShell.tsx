@@ -713,6 +713,9 @@ export function DesktopWorkspaceShell(props: {
   // The dialog signs in again to the session's server, for a sign-in the
   // server stopped accepting. Cleared when the dialog closes.
   const [cloudRenew, setCloudRenew] = useState(false);
+  // Counts each Sign in again. Keyed on it, a renewal dialog already open
+  // starts over, as a newly opened one would, though nothing else changed.
+  const [cloudRenewal, setCloudRenewal] = useState(0);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   // The part a Customize… command opened Settings for, if one did.
   const [settingsFocus, setSettingsFocus] = useState<CustomizePart | null>(null);
@@ -2126,6 +2129,7 @@ export function DesktopWorkspaceShell(props: {
     closeSettings();
     setCloudRetryServerUrl("");
     setCloudRenew(true);
+    setCloudRenewal((renewal) => renewal + 1);
     setCloudOpen(true);
   }, [closeSettings]);
   // A renewal's failure, whatever step failed. Once its dialog has closed,
@@ -7301,6 +7305,7 @@ export function DesktopWorkspaceShell(props: {
           {/* Once signed in, what is left is settings: the account and the
               sync switch. A session the dialog finds goes there too. */}
           <CloudLogin
+            key={cloudRenewal}
             handOffSession
             renew={cloudRenew}
             onClose={closeCloud}
