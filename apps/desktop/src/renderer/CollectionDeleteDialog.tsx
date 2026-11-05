@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, FileDown, Trash2 } from "lucide-react";
+import { Check, ChevronDown, FileDown, Trash2 } from "lucide-react";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import { Overlay } from "./Overlay";
 import { modalFocusableElements } from "./modalFocus";
@@ -37,7 +37,7 @@ export function CollectionDeleteDialog(props: CollectionDeleteDialogProps) {
 }
 function Delete(props: CollectionDeleteDialogProps) {
   const [page, setPage] = useState<CollectionDeletePreview | null>(null), [busy, setBusy] = useState(false);
-  const [acknowledged, setAcknowledged] = useState(false), [exporting, setExporting] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false), [exported, setExported] = useState(false), [exporting, setExporting] = useState(false);
   const [failed, setFailed] = useState<{ after?: string } | null>(null), [details, setDetails] = useState(false), detailsId = useId();
   const alive = useRef(true), request = useRef(0), lock = useRef(false), lifetime = useRef(new AbortController()), panelRef = useRef<HTMLDivElement>(null);
   // The first control: Save recovery file, which works while the apps load, or else Cancel.
@@ -82,8 +82,9 @@ function Delete(props: CollectionDeleteDialogProps) {
         <p className="text-danger">This cannot be undone on this host.</p>
       </ConfirmationHead>
       {props.onExport && <div className="flex flex-col gap-1">
-        <ConfirmEscape action={<SecondaryButton size="row" className={FOCUS_RING} disabled={deleting} onClick={() => setExporting(true)}><FileDown size={13} aria-hidden />Save recovery file</SecondaryButton>}>
+        <ConfirmEscape action={<SecondaryButton size="row" className={FOCUS_RING} disabled={deleting} onClick={() => setExporting(true)}><FileDown size={13} aria-hidden />{exported ? "Save again" : "Save recovery file"}</SecondaryButton>}>
           A recovery file can restore it on another host.
+          {exported && <span className="mt-1 flex items-center gap-1 text-[12px] text-success"><Check size={12} aria-hidden />Recovery file saved</span>}
         </ConfirmEscape>
         <div>
           <GhostButton className={`-ml-2 ${FOCUS_RING}`} aria-expanded={details} aria-controls={detailsId} onClick={() => setDetails(open => !open)}>
@@ -103,7 +104,7 @@ function Delete(props: CollectionDeleteDialogProps) {
         </ConfirmActions>
       </div>
     </ConfirmationCard>
-  </Overlay>{exporting&&props.onExport&&<CollectionRecoveryExportDialog collectionName={props.name} onExport={props.onExport} onClose={()=>setExporting(false)} onError={props.onError} onSaved={path=>{if(alive.current)props.onSaved?.(path);}}/>}</>;
+  </Overlay>{exporting&&props.onExport&&<CollectionRecoveryExportDialog collectionName={props.name} onExport={props.onExport} onClose={()=>setExporting(false)} onError={props.onError} onSaved={path=>{if(!alive.current)return;setExported(true);props.onSaved?.(path);}}/>}</>;
 }
 function sameCursor(left: DatasetCursor, right: DatasetCursor) {
   return left.workspaceId === right.workspaceId && left.datasetId === right.datasetId && left.hostEpoch === right.hostEpoch

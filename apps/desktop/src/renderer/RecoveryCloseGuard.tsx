@@ -1,4 +1,4 @@
-import { LogOut, Power, RefreshCw, RotateCw, type LucideIcon } from "lucide-react";
+import { Power, RefreshCw, RotateCw, X, type LucideIcon } from "lucide-react";
 import { hasPendingYDocDeliveries, settleYDocDeliveries } from "./pendingYDocDeliveries";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import {
@@ -32,7 +32,7 @@ const UNLOAD_COPY: Record<
   UnloadKind,
   { title: string; verb: string; confirm: string; icon: LucideIcon }
 > = {
-  close: { title: "Close", verb: "closes", confirm: "Close anyway", icon: LogOut },
+  close: { title: "Close", verb: "closes", confirm: "Close anyway", icon: X },
   reload: { title: "Reload", verb: "reloads", confirm: "Reload anyway", icon: RefreshCw },
   update: { title: "Restart", verb: "restarts", confirm: "Restart anyway", icon: RotateCw },
   quit: { title: "Quit", verb: "quits", confirm: "Quit anyway", icon: Power },
