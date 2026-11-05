@@ -33,3 +33,33 @@ export function createSessionActorResolver(auth: WorkspaceAuth): ResolveActor {
     return actorFromSession(session, workspaceId);
   };
 }
+
+/** The account and the one sign-in a request was validated under. */
+export interface AccountSession {
+  userId: string;
+  sessionId: string;
+  expiresAtMs: number;
+}
+
+export type ResolveAccountSession = (request: Request) => Promise<AccountSession>;
+
+// State bound to a sign-in, such as a browser's push subscription, ends with
+// it: signing out or in again gives a different session id.
+export function accountSessionFrom(session: {
+  user: { id: string };
+  session: { id: string; userId: string; expiresAt: Date | string | number };
+}): AccountSession {
+  const expiresAtMs = new Date(session.session.expiresAt).getTime();
+  if (session.session.userId !== session.user.id || !session.session.id || !Number.isSafeInteger(expiresAtMs)) {
+    throw new UnauthorizedError();
+  }
+  return { userId: session.user.id, sessionId: session.session.id, expiresAtMs };
+}
+
+export function createAccountSessionResolver(auth: WorkspaceAuth): ResolveAccountSession {
+  return async (request) => {
+    const session = await auth.api.getSession({ headers: request.headers });
+    if (!session) throw new UnauthorizedError();
+    return accountSessionFrom(session);
+  };
+}

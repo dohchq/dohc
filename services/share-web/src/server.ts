@@ -5,6 +5,7 @@ import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {createNamedRecipientChatClient} from "./namedRecipientChat";
+import {createPushClient} from "./pushClient";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -996,6 +997,9 @@ export function createShareWebApplication({
   const namedChat = namedBrowserSessionLimits ? createNamedRecipientChatClient({
     relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
   }) : undefined;
+  const push = namedBrowserSessionLimits ? createPushClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
+  }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
     fetchAuth,
@@ -1413,6 +1417,12 @@ export function createShareWebApplication({
     if (pathname.startsWith("/api/named-chat/")) {
       if (!namedChat) return refused();
       const result = await namedChat(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
+
+    if (pathname.startsWith("/api/push/")) {
+      if (!push) return refused();
+      const result = await push(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
