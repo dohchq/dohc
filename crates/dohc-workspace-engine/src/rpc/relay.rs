@@ -4711,6 +4711,68 @@ mod tests {
         .expect("the cancelled apply and its retry finish");
     }
 
+    #[tokio::test]
+    async fn an_apply_cancelled_in_the_actor_queue_restores_the_previous_pull_token() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let (relay, f) = half_pull_fixture("apply-cancelled-in-actor-queue", true).await;
+            assert!(f.service.reconciles_collections_itself(&f.open));
+            let previous = f.pull_token();
+            let waiting = f.collections_waiting().await;
+            relay.release();
+            let fetched = f
+                .service
+                .sync_fetch_pull(
+                    &RequestContext::unbounded(),
+                    Some(f.handle.clone()),
+                    json!({"workspaceId": f.workspace_id}),
+                )
+                .await
+                .expect("fetch page one");
+            let token = f.pull_token().expect("this fetch's token");
+            assert_ne!(Some(&token), previous.as_ref());
+            let hold = f.service.hold_actor(&f.handle).await;
+            let ctx = RequestContext::unbounded();
+            let mut applying = Box::pin(f.service.sync_apply_pull(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id, "pageToken": fetched["pageToken"]}),
+            ));
+            assert!(
+                !poll_once(applying.as_mut()).await,
+                "the hosted-replica read waits behind the first hold"
+            );
+            assert_eq!(f.open.pulls_in_flight.load(Ordering::SeqCst), 1);
+            drop(hold);
+            // The apply stays unpolled while the second hold enters after
+            // its hosted-replica read completes.
+            let hold = f.service.hold_actor(&f.handle).await;
+            assert!(
+                !poll_once(applying.as_mut()).await,
+                "the apply queues its actor closure behind the second hold"
+            );
+            ctx.cancel.cancel();
+            // Let the request's cancellation reach its operation token.
+            tokio::task::yield_now().await;
+            drop(hold);
+            let refused = applying.await.expect_err("the queued apply is cancelled");
+            assert_eq!(refused.code, ErrorCode::Cancelled);
+            assert_eq!(f.pull_token(), previous);
+            assert_eq!(f.collections_waiting().await, waiting);
+            let applied: i64 = f
+                .engine_db()
+                .query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE origin_id='peer'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count applied envelopes");
+            assert_eq!(applied, 0, "no envelope of the fetched page applied");
+            f.close().await;
+        })
+        .await
+        .expect("the apply cancelled in the actor queue finishes");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_rpc_apply_error_keeps_partly_applied_progress_and_collections_owed() {
         let (relay, f) = half_pull_fixture("partial-apply-error", true).await;
