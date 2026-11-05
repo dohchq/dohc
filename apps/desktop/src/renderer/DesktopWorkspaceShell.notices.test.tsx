@@ -4944,3 +4944,42 @@ describe("a page delete refused while History is off", () => {
     expect(within(notice).queryByRole("button", { name: /Try again|Open Live documents/u })).toBeNull();
   });
 });
+
+// An account dohc can't confirm is not the server's fault. Its row reads the
+// account again the way Settings' Try again does, opens Settings at the sync
+// row, and pauses nothing: once the account is confirmed, sync reads normal.
+it("reads the account again from Notices, opens Sync settings, and pauses nothing", async () => {
+  let status: SyncStatusResult = { ...SYNC_STATUS, state: "account-unconfirmed", accountUnconfirmed: "other-account" };
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudEnableSync: vi.fn(async () => {
+      status = { ...SYNC_STATUS };
+      return status;
+    }),
+    cloudStopSync: vi.fn(),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({
+    connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+    workspaceSynced: true, workspaceSyncConnected: status.state !== "account-unconfirmed",
+  }));
+  renderShell(bridge);
+  const user = userEvent.setup();
+
+  expect((await screen.findByTestId("sync-status")).textContent).toBe("Couldn't confirm account");
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  await user.click(within(await screen.findByTestId("notice-account-unconfirmed")).getByRole("button", { name: "Sync settings" }));
+  expect(await screen.findByTestId("settings-row-sync-workspace")).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  await user.click(within(await screen.findByTestId("notice-account-unconfirmed")).getByRole("button", { name: "Try again" }));
+  expect(bridge.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+  // Main pushes the confirmed status, and the title bar and Notices read
+  // normal with nothing else clicked.
+  act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+  await waitFor(() => expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("synced"));
+  expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
+  expect(bridge.cloudStopSync).not.toHaveBeenCalled();
+});

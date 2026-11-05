@@ -1391,6 +1391,29 @@ export function DesktopWorkspaceShell(props: {
       onDeleteAccount: startAccountDeletion,
     };
   }, [startAccountDeletion, reviewingAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, hasReceivedShares, openSettings, refreshCloudStatus, reportShellFailure, workspaceId]);
+  // Notices' Try again while dohc can't confirm the workspace's account: the
+  // enable that Settings' Try again runs. A failure it can't fix here, such as
+  // a passphrase, retries from Settings.
+  const confirmSyncAccount = useCallback(() => {
+    const forWorkspace = workspaceId;
+    const current = () => workspaceIdRef.current === forWorkspace;
+    void bridge().cloudEnableSync({ workspaceId: forWorkspace }).then(
+      () => {
+        if (current()) refreshCloudStatus();
+      },
+      (cause: unknown) => {
+        if (!current()) return;
+        reportShellFailure({
+          message: ipcErrorMessage(cause, "dohc could not enable sync for this workspace."),
+          cause,
+          retry: () => {
+            if (reviewingAccountDeletion()) return false;
+            openSettings("cloud");
+          },
+        });
+      },
+    );
+  }, [openSettings, refreshCloudStatus, reportShellFailure, reviewingAccountDeletion, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
@@ -6398,6 +6421,8 @@ export function DesktopWorkspaceShell(props: {
               shareChangeNotices={shareChangeNotices}
               onReviewShareChanges={setReviewProposalId}
               onOpenSettings={() => openSettings()}
+              onConfirmSyncAccount={confirmSyncAccount}
+              onOpenSyncSettings={openSyncSettings}
               onRebuildEngineStore={(returnFocus) => {
                 const refusal = syncStatus?.engineStoreRefused;
                 if (!refusal || engineStoreRefusalRecovery(refusal) !== "rebuild") return;

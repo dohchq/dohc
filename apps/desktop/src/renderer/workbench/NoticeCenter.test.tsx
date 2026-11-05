@@ -42,6 +42,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       onRefreshShareView={props.onRefreshShareView ?? (() => {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
+      {...(props.onConfirmSyncAccount ? { onConfirmSyncAccount: props.onConfirmSyncAccount } : {})}
+      {...(props.onOpenSyncSettings ? { onOpenSyncSettings: props.onOpenSyncSettings } : {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
       {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
@@ -1116,7 +1118,7 @@ describe("notice center", () => {
   ] as const)("says who must update when sync stopped on the relay API version (%s)", async (updateRequired, title, next) => {
     renderNotices({
       syncStatus: {
-        state: "cloud-disconnected",
+        state: "update-required",
         pendingChangeCount: 1,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
@@ -1130,8 +1132,52 @@ describe("notice center", () => {
     expect(notice.textContent).toContain(title);
     expect(notice.textContent).toContain(next);
     expect(notice.textContent).toContain("Your changes stay on this computer.");
-    // Reconnecting would not help, so the disconnected notice stays away.
-    expect(screen.queryByTestId("notice-cloud-disconnected")).toBeNull();
+    expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
+  });
+
+  // The server isn't the cause, so the row names the account. Try again
+  // reads the account again, which needs someone signed in; Sync settings
+  // always shows. The row has no dismiss, and goes once the account is
+  // confirmed.
+  it.each([
+    { accountUnconfirmed: "signed-out" as const, tryAgain: false },
+    { accountUnconfirmed: "other-account" as const, tryAgain: true },
+    { accountUnconfirmed: "sign-in-expired" as const, tryAgain: true },
+  ])("names an account dohc can't confirm ($accountUnconfirmed)", async ({ accountUnconfirmed, tryAgain }) => {
+    const onConfirmSyncAccount = vi.fn();
+    const onOpenSyncSettings = vi.fn();
+    const status = (state: SyncStatusResult["state"]): SyncStatusResult => ({
+      state,
+      ...(state === "account-unconfirmed" ? { accountUnconfirmed } : {}),
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      liveSessionsGeneration: 0,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+    });
+    const { rerender } = renderNotices({ syncStatus: status("account-unconfirmed"), onConfirmSyncAccount, onOpenSyncSettings });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-account-unconfirmed");
+    expect(notice.textContent).toContain("Couldn't confirm this workspace's account");
+    expect(notice.textContent).toContain(
+      "dohc could not confirm this workspace's account, so it isn't syncing. Your changes stay on this computer.",
+    );
+    expect(notice.textContent).not.toMatch(/server/i);
+    expect(screen.getByTestId("notice-account-unconfirmed-copy")).toBeTruthy();
+    expect(within(notice).queryByRole("button", { name: /dismiss/i })).toBeNull();
+    const retry = within(notice).queryByRole("button", { name: "Try again" });
+    expect(retry !== null).toBe(tryAgain);
+    await userEvent.click(within(notice).getByRole("button", { name: "Sync settings" }));
+    expect(onOpenSyncSettings).toHaveBeenCalledTimes(1);
+    if (retry) {
+      // An action closes Notices, so open it again.
+      if (!screen.queryByTestId("notice-account-unconfirmed")) await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(within(screen.getByTestId("notice-account-unconfirmed")).getByRole("button", { name: "Try again" }));
+      expect(onConfirmSyncAccount).toHaveBeenCalledTimes(1);
+    }
+
+    rerender(noticeElement({ syncStatus: status("synced"), onConfirmSyncAccount, onOpenSyncSettings }));
+    expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
   });
 
   // A shared view records no history by design, a capability, not a
@@ -1472,7 +1518,6 @@ describe("notice center", () => {
   // server's own toast and row report the outage, and live editing adds none.
   it.each([
     { label: "Server unreachable", server: serverUnreachable },
-    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
   ])("leaves the outage to the server while the title bar says $label", async ({ server }) => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
@@ -1525,10 +1570,15 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
 
-  // A failed save or a required update takes the title bar's words from the
-  // server, so live editing reports its own state again.
+  // The title bar doesn't name the server, so live editing reports its own
+  // state: an account dohc can't confirm, a failed save, or a required update.
   it.each([
-    { label: "a file couldn't save", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
+    ...(["signed-out", "other-account", "sign-in-expired"] as const).map((accountUnconfirmed) => ({
+      label: `the account isn't confirmed (${accountUnconfirmed})`,
+      status: { state: "account-unconfirmed" as const, accountUnconfirmed },
+      failedSaves: 0,
+    })),
+    { label: "a file couldn't save", status: { state: "account-unconfirmed" as const }, failedSaves: 1 },
     { label: "dohc needs an update", status: { ...serverUnreachable, updateRequired: "app" as const }, failedSaves: 0 },
   ])("reports live editing while the title bar says $label", ({ status, failedSaves }) => {
     renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying", "document-unavailable"), ...status }, failedSaves });
@@ -1770,7 +1820,7 @@ describe("notice center", () => {
   it("closes the notice popover on outside click while preserving inside clicks", async () => {
     renderNotices({
       syncStatus: {
-        state: "cloud-disconnected",
+        state: "account-unconfirmed",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
