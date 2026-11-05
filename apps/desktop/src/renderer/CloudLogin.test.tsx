@@ -519,6 +519,33 @@ describe("CloudLogin", () => {
     expect(screen.getByTestId("settings-row-account").textContent).toContain("ice@dohc.dev");
   });
 
+  // The server stopped accepting the session here. Signing in again starts
+  // the same sign-in at that server with no Disconnect first, and its
+  // approval reaches the host like any sign-in.
+  it("signs in again to the session's server without disconnecting", async () => {
+    vi.useFakeTimers();
+    const onConnected = vi.fn();
+    bridgeMock.cloudStatus.mockResolvedValue(CONNECTED);
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "complete", email: "ice@dohc.dev" });
+
+    render(<CloudLogin renew handOffSession onConnected={onConnected} />);
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://dohc.example.test" });
+    expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD");
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    expect(screen.queryByTestId("cloud-connected")).toBeNull();
+    expect(onConnected).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.cloudLogout).not.toHaveBeenCalled();
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+  });
+
   // The approval happened in the browser, but only main can say what this
   // machine's session is. A failed refresh is an operational failure, so the
   // panel stops claiming to know and the notice carries the way to ask again.
