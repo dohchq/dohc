@@ -1044,26 +1044,27 @@ export function EngineHistoryView(props: {
   // Neither may a page that is missing Collections, or one read while
   // History is paused: their changes are unknown, not absent.
   if (props.entries.length === 0 && !props.hasMore) {
+    // With no rows, the Collections that did not load are all the page can
+    // show, so it takes History's failed state, as when its rules can't be
+    // read: the danger mark, the words, then Try again. Collections left out
+    // by the limit failed nothing, so alone they take the plain mark and no
+    // button.
     if (partial) {
       return (
-        <div
+        <EmptyState
           data-testid="history-collections-unavailable"
-          className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-xs text-muted"
+          icon={words.unavailable ? TriangleAlert : Info}
+          tone={words.unavailable ? "danger" : "ghost"}
+          title={words.unavailable ?? words.omitted}
+          hint={words.unavailable ? words.omitted ?? undefined : undefined}
         >
           {props.paused ? <HistoryPaused testId="history-paused" /> : null}
-          {words.unavailable ? <span>{words.unavailable}</span> : null}
-          {words.omitted ? <span>{words.omitted}</span> : null}
           {words.unavailable ? (
-            <button
-              type="button"
-              data-testid="history-sources-retry"
-              onClick={retry}
-              className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-            >
+            <SecondaryButton data-testid="history-sources-retry" onClick={retry}>
               Try again
-            </button>
+            </SecondaryButton>
           ) : null}
-        </div>
+        </EmptyState>
       );
     }
     if (props.paused) {
