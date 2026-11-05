@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripMarkdown } from "./stripMarkdown";
+import { stripMarkdown, takeStripStepsForTests } from "./stripMarkdown";
 
 const strip = (source: string) => stripMarkdown(source).text;
 
@@ -84,57 +84,63 @@ describe("stripMarkdown", () => {
     expect(strip("text\n    more **words**")).toBe("text\nmore words");
   });
 
-  // The shapes that make Markdown parsers slow, at 50,000 characters. A strip
-  // that rereads text would take seconds on several of them.
+  // The shapes that make Markdown parsers slow, each built at a given size. A
+  // strip that rereads text takes far more steps per character on a larger
+  // copy of one of them.
   const rep = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-  const SHAPES: Record<string, string> = {
-    nestedBrackets: rep("[", 25_000) + rep("]", 25_000),
-    linkClosers: rep("a]", 50_000),
-    linkOpeners: rep("[a](", 50_000),
-    balancedTargets: rep("[a](", 25_000) + rep(")", 25_000),
-    parens: rep("(", 25_000) + rep(")", 25_000),
-    unclosedDestinations: rep("[a](b", 50_000),
-    unclosedDestinationLines: rep("[a](b\n", 50_000),
-    definitionLines: rep("[a\n", 50_000),
-    definedBrackets: "[a]: b\n" + rep("[".repeat(500) + "]".repeat(500), 65_536),
-    definedImages: "[a]: b\n" + rep("![".repeat(300) + "]".repeat(300), 65_536),
-    blankDefinitionAngles: "[]: b\n" + rep("![](<a ", 65_536),
-    blankDefinitionParens: "[ ]: b\n" + rep("![](a (", 65_536),
-    blankDefinitionBlanks: "[]: b\n" + rep("![](a(b c) ", 65_536),
-    emphasisOpeners: rep("*a ", 50_000),
-    emphasisClosers: rep("a* ", 50_000),
-    nestedEmphasis: rep("*a **a ", 25_000) + rep(" a** a*", 25_000),
-    mismatched: rep("*a_ ", 50_000),
-    multipleOfThree: rep("a**", 25_000) + rep("a*", 25_000),
-    mixedWidths: rep("***a ", 25_000) + rep(" a*", 25_000),
-    intraword: rep("a*a**a_a__", 50_000),
-    emphasisInLinks: rep("[*a ", 25_000) + rep("a*](b) ", 25_000),
-    linksInLinks: rep("[a [b](c) ", 50_000),
-    unclosedTitles: rep('[a](b "', 50_000),
-    unclosedParenTitles: rep("[a](b (", 50_000),
-    unclosedAngles: rep("[a](<b", 50_000),
-    strike: rep("~~a ", 25_000) + rep("a~~ ", 25_000),
-    backtickRuns: Array.from({ length: 320 }, (_, size) => `e${"`".repeat(size + 1)}`).join("").slice(0, 50_000),
-    singleTicks: rep("` ", 50_000),
-    angles: rep("<", 50_000),
-    autolinkOpeners: rep("<a:", 50_000),
-    entities: rep("&#", 50_000),
-    escapes: rep("\\", 50_000),
-    tableCells: `a|b\n-|-\n${rep("|", 49_990)}`,
-    quotes: rep("> ", 50_000),
-    lists: rep("- ", 50_000),
-    flatList: rep("- a\n", 50_000),
-    fences: rep("```\na\n", 50_000),
-    headings: rep("# a\n", 50_000),
+  const SHAPES: Record<string, (size: number) => string> = {
+    nestedBrackets: (size) => rep("[", size / 2) + rep("]", size / 2),
+    linkClosers: (size) => rep("a]", size),
+    linkOpeners: (size) => rep("[a](", size),
+    balancedTargets: (size) => rep("[a](", size / 2) + rep(")", size / 2),
+    parens: (size) => rep("(", size / 2) + rep(")", size / 2),
+    unclosedDestinations: (size) => rep("[a](b", size),
+    unclosedDestinationLines: (size) => rep("[a](b\n", size),
+    definitionLines: (size) => rep("[a\n", size),
+    definedBrackets: (size) => "[a]: b\n" + rep("[".repeat(500) + "]".repeat(500), size),
+    definedImages: (size) => "[a]: b\n" + rep("![".repeat(300) + "]".repeat(300), size),
+    blankDefinitionAngles: (size) => "[]: b\n" + rep("![](<a ", size),
+    blankDefinitionParens: (size) => "[ ]: b\n" + rep("![](a (", size),
+    blankDefinitionBlanks: (size) => "[]: b\n" + rep("![](a(b c) ", size),
+    emphasisOpeners: (size) => rep("*a ", size),
+    emphasisClosers: (size) => rep("a* ", size),
+    nestedEmphasis: (size) => rep("*a **a ", size / 2) + rep(" a** a*", size / 2),
+    mismatched: (size) => rep("*a_ ", size),
+    multipleOfThree: (size) => rep("a**", size / 2) + rep("a*", size / 2),
+    mixedWidths: (size) => rep("***a ", size / 2) + rep(" a*", size / 2),
+    intraword: (size) => rep("a*a**a_a__", size),
+    emphasisInLinks: (size) => rep("[*a ", size / 2) + rep("a*](b) ", size / 2),
+    linksInLinks: (size) => rep("[a [b](c) ", size),
+    unclosedTitles: (size) => rep('[a](b "', size),
+    unclosedParenTitles: (size) => rep("[a](b (", size),
+    unclosedAngles: (size) => rep("[a](<b", size),
+    strike: (size) => rep("~~a ", size / 2) + rep("a~~ ", size / 2),
+    backtickRuns: (size) => Array.from({ length: 320 }, (_, run) => `e${"`".repeat(run + 1)}`).join("").slice(0, size),
+    singleTicks: (size) => rep("` ", size),
+    angles: (size) => rep("<", size),
+    autolinkOpeners: (size) => rep("<a:", size),
+    entities: (size) => rep("&#", size),
+    escapes: (size) => rep("\\", size),
+    tableCells: (size) => `a|b\n-|-\n${rep("|", size)}`,
+    quotes: (size) => rep("> ", size),
+    lists: (size) => rep("- ", size),
+    flatList: (size) => rep("- a\n", size),
+    fences: (size) => rep("```\na\n", size),
+    headings: (size) => rep("# a\n", size),
   };
 
-  it("stays linear on every slow shape", () => {
-    stripMarkdown(SHAPES.flatList!);
-    for (const [name, source] of Object.entries(SHAPES)) {
-      const started = performance.now();
+  // Steps count work, so the check holds on a busy machine. Eight times the
+  // characters may cost at most 1.5 times the steps per character; a strip
+  // that rereads text costs about eight times as many.
+  it("takes steps in proportion to the body on every slow shape", () => {
+    const stepsPerCharacter = (source: string) => {
+      takeStripStepsForTests();
       stripMarkdown(source, [{ start: 10, end: 14 }]);
-      const took = performance.now() - started;
-      expect({ name, slow: took > 100 }).toEqual({ name, slow: false });
+      return takeStripStepsForTests() / source.length;
+    };
+    for (const [name, shape] of Object.entries(SHAPES)) {
+      const growth = stepsPerCharacter(shape(65_536)) / stepsPerCharacter(shape(8_192));
+      expect(growth, name).toBeLessThan(1.5);
     }
   });
 });

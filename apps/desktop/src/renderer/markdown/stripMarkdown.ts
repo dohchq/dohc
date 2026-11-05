@@ -105,7 +105,21 @@ interface Bracket {
   textStart: number;
 }
 
+// Every loop adds its passes here, so a test can check that the strip's work
+// grows with the body and no faster. A count, unlike a clock, does not change
+// with the machine's load. Only development and test builds count. In a
+// production build `counting` is false, so the bundler drops every count.
+const counting = import.meta.env.DEV;
+let steps = 0;
+
+export function takeStripStepsForTests(): number {
+  const taken = steps;
+  steps = 0;
+  return taken;
+}
+
 const normalizeLabel = (label: string) => {
+  if (counting) steps += label.length;
   let value = "";
   let space = false;
   for (const char of label) {
@@ -128,13 +142,17 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   let nextAtom = 0;
 
   const skipAtomsBefore = (at: number) => {
-    while (nextAtom < atoms.length && atoms[nextAtom]!.start < at) nextAtom++;
+    while (nextAtom < atoms.length && atoms[nextAtom]!.start < at) {
+      nextAtom++;
+      if (counting) steps++;
+    }
   };
   // Copies source text as written, noting any atom inside it.
   const copy = (from: number, to: number) => {
     skipAtomsBefore(from);
     let at = from;
     while (nextAtom < atoms.length && atoms[nextAtom]!.end <= to) {
+      if (counting) steps++;
       const atom = atoms[nextAtom]!;
       if (atom.start > at) pieces.push(source.slice(at, atom.start));
       kept.push({ piece: pieces.length, index: nextAtom });
@@ -180,6 +198,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
 
   let text = "";
   const offsets: number[] = [];
+  if (counting) steps += pieces.length + kept.length;
   for (const piece of pieces) {
     offsets.push(text.length);
     text += piece;
@@ -199,6 +218,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       let lineEnd = source.indexOf("\n", lineStart);
       const last = lineEnd < 0;
       if (last) lineEnd = source.length;
+      if (counting) steps += lineEnd - lineStart + 1;
       let end = lineEnd;
       if (end > lineStart && source.charCodeAt(end - 1) === CR) end--;
       visit(lineStart, end, last);
@@ -211,6 +231,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   function runEnd(at: number, end: number, code: number): number {
     let next = at;
     while (next < end && source.charCodeAt(next) === code) next++;
+    if (counting) steps += next - at;
     return next;
   }
 
@@ -228,6 +249,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       column += width;
       if (next > at) size += width;
     }
+    if (counting) steps += close - start;
     if (size > LABEL_MAX) return -1;
     return normalizeLabel(source.slice(at + 1, close)) ? close : -1;
   }
@@ -236,18 +258,21 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   function find(code: number, at: number, end: number): number {
     let next = at;
     while (next < end && source.charCodeAt(next) !== code) next++;
+    if (counting) steps += next - at;
     return next;
   }
 
   function blanksEnd(at: number, end: number): number {
     let next = at;
     while (next < end && isBlank(source.charCodeAt(next))) next++;
+    if (counting) steps += next - at;
     return next;
   }
 
   function indentEnd(at: number, end: number): number {
     let next = at;
     while (next < end && next - at < 4 && isBlank(source.charCodeAt(next))) next++;
+    if (counting) steps += next - at;
     return next;
   }
 
@@ -256,6 +281,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   function onlyOf(at: number, end: number, allowed: (code: number) => boolean, counted: number, least: number): boolean {
     let count = 0;
     for (let next = at; next < end; next++) {
+      if (counting) steps++;
       const code = source.charCodeAt(next);
       if (code === counted) count++;
       else if (!isBlank(code) && !allowed(code)) return false;
@@ -323,6 +349,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     let quotes = 0;
     const markers = pieces.length;
     for (;;) {
+      if (counting) steps++;
       at = indentEnd(at, end);
       if (at >= end) break;
       const code = source.charCodeAt(at);
@@ -341,6 +368,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       if (isDigit(code)) {
         let digits = at;
         while (digits < end && digits - at < 9 && isDigit(source.charCodeAt(digits))) digits++;
+        if (counting) steps += digits - at;
         const mark = digits < end ? source.charCodeAt(digits) : 0;
         const space = digits + 1 < end ? source.charCodeAt(digits + 1) : SPACE;
         if ((mark === DOT || mark === CLOSE_PAREN) && isBlank(space)) {
@@ -386,6 +414,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
   function codeStart(at: number, end: number): number {
     let columns = 0;
     for (let next = at; next < end; next++) {
+      if (counting) steps++;
       const code = source.charCodeAt(next);
       if (code === SPACE) columns++;
       else if (code === TAB) columns += 4 - (columns % 4);
@@ -425,6 +454,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       runs[index]!.prev = index - 1;
       runs[index]!.next = index + 1;
     }
+    if (counting) steps += count - bottom;
     const unlink = (index: number) => {
       const run = runs[index]!;
       if (run.prev >= bottom) runs[run.prev]!.next = run.next;
@@ -433,6 +463,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     const floors = new Map<number, number>();
     let closer = bottom;
     while (closer < count) {
+      if (counting) steps++;
       const close = runs[closer]!;
       if (!close.close) {
         closer = close.next;
@@ -441,7 +472,10 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       const key = close.code * 8 + (close.size % 3) * 2 + Number(close.open);
       const floor = floors.get(key) ?? bottom - 1;
       let opener = close.prev;
-      while (opener > floor && !pairs(runs[opener]!, close)) opener = runs[opener]!.prev;
+      while (opener > floor && !pairs(runs[opener]!, close)) {
+        opener = runs[opener]!.prev;
+        if (counting) steps++;
+      }
       if (opener <= floor) {
         floors.set(key, close.prev);
         closer = close.next;
@@ -456,6 +490,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       open.next = closer;
       close.prev = opener;
       // The opener changed size, so a search that passed it may now pair.
+      if (counting) steps += floors.size;
       for (const [kind, at] of floors) if (at >= opener) floors.set(kind, opener - 1);
       if (open.size === 0) unlink(opener);
       if (close.size === 0) {
@@ -476,6 +511,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     // Backtick runs of the line, by length, so a code span finds its closer
     // with a pointer that only moves forward.
     const runsByLength = new Map<number, { starts: number[]; next: number }>();
+    if (counting) steps += end - start;
     for (let at = start; at < end; at++) {
       if (source.charCodeAt(at) !== BACKTICK) continue;
       const after = runEnd(at, end, BACKTICK);
@@ -490,6 +526,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     const titleEnd = (marker: number, from: number) => {
       let next = titleEnds.get(marker);
       if (!next) {
+        if (counting) steps += 2 * (end - start);
         next = new Int32Array(end - start + 1);
         next[end - start] = -1;
         const escaped = new Uint8Array(end - start + 1);
@@ -523,6 +560,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     const destinationEnd = (at: number): number => {
       if (source.charCodeAt(at) === LT) {
         for (let next = at + 1; next < end; next++) {
+          if (counting) steps++;
           const code = source.charCodeAt(next);
           if (code === GT) return next + 1;
           if (code === LT) return -1;
@@ -535,6 +573,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       }
       let depth = 0;
       for (let next = at; next < end; next++) {
+        if (counting) steps++;
         const code = source.charCodeAt(next);
         // A blank inside parentheses ends no destination: the link fails.
         if (isBlank(code) || (depth === 0 && code === CLOSE_PAREN)) return depth === 0 && next > at ? next : -1;
@@ -554,6 +593,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     const labelEnd = (open: number): number => {
       let blank = true;
       for (let next = open + 1; next < end && next - open <= LABEL_MAX + 1; next++) {
+        if (counting) steps++;
         const code = source.charCodeAt(next);
         if (code === CLOSE_BRACKET) return blank ? -1 : next + 1;
         if (code === OPEN_BRACKET) return -1;
@@ -586,6 +626,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
     // The last non-blank character of a table row, whose pipe is dropped.
     let rowEnd = end;
     if (tableRow) while (rowEnd > start && isBlank(source.charCodeAt(rowEnd - 1))) rowEnd--;
+    if (counting) steps += end - rowEnd;
 
     let plain = start;
     let at = start;
@@ -593,6 +634,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
       if (at > plain) copy(plain, at);
     };
     while (at < end) {
+      if (counting) steps++;
       skipAtomsBefore(at);
       if (nextAtom < atoms.length && atoms[nextAtom]!.start === at && atoms[nextAtom]!.end <= end) {
         flush();
@@ -626,7 +668,10 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           const after = runEnd(at, end, BACKTICK);
           // A run after an escaped backtick may have no closer listed.
           const found = runsByLength.get(after - at);
-          while (found && found.next < found.starts.length && found.starts[found.next]! <= at) found.next++;
+          while (found && found.next < found.starts.length && found.starts[found.next]! <= at) {
+            found.next++;
+            if (counting) steps++;
+          }
           const closer = found && found.next < found.starts.length ? found.starts[found.next]! : -1;
           if (!found || closer < 0) {
             pieces.push(source.slice(at, after));
@@ -728,6 +773,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
           let close = at + 1;
           let address = false;
           while (close < end) {
+            if (counting) steps++;
             const inner = source.charCodeAt(close);
             if (inner === GT || inner === LT || inner <= SPACE) break;
             if (inner === COLON || inner === AT) address = true;
@@ -768,6 +814,7 @@ export function stripMarkdown(source: string, atoms: readonly SourceRange[] = []
 function referenceEnd(source: string, at: number, end: number): number {
   let close = at + 1;
   while (close < end && close - at <= ENTITY_MAX && source.charCodeAt(close) !== SEMICOLON) {
+    if (counting) steps++;
     const inner = source.charCodeAt(close);
     if (!(isWordCode(inner) || inner === HASH)) return -1;
     close++;
@@ -777,6 +824,7 @@ function referenceEnd(source: string, at: number, end: number): number {
 
 // Text with its backslash escapes and character references read.
 function decodeText(text: string): string {
+  if (counting) steps += text.length;
   let value = "";
   let plain = 0;
   for (let at = 0; at < text.length; at++) {
@@ -802,6 +850,7 @@ function decodeText(text: string): string {
 // A numeric reference is "#" and up to 7 digits, or "#x" and up to 6 hex
 // digits, as in micromark.
 function decodeEntity(name: string): string | undefined {
+  if (counting) steps += name.length;
   if (name.charCodeAt(0) !== HASH) return decodeNamedCharacterReference(name) || undefined;
   const hex = name[1] === "x" || name[1] === "X";
   const digits = name.slice(hex ? 2 : 1);
