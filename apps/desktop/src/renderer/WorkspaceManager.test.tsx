@@ -830,7 +830,7 @@ describe("workspace manager with registered workspaces", () => {
     if (synced) await user.click(screen.getByTestId("workspace-remove-confirm-button"));
 
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Could not refresh the workspace list.");
+    expect(toast.textContent).toContain("dohc could not refresh the workspace list.");
     expect(toast.textContent).not.toContain("could not remove");
     expect(screen.queryByTestId("workspace-remove-confirm")).toBeNull();
 
@@ -869,7 +869,7 @@ describe("workspace manager with registered workspaces", () => {
       await first.promise.catch(() => {});
     });
     if (newer === "fails") {
-      expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Could not refresh the workspace list.");
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain("dohc could not refresh the workspace list.");
     } else {
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
       expect(screen.queryByTestId("connection-notices")).toBeNull();

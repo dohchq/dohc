@@ -309,7 +309,7 @@ export function WorkspaceManager(props: {
       if (listRefresh.isCurrent(token)) clearIdentity(LIST_REFRESH);
     } catch (cause) {
       if (!listRefresh.isCurrent(token)) return;
-      reportError("Could not refresh the workspace list.", cause, () => void refreshAfterRemoval(), undefined, LIST_REFRESH);
+      reportError("dohc could not refresh the workspace list.", cause, () => void refreshAfterRemoval(), undefined, LIST_REFRESH);
     }
   }
 
