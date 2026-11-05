@@ -78,6 +78,7 @@ describe("renderer reload admission", () => {
       localPersonId: () => "person-local",
       sessionFor: (requestSender) =>
         sessions.current(requestSender as typeof renderer),
+      authorities: { isCurrentAttachment: () => true },
       acquireWorkspace: () => ({
         workspace,
         assertCurrent: () => undefined,

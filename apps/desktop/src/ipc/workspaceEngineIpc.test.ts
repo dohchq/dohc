@@ -143,6 +143,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const ydoc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
     sessionFor: (value) => value === sender ? renderers.current(sender) : undefined,
+    authorities: authority,
     acquireWorkspace: (id) => {
       const lease = authority.acquire(id);
       return { workspace: canonicalWorkspaceFor(lease), assertCurrent: lease.assertCurrent, release: lease.release };

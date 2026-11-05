@@ -5118,6 +5118,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
+  authorities: workspaceAuthorities,
   acquireWorkspace: (workspaceId) => {
     const lease = requireWorkspaceAuthority(workspaceId);
     return {
