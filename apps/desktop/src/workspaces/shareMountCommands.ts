@@ -22,6 +22,7 @@ import {
 import { receivedReferencePin, refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
+  SetAsideRefreshError,
   ShareViewMountRollbackError,
   type PreparedShareViewFilesMount,
   type ShareViewFiles,
@@ -529,7 +530,11 @@ export function createShareMountCommands<WorkspaceSummary>(
                   ? { collisionRecordQuarantined: true }
                   : undefined,
               );
-            } catch (error) {
+            } catch (thrown) {
+              // A refresh that set the record aside before it failed says so
+              // on its row.
+              const setAside = thrown instanceof SetAsideRefreshError;
+              const error = setAside ? thrown.failure : thrown;
               const verdict = classifyShareMountRefreshError(error);
               if (verdict.kind === "abort") {
                 throw new Error(verdict.message);
@@ -538,14 +543,12 @@ export function createShareMountCommands<WorkspaceSummary>(
                 `share-mount refresh failed for ${mount.label}:`,
                 error,
               );
-              pushResult(
-                mount,
-                verdict.status,
-                0,
-                verdict.status === "failed" && isCollisionRecordRefusal(error)
-                  ? { errorKind: "collision-record" }
-                  : undefined,
-              );
+              pushResult(mount, verdict.status, 0, {
+                ...(verdict.status === "failed" && isCollisionRecordRefusal(error)
+                  ? { errorKind: "collision-record" as const }
+                  : {}),
+                ...(setAside ? { collisionRecordQuarantined: true as const } : {}),
+              });
             }
           }
           return { results };
