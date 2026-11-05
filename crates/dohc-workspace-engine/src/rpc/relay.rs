@@ -4086,9 +4086,9 @@ mod tests {
         f.close().await;
     }
 
-    /// A loopback relay serving a workspace log. Its first log request sets
-    /// `started`, then waits for `release`. While `refuse_claims` is set it
-    /// refuses every claim for good.
+    /// A loopback relay whose first log request waits for `release`. A repair
+    /// test can hold the first lookup after the probe instead. The held request
+    /// sets `started`. While `refuse_claims` is set, every claim is refused.
     struct PagedRelay {
         base_url: String,
         ops: Arc<std::sync::Mutex<Vec<Value>>>,
@@ -4101,6 +4101,13 @@ mod tests {
 
     impl PagedRelay {
         fn start(blobs: std::collections::HashMap<String, String>) -> Self {
+            Self::start_with_repair_lookup_hold(blobs, false)
+        }
+
+        fn start_with_repair_lookup_hold(
+            blobs: std::collections::HashMap<String, String>,
+            hold_lookup: bool,
+        ) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind relay");
             let base_url = format!("http://{}", listener.local_addr().expect("relay address"));
             let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -4117,6 +4124,7 @@ mod tests {
                 );
                 move || {
                     let mut released = Some(released);
+                    let mut repair_probe = hold_lookup.then_some(false);
                     for stream in listener.incoming() {
                         if stop.load(Ordering::SeqCst) {
                             break;
@@ -4129,6 +4137,7 @@ mod tests {
                             &started,
                             &refuse_claims,
                             &mut released,
+                            &mut repair_probe,
                         );
                     }
                 }
@@ -4189,6 +4198,7 @@ mod tests {
         started: &std::sync::atomic::AtomicBool,
         refuse_claims: &std::sync::atomic::AtomicBool,
         released: &mut Option<std::sync::mpsc::Receiver<()>>,
+        repair_probe: &mut Option<bool>,
     ) -> std::io::Result<()> {
         use std::io::{BufRead, Read, Write};
         let mut reader = std::io::BufReader::new(stream.try_clone()?);
@@ -4209,7 +4219,8 @@ mod tests {
                 None => break,
             }
         }
-        reader.read_exact(&mut vec![0; length])?;
+        let mut request_body = vec![0; length];
+        reader.read_exact(&mut request_body)?;
         let (path, query) = target.split_once('?').unwrap_or((&target, ""));
         let parameter = |name: &str| {
             query
@@ -4222,7 +4233,23 @@ mod tests {
         let limit = parameter("limit")
             .and_then(|limit| usize::try_from(limit).ok())
             .unwrap_or(usize::MAX);
-        let body = if method == "POST" && path == "/sync/workspaces" {
+        let body = if method == "POST" && path.ends_with("/log") && repair_probe.is_some() {
+            let request: Value = serde_json::from_slice(&request_body).expect("repair probe");
+            assert_eq!(request["ops"], json!([]));
+            assert_eq!(*repair_probe, Some(false), "the probe is sent once");
+            *repair_probe = Some(true);
+            Some(
+                json!({ "accepted": 0, "inserted": 0, "skipped": 0, "currentMaxOriginSeq": -1 })
+                    .to_string(),
+            )
+        } else if method == "GET" && path.contains("/log/") && repair_probe.is_some() {
+            assert_eq!(*repair_probe, Some(true), "the probe completed before lookup");
+            if let Some(released) = released.take() {
+                started.store(true, Ordering::SeqCst);
+                let _ = released.recv();
+            }
+            Some(json!({ "status": "absent" }).to_string())
+        } else if method == "POST" && path == "/sync/workspaces" {
             Some(json!({ "ok": true }).to_string())
         } else if path.ends_with("/blobs/have") {
             Some(json!({ "missing": [] }).to_string())
@@ -4230,6 +4257,7 @@ mod tests {
             blobs.get(sha256).cloned()
         } else if method == "GET" && path.ends_with("/log") {
             if since == 0
+                && repair_probe.is_none()
                 && let Some(released) = released.take()
             {
                 started.store(true, Ordering::SeqCst);
@@ -4723,6 +4751,105 @@ mod tests {
             .expect("fetch task");
         assert!(fetched.is_err());
         relay.release();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closing_during_fetch_after_the_repair_probe_releases_its_token() {
+        for previous in [None, Some("earlier-pass")] {
+            let relay = PagedRelay::start_with_repair_lookup_hold(Default::default(), true);
+            let f = CursorFixture::with_relay("close-probe", false, relay.configuration()).await;
+            f.prepare().await;
+            let earlier = previous.map(|token| f.begin_pass(token));
+            let conn = f.engine_db();
+            let origin: String = conn
+                .query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                    [f.workspace_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let next_seq: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(origin_seq),-1)+1 FROM replication_log \
+                     WHERE workspace_id=?1 AND origin_id=?2",
+                    rusqlite::params![f.workspace_id, origin],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let claim = dohc_engine_storage::put_binary_blob(
+                &conn,
+                &dohc_engine_collab::Ydoc::wire().encode_full_state(),
+            )
+            .unwrap();
+            let payload = json!({
+                "versionId": "main", "objectId": "repair-doc", "path": "repair.md",
+                "contentKind": "plaintext", "lineageClaimId": claim,
+                "updateBlobSha256": claim, "isBaseState": true,
+            });
+            conn.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES (?1,'repair-doc',1000)",
+                [f.workspace_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime,updated_at_ms,path,lineage_claim_status,lineage_claim_id) \
+                 VALUES (?1,'main','repair-doc','plaintext','replicated',1000,'repair.md','exact',?2)",
+                rusqlite::params![f.workspace_id, claim],
+            )
+            .unwrap();
+            // The local candidate needs the probe; the peer candidate needs a later lookup.
+            for (origin, seq, imported) in [(origin.as_str(), next_seq, 0), ("repair-peer", 0, 1)] {
+                conn.execute(
+                    "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) \
+                     VALUES (?1,?2,?3,'ydoc.update',?4,1000,?5,'applied')",
+                    rusqlite::params![f.workspace_id, origin, seq, payload.to_string(), imported],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) \
+                     VALUES (?1,'main','repair-doc',?2,?3,?4)",
+                    rusqlite::params![f.workspace_id, claim, origin, seq],
+                )
+                .unwrap();
+            }
+            drop(conn);
+            let service = Arc::clone(&f.service);
+            let handle = f.handle.clone();
+            let fetch = tokio::spawn(async move {
+                service
+                    .sync_fetch_pull(
+                        &RequestContext::unbounded(),
+                        Some(handle),
+                        json!({"workspaceId": "close-probe"}),
+                    )
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !relay.started.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("lookup started after the repair probe completed");
+            let fetching = f.pull_token().expect("fetch holds its token");
+            assert_ne!(Some(&fetching), earlier.as_ref());
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                f.service.workspace_close(Some(f.handle.clone())),
+            )
+            .await
+            .expect("close does not wait for the lookup after the repair probe")
+            .expect("close");
+            let fetched = tokio::time::timeout(std::time::Duration::from_secs(10), fetch)
+                .await
+                .expect("fetch cleanup finishes before the lookup answers")
+                .expect("fetch task");
+            assert!(fetched.is_err());
+            assert_eq!(f.pull_token(), earlier);
+            assert!(f.open.pending_pull.lock().await.is_none());
+            relay.release();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

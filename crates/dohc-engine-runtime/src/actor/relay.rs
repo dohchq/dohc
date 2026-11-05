@@ -2390,9 +2390,8 @@ impl ActorHandle {
             _ => None,
         };
         let answer = async {
-            // Once the relay may have stored something, the operation runs to its
-            // end so the request answers with what landed. Until then each step
-            // and each effect-free read stops on cancellation.
+            // Relay writes run to the end so the request answers with what landed.
+            // A fetch only shields its repair probe; later reads stay cancellable.
             let mut preparation_attempt = 0;
             loop {
                 if token.is_cancelled() {
@@ -2476,14 +2475,20 @@ impl ActorHandle {
                         let request = transport
                             .take_pending()
                             .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
-                        if request.changes_relay() {
-                            token = CancellationToken::new();
-                        }
+                        let io_token = if request.changes_relay() {
+                            let uncancellable = CancellationToken::new();
+                            if fetching_workspace.is_none() {
+                                token = uncancellable.clone();
+                            }
+                            uncancellable
+                        } else {
+                            token.clone()
+                        };
                         let io_request = request.clone();
                         let result = tokio::select! {
                             biased;
-                            () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                            result = execute_io(io_request, token.clone()) => result,
+                            () = io_token.cancelled() => return Err(RuntimeError::Cancelled),
+                            result = execute_io(io_request, io_token.clone()) => result,
                         };
                         transport.complete(request, result);
                     }
