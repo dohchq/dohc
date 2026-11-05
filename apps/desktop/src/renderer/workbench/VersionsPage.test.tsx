@@ -58,6 +58,7 @@ function deferred<T>() {
 type OnError = ComponentProps<typeof VersionsPage>["onError"];
 
 function Page(props: {
+  workspaceId?: string;
   historyKey?: string;
   versionKey?: number;
   // Reads the versions again, as a change from another computer would.
@@ -68,8 +69,9 @@ function Page(props: {
   onError?: OnError;
   onSettled?: (identity: string) => void;
 }) {
+  const workspaceId = props.workspaceId ?? "ws-1";
   const versions = useWorkspaceVersions({
-    workspaceId: "ws-1",
+    workspaceId,
     enabled: true,
     ...(props.refreshKey === undefined ? {} : { refreshKey: props.refreshKey }),
     activeTabDirty: props.dirty ?? false,
@@ -83,7 +85,7 @@ function Page(props: {
   return (
     <>
       <VersionsPage
-        workspaceId="ws-1"
+        workspaceId={workspaceId}
         versions={versions}
         historyKey={props.historyKey ?? "0"}
         versionKey={props.versionKey ?? 0}
@@ -403,6 +405,53 @@ describe("VersionsPage", () => {
     expect(onSettled).not.toHaveBeenCalled();
     rerender(<Page onError={onError} onSettled={onSettled} versionKey={1} />);
     await waitFor(() => expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError)));
+  });
+
+  const DRAFT_CONFLICT = { conflictId: "c1", path: "c1.md", sourceVersionId: "draft", targetVersionId: "main", origin: "merge",
+    contentKind: "text", currentText: "a", incomingText: "b", baseText: null };
+
+  it("gives up on the files to decide after 30 seconds with no answer, and drops the answer that comes later", async () => {
+    const late = deferred<{ conflicts: unknown[]; nextAfterConflictId: string | null }>();
+    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(late.promise);
+    const onError = vi.fn();
+    const onSettled = vi.fn();
+    // Only the page's timers are fake. Testing Library's async helpers need
+    // real ones, so this test uses act alone.
+    vi.useRealTimers();
+    vi.useFakeTimers({ now: NOW, toFake: ["Date", "setTimeout", "clearTimeout"] });
+    render(<Page onError={onError} onSettled={onSettled} />);
+    // The page lists the versions, then reads. No time passes.
+    await act(async () => {});
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledOnce();
+    await act(() => vi.advanceTimersByTimeAsync(29_999));
+    expect(onError).not.toHaveBeenCalled();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const sentence = "dohc could not read which merges have files to decide.";
+    expect(onError).toHaveBeenCalledExactlyOnceWith(sentence, expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-reads:/), false);
+    expect(withErrorWords(sentence, onError.mock.calls[0]![1])).toBe(`${sentence} dohc did not answer in time. Try again.`);
+    // The answer that comes after the deadline shows nothing, and the row stays.
+    await act(async () => late.resolve({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null }));
+    expect(within(row("draft")).queryByTestId("versions-page-conflicts")).toBeNull();
+    expect(onSettled).not.toHaveBeenCalled();
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null });
+    act(filedRetry(onError));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("1 to decide");
+  });
+
+  it("drops an answer about the workspace the page showed before", async () => {
+    const stale = deferred<{ conflicts: unknown[]; nextAfterConflictId: string | null }>();
+    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(stale.promise);
+    const onError = vi.fn();
+    const { rerender } = render(<Page workspaceId="ws-1" onError={onError} />);
+    await waitFor(() => expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
+    rerender(<Page workspaceId="ws-2" onError={onError} />);
+    await waitFor(() => expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-2" }));
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
+    await act(async () => stale.resolve({ conflicts: [DRAFT_CONFLICT], nextAfterConflictId: null }));
+    expect(within(row("draft")).queryByTestId("versions-page-conflicts")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("shows the rows sorted by when each was made when the last changes can't be read, and says so once", async () => {

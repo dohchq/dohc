@@ -17,6 +17,27 @@ interface ConflictCount { count: number; more: boolean }
 // a count shows as a lower bound.
 const CONFLICT_PAGES_MAX = 5;
 
+// How long a read waits for its answer. The engine can leave a read with no
+// answer while the workspace's engine thread is stuck (#3318), so the page
+// gives up, in the words of the engine's own deadline.
+const READ_DEADLINE_MS = 30_000;
+
+// The read, or a failure once it has gone READ_DEADLINE_MS with no answer. An
+// answer after that is dropped.
+function withDeadline<T>(read: Promise<T>, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const error = new Error(`${what} got no answer in ${READ_DEADLINE_MS} ms.`);
+      error.name = "EngineRequestDeadlineError";
+      reject(error);
+    }, READ_DEADLINE_MS);
+    read.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 // Where the tab's failed reads go: a row in Notices, which onSettled takes back.
 // `quiet` changes the row where it stands, with no new toast.
 interface ReadReports {
@@ -269,10 +290,10 @@ export function VersionsPage(props: {
       let after: string | null = null;
       try {
         for (let page = 0; page < CONFLICT_PAGES_MAX; page += 1) {
-          const result = await bridge().listWorkspaceVersionConflicts({
+          const result = await withDeadline(bridge().listWorkspaceVersionConflicts({
             workspaceId,
             ...(after === null ? {} : { afterConflictId: after }),
-          });
+          }), "listWorkspaceVersionConflicts");
           if (!conflictReads.isCurrent(token)) return;
           for (const conflict of result.conflicts) {
             if (conflict.origin !== "merge") continue;
