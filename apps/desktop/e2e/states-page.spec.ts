@@ -450,15 +450,32 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       }
     }
     // At the sidebar's default width, a Collection change cuts who made it
-    // and what changed before its Collection's name, and no part runs past
-    // its line. The specimen must really cut something, or the check proves
+    // and what changed before its Collection's name, even a long name, and
+    // no part runs past its line. A part counts as cut when its words are
+    // wider than its box by any fraction of a pixel, since that draws an
+    // ellipsis. The specimen must really cut something, or the check proves
     // nothing.
     for (const theme of THEMES) {
       const shown = await page.getByTestId(`states-history-collections-narrow-${theme}`).evaluate((el) => {
-        const cut = (selector: string) => Array.from(el.querySelectorAll(selector)).filter((node) => node.scrollWidth > node.clientWidth).length;
+        const natural = (node: Element) => {
+          const probe = document.createElement("span");
+          const style = getComputedStyle(node);
+          probe.textContent = node.textContent;
+          probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+          for (const key of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontStretch", "fontFeatureSettings", "fontVariationSettings", "letterSpacing"] as const) {
+            probe.style[key] = style[key];
+          }
+          document.body.append(probe);
+          const width = probe.getBoundingClientRect().width;
+          probe.remove();
+          return width;
+        };
+        const cut = (selector: string) => Array.from(el.querySelectorAll(selector))
+          .filter((node) => natural(node) > node.getBoundingClientRect().width + 0.01).length;
+        const over = (selector: string) => Array.from(el.querySelectorAll(selector)).filter((node) => node.scrollWidth > node.clientWidth).length;
         return {
           names: cut('[data-testid="history-collection-name"]'),
-          lines: cut('[data-testid="history-collection-line"]'),
+          lines: over('[data-testid="history-collection-line"]'),
           parts: cut('[data-testid="history-collection-title"], [data-testid="history-collection-agent"]'),
         };
       });

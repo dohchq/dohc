@@ -689,6 +689,7 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
 // approving agent. Local times, as above.
 const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
 const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
+const TIMELINE_SIGNUPS = "00000000-0000-4000-8000-0000000000b3";
 const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
   id: "moment-timeline-plan", versionId: "main", path: "trip/plan.md", recordedAtMs: new Date(2026, 6, 8, 10, 12).getTime(),
   operation: "write", origin: "local-file", momentOrder: 9, summary: "Added the ferry times",
@@ -697,10 +698,10 @@ function timelineVersion(id: string, kind: "main" | "named", name: string, creat
   return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
 }
 function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
-  by?: { automation?: string; rulesApprovedBy?: string }): TimelineEntry {
+  by?: { automation?: string; rulesApprovedBy?: string; operation?: string }): TimelineEntry {
   const rules = by?.rulesApprovedBy;
   return { kind: "collection", datasetId, name, sortAtMs, change: {
-    revision, operation: rules ? "Fields and rules" : "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    revision, operation: rules ? "Fields and rules" : by?.operation ?? "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
     changesetBytes: rules ? 0 : 120, attachmentCount: 0,
     ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
     ...(rules ? {
@@ -712,6 +713,9 @@ function timelineChange(datasetId: string, name: string, revision: number, recor
 const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
 const TIMELINE_RULES = timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" });
 const TIMELINE_UNDATED = timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null);
+// A long Collection name beside a long title: the title has room to give.
+const TIMELINE_SIGNUPS_CHANGE = timelineChange(TIMELINE_SIGNUPS, "Registrations 2026", 7, new Date(2026, 6, 8, 9, 12).getTime(),
+  new Date(2026, 6, 8, 9, 12).getTime(), { operation: "confirm" });
 const TIMELINE_MIXED: TimelineEntry[] = [
   TIMELINE_FILE,
   timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
@@ -746,6 +750,7 @@ const TIMELINE_STORY: TimelineEntry[] = [
 const TIMELINE_COLLECTIONS = new Map([
   [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), openHistory: noop }],
   [TIMELINE_GUESTS, { name: "Guests" }],
+  [TIMELINE_SIGNUPS, { name: "Registrations 2026", operationLabels: new Map([["confirm", "Set status to Confirmed"]]), openHistory: noop }],
 ]);
 
 // The About tab on the drawing's document: who wrote what, who has it.
@@ -2234,8 +2239,8 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="Collections at the sidebar's default width: who made a change cuts before the Collection's name">
-          <div data-testid={`states-history-collections-narrow-${theme}`} className="flex h-[200px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
-            <EngineHistoryView entries={[TIMELINE_DATED, TIMELINE_RULES, TIMELINE_UNDATED]} hasMore={false} loadingMore={false} onLoadMore={noop}
+          <div data-testid={`states-history-collections-narrow-${theme}`} className="flex h-[260px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_DATED, TIMELINE_RULES, TIMELINE_SIGNUPS_CHANGE, TIMELINE_UNDATED]} hasMore={false} loadingMore={false} onLoadMore={noop}
               onOpenMoment={noop} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
           </div>
         </Specimen>
