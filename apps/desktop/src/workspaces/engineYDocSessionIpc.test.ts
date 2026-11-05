@@ -2650,8 +2650,12 @@ describe("a window left from before Forget", () => {
     expect(r.ranUnder.map(label)).toEqual(["after Open folder"]);
     r.ranUnder.length = 0;
 
+    // The old window shows the document as unavailable, not in the plain editor.
     const opened = await r.ipc.open(r.oldWindow, { ...openPayload, sessionId: "old-after" });
-    expect({ opened, ranUnder: r.ranUnder.map(label) }).toMatchObject({ opened: { available: false }, ranUnder: [] });
+    expect({ opened, ranUnder: r.ranUnder.map(label) }).toEqual({
+      opened: { available: false, documentUnavailable: true },
+      ranUnder: [],
+    });
     await r.ipc.shutdown();
   });
 

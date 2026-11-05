@@ -538,13 +538,18 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   ): Promise<OpenResult> {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const rendererSession = this.#sessionFor(sender);
-    // Only a window that shows the workspace as it is open now opens its documents.
     if (
       !rendererSession ||
-      !windowShowsWorkspace(rendererSession, input.workspaceId, this.#authorities) ||
+      rendererSession.workspaceId !== input.workspaceId ||
       !rendererSession.isCurrent()
     ) {
       return unavailableOpen();
+    }
+    // Only a window that shows the workspace as it is open now opens its
+    // documents. A window left from before Forget shows them as unavailable,
+    // not in the plain editor, because it can't save them.
+    if (!windowShowsWorkspace(rendererSession, input.workspaceId, this.#authorities)) {
+      return unavailableOpen({ documentUnavailable: true });
     }
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
