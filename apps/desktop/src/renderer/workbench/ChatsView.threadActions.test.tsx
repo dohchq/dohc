@@ -376,6 +376,7 @@ describe("ChatsView work and run links", () => {
     expect(screen.getByTestId("chats-attachment-chip")).toBe(loading);
     expect(loading.textContent).toBe("Collection change");
     expect(loading.getAttribute("title")).toBe(changeFile);
+    expect(loading.querySelector("svg")?.classList.contains("lucide-table-2")).toBe(true);
     expect(screen.queryByText(/3f2a91c0/)).toBeNull();
 
     release();
@@ -383,6 +384,7 @@ describe("ChatsView work and run links", () => {
     expect(screen.getByTestId("chats-attachment-chip")).toBe(chip);
     expect(chip.textContent).toBe("Change to Volunteers");
     expect(chip.getAttribute("title")).toBe(changeFile);
+    expect(chip.querySelector("svg")?.classList.contains("lucide-table-2")).toBe(true);
     expect(dataset).toHaveBeenCalledWith({
       workspaceId: "workspace-a", datasetPath: "volunteers/dataset.json", expectedDatasetId: "dataset-1", action: "describe",
     });
@@ -393,6 +395,7 @@ describe("ChatsView work and run links", () => {
 
     const chip = await screen.findByRole("button", { name: "3f2a91c0-5b7d-4e2a-9c1f-2d8e6a4b7c90.json" });
     expect(screen.getByTestId("chats-attachment-chip")).toBe(chip);
+    expect(chip.querySelector("svg")?.classList.contains("lucide-file-code")).toBe(true);
   });
 
   it("opens attachment paths and shows linked agent-run details", async () => {
