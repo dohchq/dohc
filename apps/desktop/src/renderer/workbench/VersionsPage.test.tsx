@@ -271,7 +271,7 @@ describe("VersionsPage", () => {
     const user = userEvent.setup();
     render(<Page />);
     const retry = await waitFor(() => within(row("nested")).getByTestId("versions-page-count-retry"));
-    expect(retry.getAttribute("aria-label")).toBe("dohc could not count the differences. Try again.");
+    expect(retry.getAttribute("aria-label")).toBe("dohc could not count the files that differ from Main. Try again.");
     expect(details("draft")).toContain("2 files differ from Main");
     bridgeMock.countWorkspaceVersionChanges.mockResolvedValue({ count: 5 });
     await user.click(retry);
@@ -293,7 +293,7 @@ describe("VersionsPage", () => {
     expect(within(row("nested")).getByTestId("versions-page-count-retry")).toBeTruthy();
     // The row is filed from an effect, which can run after the render.
     await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(
-      "dohc could not count the differences from Main.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-counts:/)));
+      "dohc could not count the files that differ from Main.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-counts:/)));
     bridgeMock.countWorkspaceVersionChanges.mockClear();
     bridgeMock.countWorkspaceVersionChanges.mockResolvedValue({ count: 4 });
     act(filedRetry(onError));

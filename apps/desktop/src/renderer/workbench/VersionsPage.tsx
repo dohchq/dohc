@@ -124,7 +124,7 @@ export function VersionsPage(props: {
   const countErrors = useRef(new Map<string, unknown>());
   const failedCounts = useRef<string[]>([]);
   failedCounts.current = countOrder.current.filter((versionId) => counts.get(versionId) === "failed");
-  const countsNotice = useReadNotice(props, "versions-counts", "dohc could not count the differences from Main.",
+  const countsNotice = useReadNotice(props, "versions-counts", "dohc could not count the files that differ from Main.",
     () => recount(failedCounts.current));
   const failedKey = failedCounts.current.join("\n");
   useEffect(() => {
@@ -452,8 +452,8 @@ function VersionRow(props: {
         <span className="inline-block align-top">
           <IconButton
             data-testid="versions-page-count-retry"
-            aria-label="dohc could not count the differences. Try again."
-            title="dohc could not count the differences. Try again."
+            aria-label="dohc could not count the files that differ from Main. Try again."
+            title="dohc could not count the files that differ from Main. Try again."
             aria-describedby={nameId}
             onClick={props.onRetryCount}
             className="size-4"
