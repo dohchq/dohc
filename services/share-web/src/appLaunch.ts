@@ -10,6 +10,7 @@ import { forwardAppCollection } from "./appCollectionProxy";
 import { forwardAppBackend } from "./appBackendProxy";
 import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import {opaqueLinkRefusal} from "./linkRefusal";
+import {SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const PUBLICATION = /^[a-f0-9]{64}$/;
@@ -39,7 +40,7 @@ const PAGE_HEAD = `<!doctype html><html lang="en"><head><meta charset="utf-8"><m
 const SESSION_ENDED = "This app session ended. Reopen the share link.";
 /** What a reload shows once its session has ended: the launch page's stopped state, with no script. It names nothing about the app or the share. */
 const stoppedPage = (status: 404 | 410, words: string) => new Response(`${PAGE_HEAD}<body data-state="stopped"><main id="message">${STOPPED_MARK}<p id="status" role="status">${words}</p></main></body></html>`,
-  {status, headers: {...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}});
+  {status, headers: {...headers, "x-robots-tag": SHARE_WEB_SECURITY_HEADERS["x-robots-tag"], "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}});
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
@@ -156,9 +157,9 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       const statusRequest = url.pathname === "/status" && appHost(host);
       const collectionRequest = ["/collection", "/backend"].includes(url.pathname) && appHost(host);
       const bootstrapRequest = url.pathname === "/bootstrap" && appHost(host);
-      // A person reloading an ended session is a browser navigation to /bootstrap. Other callers keep the JSON refusal.
-      const reload = bootstrapRequest && request.method === "GET" && request.headers.get("sec-fetch-mode") === "navigate";
-      const refusal = () => reload ? stoppedPage(404, SESSION_ENDED) : opaqueLinkRefusal();
+      // A browser navigating to /bootstrap, such as a reload after the session ended, gets the stopped page. Other callers keep the JSON refusal.
+      const navigation = bootstrapRequest && request.headers.get("sec-fetch-mode") === "navigate";
+      const refusal = () => navigation ? stoppedPage(404, SESSION_ENDED) : opaqueLinkRefusal();
       if ((request.method !== "POST" && !(bootstrapRequest && request.method === "GET")) || url.search || request.signal.aborted) return refusal();
       const summaryRequest = url.pathname === "/api/apps/summary";
       const issue = host === viewerHost && (url.pathname === "/api/apps/launch" || summaryRequest);
@@ -273,7 +274,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       } catch (error) {
         const launch = launches.get(host);
         if (error instanceof RelayRateLimited) return rateLimited();
-        if (error instanceof CollectionMissing) return reload ? stoppedPage(410, LINK_REFUSALS.app_collection_missing.error)
+        if (error instanceof CollectionMissing) return navigation ? stoppedPage(410, LINK_REFUSALS.app_collection_missing.error)
           : Response.json(linkRefusalBody("app_collection_missing"), {status: 410, headers});
         return (namedIssue || (launch && namedMaterial(launch.material))) && error instanceof RelayUnavailable ? unavailable() : refusal();
       } finally {
