@@ -305,6 +305,7 @@ export function createWorkspaceActivity(
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
+      ...(snap?.authExpired ? { signInExpired: true } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,

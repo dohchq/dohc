@@ -1400,6 +1400,10 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Sync stopped because the server does not serve this dohc's relay API
   // version: "app" means update dohc, "server" means the server is older.
   updateRequired: z.enum(["app", "server"]).optional(),
+  // True while the server refuses this computer's sign-in, even when a
+  // state ahead of it, such as a conflict, is the one shown. Omitted
+  // otherwise.
+  signInExpired: z.boolean().optional(),
   claimingIdentity: z.boolean().optional(),
   // True when the recorder could not be built at workspace open. Required:
   // an omitted boolean reads as false, and a producer that cannot say which

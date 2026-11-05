@@ -2018,21 +2018,21 @@ function Pane(props: { theme: "light" | "dark" }) {
             {/* Signed in to an account dohc can't confirm, then signed out,
                 which is a choice rather than a fault. */}
             <LocalNoticeRow
-              notice={accountUnconfirmedNotice({ workspaceId: "ws-trip", onTryAgain: noop, onOpenSyncSettings: noop })}
+              notice={accountUnconfirmedNotice({ onTryAgain: noop, onOpenSyncSettings: noop })}
               unread
               onKeyDown={noop}
               onAction={noop}
               onDismiss={noop}
             />
             <LocalNoticeRow
-              notice={notConnectedNotice({ workspaceId: "ws-trip", onConnectServer: noop })}
+              notice={notConnectedNotice({ onConnectServer: noop })}
               unread
               onKeyDown={noop}
               onAction={noop}
               onDismiss={noop}
             />
             <LocalNoticeRow
-              notice={signInExpiredNotice({ workspaceId: "ws-trip", onSignInAgain: noop })}
+              notice={signInExpiredNotice({ onSignInAgain: noop })}
               unread
               onKeyDown={noop}
               onAction={noop}

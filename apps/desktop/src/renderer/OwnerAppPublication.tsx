@@ -413,12 +413,13 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       if (current) { setPublications(rows); setLinksFailed(false); }
     })().catch(async error => {
       if (!current) return;
-      // Offline: the sync status already reports the server, so Share links adds nothing of its own.
+      // Offline, or stopped until one side updates: the title bar already
+      // reports it, so Share links adds nothing of its own.
       let status: SyncStatusResult | null = null;
       try { status = await api.getSyncStatus({ workspaceId: props.workspaceId }); } catch { /* Without a status, the line shows. */ }
       if (!current) return;
       setPublicationsError(ipcErrorMessage(error, "dohc could not load app publications. Reload the publications."));
-      const offline = syncNamesServer(status);
+      const offline = syncNamesServer(status) || status?.updateRequired !== undefined;
       setLinksHidden(offline); setLinksFailed(!offline);
     }).finally(() => { if (current) setPublicationsLoading(false); });
     return () => { current = false; };

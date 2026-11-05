@@ -936,13 +936,14 @@ describe("workspaceActivity cloud sync nudge", () => {
   it("says why it can't sync on this session, and syncs again once it can, stopping nothing", async () => {
     let blocked: "not-connected" | "account-unconfirmed" | undefined = "not-connected";
     let authExpired = false;
+    let conflictCount = 0;
     const stop = vi.fn(async () => {});
     const engine = {
       start: async () => {}, queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
       retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
-        conflictCount: 0, authExpired, sharingDeclined: [],
+        conflictCount, authExpired, sharingDeclined: [],
       }),
       stop,
     };
@@ -958,6 +959,12 @@ describe("workspaceActivity cloud sync nudge", () => {
     blocked = undefined;
     authExpired = true;
     expect(read().state).toBe("sign-in-expired");
+    expect(read().signInExpired).toBe(true);
+    // A conflict shows first, and the expired sign-in still reaches Settings.
+    conflictCount = 1;
+    expect(read().state).toBe("conflict");
+    expect(read().signInExpired).toBe(true);
+    conflictCount = 0;
     // Main's own reason comes first: a session that no longer matches says
     // so, whatever the stopped engine last saw.
     blocked = "not-connected";
@@ -968,6 +975,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     authExpired = false;
     const confirmed = read();
     expect(confirmed.state).toBe("synced");
+    expect(confirmed.signInExpired).toBeUndefined();
     expect(confirmed.syncPause).toBeUndefined();
     expect(stop).not.toHaveBeenCalled();
     await activity.stopAll();
