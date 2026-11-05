@@ -75,7 +75,7 @@ export function LazyDesktopSettings(
       resetKeys={[settingsProps.workspaceId, attempt]}
       onRetry={retry}
       fallbackClassName="dohc-elevated relative h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] rounded-xl border border-line"
-      recoveryMessage="The workspace is still available. Try again."
+      recoveryMessage="The workspace is still available."
       closeControl={<CloseSettings onClose={settingsProps.onClose} />}
     >
       <Suspense fallback={<SettingsLoading onClose={settingsProps.onClose} />}>
