@@ -2515,11 +2515,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     const workspace = findWorkspace(workspaceId);
     const remote = workspace?.remote;
     return {
-      enabled: !!remote,
       syncPause: workspace ? syncPauseFor(workspace, localInstallationId()) : undefined,
       // Legacy and different-account bindings stay local-only.
-      connected:
-        !!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials),
+      ...(remote && !workspaceRemoteMatchesCredentials(remote, cachedCredentials)
+        ? { accountUnconfirmed: cachedCredentials ? "other-account" as const : "signed-out" as const }
+        : {}),
     };
   },
   engineFor: engineForWorkspace,

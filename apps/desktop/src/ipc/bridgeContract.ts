@@ -1380,8 +1380,13 @@ const SYNC_STATUS_BASE_FIELDS = {
     "local-changes",
     "conflict",
     "sync-failed",
-    "cloud-disconnected",
+    "account-unconfirmed",
+    "update-required",
   ]),
+  // Why dohc can't confirm the account that syncs this workspace, while the
+  // state is "account-unconfirmed": nobody is signed in, another account is,
+  // or the server refused the sign-in.
+  accountUnconfirmed: z.enum(["signed-out", "other-account", "sign-in-expired"]).optional(),
   pendingChangeCount: z.number().int().nonnegative(),
   lastSyncedAtMs: z.number().nullable(),
   // How many files conflict, not just that

@@ -1081,10 +1081,6 @@ describe("owner app publication", () => {
       ["the workspace is not synced", () => api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false }), () => api.cloudStatus],
       // main answers listUnavailable for the relay's not_found 404.
       ["the server does not publish apps here", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listUnavailable" } : local([localRow])(request)), () => api.publishOwnerApp],
-      ["the sync status says the server is disconnected", () => {
-        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
-        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "cloud-disconnected" });
-      }, () => api.getSyncStatus],
       ["the sync status says the server is unreachable", () => {
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
         api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "sync-failed", syncFailure: { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 2 } });
@@ -1106,6 +1102,22 @@ describe("owner app publication", () => {
       expect(screen.queryByRole("alert")).toBeNull();
       expect(reportError).not.toHaveBeenCalled();
     });
+
+    // The server isn't the cause of an account dohc can't confirm, so Share
+    // links says what it couldn't read instead of leaving it to the title bar.
+    it.each(["other-account", "sign-in-expired"] as const)(
+      "keeps Share links with its line while the account isn't confirmed (%s)",
+      async (accountUnconfirmed) => {
+        const reportError = vi.fn();
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "account-unconfirmed", accountUnconfirmed });
+        renderLocal({ reportError });
+        await openLocal();
+        const line = await screen.findByText(linksLine);
+        expect(screen.getByRole("region", { name: "Share links" }).contains(line)).toBe(true);
+        expect(api.getSyncStatus).toHaveBeenCalledWith({ workspaceId: "ws-trip" });
+      },
+    );
 
     it.each([
       ["a 5xx", "Error: Sharing failed (503)."],

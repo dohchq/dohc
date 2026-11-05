@@ -116,16 +116,32 @@ describe("sync status surface", () => {
   });
 
   // A sync pass is work in flight: a ring, its words kept for the name.
-  it("shows a sync pass as a ring and a lost server in words", () => {
-    const { rerender } = renderStatus({ syncStatus: syncState("syncing") });
-    const status = screen.getByTestId("sync-status");
+  it("shows a sync pass as a ring", () => {
+    renderStatus({ syncStatus: syncState("syncing") });
     expect(dotOf()).toBe("working");
     expect(worded()).toBe(false);
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("cloud-disconnected")} failedSaves={0} />);
-    expect(status.getAttribute("data-state")).toBe("cloud-disconnected");
-    expect(dotOf()).toBe("waiting");
-    expect(worded()).toBe(true);
   });
+
+  // The server isn't the cause, so the title bar names the account, with the
+  // attention mark, whichever reason main gives.
+  it.each(["signed-out", "other-account", "sign-in-expired"] as const)(
+    "names an account dohc can't confirm (%s), and reads saved again once it can",
+    (accountUnconfirmed) => {
+      const { rerender } = renderStatus({ syncStatus: { ...syncState("account-unconfirmed"), accountUnconfirmed } });
+      const status = screen.getByRole("status", { name: "Not syncing. dohc could not confirm this workspace's account." });
+      expect(status.getAttribute("data-state")).toBe("account-unconfirmed");
+      expect(status.textContent).toBe("Couldn't confirm account");
+      expect(status.getAttribute("title")).toBe("Not syncing. dohc could not confirm this workspace's account.");
+      expect(status.textContent).not.toMatch(/server/i);
+      expect(dotOf()).toBe("attention");
+      expect(worded()).toBe(true);
+
+      rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
+      expect(status.getAttribute("data-state")).toBe("synced");
+      expect(status.getAttribute("aria-label")).toBe("Local · saved");
+      expect(dotOf()).toBe("saved");
+    },
+  );
 
   // A file whose save failed: the title bar must not say saved over it.
   it("names the files that couldn't save instead of saved, and says saved again once they clear", () => {
@@ -157,7 +173,7 @@ describe("sync status surface", () => {
     rerender(<WorkspaceSyncStatus syncStatus={syncState("sync-failed")} failedSaves={1} />);
     expect(status.textContent).toBe("Sync failed");
     rerender(
-      <WorkspaceSyncStatus syncStatus={{ ...syncState("cloud-disconnected"), updateRequired: "app" }} failedSaves={1} />,
+      <WorkspaceSyncStatus syncStatus={{ ...syncState("update-required"), updateRequired: "app" }} failedSaves={1} />,
     );
     expect(status.textContent).toBe("Update dohc to sync");
     expect(dotOf()).toBe("attention");
@@ -183,16 +199,12 @@ describe("sync status surface", () => {
   it("names a lost connection as the server, not the cloud", () => {
     renderStatus({
       syncStatus: {
-        state: "cloud-disconnected",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        liveSessionsGeneration: 0,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
+        ...syncState("sync-failed"),
+        syncFailure: { cause: "server-unreachable", detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
       },
     });
     const status = screen.getByTestId("sync-status");
-    expect(status.textContent).toBe("Server disconnected");
+    expect(status.textContent).toBe("Server unreachable");
     expect(status.textContent).not.toMatch(/cloud/i);
   });
 
@@ -291,7 +303,6 @@ describe("sync status surface", () => {
         syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
       },
     },
-    { label: "Server disconnected", server: { state: "cloud-disconnected" as const } },
   ])("hides live editing while the title bar says $label", ({ label, server }) => {
     const { rerender } = renderStatus({ syncStatus: { ...liveDeliveryStatus("retrying"), ...server } });
     expect(screen.getByTestId("sync-status").textContent).toBe(label);
@@ -316,11 +327,14 @@ describe("sync status surface", () => {
     expect(screen.getByTestId("owner-live-delivery-status").textContent).toBe("Live editing retrying");
   });
 
-  // A failed save or a required update takes the title bar's words from the
-  // server, so live editing shows beside them.
+  // The title bar doesn't name the server, so live editing shows beside its
+  // words: an account dohc can't confirm, a failed save, or a required update.
   it.each([
-    { label: "Couldn't save 1 file", status: { state: "cloud-disconnected" as const }, failedSaves: 1 },
-    { label: "Update dohc to sync", status: { state: "cloud-disconnected" as const, updateRequired: "app" as const }, failedSaves: 0 },
+    ...(["signed-out", "other-account", "sign-in-expired"] as const).map((accountUnconfirmed) => ({
+      label: "Couldn't confirm account", status: { state: "account-unconfirmed" as const, accountUnconfirmed }, failedSaves: 0,
+    })),
+    { label: "Couldn't save 1 file", status: { state: "account-unconfirmed" as const }, failedSaves: 1 },
+    { label: "Update dohc to sync", status: { state: "update-required" as const, updateRequired: "app" as const }, failedSaves: 0 },
   ])("keeps live editing beside $label", ({ label, status, failedSaves }) => {
     renderStatus({ syncStatus: { ...liveDeliveryStatus("retrying"), ...status }, failedSaves });
     expect(screen.getByTestId("sync-status").textContent).toBe(label);
@@ -333,7 +347,7 @@ describe("sync status surface", () => {
   ] as const)("names the side to update when sync stopped on the relay API version (%s)", (updateRequired, label) => {
     renderStatus({
       syncStatus: {
-        state: "cloud-disconnected",
+        state: "update-required",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
@@ -343,7 +357,7 @@ describe("sync status surface", () => {
       },
     });
     const status = screen.getByTestId("sync-status");
-    expect(status.getAttribute("data-state")).toBe("cloud-disconnected");
+    expect(status.getAttribute("data-state")).toBe("update-required");
     expect(status.getAttribute("aria-label")).toBe(label);
     expect(status.textContent).toBe(label);
   });

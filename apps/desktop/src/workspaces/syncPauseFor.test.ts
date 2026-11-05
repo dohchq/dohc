@@ -23,7 +23,7 @@ it.each([
   const workspace = { ...entry, attachmentId: Symbol("workspace") };
   const activity = createWorkspaceActivity(vi.fn(), {
     observationFor: () => idleObservation(workspace, {} as never),
-    cloudStateFor: () => ({ enabled: !!entry.remote, connected: false, syncPause: syncPauseFor(entry, "local") }),
+    cloudStateFor: () => ({ ...(entry.remote ? { accountUnconfirmed: "signed-out" as const } : {}), syncPause: syncPauseFor(entry, "local") }),
   });
   const state = new WorkspaceActivityState();
   await activity.open(workspace, state);

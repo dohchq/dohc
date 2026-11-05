@@ -24,6 +24,7 @@ import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
+import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 
 export type NoticeAction = {
   label: string;
@@ -502,6 +503,38 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
+// The account isn't confirmed, whichever reason main gives, and the server
+// isn't the cause. Try again reads the signed-in account's session again, so
+// it needs someone signed in. The row has no dismiss: it stays until the
+// account is confirmed.
+const ACCOUNT_UNCONFIRMED_TITLE = "Couldn't confirm this workspace's account";
+const ACCOUNT_UNCONFIRMED_BODY = `${SYNC_UNCONFIRMED_ACCOUNT} Your changes stay on this computer.`;
+export function accountUnconfirmedNotice(input: {
+  workspaceId: string;
+  reason: SyncStatusResult["accountUnconfirmed"];
+  onTryAgain: (() => void) | undefined;
+  onOpenSyncSettings: (() => void) | undefined;
+}): Notice {
+  const actions: NoticeAction[] = [
+    ...(input.reason !== "signed-out" && input.onTryAgain ? [{ label: "Try again", onClick: input.onTryAgain }] : []),
+    ...(input.onOpenSyncSettings ? [{ label: "Sync settings", onClick: input.onOpenSyncSettings }] : []),
+  ];
+  return {
+    id: "account-unconfirmed",
+    tone: "danger",
+    title: ACCOUNT_UNCONFIRMED_TITLE,
+    body: ACCOUNT_UNCONFIRMED_BODY,
+    ...(actions.length > 0 ? { actions } : {}),
+    copyText: errorDetails([
+      ["Notice", ACCOUNT_UNCONFIRMED_TITLE],
+      ["Detail", ACCOUNT_UNCONFIRMED_BODY],
+      ["Reason", input.reason],
+      ["Workspace id", input.workspaceId],
+    ]),
+    Icon: AlertTriangle,
+  };
+}
+
 // An oversized unclaimed lineage shares its latest saved file at each push,
 // never its live edits. An open copy elsewhere takes it only after closing.
 type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
@@ -832,6 +865,11 @@ export function NoticeCenter(props: {
   conflictSummaries: string[];
   onOpenHistory: () => void;
   onOpenSettings: () => void;
+  // While dohc can't confirm the workspace's account: Try again reads the
+  // account again, the way Settings' Try again does, and Sync settings opens
+  // Settings at the workspace's sync row.
+  onConfirmSyncAccount?: () => void;
+  onOpenSyncSettings?: () => void;
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
@@ -1395,14 +1433,13 @@ export function NoticeCenter(props: {
         } Your changes stay on this computer.`,
         Icon: CloudOff,
       });
-    } else if (state === "cloud-disconnected") {
-      next.push({
-        id: "cloud-disconnected",
-        tone: "warning",
-        title: "Server disconnected",
-        body: "Local work is safe. Reconnect your server when you want sync again.",
-        Icon: CloudOff,
-      });
+    } else if (state === "account-unconfirmed") {
+      next.push(accountUnconfirmedNotice({
+        workspaceId: props.workspaceId,
+        reason: props.syncStatus?.accountUnconfirmed,
+        onTryAgain: props.onConfirmSyncAccount,
+        onOpenSyncSettings: props.onOpenSyncSettings,
+      }));
     }
 
     for (const pending of props.syncStatus?.ownerAdmissionPending ?? []) {
@@ -1528,6 +1565,8 @@ export function NoticeCenter(props: {
     props.onOpenHistory,
     props.onRefreshShareView,
     props.onOpenSettings,
+    props.onConfirmSyncAccount,
+    props.onOpenSyncSettings,
     props.onRebuildEngineStore,
     props.onReviewShareChanges,
     props.shareChangeNotices,
