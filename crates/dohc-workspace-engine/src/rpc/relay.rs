@@ -1108,10 +1108,25 @@ impl EngineService {
         answer
     }
 
+    pub(super) async fn release_fetched_pull(
+        open: &OpenWorkspace,
+        page: &dohc_engine_sync::PreparedOrdinaryPull,
+    ) -> Result<(), WireError> {
+        open.actor
+            .abandon_prepared_pull(
+                open.workspace_id.clone(),
+                page.pull_token().to_owned(),
+                page.previous_pull_token().map(str::to_owned),
+            )
+            .await
+            .map(|_| ())
+            .map_err(map_runtime)
+    }
+
     async fn abandon_fetched_pull(
         &self,
         open: &OpenWorkspace,
-        token: String,
+        page: &dohc_engine_sync::PreparedOrdinaryPull,
     ) -> Result<(), WireError> {
         let held = open
             .actor
@@ -1120,11 +1135,7 @@ impl EngineService {
             .unwrap_or(true);
         let answer = self
             .wake_after_abandoned_pull(&RequestContext::unbounded(), open, async {
-                open.actor
-                    .abandon_prepared_pull(open.workspace_id.clone(), token)
-                    .await
-                    .map(|_| ())
-                    .map_err(map_runtime)
+                Self::release_fetched_pull(open, page).await
             })
             .await;
         if !held {
@@ -1296,10 +1307,10 @@ impl EngineService {
             guard = open.pending_pull.lock() => guard,
         };
         if let Some(previous) = pending.take() {
-            self.abandon_fetched_pull(&open, previous.page.pull_token().to_owned())
+            self.abandon_fetched_pull(&open, &previous.page)
                 .await?;
         }
-        let mut fetched_token = None;
+        let mut fetched_page = None;
         let answer = async {
             let outcome = self
                 .relay_execute(
@@ -1320,7 +1331,7 @@ impl EngineService {
                     "unexpected pull fetch outcome",
                 ));
             };
-            fetched_token = Some(page.pull_token().to_owned());
+            fetched_page = Some(Arc::clone(&page));
             if !Arc::ptr_eq(&self.open(handle.as_ref())?, &open) {
                 return Err(workspace_unavailable());
             }
@@ -1334,8 +1345,8 @@ impl EngineService {
         }
         .await;
         if answer.is_err() {
-            if let Some(token) = fetched_token {
-                self.abandon_fetched_pull(&open, token).await?;
+            if let Some(page) = fetched_page {
+                self.abandon_fetched_pull(&open, &page).await?;
             } else if matches!(
                 open.actor
                     .ordinary_pull_unfinished(open.workspace_id.clone())
@@ -1375,7 +1386,7 @@ impl EngineService {
         }
         let page = pending.take().expect("validated pull page").page;
         drop(pending);
-        let pull_token = page.pull_token().to_owned();
+        let held_page = Arc::clone(&page);
         let answer = async {
         // A Collections update already admitted under the gate runs before
         // this pull places a page, and none is admitted until the pull is
@@ -1408,7 +1419,7 @@ impl EngineService {
         if matches!(&outcome, RelayOperationOutcome::PullRetry) {
             drop(pulling);
             open.pull_repair_retries.fetch_add(1, Ordering::SeqCst);
-            self.abandon_fetched_pull(&open, pull_token.clone()).await?;
+            self.abandon_fetched_pull(&open, &held_page).await?;
             eprintln!("engine: sync pull retry: waiting for repairs");
             return Ok(json!({"status": "retry"}));
         }
@@ -1496,7 +1507,7 @@ impl EngineService {
         Ok(result)
         }.await;
         if answer.is_err() {
-            self.abandon_fetched_pull(&open, pull_token).await?;
+            self.abandon_fetched_pull(&open, &held_page).await?;
         }
         answer
     }
@@ -4406,6 +4417,142 @@ mod tests {
         let state = f.collections_rows();
         f.close().await;
         state
+    }
+
+    async fn held_second_page(
+        workspace_id: &'static str,
+    ) -> (PagedRelay, CursorFixture, String) {
+        let (relay, f) = half_pull_fixture(workspace_id, true).await;
+        relay.release();
+        let first = pull(&f).await.expect("page one");
+        assert_eq!(first["hasMore"], json!(true));
+        commit_page(&f, &first).await.expect("commit page one");
+        let earlier = f.pull_token().expect("page one remains unfinished");
+        f.service
+            .sync_fetch_pull(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({"workspaceId": workspace_id}),
+            )
+            .await
+            .expect("hold page two");
+        assert_ne!(f.pull_token().as_ref(), Some(&earlier));
+        (relay, f, earlier)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closing_with_page_two_held_restores_the_unfinished_pass() {
+        let (_relay, f, earlier) = held_second_page("close-held-page-two").await;
+        let f = f.restart().await;
+        assert_eq!(f.pull_token(), Some(earlier));
+        assert!(f.collections_waiting().await);
+        assert!(f.source_relates_to_target());
+        write_inside_the_collection(&f).await;
+        let second = pull(&f).await.expect("page two after restart");
+        commit_page(&f, &second).await.expect("commit page two");
+        assert!(!f.collections_waiting().await);
+        assert!(!f.owed());
+        assert!(f.source_relates_to_target());
+        assert_eq!(f.edges(), 2);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn refusing_page_two_restores_the_token_for_the_next_fetch() {
+        let (_relay, f, earlier) = held_second_page("refuse-held-page-two").await;
+        let conn = f.engine_db();
+        let claim = dohc_engine_storage::hex_sha256(
+            &dohc_engine_collab::Ydoc::wire().encode_full_state(),
+        );
+        let payload = json!({
+            "versionId": "main", "objectId": "moved", "path": "tasks/moved.md",
+            "contentKind": "plaintext", "lineageClaimId": claim,
+            "updateBlobSha256": claim, "isBaseState": true,
+        });
+        conn.execute(
+            "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES (?1,'moved',1000)",
+            [f.workspace_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime,updated_at_ms,path,lineage_claim_status,lineage_claim_id) \
+             VALUES (?1,'main','moved','plaintext','replicated',1000,'tasks/moved.md','exact',?2)",
+            rusqlite::params![f.workspace_id, claim],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) \
+             VALUES (?1,'repair-peer',0,'ydoc.update',?2,1000,1,'applied')",
+            rusqlite::params![f.workspace_id, payload.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) \
+             VALUES (?1,'main','moved',?2,'repair-peer',0)",
+            rusqlite::params![f.workspace_id, claim],
+        )
+        .unwrap();
+        let token = f
+            .open
+            .pending_pull
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .token
+            .clone();
+        let answer = f
+            .service
+            .sync_apply_pull(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id, "pageToken": token}),
+            )
+            .await
+            .expect("refuse the changed repairs");
+        assert_eq!(answer["status"], json!("retry"));
+        assert_eq!(f.pull_token().as_ref(), Some(&earlier));
+        assert!(f.collections_waiting().await);
+        assert!(f.owed());
+        assert!(f.source_relates_to_target());
+        conn.execute(
+            "DELETE FROM ydoc_base_relay_candidates WHERE object_id='moved'",
+            [],
+        )
+        .unwrap();
+        f.service
+            .sync_fetch_pull(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id}),
+            )
+            .await
+            .expect("the next fetch");
+        f.service
+            .workspace_close(Some(f.handle.clone()))
+            .await
+            .expect("drop the next fetched page");
+        assert_eq!(f.pull_token(), Some(earlier));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn replacing_page_two_restores_the_earlier_pass_before_fetching() {
+        let (relay, f, earlier) = held_second_page("replace-held-page-two").await;
+        lock(&relay.ops).last_mut().expect("page two")["originSeq"] = json!(-1);
+        let answer = f
+            .service
+            .sync_fetch_pull(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id}),
+            )
+            .await;
+        assert!(answer.is_err(), "the replacement fetch is invalid");
+        assert_eq!(f.pull_token(), Some(earlier));
+        assert!(f.collections_waiting().await);
+        assert!(f.owed());
+        assert!(f.source_relates_to_target());
+        f.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

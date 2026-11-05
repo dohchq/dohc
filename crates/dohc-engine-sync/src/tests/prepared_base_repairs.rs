@@ -735,3 +735,45 @@ fn prepared_repairs_leave_a_changed_candidate_group_for_the_next_fetch() {
     apply(&mut store, &page);
     assert_eq!(remaining(&store), 0);
 }
+
+#[test]
+fn a_refused_second_page_restores_the_token_read_by_the_next_fetch() {
+    let (_scratch, _path, mut store) = open_store();
+    let claim =
+        dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let relay = touching(seed(&mut store, &["doc".into()], &claim), "doc");
+    let identity = crate::read_sync_identity(&store, "ws").unwrap().unwrap();
+    let earlier = match crate::cursor::begin_ordinary_pull(&mut store, &identity, &NoFaults)
+        .unwrap()
+    {
+        TxnOutcome::Committed(token) => token,
+        TxnOutcome::Crashed { .. } => panic!("begin earlier pass"),
+    };
+    let client = RelaySyncClient::new(relay);
+    for _ in 0..2 {
+        let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+        change_candidate(&mut store);
+        assert!(matches!(
+            client.apply_pull(
+                &mut store,
+                &mut Default::default(),
+                "ws",
+                &page,
+                &NoFaults,
+                &crate::NoLiveLeases,
+                2_000,
+            ),
+            Err(RelayError::RepairPending)
+        ));
+        let token: Option<String> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(token.as_ref(), Some(&earlier));
+    }
+}

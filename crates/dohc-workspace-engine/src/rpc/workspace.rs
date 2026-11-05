@@ -1533,13 +1533,7 @@ impl EngineService {
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
             if let Some(pending) = pending {
-                let _ = removed
-                    .actor
-                    .abandon_prepared_pull(
-                        removed.workspace_id.clone(),
-                        pending.page.pull_token().to_owned(),
-                    )
-                    .await;
+                let _ = Self::release_fetched_pull(&removed, &pending.page).await;
             }
             let finished = tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),

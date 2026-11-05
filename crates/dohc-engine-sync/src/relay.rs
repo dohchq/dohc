@@ -827,11 +827,16 @@ pub struct PreparedOrdinaryPull {
     has_more: bool,
     repairs: BaseRepairAnswers,
     pull_token: String,
+    previous_pull_token: Option<String>,
 }
 
 impl PreparedOrdinaryPull {
     pub fn pull_token(&self) -> &str {
         &self.pull_token
+    }
+
+    pub fn previous_pull_token(&self) -> Option<&str> {
+        self.previous_pull_token.as_deref()
     }
 }
 
@@ -2648,7 +2653,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
-        let pull_token = {
+        let (pull_token, previous_pull_token) = {
             let mut fetching = self
                 .continuation
                 .1
@@ -2660,7 +2665,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if fetch.identity == identity
                         && previous.as_deref() == Some(fetch.token.as_str()) =>
                 {
-                    fetch.token.clone()
+                    (fetch.token.clone(), fetch.previous.clone())
                 }
                 Some(_) => return Err(RelayError::InvalidResponse),
                 None => {
@@ -2673,9 +2678,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     *fetching = Some(FetchPullToken {
                         identity: identity.clone(),
                         token: token.clone(),
-                        previous,
+                        previous: previous.clone(),
                     });
-                    token
+                    (token, previous)
                 }
             }
         };
@@ -2744,6 +2749,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             has_more,
             repairs,
             pull_token,
+            previous_pull_token,
         })
     }
 
@@ -2860,7 +2866,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             store,
                             workspace_id,
                             prepared.pull_token(),
-                            None,
+                            prepared.previous_pull_token(),
                             faults,
                         )?;
                         return Err(RelayError::RepairPending);
