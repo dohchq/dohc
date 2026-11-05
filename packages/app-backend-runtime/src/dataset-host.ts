@@ -21,7 +21,7 @@ import { createDatasetReplicaHost } from "./replica-host.js";
 import { datasetHistoryLineage, historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled, hasUncommittedDatasetAttempts } from "./dataset-attempts.js";
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
-import { DatasetHostError, DatasetBindingPendingAttemptError } from "@dohc/app-backend-runtime/dataset-error";
+import { DatasetHostError, DatasetBindingPendingAttemptError, DatasetNotArchivedError } from "@dohc/app-backend-runtime/dataset-error";
 export { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 
 export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
@@ -412,6 +412,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       journal.destroy({ expected, authorize: () => { owner(context,key); }, cleanup() {
           revision(key);
           if (raw.reviewToken !== reviewToken(key,expected)) throw new DatasetHostError("conflict", "Collection access changed. Review deletion again.");
+          if (!lifecycle(key).archived) throw new DatasetNotArchivedError();
           if (options.deleteResources) synchronous(() => options.deleteResources!(context,key));
           automations.forget(key);
           for (const table of ["dohc_dataset_import_records", "dohc_dataset_import_metadata", "dohc_dataset_import_checkpoints", "dohc_dataset_recovered_permissions"])

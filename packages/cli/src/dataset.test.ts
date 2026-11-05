@@ -3,6 +3,7 @@ import { parseCliArguments } from "./args";
 import { executeCli } from "./index";
 import { CLI_PROTOCOL_VERSION, cliRequestSchema, parseCliResult } from "./protocol";
 import { DatasetRequest, DatasetResult } from "./dataset";
+import { DohcCliError } from "./errors";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const definition = {formatVersion:1,datasetId:id(1),name:"Equipment",schemaPath:"equipment/schema.sql",operationsPath:"equipment/actions.ts",
@@ -184,6 +185,13 @@ it("requires an exact deletion review and explicit acknowledgment before transpo
   expect(send).not.toHaveBeenCalled();
   expect((await executeCli({argv:["dataset","delete",JSON.stringify(request)],request:send})).exitCode).toBe(0);
   expect(() => parseCliResult("dataset",{kind:"deleted",deleted:true,datasetId:id(1),records:[]})).toThrow();
+});
+
+it("tells an agent to archive a Collection before deleting it", async () => {
+  const request = {workspaceId:"workspace",datasetPath:"equipment/dataset.json",expected:cursor,reviewToken:"c".repeat(64),acknowledge:true};
+  const send = vi.fn(async () => { throw new DohcCliError("dohc: This Collection isn't archived. Archive it before you delete it permanently."); });
+  expect(await executeCli({argv:["dataset","delete",JSON.stringify(request)],request:send}))
+    .toEqual({exitCode:1,stdout:"",stderr:"dohc: This Collection isn't archived. Archive it before you delete it permanently.\n"});
 });
 
 it("accepts an expected Collection identity and derives migration source from its address", () => {

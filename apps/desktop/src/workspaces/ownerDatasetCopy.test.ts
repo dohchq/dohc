@@ -102,6 +102,7 @@ it.each(["delete", "status", "closing"])("erases a cached Collection after confi
     holdMutation=true;
     const pendingMutation=copy.data(remote,source,signal).invoke({...read,operationId:id(5),idempotencyKey:"pending"}).then(value=>({value}),error=>({error}));
     await started;
+    host.archiveDataset(actor,scope);
     const preview=host.deletePreview(actor,scope),deletion={datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
     if(mode==="closing") {
       const deletionRequest=copy.data(remote,source,signal).deleteDataset!(deletion);await deleting;
