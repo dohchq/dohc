@@ -788,6 +788,93 @@ mod relay_hosted_origin_tests;
 mod deferred_relay_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_push_write_runs_to_its_answer_after_a_cancel() {
+        let (_scratch, path, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .unwrap();
+        adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1_000, &NoFaults,
+        )
+        .unwrap();
+        drop(store);
+
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&path, 1_100).unwrap().actor;
+        let token = CancellationToken::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let io_started = Arc::clone(&started);
+        let io_release = Arc::clone(&release);
+        let push = actor.relay_with_io(
+            false,
+            RelayOperation::Push {
+                workspace_id: "ws".into(),
+                now_ms: 1_200,
+                max_read_bytes: 0,
+            },
+            LeaseRegistry::default(),
+            token.clone(),
+            None,
+            move |request, _token| {
+                let started = Arc::clone(&io_started);
+                let release = Arc::clone(&io_release);
+                async move {
+                    let RelayIoRequest::Push(request) = request else {
+                        panic!("unexpected request: {request:?}");
+                    };
+                    assert!(request.ops.is_empty(), "the first push enrolls the workspace");
+                    assert_eq!(request.after_seq, -1);
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(RelayIoResponse::Push(PushResponse {
+                        settlement_refusals: Vec::new(),
+                        hosted_refusals: Vec::new(),
+                        redundant_recoveries: Vec::new(),
+                        accepted: 0,
+                        inserted: 0,
+                        skipped: 0,
+                        current_max_origin_seq: -1,
+                    }))
+                }
+            },
+        );
+        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(push, async {
+                started.notified().await;
+                token.cancel();
+                release.notify_one();
+            })
+        })
+        .await
+        .expect("the push must start and finish after its answer is released");
+        supervisor.close(&path).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                    pushed: 0,
+                    has_more: false,
+                    ..
+                }))
+            ),
+            "the push must consume its answer after cancellation: {outcome:?}"
+        );
+        let store = EngineStore::open(&path, 1_300).unwrap();
+        let pushed_seq = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT pushed_seq FROM sync_relay_push_state \
+                     WHERE workspace_id='ws' AND origin_id='local'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("the probe answer must record enrollment");
+        assert_eq!(pushed_seq, -1);
+    }
+
     #[test]
     fn a_fetch_keeps_one_token_across_io_and_restores_earlier_progress_on_failure() {
         let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
