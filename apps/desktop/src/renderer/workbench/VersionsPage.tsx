@@ -1,8 +1,10 @@
 import { Check, Layers, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
+import { readError, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
+import type { ErrorDetailField } from "../shell/copyDetails";
 import { EmptyState, IconButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
@@ -18,35 +20,84 @@ interface ConflictCount { count: number; more: boolean }
 const CONFLICT_PAGES_MAX = 5;
 
 // Where the tab's failed reads go: a row in Notices, which onSettled takes back.
+// `quiet` changes the row where it stands, with no new toast. `details` take
+// the place of the error's own lines in Copy details.
 interface ReadReports {
-  onError: (fallback: string, error: unknown, retry: () => void, identity: string) => void;
+  onError: (fallback: string, error: unknown, retry: () => void, identity: string,
+    options: { quiet: boolean; details?: ReadonlyArray<ErrorDetailField> }) => void;
   onSettled: (identity: string) => void;
 }
 
-// One read's row in Notices. A read that keeps failing files it once, until
-// the read works again, which takes the row back, or its Try again runs.
-function useReadNotice(reports: ReadReports, read: string, fallback: string, retry: () => void) {
+type Read = "last-changes" | "counts" | "conflicts";
+// A read's sentence when it fails alone, and its line in Copy details when
+// it fails with another.
+const READS: Record<Read, { failed: string; label: string }> = {
+  "last-changes": { failed: "dohc could not read when each version last changed.", label: "When each version last changed" },
+  counts: { failed: "dohc could not count the files that differ from Main.", label: "Files that differ from Main" },
+  conflicts: { failed: "dohc could not read which merges have files to decide.", label: "Merges with files to decide" },
+};
+export const READS_FAILED = "dohc could not finish loading Versions.";
+
+// The page's one row in Notices, for every read that fails, as when the
+// engine goes away. It toasts once. A read that fails or works while the row
+// stands changes it where it stands. The row goes once every read works
+// again, or its Try again runs.
+function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) => void) {
   // Each page has its own row, since a split can show two.
-  const identity = `${read}:${useId()}`;
-  const filed = useRef(false);
+  const identity = `versions-reads:${useId()}`;
+  const [failures, setFailures] = useState<ReadonlyMap<Read, unknown>>(new Map());
+  const current = useRef(failures);
+  current.current = failures;
+  // The reads the row names, or null with no row.
+  const filed = useRef<string | null>(null);
   // Its Try again reads for this page, so the row goes with the page, as when
   // its tab closes or another tab shows in its place.
   useEffect(() => () => {
-    if (filed.current) reports.onSettled(identity);
+    if (filed.current !== null) reports.onSettled(identity);
   }, []);
-  return {
-    failed(error: unknown) {
-      if (filed.current) return;
-      filed.current = true;
-      reports.onError(fallback, error, () => {
-        filed.current = false;
-        retry();
-      }, identity);
-    },
-    worked() {
-      if (!filed.current) return;
-      filed.current = false;
+  const reads = (Object.keys(READS) as Read[]).filter((read) => failures.has(read));
+  const key = reads.length === 0 ? null : reads.join(" ");
+  useEffect(() => {
+    if (key === filed.current) return;
+    const quiet = filed.current !== null;
+    filed.current = key;
+    if (key === null) {
       reports.onSettled(identity);
+      return;
+    }
+    const again = () => {
+      const failed = [...current.current.keys()];
+      filed.current = null;
+      setFailures(new Map());
+      retry(failed);
+    };
+    const errors = reads.map((read) => failures.get(read));
+    if (errors.length === 1) {
+      reports.onError(READS[reads[0]!].failed, errors[0], again, identity, { quiet });
+      return;
+    }
+    // The error's words, such as the engine's "Try again in a moment.", only
+    // when every read failed with the same words.
+    const shared = new Set(errors.map((error) => withErrorWords(READS_FAILED, error))).size === 1;
+    reports.onError(READS_FAILED, shared ? errors[0] : undefined, again, identity, {
+      quiet,
+      details: reads.map((read): ErrorDetailField => {
+        const { cause, words } = readError(failures.get(read));
+        return [READS[read].label, cause ?? words ?? "No message"];
+      }),
+    });
+  }, [key]);
+  return {
+    failed(read: Read, error: unknown) {
+      setFailures((now) => (now.has(read) ? now : new Map(now).set(read, error)));
+    },
+    worked(read: Read) {
+      setFailures((now) => {
+        if (!now.has(read)) return now;
+        const next = new Map(now);
+        next.delete(read);
+        return next;
+      });
     },
   };
 }
@@ -83,10 +134,15 @@ export function VersionsPage(props: {
 
   const versionIds = snapshot?.versions.map((version) => version.id).join("\n") ?? null;
 
+  // Try again reads again each read that had failed.
+  const notice = useReadsNotice(props, (reads) => {
+    if (reads.includes("last-changes")) setLastChangesRetry((attempt) => attempt + 1);
+    if (reads.includes("counts")) recount(failedCounts.current);
+    if (reads.includes("conflicts")) setConflictsRetry((attempt) => attempt + 1);
+  });
+
   const [lastChangesFailed, setLastChangesFailed] = useState(false);
   const [lastChangesRetry, setLastChangesRetry] = useState(0);
-  const lastChangesNotice = useReadNotice(props, "versions-last-changes", "dohc could not read when each version last changed.",
-    () => setLastChangesRetry((attempt) => attempt + 1));
   const lastChangeReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     if (versionIds === null) return;
@@ -94,7 +150,7 @@ export function VersionsPage(props: {
     bridge().listVersionLastChanges({ workspaceId }).then(
       (result) => {
         if (!lastChangeReads.isCurrent(token)) return;
-        lastChangesNotice.worked();
+        notice.worked("last-changes");
         setLastChangesFailed(false);
         setLastChanges(new Map(result.versions.map((entry) => [entry.versionId, entry.lastChange])));
       },
@@ -103,7 +159,7 @@ export function VersionsPage(props: {
         // The rows still show, sorted by when each version was made.
         setLastChanges((current) => current ?? new Map());
         setLastChangesFailed(true);
-        lastChangesNotice.failed(error);
+        notice.failed("last-changes", error);
       },
     );
   }, [workspaceId, versionIds, props.historyKey, props.versionKey, lastChangesRetry]);
@@ -119,18 +175,16 @@ export function VersionsPage(props: {
   const countOrder = useRef<string[]>([]);
   countOrder.current = ordered.filter((version) => version.kind !== "main").map((version) => version.id);
   const activeVersionId = snapshot?.activeVersionId ?? null;
-  // One row in Notices while a version shown has a failed count. Its Try
+  // A failed count stays in Notices while a version shown has one. Its Try
   // again counts every one of them again.
   const countErrors = useRef(new Map<string, unknown>());
   const failedCounts = useRef<string[]>([]);
   failedCounts.current = countOrder.current.filter((versionId) => counts.get(versionId) === "failed");
-  const countsNotice = useReadNotice(props, "versions-counts", "dohc could not count the files that differ from Main.",
-    () => recount(failedCounts.current));
   const failedKey = failedCounts.current.join("\n");
   useEffect(() => {
     const first = failedCounts.current[0];
-    if (first === undefined) countsNotice.worked();
-    else countsNotice.failed(countErrors.current.get(first));
+    if (first === undefined) notice.worked("counts");
+    else notice.failed("counts", countErrors.current.get(first));
   }, [failedKey]);
   // Counting waits for the first listing, so it runs in the order the rows show.
   const listed = lastChanges !== null;
@@ -205,8 +259,6 @@ export function VersionsPage(props: {
   }, [activeVersionId]);
 
   const [conflictsRetry, setConflictsRetry] = useState(0);
-  const conflictsNotice = useReadNotice(props, "versions-conflicts", "dohc could not read which merges have files to decide.",
-    () => setConflictsRetry((attempt) => attempt + 1));
   const conflictReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     if (versionIds === null) return;
@@ -230,10 +282,10 @@ export function VersionsPage(props: {
           if (after === null) break;
         }
       } catch (error) {
-        if (conflictReads.isCurrent(token)) conflictsNotice.failed(error);
+        if (conflictReads.isCurrent(token)) notice.failed("conflicts", error);
         return;
       }
-      conflictsNotice.worked();
+      notice.worked("conflicts");
       // The pages ran out before the list did, so every count is a lower bound.
       if (after !== null) for (const [id, entry] of found) found.set(id, { ...entry, more: true });
       setConflictCounts(found);

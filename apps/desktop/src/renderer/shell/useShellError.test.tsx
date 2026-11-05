@@ -616,6 +616,21 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("changes a part's row where it stands when it reports quietly, with the Copy details it passes", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const engineDown = new Error("EngineDaemonUnavailableError: Rust engine daemon exited.");
+    act(() => result.current.reportButtonError("dohc could not read when each version last changed.", engineDown, vi.fn(), "versions-reads:a"));
+    const [before] = result.current.shellErrors;
+    const retry = vi.fn();
+    act(() => result.current.reportButtonError("dohc could not finish loading Versions.", engineDown, retry, "versions-reads:a",
+      { quiet: true, details: [["When each version last changed", "a"], ["Merges with files to decide", "b"]] }));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({
+      id: before!.id, atMs: before!.atMs, seen: false, retry, message: "dohc could not finish loading Versions. Try again in a moment.",
+    });
+    expect(errorDetails(result.current.shellErrors[0]!.details!)).toBe("When each version last changed: a\nMerges with files to decide: b");
+  });
+
   it("files a quiet failure as a row without a toast, and keeps an open toast open", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
