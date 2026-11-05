@@ -61,7 +61,7 @@ it("turns alerts on and off through the account session, forwarding nothing else
   const sent = f.forwarded.at(-1)!;
   expect(new URL(sent.url).pathname).toBe("/sync/push/subscribe");
   expect(Object.fromEntries(sent.headers)).toEqual({cookie: `${cookieName}=alice`, origin, "x-dohc-relay-exchange-key": exchangeKey,
-    "content-type": "application/json"});
+    "content-type": "application/json", "x-dohc-api-version": "1"});
   expect(await (await f.web.handle(status("bob"))).json()).toMatchObject({enabled: false, fingerprint: null});
   expect(await (await f.web.handle(request("unsubscribe", "alice", {installationId}))).json()).toMatchObject({enabled: false});
   expect(await (await f.web.handle(status())).json()).toMatchObject({enabled: false});
