@@ -13,19 +13,13 @@ const window = (destroyed: boolean) => ({ isDestroyed: () => destroyed }) as Bro
 beforeEach(() => vi.clearAllMocks());
 
 describe("showMessageBox", () => {
-  it("titles a box that has no title dohc", async () => {
+  it("titles a box that has no title dohc, and gives it push buttons", async () => {
     await showMessageBox({ message: "Do you trust the authors of the files in this workspace?" });
     expect(electron.dialog.showMessageBox).toHaveBeenCalledWith({
       title: "dohc",
       noLink: true,
       message: "Do you trust the authors of the files in this workspace?",
     });
-  });
-
-  // Windows draws a label it doesn't know as a command link unless noLink is set.
-  it("gives every box push buttons", async () => {
-    await showMessageBox({ message: "dohc could not keep your typing on this computer.", buttons: ["Go back", "Quit anyway"] });
-    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ noLink: true }));
   });
 
   it("keeps a box's own title", async () => {
