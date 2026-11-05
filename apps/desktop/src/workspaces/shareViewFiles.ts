@@ -956,11 +956,11 @@ export function createShareViewFiles(
         : outcome;
     };
 
-    let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
-    if (target.ended) {
-      outcome = localOutcome("ended");
-    } else {
-      try {
+    try {
+      let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
+      if (target.ended) {
+        outcome = localOutcome("ended");
+      } else {
         const relay = await dependencies.resolveRelay(target);
         if (relay === null) {
           outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
@@ -1006,25 +1006,25 @@ export function createShareViewFiles(
                   onCursorCommitted,
                 });
         }
-      } catch (error) {
-        // The capture set the record aside, so a refresh that then fails
-        // says so too.
-        if (target.kind !== "standalone" || !recovered.collisionRecordQuarantined) throw error;
-        return {
-          kind: "refresh",
-          outcome: { ...standaloneShareViewFailureOutcome(error, localChanges), ...setAsideCollisionRecord(recovered) },
-        };
       }
+      if (
+        "ok" in outcome
+          ? outcome.ok && outcome.status === "ended"
+          : outcome.status === "ended"
+      ) {
+        await dependencies.markEnded(target);
+        await dependencies.retireTarget(target);
+      }
+      return { kind: "refresh", outcome };
+    } catch (error) {
+      // The capture set the record aside, so a refresh that then fails
+      // says so too.
+      if (target.kind !== "standalone" || !recovered.collisionRecordQuarantined) throw error;
+      return {
+        kind: "refresh",
+        outcome: { ...standaloneShareViewFailureOutcome(error, localChanges), ...setAsideCollisionRecord(recovered) },
+      };
     }
-    if (
-      "ok" in outcome
-        ? outcome.ok && outcome.status === "ended"
-        : outcome.status === "ended"
-    ) {
-      await dependencies.markEnded(target);
-      await dependencies.retireTarget(target);
-    }
-    return { kind: "refresh", outcome };
   }
 
   async function recordRecoveredPaths(target: ActiveShareViewFilesTarget, captured: CaptureSharedViewLocalDivergenceOutcome): Promise<void> {
