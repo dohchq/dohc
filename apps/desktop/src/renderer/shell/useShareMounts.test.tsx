@@ -248,3 +248,29 @@ it("lets only the newest refresh write a share's rows", async () => {
   expect(reportShellFailure).not.toHaveBeenCalled();
   vi.unstubAllGlobals();
 });
+
+// The older refresh set the record aside, so the newer one finds no record to
+// report. The older refresh's row is the only one the person gets.
+it("files an older refresh's set-aside row", async () => {
+  let finishOlder!: (value: unknown) => void;
+  const refresh = vi.fn()
+    .mockReturnValueOnce(new Promise((done) => { finishOlder = done; }))
+    .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0 }] });
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const { result, reportShellFailure } = mountRows();
+
+  let older!: Promise<void>;
+  act(() => { older = result.current.refreshShareMounts(); });
+  await act(async () => { await result.current.refreshShareMounts(); });
+  expect(reportShellFailure).not.toHaveBeenCalled();
+
+  await act(async () => {
+    finishOlder({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }] });
+    await older;
+  });
+  expect(reportShellFailure).toHaveBeenCalledOnce();
+  expect(reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({
+    identity: "share-mount-collision-record-set-aside:share-1",
+  }));
+  vi.unstubAllGlobals();
+});
