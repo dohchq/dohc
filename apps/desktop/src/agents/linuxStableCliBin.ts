@@ -101,8 +101,8 @@ const LAUNCHER_NODE = /^NODE="\$\{0%\/\*\}\/(node-[0-9a-f]{64})"$/m;
 // quit or crash cut short. A Node.js that neither the launcher nor this release
 // names is from an earlier release. Each can be 120 MB. The Node.js an earlier
 // launcher names goes on the refresh after the one that replaces that launcher.
-// Only a missing launcher names no Node.js. If the launcher exists but can't be
-// read, the Node.js it names is unknown, so this refresh removes nothing.
+// A missing launcher names nothing. A launcher that exists but can't be read
+// may name any Node.js here, so that refresh removes nothing.
 async function removeLeftovers(targetDir: string, currentNode: string | undefined): Promise<void> {
   const launcher = await readFile(join(targetDir, "dohc-mcp"), "utf8").catch((cause: NodeJS.ErrnoException) =>
     cause.code === "ENOENT" ? "" : undefined,

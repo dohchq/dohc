@@ -204,6 +204,18 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
     expect(await refreshLinuxStableCliBin({ ...f, onError: () => {} })).toBe(f.targetDir);
   });
 
+  it("removes a cut-short copy and an earlier release's Node.js when there is no launcher yet", async () => {
+    const f = x64Fixture();
+    const earlierNode = `node-${createHash("sha256").update("an earlier release").digest("hex")}`;
+    mkdirSync(f.targetDir, { recursive: true });
+    writeFileSync(join(f.targetDir, `${f.nodeFileName}.tmp-1-cut`), "partial");
+    writeFileSync(join(f.targetDir, earlierNode), "earlier", { mode: 0o755 });
+
+    await syncLinuxStableCliBin(f);
+    expect(readdirSync(f.targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([f.nodeFileName]);
+  });
+
   it("keeps the Node.js its launcher names when the launcher can't be read, so a failed refresh still has it", async () => {
     const f = x64Fixture();
     await syncLinuxStableCliBin(f);
