@@ -95,8 +95,9 @@ import {
   mediaTypeForPath,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { createReadStream, existsSync, type Stats } from "node:fs";
+import { lstat, mkdir, open, readFile, realpath, rm, type FileHandle } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
@@ -1782,9 +1783,8 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   //      a symlinked ancestor outside the workspace;
   //   2. after mkdir, the real parent directory must still resolve inside
   //      the root;
-  //   3. the leaf itself must not be a symlink — writeFile follows symlinks,
-  //      so an unchecked leaf would redirect engine content outside the
-  //      workspace (or clobber an arbitrary user file).
+  //   3. the leaf itself must not be a symlink. The write replaces the leaf,
+  //      so a link there would silently become a plain file.
   async function assertContainedDir(absoluteDir: string): Promise<void> {
     const [realRoot, realDir] = await Promise.all([
       realpath(resolve(rootPath)),
@@ -1814,15 +1814,16 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       candidate = parent;
     }
   }
-  async function assertLeafNotSymlink(absolutePath: string): Promise<void> {
+  async function assertLeafNotSymlink(absolutePath: string): Promise<Stats | undefined> {
     try {
       const info = await lstat(absolutePath);
       if (info.isSymbolicLink()) {
         throw new Error(`Engine refused to write through a symlink: ${absolutePath}`);
       }
+      return info;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") return;
+      if (code === "ENOENT" || code === "ENOTDIR") return undefined;
       throw error;
     }
   }
@@ -1849,10 +1850,21 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       access: "entry",
     });
   }
+  // Each target has one temp name, and the chain writes one file at a time.
+  // A temp left by a stopped write can hold a secret's plaintext, so the next
+  // write or delete of that target removes it. The name is lowercased, so a
+  // case-variant spelling on a case-insensitive disk finds the same temp.
+  function temporaryFor(target: string): string {
+    const name = createHash("sha256").update(basename(target).toLowerCase()).digest("hex").slice(0, 16);
+    return join(dirname(target), `.dohc-write-${name}.tmp`);
+  }
   // Text and bytes take the same four checks in the same order, so they take
-  // one path through them. writeFile defaults a string to UTF-8 and ignores
-  // the encoding for a Uint8Array, so one call serves both. Two copies of a
-  // security sequence can drift; one cannot.
+  // one path through them. FileHandle.writeFile defaults a string to UTF-8
+  // and ignores the encoding for a Uint8Array, so one call serves both. Two
+  // copies of a security sequence can drift; one cannot.
+  // The bytes go to a flushed `.dohc-write-` sibling, which capture ignores,
+  // and a rename puts them in place. The target holds its old bytes or the
+  // new ones, never a cut-off file, even if the app stops mid-write.
   async function writeEngineFile(
     absolutePath: string,
     data: string | Uint8Array,
@@ -1864,8 +1876,25 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
-    await assertLeafNotSymlink(target);
-    await writeFile(target, data);
+    const replaced = await assertLeafNotSymlink(target);
+    await atomicReplaceFile(target, async (temporary) => {
+      const mode = replaced?.isFile() ? 0o600 : 0o666;
+      const handle = await open(temporary, "wx", mode).catch(async (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+        // A stopped write left it. Remove it rather than write through it.
+        await rm(temporary, { force: true });
+        return open(temporary, "wx", mode);
+      });
+      try {
+        if (replaced?.isFile()) await keepPermissions(handle, replaced);
+        await handle.writeFile(data);
+        await handle.sync();
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
+      }
+      await handle.close();
+    }, { temporary: temporaryFor(target), syncDirectory: true });
   }
   return {
     writeTextFile: writeEngineFile,
@@ -1880,8 +1909,26 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       // rm on a symlink removes the link itself, never the target, so a
       // symlink leaf needs no extra handling here.
       await rm(target, { force: true });
+      await rm(temporaryFor(target), { force: true });
     },
   };
+}
+
+// The temp takes the permission bits of the file it replaces, as the engine's
+// materializer does (`Replaced::apply_to` in materialize.rs). Group and other
+// bits stay only when the temp has the file's group or the two sets match, so
+// nobody gains access. The temp starts owner-only, so a failed copy leaves the
+// file owner-only and never fails the write.
+async function keepPermissions(handle: FileHandle, replaced: Stats): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    const temp = await handle.stat();
+    const bits = replaced.mode & 0o777;
+    const shared = temp.gid === replaced.gid || ((bits >> 3) & 0o7) === (bits & 0o7);
+    await handle.chmod((shared ? bits : bits & 0o700) | (temp.uid === replaced.uid ? 0 : 0o600));
+  } catch {
+    // The new bytes matter more than the copied mode.
+  }
 }
 
 // A person's own file change reads as a local file edit in History, as their

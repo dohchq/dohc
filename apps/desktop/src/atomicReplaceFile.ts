@@ -137,10 +137,16 @@ export async function atomicReplaceFile(
   dependencies: AsyncReplaceDependencies & {
     syncDirectory?: boolean;
     open?: (path: string, flags: string) => Promise<SyncHandle>;
+    /** A sibling of `destination` that nothing else uses. */
+    temporary?: string;
   } = {},
 ): Promise<void> {
-  const { syncDirectory = false, open: openDirectory = open, platform = process.platform } = dependencies;
-  const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
+  const {
+    syncDirectory = false,
+    open: openDirectory = open,
+    platform = process.platform,
+    temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`,
+  } = dependencies;
   try {
     await writeTemporary(temporary);
     await renameWithRetry(temporary, destination, dependencies);
