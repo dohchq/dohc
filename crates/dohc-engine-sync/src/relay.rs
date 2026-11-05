@@ -7314,8 +7314,8 @@ fn local(error: SyncError) -> RelayError {
 fn retryable_refusal<'a>(
     refusals: impl IntoIterator<Item = (&'a ReplicationEnvelope, &'static str)>,
 ) -> RelayError {
-    let mut refusals = refusals.into_iter();
-    let Some((op, reason)) = refusals.next() else {
+    let refusals: Vec<_> = refusals.into_iter().collect();
+    let Some(&(op, reason)) = refusals.first() else {
         return RelayError::Local("retryable-state".to_owned());
     };
     let object = crate::hosted::hosted_document(op)
@@ -7327,11 +7327,25 @@ fn retryable_refusal<'a>(
         op.origin_id,
         op.origin_seq,
     );
-    let remaining = refusals.count();
+    let remaining = refusals.len() - 1;
     if remaining > 0 {
         detail.push_str(&format!("; and {remaining} more"));
     }
-    RelayError::Local(detail)
+    // The relay served the update to this replica, and this replica holds a
+    // file at its path, so the replica's owner can already see that path.
+    let occupied = refusals
+        .iter()
+        .filter(|&&(op, reason)| {
+            reason == crate::ydoc_apply::PATH_OCCUPIED && op.op_kind == "ydoc.update"
+        })
+        .find_map(|&(op, _)| op.payload["path"].as_str());
+    match occupied {
+        Some(path) => RelayError::PathOccupied {
+            path: path.to_owned(),
+            detail,
+        },
+        None => RelayError::Local(detail),
+    }
 }
 
 /// A hosted feed request on a transport built for an ordinary replica.
@@ -7925,5 +7939,46 @@ mod refusal_tests {
         assert!(
             matches!(retryable_refusal([]), RelayError::Local(detail) if detail == "retryable-state")
         );
+    }
+
+    #[test]
+    fn an_occupied_path_refusal_names_the_path() {
+        let occupied = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "peer".into(),
+            origin_seq: 7,
+            relay_seq: Some(7),
+            op_kind: "ydoc.update".into(),
+            payload: serde_json::json!({"objectId": "apollo", "path": "notes/trip.txt"}),
+            recorded_at_ms: 0,
+        };
+        let earlier = ReplicationEnvelope {
+            origin_seq: 6,
+            payload: serde_json::json!({"objectId": "zeus", "path": "zeus.md"}),
+            ..occupied.clone()
+        };
+        let refusal = retryable_refusal([
+            (&earlier, "ydoc-resulting-head-pending"),
+            (&occupied, "ydoc.update path is occupied by another object"),
+        ]);
+        assert_eq!(
+            refusal,
+            RelayError::PathOccupied {
+                path: "notes/trip.txt".into(),
+                detail: "retryable-state: replication state is not ready: ydoc-resulting-head-pending (object zeus, origin peer seq 6); and 1 more".into(),
+            }
+        );
+        // The engine's log line names no path.
+        assert_eq!(
+            refusal.to_string(),
+            "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object zeus, origin peer seq 6); and 1 more",
+        );
+        // Another reason keeps the generic error, even when its op has a path.
+        assert!(matches!(
+            retryable_refusal([(&earlier, "ydoc-resulting-head-pending")]),
+            RelayError::Local(_)
+        ));
     }
 }
