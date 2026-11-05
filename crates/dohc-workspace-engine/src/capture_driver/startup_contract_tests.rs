@@ -151,6 +151,7 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
                 &cancel,
                 None,
                 policy_fingerprint(&env.root),
+                read_capture_policy(&env.root),
                 0,
                 &env.scan,
                 &env.observation,

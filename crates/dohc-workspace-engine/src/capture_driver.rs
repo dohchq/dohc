@@ -1524,6 +1524,8 @@ struct FilesLayer {
     files: FilesActor,
     watcher: crate::file_observation::CaptureWatch,
     policy_fingerprint: Option<u64>,
+    /// The rules the layer was built with.
+    rules: Arc<PolicyState>,
     refresh_epoch: u64,
 }
 
@@ -1568,6 +1570,7 @@ impl FilesLayer {
         cancel: &CancellationToken,
         seed: Option<(ScanManifest, ScanGeneration)>,
         policy_fingerprint: Option<u64>,
+        rules: PolicyState,
         refresh_epoch: u64,
         scan: &ScanGauge,
         observation: &Arc<crate::file_observation::FileObservation>,
@@ -1591,6 +1594,7 @@ impl FilesLayer {
                     files,
                     watcher,
                     policy_fingerprint,
+                    rules: Arc::new(rules),
                     refresh_epoch,
                 },
                 RootBoundRun { captured_root, run },
@@ -2356,7 +2360,7 @@ impl RealEnv {
     /// as a rescan.
     fn apply_context(&self, layer: &FilesLayer) -> ApplyRunContext<'_> {
         ApplyRunContext {
-            layer_rules: Some(layer.policy_fingerprint),
+            layer_rules: Some(layer.rules.clone()),
             ..self.apply_context_with(CaptureProvenance {
                 first_import: self.first_import.clone(),
                 carried: self.carried.clone(),
@@ -2469,6 +2473,7 @@ impl DriverEnv for RealEnv {
         // would swallow the edit (the seed reflects old policy while the
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
+        let rules_before_seed = read_capture_policy(&self.root);
         #[cfg(feature = "harness")]
         let mut manifest_phase =
             dohc_engine_storage::capture_phase::Phase::new("manifest_seed", None, 0, false);
@@ -2497,6 +2502,7 @@ impl DriverEnv for RealEnv {
             cancel,
             seed.into_scan_seed(),
             fingerprint_before_seed,
+            rules_before_seed,
             refresh_epoch,
             &self.scan,
             &self.observation,
@@ -2878,7 +2884,12 @@ impl DriverEnv for RealEnv {
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
         };
-        if tick == TickIo::Converged {
+        // A file a live session holds is not recorded yet, so it stays
+        // carried until the session lets it go.
+        if tick == TickIo::Converged
+            && self.carried.is_some()
+            && matches!(layer.files.handle().stats().await, Ok(stats) if stats.deferred == 0)
+        {
             self.carried = None;
         }
         self.actor
@@ -3068,8 +3079,8 @@ struct ApplyRunContext<'a> {
     apply_probe: Option<CaptureApplyProbe>,
     /// Set only for a fresh import's baseline.
     import_priority: Option<Arc<ImportPriority>>,
-    /// For a live pass, the rules fingerprint its layer was built with.
-    layer_rules: Option<Option<u64>>,
+    /// For a live pass, the rules its layer was built with.
+    layer_rules: Option<Arc<PolicyState>>,
 }
 
 struct CaptureThreadOutcome {
@@ -3517,8 +3528,8 @@ async fn apply_bound_run_with_handle(
             // was built, this pass records what the change found, as the
             // rebuild after it would, so it records as a rescan.
             if let Some(layer_rules) = layer_rules {
-                let rules = policy_fingerprint(&apply_root);
-                if rules.is_some() && rules != layer_rules {
+                let rules = sink.files_policy();
+                if matches!(rules, PolicyState::Known(_)) && rules != &*layer_rules {
                     record_as_rescan(sink.provenance_mut());
                 }
             }

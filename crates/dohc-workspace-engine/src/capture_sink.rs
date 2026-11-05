@@ -426,6 +426,7 @@ pub(crate) fn bound_sink_params(
 }
 
 /// Capture's view of `.dohc/files.toml`, split by why there are no rules.
+#[derive(PartialEq)]
 pub(crate) enum PolicyState {
     /// A real answer: absent (default policy), parsed rules, or a MALFORMED
     /// file — the last lands here as `Known(None)` under the ratified WS-F
@@ -601,6 +602,11 @@ impl StoreCaptureSink {
     /// Whether any op this run was held on an unavailable policy.
     pub fn policy_held(&self) -> bool {
         self.policy_held.get()
+    }
+
+    /// The rules this sink read when it was built.
+    pub(crate) fn files_policy(&self) -> &PolicyState {
+        &self.files_policy
     }
 
     /// The provenance this sink records with.

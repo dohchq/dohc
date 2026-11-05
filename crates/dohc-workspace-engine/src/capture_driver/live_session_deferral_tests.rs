@@ -3232,3 +3232,123 @@ async fn a_respelled_folder_sends_no_delete_after_its_write() {
     files.close().await;
     supervisor.close(&db).expect("close actor");
 }
+
+// A rescan found a new file while the person's editor held it. The session
+// keeps the file out of capture and nothing else is dirty, so the next tick
+// converges. The file stays carried until the session lets it go, then
+// records with the rescan's label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rescan_keeps_carrying_a_file_a_live_session_holds() {
+    use std::sync::atomic::AtomicU64;
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    std::fs::write(root.join(NEW_FILE), b"").expect("write file");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE),
+    )
+    .expect("new file key");
+    let lease = leases
+        .acquire(&key)
+        .expect("the editor's session holds the new file");
+    let events = EngineEvents::default();
+    let (open_ready_tx, _) = tokio::sync::watch::channel(true);
+    let status = Arc::new(DriverStatus::default());
+    status.mark_initial_ready();
+    let mut env = RealEnv {
+        observation: crate::file_observation::FileObservation::new(
+            events.clone(),
+            WORKSPACE_ID.into(),
+        ),
+        root: root.clone(),
+        initial_links_hold: None,
+        actor: actor.clone(),
+        lease_releases_seen: leases.release_generation(WORKSPACE_ID),
+        workspace_id: WORKSPACE_ID.into(),
+        leases: leases.clone(),
+        status,
+        author_json: Arc::new(Mutex::new(None)),
+        self_writes: SelfWriteSuppression::default(),
+        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
+        store_freshly_created: false,
+        open_ready_tx,
+        refresh_epoch: Arc::new(AtomicU64::new(0)),
+        events,
+        apply_probe: None,
+        scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
+        no_atomic_placement_announced: false,
+        first_import: None,
+        carried: Some(Arc::new(CarriedPass {
+            summary: Some(RESCAN_SUMMARY.to_owned()),
+            correlation_id: Some("reconcile-held".to_owned()),
+            paths: BTreeSet::from([NEW_FILE.to_owned()]),
+        })),
+    };
+    let cancel = CancellationToken::new();
+    env.observation
+        .start(env.root.clone())
+        .expect("observation");
+    let (layer, initial) = FilesLayer::start_with_fingerprint(
+        &env.root,
+        &cancel,
+        None,
+        policy_fingerprint(&env.root),
+        read_capture_policy(&env.root),
+        0,
+        &env.scan,
+        &env.observation,
+    )
+    .await
+    .expect("layer");
+    let applied = apply_run(
+        env.apply_context(&layer),
+        &layer.files.handle(),
+        initial,
+        &cancel,
+    )
+    .await;
+    carry_past(&mut env.carried, &applied.recorded);
+    assert_eq!(
+        layer.files.handle().stats().await.expect("stats").deferred,
+        1
+    );
+
+    assert_eq!(env.tick(&layer, &cancel).await, TickIo::Converged);
+    assert_eq!(
+        env.carried.as_ref().map(|pass| pass.paths.clone()),
+        Some(BTreeSet::from([NEW_FILE.to_owned()])),
+        "a converged tick must not drop a file the session still holds"
+    );
+
+    drop(lease);
+    assert_eq!(
+        env.tick(&layer, &cancel).await,
+        TickIo::Applied { clean: true }
+    );
+    assert!(env.carried.is_none(), "the release recorded the file");
+    let summary: Option<String> = rusqlite::Connection::open(&db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT metadata_summary FROM moments WHERE workspace_id = ?1 AND path = ?2 \
+             ORDER BY moment_order DESC LIMIT 1",
+            [WORKSPACE_ID, NEW_FILE],
+            |row| row.get(0),
+        )
+        .expect("the released file's moment");
+    assert_eq!(summary.as_deref(), Some(RESCAN_SUMMARY));
+
+    layer.stop().await;
+    drop(env);
+    tokio::task::spawn_blocking(move || supervisor.close(&db))
+        .await
+        .expect("join")
+        .expect("close actor");
+}

@@ -713,6 +713,17 @@ tracked = false
 /// and an edit it captures records with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_widen_saved_during_a_scan_records_as_a_rescan() {
+    widen_saved_during_a_scan(false).await;
+}
+
+// An unreadable visibility.toml does not hold capture, so the widened file
+// still records, and still as a rescan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_widen_saved_during_a_scan_beside_an_unreadable_visibility_file_records_as_a_rescan() {
+    widen_saved_during_a_scan(true).await;
+}
+
+async fn widen_saved_during_a_scan(unreadable_visibility: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(
@@ -725,6 +736,9 @@ tracked = false
     );
     write_file(scratch.path(), "private/journal.md", b"personal");
     write_file(scratch.path(), "notes.md", b"first");
+    if unreadable_visibility {
+        std::fs::create_dir_all(scratch.path().join(".dohc/visibility.toml")).expect("directory");
+    }
     let probe = CaptureApplyProbe::default();
     let transport = InProcessTransport::new(Arc::new(
         EngineService::with_capture_apply_probe_for_harness(probe.clone()),
