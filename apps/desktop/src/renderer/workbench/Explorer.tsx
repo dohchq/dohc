@@ -31,7 +31,7 @@ import {
   type MouseEvent,
   type ReactNode,
 } from "react";
-import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type { ShowExplorerMenuResult, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
 import { planDrop, type DragSource } from "./file-tree-dnd";
@@ -57,6 +57,7 @@ import type { DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
+import { fileManagerName } from "../../workspaces/explorerMenu";
 import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -1167,19 +1168,40 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [pinnedApps, props.pinned],
   );
 
+  // The workspace this Explorer shows, or null once it unmounts. A menu
+  // answer for a workspace the window has left changes nothing and says nothing.
+  const shownWorkspace = useRef<string | null>(workspaceId);
+  useEffect(() => {
+    shownWorkspace.current = workspaceId;
+    return () => {
+      shownWorkspace.current = null;
+    };
+  }, [workspaceId]);
+
   const dispatchMenu = useCallback(
     async (
       kind: "file" | "folder" | "root",
       path: string | undefined,
       pinnedRow: boolean,
     ) => {
-      const command = await bridge().showExplorerMenu({
-        workspaceId,
-        ...(path !== undefined ? { path } : {}),
-        kind,
-        pinned: pinnedRow,
-      });
-      if (command === null) return;
+      const asked = workspaceId;
+      let command: ShowExplorerMenuResult;
+      try {
+        command = await bridge().showExplorerMenu({
+          workspaceId,
+          ...(path !== undefined ? { path } : {}),
+          kind,
+          pinned: pinnedRow,
+        });
+      } catch (cause) {
+        if (shownWorkspace.current !== asked) return;
+        // Only a row's menu offers the reveal, which main runs inside this call.
+        if (path === undefined) throw cause;
+        const fileManager = fileManagerName(window.dohcDesktop?.platform);
+        onError(ipcErrorMessage(cause, `dohc could not show ${basenameOf(path)} in ${fileManager}.`), cause);
+        return;
+      }
+      if (command === null || shownWorkspace.current !== asked) return;
       const targetDir =
         kind === "root" ? "" : kind === "folder" ? (path ?? "") : dirnameOf(path ?? "");
       switch (command) {
@@ -1231,6 +1253,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       workspaceId,
       beginCreateFolder,
       beginRename,
+      onError,
       onModeChange,
       onTogglePin,
       exportZip,

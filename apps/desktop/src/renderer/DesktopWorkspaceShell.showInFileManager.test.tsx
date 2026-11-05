@@ -1,0 +1,115 @@
+// @vitest-environment jsdom
+import "./DesktopWorkspaceShell.testSupport";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ShowExplorerMenuResult } from "../ipc/bridgeContract";
+import { deferred } from "../testing/deferred";
+import type { Workspace } from "./DesktopWorkspaceShell";
+import {
+  DesktopWorkspaceShell,
+  OTHER_WORKSPACE,
+  WORKSPACE,
+  makeBridge,
+  renderShell,
+  shellBootstrapProps,
+} from "./DesktopWorkspaceShell.testHarness";
+
+// Main runs Show in File Explorer inside the menu call, after its path checks.
+// These are the rejections the renderer receives from that call.
+const REMOVED = new Error(
+  "Error invoking remote method 'desktop:show-explorer-menu': Error [ENOENT]: ENOENT: no such file or directory, stat 'report.pdf'",
+);
+const LEFT = new Error(
+  "Error invoking remote method 'desktop:show-explorer-menu': Error: Explorer action stopped because this window changed workspaces.",
+);
+const WORDS = "dohc could not show report.pdf in File Explorer. The file or folder is not there anymore.";
+
+function bridgeListing() {
+  const bridge = makeBridge(Promise.resolve(null), "win32");
+  bridge.listWorkspaceFiles.mockResolvedValue({
+    visibility: { status: "ready" as const, rules: [] },
+    files: [{ path: "report.pdf", kind: "file" }],
+    folders: [],
+  });
+  return bridge;
+}
+
+async function rightClickReport() {
+  const row = (await screen.findAllByTestId("tree-row")).find((candidate) => candidate.dataset.path === "report.pdf");
+  if (!row) throw new Error("report.pdf row missing");
+  fireEvent.contextMenu(row);
+}
+
+// The app sends an error report for every unhandled rejection.
+const unhandled: unknown[] = [];
+const recordUnhandled = (reason: unknown) => unhandled.push(reason);
+beforeEach(() => {
+  unhandled.length = 0;
+  process.on("unhandledRejection", recordUnhandled);
+});
+afterEach(() => {
+  process.off("unhandledRejection", recordUnhandled);
+});
+// Node reports a rejection nobody handled once this turn's microtasks run out.
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+describe("Show in File Explorer", () => {
+  it("says in a toast and a Notices row that dohc could not show a removed file", async () => {
+    const bridge = bridgeListing();
+    bridge.showExplorerMenu.mockRejectedValueOnce(REMOVED);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await rightClickReport();
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(WORDS);
+    expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = (await within(await screen.findByTestId("notice-center")).findByText(WORDS)).closest("li")!;
+    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    await nextTurn();
+    expect(unhandled).toEqual([]);
+  });
+
+  // DesktopRoot remounts the shell on a switch. Keeping the same shell is the
+  // stricter case. Either way main answers that the window left.
+  it.each(["remounts", "keeps"] as const)(
+    "says nothing when the menu answers after the window switches workspaces and %s its shell",
+    async (mode) => {
+      const bridge = bridgeListing();
+      const answer = deferred<ShowExplorerMenuResult>();
+      bridge.showExplorerMenu.mockReturnValueOnce(answer.promise);
+      const shell = (workspace: Workspace) => (
+        <DesktopWorkspaceShell
+          workspace={workspace}
+          workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
+      );
+      vi.stubGlobal("dohcDesktop", bridge);
+      const view = render(shell(WORKSPACE));
+
+      await rightClickReport();
+      expect(bridge.showExplorerMenu).toHaveBeenCalledTimes(1);
+      if (mode === "keeps") view.rerender(shell(OTHER_WORKSPACE));
+      else {
+        view.unmount();
+        render(shell(OTHER_WORKSPACE));
+      }
+      await act(async () => {
+        answer.reject(LEFT);
+        await answer.promise.catch(() => undefined);
+      });
+      await nextTurn();
+
+      expect(unhandled).toEqual([]);
+      expect(bridge.reportRendererError).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      await userEvent.setup().click(screen.getByTestId("notice-center-toggle"));
+      const notices = await screen.findByTestId("notice-center");
+      expect(within(notices).queryByText(/changed workspaces|could not show/)).toBeNull();
+    },
+  );
+});
