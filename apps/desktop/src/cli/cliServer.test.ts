@@ -668,7 +668,7 @@ describe("CLI socket server", () => {
       const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
       const older = { ...messages[0]!, id: "synced-message", createdAtMs: 0, body: "@agent synced" };
       const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
-      const start = source.indexOf("    afterSuccessfulPull: ({ recovered }) => {");
+      const start = source.indexOf("    afterSuccessfulPull: ({ recovered, applied }) => {");
       const end = source.indexOf("\n    // Recorded durably before each pull", start);
       expect(start).toBeGreaterThan(-1);
       expect(end).toBeGreaterThan(start);

@@ -2432,8 +2432,9 @@ function engineForWorkspace(
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
-    afterSuccessfulPull: ({ recovered }) => {
-      signalChatWrite(workspace.workspaceId);
+    afterSuccessfulPull: ({ recovered, applied }) => {
+      // Waits rerun their inbox query, so only a pull that brought ops wakes them.
+      if (applied) signalChatWrite(workspace.workspaceId);
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       refreshShareLabels();
