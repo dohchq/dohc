@@ -369,7 +369,7 @@ test("an agent's file save on one device opens a conflict against a record the o
       rustEngineSessions: deviceC.sessions,
     });
     captureC = computerCCapture;
-    await computerCCapture.runRelaySync((materializePage) => computerCRelay.pull(materializePage));
+    await computerCRelay.pull((apply) => computerCCapture.runRelaySync(apply));
     expect(await readFile(join(computerCRoot, apolloPath), "utf8")).toContain("Status: Todo");
 
     await seedCloudCredentials(temp, {
