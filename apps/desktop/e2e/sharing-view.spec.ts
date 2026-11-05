@@ -170,7 +170,7 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
     const row = page.locator(`[data-testid="sharing-received-row"][data-share-id="${shareId}"]`);
     await expect(row).toHaveAttribute("data-status", "removed");
     await expect(row).toContainText("notes");
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("removed");
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("Removed");
 
     // Dismiss hides the skipped changes; the record stays, so the menu shows them again.
     const skipped = page.getByTestId("sharing-skipped");

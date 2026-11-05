@@ -261,7 +261,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(RECIPIENT_EMAIL);
     await confirm.getByTestId("sharing-end").click();
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("ended");
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
 
     // Revocation is live: the recipient's next fetch returns 404 with the
     // owner-removed explanation (#1438).

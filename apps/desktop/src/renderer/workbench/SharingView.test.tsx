@@ -147,6 +147,8 @@ describe("the Sharing view's two lists", () => {
     const grantedRows = await screen.findAllByTestId("sharing-granted-row");
     expect(grantedRows).toHaveLength(2);
     expect(grantedRows[0]!.textContent).toBe("product-plan.md2 people can edit");
+    // A live share's name is content, in ink.
+    expect(within(grantedRows[0]!).getByText("product-plan").parentElement!.className).toContain("text-ink");
     // The count's tooltip names each person with their level, one per line.
     expect(within(grantedRows[0]!).getByTestId("sharing-row-who").getAttribute("title"))
       .toBe("sam@example.com can edit\nnova@example.com can edit");
@@ -171,7 +173,8 @@ describe("the Sharing view's two lists", () => {
       granted({ grantId: "tea", recipientEmail: "tea@example.com", access: "view" }),
       granted({ grantId: "kim", recipientEmail: null, recipientUserId: "kim", access: "read-only" }),
       granted({ grantId: "nova", recipientEmail: "nova@example.com", status: "revoked", access: "comment" }),
-      granted({ shareId: "share-link", grantId: "link", via: "link", recipientEmail: null, recipientUserId: null, access: "comment" }),
+      granted({ shareId: "share-link", grantId: "link", via: "link", recipientEmail: null, recipientUserId: null, access: "comment",
+        selector: { paths: ["notes/roadmap.md"], versionId: null } }),
     ] }) });
     render(<View />);
     const [mixed, link] = await screen.findAllByTestId("sharing-granted-row");
@@ -179,9 +182,9 @@ describe("the Sharing view's two lists", () => {
     const who = within(mixed!).getByTestId("sharing-row-who");
     expect(who.textContent).toBe("1 person can edit, 2 can view");
     expect(who.getAttribute("title")).toBe("sam@example.com can edit\ntea@example.com can view\nkim can view");
-    // The subject cuts; the verb never does.
-    expect(who.children[0]!.className).toContain("truncate");
-    expect(who.children[1]!.className).toContain("shrink-0");
+    // The line wraps whole; nothing in it cuts.
+    expect(who.parentElement!.className).toContain("wrap-anywhere");
+    expect([...mixed!.querySelectorAll(".truncate")].map((part) => part.textContent)).toEqual(["product-plan"]);
     expect(within(link!).getByTestId("sharing-row-who").textContent).toBe("Anyone with the link can comment");
   });
 
@@ -212,9 +215,6 @@ describe("the Sharing view's two lists", () => {
     // The tooltip names everyone: the link first, then each person.
     expect(who.getAttribute("title")!.split("\n")).toHaveLength(grants.length);
     expect(who.getAttribute("title")!.split("\n")[0]).toMatch(/^Anyone with the link can /);
-    // The first clause stays whole; what follows it cuts at its end.
-    expect(who.children[0]!.className).toContain("shrink-0");
-    if (who.children[1]) expect(who.children[1].className).toContain("truncate");
   });
 
   it("names a person with their level beside a link in the tooltip", async () => {
@@ -222,8 +222,7 @@ describe("the Sharing view's two lists", () => {
     render(<View />);
     const who = within(await screen.findByTestId("sharing-granted-row")).getByTestId("sharing-row-who");
     expect(who.getAttribute("title")).toBe("Anyone with the link can view\nsam@example.com can edit");
-    expect(who.children[0]!.textContent).toBe("1 person can edit");
-    expect(who.children[1]!.textContent).toBe(", anyone with the link can view");
+    expect(who.textContent).toBe("1 person can edit, anyone with the link can view");
   });
 
   it.each([["a view link first", ["view", "edit"]], ["an edit link first", ["edit", "view"]]] as const)(
@@ -247,20 +246,23 @@ describe("the Sharing view's two lists", () => {
     const who = within(row).getByTestId("sharing-row-who");
     expect(who.textContent).toBe("From Sam");
     expect(who.getAttribute("title")).toBe("From Sam (sam@example.com)");
-    // "From" stays whole; the sender cuts.
-    expect(who.children[0]!.className).toContain("shrink-0");
-    expect(who.children[1]!.className).toContain("truncate");
     expect(screen.getByRole("group", { name: "funnel.csv, from Sam" })).toBeTruthy();
   });
 
-  it.each([["revoked", "ended"], ["damaged", "damaged"]] as const)(
-    "keeps the sender on a share sent to the account that is %s, then says so",
-    async (status, word) => {
+  it.each([["revoked", "ended", "Ended", "text-muted"], ["damaged", "damaged", "Damaged", "text-danger"]] as const)(
+    "keeps the sender on a share sent to the account that is %s, after a pill that says so",
+    async (status, word, shown, tone) => {
       answerWith({ received: answer("received", { rows: [received({ status, selector: null, access: null })] }) });
       render(<View />);
       const row = await screen.findByTestId("sharing-received-row");
       expect(within(row).getByTestId("sharing-row-who").textContent).toBe("From Sam");
-      expect(within(row).getByTestId("sharing-row-status").textContent).toBe(word);
+      const pill = within(row).getByTestId("sharing-row-status");
+      expect(pill.textContent).toBe(shown);
+      expect(pill.firstElementChild!.className).toContain(tone);
+      // The pill starts the second line, before the sender.
+      expect(pill.nextElementSibling).toBe(within(row).getByTestId("sharing-row-who"));
+      // A name that is no longer live is muted, not ink.
+      expect(within(row).getByText("funnel").parentElement!.className).not.toContain("text-ink");
       expect(screen.getByRole("group", { name: `funnel.csv, from Sam, ${word}` })).toBeTruthy();
     },
   );
@@ -372,6 +374,8 @@ describe("the Sharing view's two lists", () => {
     answerWith({ received: new Error("offline") });
     render(<View />);
     const failed = await screen.findByTestId("sharing-received-failed");
+    // The list says it could not load, in one line; the cause stays in Notices.
+    expect(failed.querySelector("p")!.textContent).toBe("dohc could not check the shares to your account.");
     expect(notices.report).toHaveBeenCalledWith(expect.objectContaining({ identity: "sharing-received" }));
     answerWith({ received: answer("received", { rows: [received()] }) });
     await userEvent.click(within(failed).getByRole("button", { name: "Try again" }));
@@ -577,7 +581,7 @@ describe("the actions Settings offers on a share", () => {
     render(<View />);
     const row = await screen.findByTestId("sharing-granted-row");
     expect(row.textContent).toContain("plan.md");
-    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("ended");
+    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Ended");
     expect(within(row).queryByRole("button", { name: "Share actions" })).toBeNull();
     expect(screen.getByTestId("sharing-granted-count").textContent).toBe("0");
   });
@@ -632,8 +636,11 @@ describe("the actions Settings offers on a share", () => {
     bridgeMock.revokeRelayShare.mockResolvedValue({});
     render(<View />);
     const row = await screen.findByTestId("sharing-granted-row");
-    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("damaged");
-    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }));
+    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Damaged");
+    const end = within(await openMenu(row)).getByRole("menuitem", { name: "End share…" });
+    // Ending removes access, so it reads in the danger color.
+    expect(end.className).toContain("text-danger");
+    await userEvent.click(end);
     await userEvent.click(screen.getByTestId("sharing-end"));
     await waitFor(() => expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }));
   });
@@ -682,12 +689,14 @@ describe("copying a share's code or invitation", () => {
     for (const shareId of ["share-link", "share-bad", "share-chat"]) {
       expect(within(await rowOf(shareId)).queryByRole("button", { name: /^Copy/ })).toBeNull();
     }
-    // The actions sit in the row, on its fill, and take no room at rest.
+    // The actions sit over the end of the row's last line, so no row changes
+    // height; they show on hover, keyboard focus, and while their menu is open.
     const actions = within(named).getByTestId("sharing-granted-actions");
     expect(actions.parentElement).toBe(named.querySelector("[data-sharing-row-focus]"));
-    expect(actions.className).toContain("max-w-0");
-    expect(actions.className).toContain("group-hover:max-w-none");
-    expect(actions.className).toContain("group-focus-within:max-w-none");
+    expect(actions.className.split(" ")).toEqual(expect.arrayContaining([
+      "absolute", "bottom-0", "opacity-0", "pointer-events-none", "group-hover:opacity-100",
+      "keyboard:group-focus-within:opacity-100", "has-[[aria-expanded=true]]:opacity-100",
+    ]));
   });
 
   it.each([
@@ -827,8 +836,8 @@ describe("mounts and their skipped changes", () => {
     const row = await screen.findByTestId("sharing-received-row");
     expect(row.dataset.status).toBe("removed");
     expect(row.textContent).toContain("notes");
-    // The sender stays, then the state word, which stays while the actions show.
-    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("removed");
+    // The pill starts the second line, before the sender, outside the actions.
+    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Removed");
     expect(within(row).getByTestId("sharing-row-who").textContent).toBe("From sam@example.com");
     expect(screen.getByRole("group", { name: "notes, from sam@example.com, removed" })).toBeTruthy();
     expect(within(row).getByTestId("sharing-row-note").textContent).toBe("Your copy stays readable but won't update.");
@@ -853,7 +862,7 @@ describe("mounts and their skipped changes", () => {
     // Named by what it is; the note's sentences describe it.
     const group = screen.getByRole("group", { name: "notes, from sam@example.com, removed" });
     expect(group.getAttribute("aria-describedby")).toBe(within(row).getByTestId("sharing-row-note").id);
-    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("removed");
+    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Removed");
     expect(within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" })).toBeTruthy();
   });
 
