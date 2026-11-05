@@ -1329,9 +1329,11 @@ export function DesktopWorkspaceShell(props: {
   // failed, or whichever of the two now applies, once the source has closed.
   // An open deletion review holds the account until it ends, so a Try again
   // then runs nothing and keeps its row: no sign-in, Disconnect, or new
-  // review starts under it.
-  const reportConnectionError = useCallback(
-    (error: ConnectionErrorReport) => {
+  // review starts under it. A failed renewal reopens as a renewal: the
+  // expired session is still saved, and a plain dialog would hand it to
+  // Settings and start nothing.
+  const reportCloudFailure = useCallback(
+    (error: ConnectionErrorReport, renew: boolean) => {
       reportShellFailure({
         message: error.message,
         cause: error.cause,
@@ -1340,11 +1342,20 @@ export function DesktopWorkspaceShell(props: {
           if (error.retry?.()) return;
           if (error.serverUrl === null) return openCloud();
           setCloudRetryServerUrl(error.serverUrl);
+          setCloudRenew(renew);
           setCloudOpen(true);
         },
       });
     },
     [reviewingAccountDeletion, openCloud, reportShellFailure],
+  );
+  const reportConnectionError = useCallback(
+    (error: ConnectionErrorReport) => reportCloudFailure(error, false),
+    [reportCloudFailure],
+  );
+  const reportRenewalError = useCallback(
+    (error: ConnectionErrorReport) => reportCloudFailure(error, true),
+    [reportCloudFailure],
   );
   // After useShellError's, so this shell attaches with its notices started:
   // an answer to a delete sent from the previous workspace's shell reports here.
@@ -7504,7 +7515,7 @@ export function DesktopWorkspaceShell(props: {
               if (cloudRenew) setCloudRenew(false);
               else openSettings("cloud");
             }}
-            onConnectionError={reportConnectionError}
+            onConnectionError={cloudRenew ? reportRenewalError : reportConnectionError}
             initialServerUrl={cloudRetryServerUrl}
           />
         </Overlay>
