@@ -17,6 +17,37 @@ interface ConflictCount { count: number; more: boolean }
 // a count shows as a lower bound.
 const CONFLICT_PAGES_MAX = 5;
 
+// Where the tab's failed reads go: a row in Notices, which onSettled takes back.
+interface ReadReports {
+  onError: (fallback: string, error: unknown, retry: () => void, identity: string) => void;
+  onSettled: (identity: string) => void;
+}
+
+// One read's row in Notices. A read that keeps failing files it once, until
+// the read works again, which takes the row back, or its Try again runs.
+function useReadNotice(reports: ReadReports, identity: string, fallback: string, retry: () => void) {
+  const filed = useRef(false);
+  // Its Try again reads for this tab, so the row goes when the tab closes.
+  useEffect(() => () => {
+    if (filed.current) reports.onSettled(identity);
+  }, []);
+  return {
+    failed(error: unknown) {
+      if (filed.current) return;
+      filed.current = true;
+      reports.onError(fallback, error, () => {
+        filed.current = false;
+        retry();
+      }, identity);
+    },
+    worked() {
+      if (!filed.current) return;
+      filed.current = false;
+      reports.onSettled(identity);
+    },
+  };
+}
+
 // The Versions tab: every version in the workspace, the one you're in, how
 // each differs from Main, and the actions the titlebar menu offers for the
 // version you're in, here for any version.
@@ -31,8 +62,7 @@ export function VersionsPage(props: {
   versionKey: number;
   onOpenCompare: (versionId: string) => void;
   onReviewConflicts: () => void;
-  onError: (fallback: string, error: unknown) => void;
-}) {
+} & ReadReports) {
   const { workspaceId, versions } = props;
   const { snapshot } = versions;
   const [lastChanges, setLastChanges] = useState<Map<string, LastChange> | null>(null);
@@ -50,9 +80,10 @@ export function VersionsPage(props: {
 
   const versionIds = snapshot?.versions.map((version) => version.id).join("\n") ?? null;
 
-  // A read that keeps failing reports once, until it works again.
-  const lastChangesFailing = useRef(false);
   const [lastChangesFailed, setLastChangesFailed] = useState(false);
+  const [lastChangesRetry, setLastChangesRetry] = useState(0);
+  const lastChangesNotice = useReadNotice(props, "versions-last-changes", "dohc could not read when each version last changed.",
+    () => setLastChangesRetry((attempt) => attempt + 1));
   const lastChangeReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     if (versionIds === null) return;
@@ -60,7 +91,7 @@ export function VersionsPage(props: {
     bridge().listVersionLastChanges({ workspaceId }).then(
       (result) => {
         if (!lastChangeReads.isCurrent(token)) return;
-        lastChangesFailing.current = false;
+        lastChangesNotice.worked();
         setLastChangesFailed(false);
         setLastChanges(new Map(result.versions.map((entry) => [entry.versionId, entry.lastChange])));
       },
@@ -69,12 +100,10 @@ export function VersionsPage(props: {
         // The rows still show, sorted by when each version was made.
         setLastChanges((current) => current ?? new Map());
         setLastChangesFailed(true);
-        if (lastChangesFailing.current) return;
-        lastChangesFailing.current = true;
-        props.onError("dohc could not read when each version last changed.", error);
+        lastChangesNotice.failed(error);
       },
     );
-  }, [workspaceId, versionIds, props.historyKey, props.versionKey]);
+  }, [workspaceId, versionIds, props.historyKey, props.versionKey, lastChangesRetry]);
 
   // Versions whose count is out of date, and the one run that counts them. It
   // goes round the rows in order until none are left, so a change during the
@@ -87,6 +116,16 @@ export function VersionsPage(props: {
   const countOrder = useRef<string[]>([]);
   countOrder.current = ordered.filter((version) => version.kind !== "main").map((version) => version.id);
   const activeVersionId = snapshot?.activeVersionId ?? null;
+  // One row in Notices for every count that failed. Its Try again counts
+  // them all again, and it goes once none has failed.
+  const failedCounts = useRef<string[]>([]);
+  failedCounts.current = countOrder.current.filter((versionId) => counts.get(versionId) === "failed");
+  const countsNotice = useReadNotice(props, "versions-counts", "dohc could not count the differences from Main.",
+    () => recount(failedCounts.current));
+  const countsFailed = failedCounts.current.length > 0;
+  useEffect(() => {
+    if (!countsFailed) countsNotice.worked();
+  }, [countsFailed]);
   // Counting waits for the first listing, so it runs in the order the rows show.
   const listed = lastChanges !== null;
   useEffect(() => {
@@ -118,13 +157,15 @@ export function VersionsPage(props: {
         const versionId: string | undefined = [...order.slice(start), ...order.slice(0, start)].find((id) => staleCounts.current.has(id));
         if (versionId === undefined) break;
         staleCounts.current.delete(versionId);
-        let count: Count;
+        let count: Count = "failed";
+        let error: unknown;
         try {
           count = (await bridge().countWorkspaceVersionChanges({ workspaceId, versionId })).count;
-        } catch {
-          count = "failed";
+        } catch (caught) {
+          error = caught;
         }
         if (!countReads.isCurrent(token)) return;
+        if (count === "failed") countsNotice.failed(error);
         // Newer than what the row shows, even if it was marked again while it
         // counted. The mark counts it again in its turn.
         setCounts((current) => new Map(current).set(versionId, count));
@@ -133,15 +174,18 @@ export function VersionsPage(props: {
       countRun.current = null;
     })();
   }, [workspaceId, versionIds, listed, props.historyKey, props.versionKey, countRetry]);
-  const retryCount = (versionId: string) => {
-    setFocusRow(versionId);
-    staleCounts.current.add(versionId);
+  const recount = (versionIds: readonly string[]) => {
+    for (const versionId of versionIds) staleCounts.current.add(versionId);
     setCounts((current) => {
       const next = new Map(current);
-      next.delete(versionId);
+      for (const versionId of versionIds) next.delete(versionId);
       return next;
     });
     setCountRetry((attempt) => attempt + 1);
+  };
+  const retryCount = (versionId: string) => {
+    setFocusRow(versionId);
+    recount([versionId]);
   };
 
   // A row's Switch goes once its switch lands, so its row takes the focus that
@@ -155,7 +199,9 @@ export function VersionsPage(props: {
     switchedTo.current = null;
   }, [activeVersionId]);
 
-  const conflictsFailing = useRef(false);
+  const [conflictsRetry, setConflictsRetry] = useState(0);
+  const conflictsNotice = useReadNotice(props, "versions-conflicts", "dohc could not read which merges have files to decide.",
+    () => setConflictsRetry((attempt) => attempt + 1));
   const conflictReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     if (versionIds === null) return;
@@ -179,17 +225,15 @@ export function VersionsPage(props: {
           if (after === null) break;
         }
       } catch (error) {
-        if (!conflictReads.isCurrent(token) || conflictsFailing.current) return;
-        conflictsFailing.current = true;
-        props.onError("dohc could not read which merges have files to decide.", error);
+        if (conflictReads.isCurrent(token)) conflictsNotice.failed(error);
         return;
       }
-      conflictsFailing.current = false;
+      conflictsNotice.worked();
       // The pages ran out before the list did, so every count is a lower bound.
       if (after !== null) for (const [id, entry] of found) found.set(id, { ...entry, more: true });
       setConflictCounts(found);
     })();
-  }, [workspaceId, versionIds, props.versionKey]);
+  }, [workspaceId, versionIds, props.versionKey, conflictsRetry]);
 
   const [newName, setNewName] = useState<string | null>(null);
   const [nameError, setNameError] = useState<ReactNode>(null);

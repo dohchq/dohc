@@ -6530,7 +6530,8 @@ export function DesktopWorkspaceShell(props: {
                   versionKey={versionEpoch}
                   onOpenCompare={openVersionCompareTab}
                   onReviewConflicts={() => setConflictReviewOpen(true)}
-                  onError={reportShellError}
+                  onError={reportButtonError}
+                  onSettled={clearIdentity}
                 />
               )
             );
