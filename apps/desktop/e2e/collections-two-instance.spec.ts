@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
@@ -14,6 +14,7 @@ import { waitForVisibleAnimations } from "./helpers/animations";
 import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { ydocLineageClaimStatus } from "./helpers/engineDb";
+import { DOCUMENT_END } from "./helpers/keys";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -289,13 +290,14 @@ test("a drag's field write on one device moves the card on the other device's op
   }
 });
 
-// An agent on device A saves the record as a plain file, with no live
-// document session. Device B opened the record once, so its copy holds a
-// claimed Y.Doc lineage, but B made no edits. A is file-only: it runs no
-// desktop capture poll, so it never adopts the record and holds no lineage.
-// B cannot take the file as a Y.Doc update. B opens a conflict instead, and
-// its board keeps the old value until the person resolves the conflict.
-test("an agent's file save on one device opens a conflict against the other device's claimed record", async () => {
+// An agent on device A saves records as plain files, with no live document
+// session. A is file-only: it runs no desktop capture poll, so it never
+// adopts a record and holds no lineage. Device B opens two records, so each
+// copy holds a claimed Y.Doc lineage. B leaves Zephyr unchanged, so A's save
+// of Zephyr comes in. B types a line in Apollo, so it cannot take A's save of
+// Apollo as a Y.Doc update. B opens a conflict instead, and its board keeps
+// the old value until the person resolves the conflict.
+test("an agent's file save on one device opens a conflict against a record the other device edited", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "collections-board-file-save-e2e";
@@ -331,11 +333,14 @@ test("an agent's file save on one device opens a conflict against the other devi
 
     const schemaPath = "tasks/collection.yaml";
     const apolloPath = "tasks/apollo.md";
+    const zephyrPath = "tasks/zephyr.md";
     await writeFile(join(sourceRoot, schemaPath), SCHEMA_YAML);
     await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Todo"));
+    await writeFile(join(sourceRoot, zephyrPath), recordMd(ZEPHYR_ID, "Zephyr", "Todo"));
     await Promise.all([
       waitForPathMoments(capture, schemaPath, 1),
       waitForPathMoments(capture, apolloPath, 1),
+      waitForPathMoments(capture, zephyrPath, 1),
     ]);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 
@@ -404,34 +409,14 @@ test("an agent's file save on one device opens a conflict against the other devi
     const doingApollo = page.locator(
       'section[aria-label="Doing"] [role="listitem"][aria-label="Apollo"]',
     );
-    await expect(todoApollo).toBeVisible({ timeout: 30_000 });
-
-    // B claims its copy: the card opens the record's live document, and
-    // closing it originates the lineage's base. B types nothing.
-    await todoApollo.click();
-    const apolloTab = page.getByTestId(editorTabTestId(apolloPath));
-    await expect(apolloTab).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("markdown-editor")).toHaveAttribute(
-      "contenteditable",
-      "true",
+    const todoZephyr = page.locator(
+      'section[aria-label="Todo"] [role="listitem"][aria-label="Zephyr"]',
     );
-    await apolloTab.hover();
-    await apolloTab.getByRole("button", { name: /^Close / }).click();
-    await expect(apolloTab).toHaveCount(0);
-    await expect
-      .poll(() => ydocLineageClaimStatus(temp.rootPath, apolloPath), {
-        timeout: 30_000,
-      })
-      .toBe("exact");
-    await page.getByTestId(editorTabTestId("tab://collection/tasks")).click();
-    await expect(todoApollo).toBeVisible();
-
-    expect(ydocLineageClaimStatus(sourceRoot, apolloPath)).toBeNull();
-
-    // A saves the file the way an agent does, with no session.
-    await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Doing"));
-    await waitForPathMoments(capture, apolloPath, 2);
-    expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
+    const doingZephyr = page.locator(
+      'section[aria-label="Doing"] [role="listitem"][aria-label="Zephyr"]',
+    );
+    await expect(todoApollo).toBeVisible({ timeout: 30_000 });
+    await expect(todoZephyr).toBeVisible({ timeout: 30_000 });
 
     const conflictsOnB = async () =>
       await page.evaluate(async (id) => {
@@ -442,24 +427,84 @@ test("an agent's file save on one device opens a conflict against the other devi
         ).dohcDesktop;
         return (await api.listWorkspaceVersionConflicts({ workspaceId: id })).conflicts;
       }, workspaceId);
-    const statusOnB = async () =>
-      await page.evaluate(async (id) => {
-        const api = (
-          window as unknown as {
-            dohcDesktop: Pick<DohcDesktopBridge, "queryCollectionRecords">;
-          }
-        ).dohcDesktop;
-        const result = await api.queryCollectionRecords({
-          workspaceId: id,
-          collectionPath: "tasks",
-        });
-        const apollo = result.records.find((record) => record.path === "tasks/apollo.md");
-        return apollo?.values.find((entry) => entry.field === "Status")?.value ?? null;
-      }, workspaceId);
-
-    // The conflict opens on B. Nudge writes outside the collection only wake
-    // B's pull.
+    const statusOnB = async (path: string) =>
+      await page.evaluate(
+        async ({ id, recordPath }) => {
+          const api = (
+            window as unknown as {
+              dohcDesktop: Pick<DohcDesktopBridge, "queryCollectionRecords">;
+            }
+          ).dohcDesktop;
+          const result = await api.queryCollectionRecords({
+            workspaceId: id,
+            collectionPath: "tasks",
+          });
+          const record = result.records.find((entry) => entry.path === recordPath);
+          return record?.values.find((entry) => entry.field === "Status")?.value ?? null;
+        },
+        { id: workspaceId, recordPath: path },
+      );
+    // B claims its copy: the card opens the record's live document, and
+    // closing it originates the lineage's base. With `typed`, B edits the
+    // record before closing it.
+    const claimOnB = async (card: Locator, path: string, typed?: string) => {
+      await card.click();
+      const tab = page.getByTestId(editorTabTestId(path));
+      await expect(tab).toBeVisible({ timeout: 15_000 });
+      const editor = page.getByTestId("markdown-editor");
+      await expect(editor).toHaveAttribute("contenteditable", "true");
+      if (typed !== undefined) {
+        await editor.click();
+        await page.keyboard.press(DOCUMENT_END);
+        await page.keyboard.type(typed);
+        await expect
+          .poll(() => readFile(join(temp.rootPath, path), "utf8"), { timeout: 30_000 })
+          .toContain(typed);
+      }
+      await tab.hover();
+      await tab.getByRole("button", { name: /^Close / }).click();
+      await expect(tab).toHaveCount(0);
+      await expect
+        .poll(() => ydocLineageClaimStatus(temp.rootPath, path), { timeout: 30_000 })
+        .toBe("exact");
+      await page.getByTestId(editorTabTestId("tab://collection/tasks")).click();
+      await expect(card).toBeVisible();
+      expect(ydocLineageClaimStatus(sourceRoot, path)).toBeNull();
+    };
+    // Nudge writes outside the collection only wake B's pull.
     let nudge = 0;
+
+    // B claims Zephyr and changes nothing. A saves it the way an agent does,
+    // with no session, and B takes the save with no conflict.
+    await claimOnB(todoZephyr, zephyrPath);
+    await writeFile(join(sourceRoot, zephyrPath), recordMd(ZEPHYR_ID, "Zephyr", "Doing"));
+    await waitForPathMoments(capture, zephyrPath, 2);
+    expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
+    await expect
+      .poll(
+        async () => {
+          nudge += 1;
+          await writeWorkspaceFiles(temp, [
+            { path: `nudges/sync-nudge-${nudge}.md`, contents: `nudge ${nudge}\n` },
+          ]);
+          return await statusOnB(zephyrPath);
+        },
+        { timeout: 90_000, intervals: [2000] },
+      )
+      .toBe("Doing");
+    expect(await conflictsOnB()).toEqual([]);
+    expect(await readFile(join(temp.rootPath, zephyrPath), "utf8")).toContain("Status: Doing");
+    await expect(doingZephyr).toBeVisible({ timeout: 30_000 });
+    await expect(todoZephyr).toHaveCount(0);
+
+    // B types a line in Apollo, an edit A never sees. Then A saves Apollo.
+    const typedOnB = "Checked on B.";
+    await claimOnB(todoApollo, apolloPath, typedOnB);
+    await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Doing"));
+    await waitForPathMoments(capture, apolloPath, 2);
+    expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
+
+    // The conflict opens on B.
     await expect
       .poll(
         async () => {
@@ -476,12 +521,13 @@ test("an agent's file save on one device opens a conflict against the other devi
     if (!conflict) throw new Error("The conflict closed before the test read it.");
     expect(conflict.origin).toBe("sync");
     expect(conflict.currentText).toContain("Status: Todo");
+    expect(conflict.currentText).toContain(typedOnB);
     expect(conflict.incomingText).toContain("Status: Doing");
     await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "conflict");
 
     // Until the person resolves it, B's file, index, and board keep Todo.
     expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain("Status: Todo");
-    expect(await statusOnB()).toBe("Todo");
+    expect(await statusOnB(apolloPath)).toBe("Todo");
     await expect(todoApollo).toBeVisible();
     await expect(doingApollo).toHaveCount(0);
 
@@ -513,7 +559,7 @@ test("an agent's file save on one device opens a conflict against the other devi
     expect(held?.conflictId).toBe(conflict.conflictId);
     expect(held?.incomingText).toContain("Status: Doing");
     expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).not.toContain("Apollo 11");
-    expect(await statusOnB()).toBe("Todo");
+    expect(await statusOnB(apolloPath)).toBe("Todo");
     expect(await syncStatus.getAttribute("aria-label")).toBe(syncLabelBefore);
     expect(await noticeToggle.getAttribute("aria-label")).toBe(noticeLabelBefore);
     expect(await toasts.locator("[data-notice-row]").count()).toBeLessThanOrEqual(toastRowsBefore);
@@ -587,7 +633,7 @@ test("an agent's file save on one device opens a conflict against the other devi
       conflict.conflictId,
     );
     await expect
-      .poll(statusOnB, { timeout: 30_000, intervals: [1000] })
+      .poll(() => statusOnB(apolloPath), { timeout: 30_000, intervals: [1000] })
       .toBe("Doing");
     await expect(doingApollo).toBeVisible({ timeout: 30_000 });
     await expect(todoApollo).toHaveCount(0);
@@ -611,7 +657,7 @@ test("an agent's file save on one device opens a conflict against the other devi
         { timeout: 90_000, intervals: [2000] },
       )
       .toEqual([{ path: apolloPath, fromComputerC: true, waitingVersion: null }]);
-    expect(await statusOnB()).toBe("Doing");
+    expect(await statusOnB(apolloPath)).toBe("Doing");
   } finally {
     await capture?.stop().catch(() => undefined);
     await deviceA?.close().catch(() => undefined);
