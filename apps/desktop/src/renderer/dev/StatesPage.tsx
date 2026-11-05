@@ -1211,16 +1211,24 @@ function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
   );
 }
 
-// The Sharing view's lists, as the drawing fills them.
+// The Sharing view's lists, as the drawing fills them: a long name cut in
+// its middle, one person, several at two levels, a link, two rows with one
+// name, and an ended share.
 const SHARING_CHECKED_AT = new Date(2026, 6, 8, 9, 40).getTime();
 const SHARING_GRANTED: AccessAnswer = {
   ...ABOUT_ACCESS,
   ref: null,
   rows: [
     aboutGrant({ shareId: "share-plan", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
-      selector: { paths: ["notes/product-plan.md"], versionId: null } }),
+      selector: { paths: ["notes/product-plan-2027-roadmap.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["trip/notes.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      selector: { paths: ["trip/notes.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-tea", recipientUserId: "tea", recipientEmail: "tea@example.com",
+      selector: { paths: ["trip/notes.md"], versionId: null }, access: "view" }),
     aboutGrant({ shareId: "share-research", grantId: "grant-link", via: "link", recipientUserId: null, recipientEmail: null,
-      selector: { paths: ["research/competitors.md"], versionId: null }, access: "view" }),
+      selector: { paths: ["research/notes.md"], versionId: null }, access: "view" }),
     aboutGrant({ shareId: "share-old", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
       subjectName: "budget.csv", selector: null, access: null, status: "revoked" }),
   ],
@@ -1259,6 +1267,16 @@ const SHARING_REMOVED: AccessAnswer = {
     SHARING_RECEIVED.rows[0]!,
     aboutGrant({ shareId: "in-budget", grantId: "in-3", via: "received", sharerName: null, granterEmail: null, recipientUserId: "me",
       recipientEmail: null, selector: null, access: null, status: "removed", removalMessage: "Sam removed your access." }),
+  ],
+};
+// A link, and a person who can do more than it lets anyone do.
+const SHARING_LINK_ABOVE: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [
+    aboutGrant({ shareId: "share-brief", grantId: "grant-brief-link", via: "link", recipientUserId: null, recipientEmail: null,
+      selector: { paths: ["plans/launch-brief.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-brief", grantId: "grant-brief-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["plans/launch-brief.md"], versionId: null } }),
   ],
 };
 const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
@@ -2540,6 +2558,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
         </Specimen>
+        <Specimen label="a link, and a person who can do more">
+          <SharingSpecimen granted={ready(SHARING_LINK_ABOVE)} received={ready({ ...SHARING_RECEIVED, rows: [] })} mounts={[]} />
+        </Specimen>
         <Specimen label="may be out of date">
           <SharingSpecimen granted={ready({ ...SHARING_GRANTED, freshness: "stale" })}
             received={ready({ ...SHARING_RECEIVED, freshness: "stale" })} />
@@ -2563,7 +2584,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             confirmShareId="share-plan" />
         </Specimen>
         <Specimen label="keyboard focus on a row's actions">
-          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
             <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-granted-menu"]'>
               <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
@@ -2571,7 +2592,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="keyboard focus on a row's code copy">
-          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
             <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-copy-code"]'>
               <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
