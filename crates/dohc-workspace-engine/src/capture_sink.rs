@@ -440,7 +440,7 @@ impl StoreCaptureSink {
             PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
-            batch_retry: CaptureBatchRetry::new(cancel),
+            batch_retry: CaptureBatchRetry::new(cancel, actor.checkpoint_cycle()),
             actor,
             leases,
             workspace_id,
