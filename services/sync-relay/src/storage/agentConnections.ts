@@ -278,29 +278,20 @@ export function getAgentClient(storage: StorageContext, clientId: string): Agent
   };
 }
 
-const LOOPBACK_IP_HOSTS = new Set(["127.0.0.1", "[::1]"]);
+// An http loopback IP literal, its optional port, and the rest of the string as written.
+const LOOPBACK_REDIRECT = /^http:\/\/(127\.0\.0\.1|\[::1\])(?::(\d{1,5}))?([/?#].*)?$/s;
 
 /**
  * An exact match, except that RFC 8252 section 7.3 lets a native client on a
  * loopback IP literal pick its port when it asks. `localhost` gets no exception.
+ * The strings are compared as written, so nothing is normalized into a match.
  */
 export function redirectUriMatches(registered: string, presented: string): boolean {
   if (registered === presented) return true;
-  let want: URL;
-  let got: URL;
-  try {
-    want = new URL(registered);
-    got = new URL(presented);
-  } catch {
-    return false;
-  }
-  if (want.protocol !== "http:" || got.protocol !== "http:" ||
-      !LOOPBACK_IP_HOSTS.has(want.hostname) || got.hostname !== want.hostname) {
-    return false;
-  }
-  want.port = "";
-  got.port = "";
-  return want.href === got.href;
+  const want = LOOPBACK_REDIRECT.exec(registered);
+  const got = LOOPBACK_REDIRECT.exec(presented);
+  return want !== null && got !== null && Number(got[2] ?? 0) <= 65535 &&
+    want[1] === got[1] && (want[3] ?? "") === (got[3] ?? "");
 }
 
 export function beginAgentAuthorization(storage: StorageContext, input: {

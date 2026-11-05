@@ -296,6 +296,13 @@ describe("agent sign-in for share links", () => {
       "http://127.0.0.1:51234/callback?next=1",
       "http://localhost:51234/callback",
       "http://[::1]:51234/other",
+      "http://127.0.0.1:51234/other/../callback",
+      "http://127.0.0.1:51234/./callback",
+      "http://127.1:51234/callback",
+      "http://0x7f.0.0.1:51234/callback",
+      "http://[0:0:0:0:0:0:0:1]:51234/callback",
+      "http://127.0.0.1:99999/callback",
+      "http://127.0.0.1:51234@agent.example.test/callback",
     ]) {
       await expectRefused(await begin(f, link, clientId, redirectUri));
     }
@@ -513,6 +520,8 @@ describe("agent sign-in for share links", () => {
 
     closeTestStorage(full);
     const roomy = reopenTestStorage(f.dbPath, { workspaceQuotaBytes: usage + LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES + 1_000 });
+    // The refusal spent the code, so it fails even with room.
+    await expectRefused(await redeem({ ...f, storage: roomy, h: handler(roomy, f.now) }, { clientId, code, resource: link.resource }));
     const connected = await connect({ ...f, storage: roomy, h: handler(roomy, f.now) }, link, clientId);
     expect(connectionRow(f.dbPath, connected.connectionId)).toEqual({ status: "active", tokens: 2 });
     expect(workspaceUsage(f.dbPath)).toBeGreaterThan(usage);
@@ -647,8 +656,9 @@ describe("agent sign-in for share links", () => {
   });
 
   // The link's credential stays where it was in both cases, so nothing is
-  // cleaned up. Only the check made inside each step, that the link is still
-  // current and its files still servable, refuses the agent.
+  // cleaned up. Only the checks made inside each step refuse the agent: for an
+  // Edit link no longer served, the servable check alone; for a new owner, the
+  // binding check and the servable check both.
   const unservable: Array<[
     name: string,
     overrides: HandlerOverrides,
