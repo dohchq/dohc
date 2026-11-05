@@ -27,6 +27,10 @@ export interface ThemeTokens {
   success: string;
   warning: string;
   danger: string;
+  dangerFill: string;
+  onDanger: string;
+  dangerTint: string;
+  dangerDisabled: string;
   selection: string;
 }
 
@@ -72,6 +76,12 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // AA as text on a menu row's 14% fill, its tightest surface (see the
     // contrast test).
     danger: "#9d3c28",
+    // A danger confirm: its fill and label, then the tint behind a danger
+    // glyph and a disabled danger confirm, with that confirm's faded label.
+    dangerFill: "#9d3c28",
+    onDanger: "#faf9f5",
+    dangerTint: "#eadcd3",
+    dangerDisabled: "#b25e4c",
     selection: "rgba(58, 126, 233, 0.22)",
   },
   dark: {
@@ -100,6 +110,12 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     success: "#82c29b",
     warning: "#d9a94e",
     danger: "#e1866c",
+    // Danger text needs the light red on the panel, but a fill that light
+    // reads soft with a dark label. The fill is deeper, under an ink label.
+    dangerFill: "#b04530",
+    onDanger: "#f6f4ee",
+    dangerTint: "#30241f",
+    dangerDisabled: "#bd6e57",
     selection: "rgba(102, 148, 245, 0.30)",
   },
 };
@@ -127,6 +143,10 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   success: "--dohc-success",
   warning: "--dohc-warning",
   danger: "--dohc-danger",
+  dangerFill: "--dohc-danger-fill",
+  onDanger: "--dohc-on-danger",
+  dangerTint: "--dohc-danger-tint",
+  dangerDisabled: "--dohc-danger-disabled",
   selection: "--dohc-selection",
 };
 

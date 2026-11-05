@@ -168,6 +168,7 @@ Put Cancel, then one primary, at the right.
 A secondary step that comes before the decision, such as `Save recovery file first`, sits at the left of the same row.
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
+A `DangerButton` that can't be pressed yet, or is working, keeps a danger tint under a faded label, with no hover. It turns solid red only when pressing it will act.
 Never label a button `OK`, `Yes`, or `Confirm`.
 
 ### Focus and keys
@@ -309,6 +310,8 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-agent`, `text-agent` | The default agent color |
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
+| `bg-danger-fill`, `text-on-danger` | A danger confirm's fill and label. Dark has its own deeper fill, so never put `text-danger` text on it |
+| `bg-danger-tint`, `text-danger-disabled` | The tint behind a danger glyph and a disabled danger confirm, and that confirm's label |
 
 A surface or list whose read failed, so it shows nothing, takes danger. When some of its sources didn't load beside others that did, what's missing takes warning. Work dohc is holding or has paused takes warning where it waits, such as History paused in History's pane. The notice that reports the failure behind it is an error, so it takes danger. What the person's own rules or a list's limit leave out, such as a file History no longer tracks, takes the plain mark. A list's limit goes in a `bg-panel-2` band above its rows, never in a row, and its whole sentence shows: how many the list includes, and how to see the rest. An item that is broken, such as an automation dohc can't read, takes danger wherever it sits.
 
