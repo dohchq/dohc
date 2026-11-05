@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ComponentProps } from "react";
+import { type ComponentProps, useLayoutEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withErrorWords } from "../../ipc/errorWords";
 import { READS_FAILED, VersionsPage, orderVersions } from "./VersionsPage";
@@ -116,6 +116,17 @@ function filedRetry(onError: { mock: { calls: unknown[][] } }, call = 0): () => 
 
 // The identity a failure filed its row under.
 const filedIdentity = (onError: { mock: { calls: unknown[][] } }, call = 0) => onError.mock.calls[call]?.[3];
+
+// Presses a Try again in the next render it shares with the page, once the
+// page shows that render and before the page's effects for it run. A person's
+// press can land there too.
+let pressBeforeEffects: (press: () => void) => void = () => {};
+function PressBeforeEffects() {
+  const [press, setPress] = useState<{ run: () => void } | null>(null);
+  pressBeforeEffects = (run) => setPress({ run });
+  useLayoutEffect(() => { press?.run(); }, [press]);
+  return null;
+}
 
 describe("VersionsPage", () => {
   it("lists Main first, then by last change, with a version that has none sorted by when it was made", async () => {
@@ -511,6 +522,42 @@ describe("VersionsPage", () => {
     expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledTimes(2);
     expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(2);
     // Its Try again already took the row back, and every read works now.
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onSettled).not.toHaveBeenCalled();
+  });
+
+  it("files nothing more when Try again is pressed as other reads fail, and reads each of them again", async () => {
+    const cause = "EngineDaemonUnavailableError: Rust engine daemon exited.";
+    bridgeMock.listVersionLastChanges.mockRejectedValueOnce(new Error(cause)).mockRejectedValueOnce(new Error(cause));
+    const onError = vi.fn<OnError>();
+    const onSettled = vi.fn();
+    const page = (versionKey: number) => <><Page onError={onError} onSettled={onSettled} versionKey={versionKey} /><PressBeforeEffects /></>;
+    const { rerender } = render(page(0));
+    await waitFor(() => expect(details("draft")).toContain("3 files differ from Main"));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    // Everything reads again. The last changes fail again at once, and the
+    // files to decide and the first count wait.
+    const conflicts = deferred<{ conflicts: never[]; nextAfterConflictId: null }>();
+    bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(conflicts.promise);
+    const count = deferred<{ count: number }>();
+    bridgeMock.countWorkspaceVersionChanges.mockReturnValueOnce(count.promise);
+    rerender(page(1));
+    await waitFor(() => expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledTimes(2));
+    // Both fail, and the last changes' Try again is pressed as the page shows it.
+    await act(async () => {
+      pressBeforeEffects(filedRetry(onError));
+      conflicts.reject(new Error(cause));
+      count.reject(new Error(cause));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onSettled).not.toHaveBeenCalled();
+    await waitFor(() => expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledTimes(7));
+    expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenLastCalledWith({ workspaceId: "ws-1", versionId: "nested" });
+    await waitFor(() => expect(details("nested")).toContain("1 file differs from Main"));
+    expect(bridgeMock.listVersionLastChanges).toHaveBeenCalledTimes(3);
+    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(3);
     expect(onError).toHaveBeenCalledOnce();
     expect(onSettled).not.toHaveBeenCalled();
   });

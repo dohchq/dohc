@@ -77,6 +77,8 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
     if (filed.current !== null) reports.onSettled(identity);
   }, []);
   useEffect(() => {
+    // A Try again pressed since this render took these failures back.
+    if (failures !== current.current) return;
     if (failures.size === 0) {
       if (filed.current !== null) reports.onSettled(identity);
       filed.current = null;
@@ -91,8 +93,11 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
     // The first failure's error gives the words and Copy details.
     reports.onError(sentence, failures.get(first!), () => {
       const failed = [...current.current.keys()];
+      // The effect of a render before this press can still run. It finds its
+      // failures gone, so it files nothing.
+      current.current = new Map();
       filed.current = null;
-      setFailures(new Map());
+      setFailures(current.current);
       retry(failed);
     }, identity, quiet);
   }, [failures, reading]);
@@ -157,7 +162,12 @@ export function VersionsPage(props: {
   // Try again reads again each read that had failed.
   const notice = useReadsNotice(props, (reads) => {
     if (reads.includes("last-changes")) setLastChangesRetry((attempt) => attempt + 1);
-    if (reads.includes("counts")) recount(failedCounts.current);
+    // Every failed count, even one whose failure has not reached the notice
+    // yet. That failure's effect, from before the press, then files nothing.
+    if (failedCounts.current.length > 0) {
+      recount(failedCounts.current);
+      failedCounts.current = [];
+    }
     if (reads.includes("conflicts")) setConflictsRetry((attempt) => attempt + 1);
   });
 
