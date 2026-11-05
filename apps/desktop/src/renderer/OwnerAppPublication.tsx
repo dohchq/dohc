@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { AppWindow, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Eye, Globe, Link as LinkIcon, LogIn, Pencil, Table2, TriangleAlert, X, type LucideIcon } from "lucide-react";
+import { AppWindow, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Eye, EyeOff, Globe, Link as LinkIcon, LogIn, Pencil, Table2, TriangleAlert, Unlink, X, type LucideIcon } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
 import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow, SyncStatusResult } from "../ipc/bridgeContract";
@@ -829,18 +829,18 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           {synced === false ? null : <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" && !busyPublicationId ? "Preparing app…" : "Prepare app"}</PrimaryButton>}</footer>
       </>}
       </section></Overlay>
-      {pendingRevoke ? <ConfirmDialog intent="danger" testId="app-collection-revoke-confirm" cancelTestId="app-collection-revoke-cancel" confirmTestId="app-collection-revoke-action" title="Revoke collection access?" confirmLabel="Revoke access" onCancel={closeRevocation} onConfirm={() => { const value = pendingRevoke; closeRevocation(); void revokeCollection(value); }}>
-        <p className="mt-3 mb-0 text-[13px] text-muted">The app stays published. It can no longer read the collection or accept responses through dohc.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">Saved responses stay in your workspace. Copies already received cannot be removed.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">Prepare the app again to review and restore access.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">To reduce access, revoke it first. Change the app's data request, then prepare and review a new publication.</p>
-        {pendingRevoke.manifestUnavailable ? <p className="mt-2 mb-0 text-[13px] text-warning">Source details are unavailable. This publication may belong to another app.</p> : null}
-        <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingRevoke.publicationId}</p>
+      {pendingRevoke ? <ConfirmDialog intent="danger" icon={Unlink} testId="app-collection-revoke-confirm" cancelTestId="app-collection-revoke-cancel" confirmTestId="app-collection-revoke-action" title="Revoke collection access?" confirmLabel="Revoke access" onCancel={closeRevocation} onConfirm={() => { const value = pendingRevoke; closeRevocation(); void revokeCollection(value); }}>
+        <p>The app stays published. It can no longer read the collection or accept responses through dohc.</p>
+        <p>Saved responses stay in your workspace. Copies already received cannot be removed.</p>
+        <p>Prepare the app again to review and restore access.</p>
+        <p>To reduce access, revoke it first. Change the app's data request, then prepare and review a new publication.</p>
+        {pendingRevoke.manifestUnavailable ? <p className="text-warning">Source details are unavailable. This publication may belong to another app.</p> : null}
+        <p className="break-all font-mono text-[12px]">{pendingRevoke.publicationId}</p>
       </ConfirmDialog> : null}
-      {pendingWithdraw ? <ConfirmDialog intent="danger" testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>
-        <p className="mt-3 mb-0 text-[13px] text-muted">This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
-        <p className="mt-2 mb-0 text-[13px] text-muted">{!pendingWithdraw.linkCurrent ? "This publication belongs to a changed link. Choose a current link to publish the app again." : pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
-        <p className="mt-2 mb-0 break-all font-mono text-[12px] text-muted">{pendingWithdraw.manifestUnavailable ? pendingWithdraw.publicationId : pendingWithdraw.appRoot}</p>
+      {pendingWithdraw ? <ConfirmDialog intent="danger" icon={EyeOff} testId="app-publication-withdraw-confirm" cancelTestId="app-publication-withdraw-cancel" confirmTestId="app-publication-withdraw-confirm-action" title="Unpublish this app?" confirmLabel="Unpublish app" onCancel={closeWithdrawal} onConfirm={() => { const value = pendingWithdraw; closeWithdrawal(); void withdraw(value); }}>
+        <p>This stops new access through dohc. It cannot remove copies sent elsewhere.</p>
+        <p>{!pendingWithdraw.linkCurrent ? "This publication belongs to a changed link. Choose a current link to publish the app again." : pendingWithdraw.manifestUnavailable ? "Source details are unavailable. This publication may belong to another app and cannot currently be republished." : "You can review this stored revision and publish it again."}</p>
+        <p className="break-all font-mono text-[12px]">{pendingWithdraw.manifestUnavailable ? pendingWithdraw.publicationId : pendingWithdraw.appRoot}</p>
       </ConfirmDialog> : null}
   </>;
 }

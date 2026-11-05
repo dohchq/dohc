@@ -1,10 +1,10 @@
-import { Archive, EyeOff, HardDrive, Shield, TriangleAlert } from "lucide-react";
+import { Archive, Eraser, EyeOff, HardDrive, Shield, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { INVALID_USAGE_RECORD, type UsageRecordResult, type UsageRecordRow } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { withErrorWords } from "../../ipc/errorWords";
-import { ConfirmDialog, ConfirmDialogCard } from "../ui/ConfirmDialog";
+import { ConfirmDialog, ConfirmDialogCard, ConfirmEscape } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -275,17 +275,17 @@ type ReportFailure = (message: string, cause?: unknown, retry?: () => Promise<vo
 export function UsageRecordClearConfirm(props: { record: Readable; card?: boolean; onCancel(): void; onConfirm(): void }) {
   const Dialog = props.card ? ConfirmDialogCard : ConfirmDialog;
   return (
-    <Dialog intent="danger" title="Clear the usage record?" confirmLabel="Clear record"
+    <Dialog intent="danger" icon={Eraser} title="Clear the usage record?" confirmLabel="Clear record"
       testId="usage-record-clear-confirm" cancelTestId="usage-record-clear-cancel" confirmTestId="usage-record-clear-action"
       onCancel={props.onCancel} onConfirm={props.onConfirm}
       details={
-        <div className="mt-3">
-          <CopyButton label="Copy the record" testId="usage-record-clear-copy" getText={() => usageRecordText(props.record)} />
-        </div>
+        <ConfirmEscape
+          action={<CopyButton label="Copy the record" testId="usage-record-clear-copy" getText={() => usageRecordText(props.record)} />}
+        >
+          Copy the record first to keep it.
+        </ConfirmEscape>
       }>
-      <p className="mt-2 text-[13px] text-muted">
-        This deletes every saved count on this computer. dohc cannot restore them. Copy the record first to keep it.
-      </p>
+      <p>This deletes every saved count on this computer. dohc cannot restore them.</p>
     </Dialog>
   );
 }

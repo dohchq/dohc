@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, FileDown, Trash2 } from "lucide-react";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import { Overlay } from "./Overlay";
+import { modalFocusableElements } from "./modalFocus";
 import { DangerButton, GhostButton, SecondaryButton } from "./ui/controls";
+import { ConfirmActions, ConfirmationCard, ConfirmationHead, ConfirmEscape, FOCUS_RING, onDialogKeyDown, useOpeningFocus } from "./ui/ConfirmDialog";
 import { CollectionAffectedApps } from "./CollectionAffectedApps";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 
@@ -35,9 +37,11 @@ export function CollectionDeleteDialog(props: CollectionDeleteDialogProps) {
 }
 function Delete(props: CollectionDeleteDialogProps) {
   const [page, setPage] = useState<CollectionDeletePreview | null>(null), [busy, setBusy] = useState(false);
-  const [acknowledged, setAcknowledged] = useState(false), [exported, setExported] = useState(false), [exporting,setExporting] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false), [exporting, setExporting] = useState(false);
   const [failed, setFailed] = useState<{ after?: string } | null>(null), [details, setDetails] = useState(false), detailsId = useId();
-  const alive = useRef(true), request = useRef(0), lock = useRef(false), lifetime = useRef(new AbortController());
+  const alive = useRef(true), request = useRef(0), lock = useRef(false), lifetime = useRef(new AbortController()), panelRef = useRef<HTMLDivElement>(null);
+  // The first control: Save recovery file, which works while the apps load, or else Cancel.
+  useOpeningFocus(() => panelRef.current && modalFocusableElements(panelRef.current)[0]);
   const scope = { workspaceId: props.workspaceId, datasetId: props.datasetId };
   async function load(after?: string) {
     if (!alive.current || lock.current) return;
@@ -68,31 +72,38 @@ function Delete(props: CollectionDeleteDialogProps) {
     } catch (error) { if (alive.current && request.current === token && !lifetime.current.signal.aborted) {setAcknowledged(false);props.onError("Could not delete this Collection.", error, () => { void load(); });} }
     finally { lock.current = false; if (alive.current && request.current === token) setBusy(false); }
   }
-  return <><Overlay appearance="warning" onClose={busy || exporting ? undefined : props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-labelledby": "delete-collection-title" }}>
-    <section className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-6 overflow-auto rounded-xl border border-line bg-panel p-6 text-ink">
-      <div className="flex flex-col gap-2">
-      <h2 id="delete-collection-title" className="m-0 text-base font-semibold">Delete {props.name} permanently?</h2>
-      <p className="m-0 text-[13px] text-muted">This deletes every table, record, upload, history entry, and app grant in this Collection. {props.folder ? <>The <span className="wrap-anywhere">{props.folder}</span> folder and its files stay.</> : "Its files stay."} Find them in Files.</p>
-      <p className="m-0 text-[13px] text-danger">This cannot be undone on this host, even with a recovery file.</p>
-      <div>
-        <GhostButton className="-ml-2" aria-expanded={details} aria-controls={detailsId} onClick={() => setDetails(open => !open)}>
-          {details ? "Hide details" : "Details"}<ChevronDown size={12} aria-hidden className={`transition-transform ${details ? "rotate-180" : ""}`} />
-        </GhostButton>
-        <p id={detailsId} hidden={!details} className="m-0 mt-1 text-[13px] text-muted">Save a recovery file first to preserve a separate copy. Recovery requires another clean host with this workspace's identity. That host must never have stored or deleted this Collection.</p>
-      </div>
-      </div>
+  // Only the delete itself locks the dialog. Saving a recovery file and
+  // closing both work while the apps load.
+  const deleting = busy && lock.current;
+  return <><Overlay onClose={deleting || exporting ? undefined : props.onClose} panelRef={panelRef} panelProps={{ onKeyDown: onDialogKeyDown }}>
+    <ConfirmationCard icon={Trash2} intent="danger" labelledBy="delete-collection-title" describedBy="delete-collection-body">
+      <ConfirmationHead titleId="delete-collection-title" bodyId="delete-collection-body" title={`Delete ${props.name} permanently?`}>
+        <p>This deletes every table, record, upload, history entry, and app grant in this Collection. {props.folder ? <>The <span className="wrap-anywhere">{props.folder}</span> folder and its files stay.</> : "Its files stay."} Find them in Files.</p>
+        <p className="text-danger">This cannot be undone on this host.</p>
+      </ConfirmationHead>
+      {props.onExport && <div className="flex flex-col gap-1">
+        <ConfirmEscape action={<SecondaryButton size="row" className={FOCUS_RING} disabled={deleting} onClick={() => setExporting(true)}><FileDown size={13} aria-hidden />Save recovery file</SecondaryButton>}>
+          A recovery file can restore it on another host.
+        </ConfirmEscape>
+        <div>
+          <GhostButton className={`-ml-2 ${FOCUS_RING}`} aria-expanded={details} aria-controls={detailsId} onClick={() => setDetails(open => !open)}>
+            {details ? "Hide details" : "Details"}<ChevronDown size={12} aria-hidden className={`transition-transform ${details ? "rotate-180" : ""}`} />
+          </GhostButton>
+          <p id={detailsId} hidden={!details} className="m-0 mt-1 text-[13px] text-muted">The host needs this workspace's identity and must never have stored or deleted this Collection.</p>
+        </div>
+      </div>}
       <CollectionAffectedApps page={page} failed={failed !== null} busy={busy} loadingLabel="Loading affected apps…" retryTestId="collection-delete-apps-retry"
         onRetry={() => void load(failed?.after)} onMore={after => void load(after)} />
+      {/* The box sits close over the buttons, as the thing the confirm waits for. */}
       <div className="flex flex-col gap-3">
-      {exported&&<p className="m-0 text-[12px] text-muted">Recovery file saved</p>}
-      <label className="flex items-start gap-2 text-[13px] text-ink"><input type="checkbox" checked={acknowledged} disabled={busy || !page || failed !== null} onChange={event => setAcknowledged(event.target.checked)} />I understand that dohc cannot undo this deletion.</label>
-      <div className="flex items-center gap-2">
-        {props.onExport && <SecondaryButton disabled={busy} onClick={() => setExporting(true)}>{exported ? "Save another recovery file" : "Save recovery file first"}</SecondaryButton>}
-        <div className="ml-auto flex gap-2"><SecondaryButton disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><DangerButton disabled={busy || !page || failed !== null || !acknowledged} onClick={() => void deleteCollection()}>{lock.current ? "Deleting…" : "Delete permanently"}</DangerButton></div>
+        <label className="flex items-start gap-2 text-[13px] text-ink"><input type="checkbox" checked={acknowledged} disabled={busy || !page || failed !== null} onChange={event => setAcknowledged(event.target.checked)} />I understand that dohc cannot undo this deletion.</label>
+        <ConfirmActions>
+          <SecondaryButton className={FOCUS_RING} disabled={deleting} onClick={props.onClose}>Cancel</SecondaryButton>
+          <DangerButton className={FOCUS_RING} disabled={busy || !page || failed !== null || !acknowledged} onClick={() => void deleteCollection()}>{lock.current ? "Deleting…" : "Delete permanently"}</DangerButton>
+        </ConfirmActions>
       </div>
-      </div>
-    </section>
-  </Overlay>{exporting&&props.onExport&&<CollectionRecoveryExportDialog collectionName={props.name} onExport={props.onExport} onClose={()=>setExporting(false)} onError={props.onError} onSaved={path=>{if(!alive.current)return;setExported(true);props.onSaved?.(path);}}/>}</>;
+    </ConfirmationCard>
+  </Overlay>{exporting&&props.onExport&&<CollectionRecoveryExportDialog collectionName={props.name} onExport={props.onExport} onClose={()=>setExporting(false)} onError={props.onError} onSaved={path=>{if(alive.current)props.onSaved?.(path);}}/>}</>;
 }
 function sameCursor(left: DatasetCursor, right: DatasetCursor) {
   return left.workspaceId === right.workspaceId && left.datasetId === right.datasetId && left.hostEpoch === right.hostEpoch

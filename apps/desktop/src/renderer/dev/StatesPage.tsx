@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, SearchX } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, SearchX, Trash2 } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -1313,7 +1313,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
   return (
     // `contain: paint` makes this box the containing block of the frame's
     // fixed backdrop, so the dialog sits over these rows and not the window.
-    <div className="relative h-72 w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
+    <div className="relative h-80 w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
       <div className="flex flex-col gap-2 p-4 text-[13px] text-muted">
         <span>Research</span>
         <span>competitors.md</span>
@@ -1322,6 +1322,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
       <OverlayFrame panelRef={panelRef}>
         <ConfirmDialogCard
           intent="danger"
+          icon={Trash2}
           title="Delete 12 files from Research?"
           confirmLabel="Delete files"
           onCancel={noop}
@@ -1330,10 +1331,8 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
           cancelTestId={`states-dialog-cancel-${props.theme}`}
           confirmTestId={`states-dialog-confirm-${props.theme}`}
         >
-          <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
-            restore them.
-          </p>
+          <p>They move to the system trash, where you can restore them.</p>
+          <p className="text-[12px]">If the system trash refuses one, it goes to .dohc/local/trash in this workspace.</p>
         </ConfirmDialogCard>
       </OverlayFrame>
     </div>

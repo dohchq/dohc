@@ -193,10 +193,12 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await page.getByRole("dialog", { name: "Archive Equipment?" }).getByRole("button", { name: "Archive", exact: true }).click();
     await page.getByRole("button", { name: "Delete permanently…", exact: true }).click();
     const deletion = page.getByRole("dialog", { name: "Delete Equipment permanently?" });
-    await expect(deletion).toContainText("This cannot be undone on this host, even with a recovery file.");
-    await expect(deletion.getByText(/Recovery requires another clean host/)).toBeHidden();
+    await expect(deletion).toContainText("This cannot be undone on this host.");
+    await expect(deletion).toContainText("A recovery file can restore it on another host.");
+    await expect(deletion.getByRole("button", { name: "Save recovery file", exact: true })).toBeFocused();
+    await expect(deletion.getByText(/The host needs this workspace's identity/)).toBeHidden();
     await deletion.getByRole("button", { name: "Details", exact: true }).click();
-    await expect(deletion.getByText(/Recovery requires another clean host/)).toContainText("Recovery requires another clean host with this workspace's identity.");
+    await expect(deletion.getByText(/The host needs this workspace's identity/)).toContainText("The host needs this workspace's identity and must never have stored or deleted this Collection.");
     await expect(deletion.getByRole("button", { name: "Hide details", exact: true })).toHaveAttribute("aria-expanded", "true");
     await expect(deletion).toContainText(`The ${dirname(listed.datasets[0].datasetPath!)} folder and its files stay. Find them in Files.`);
     await deletion.getByRole("checkbox", { name: "I understand that dohc cannot undo this deletion." }).check();

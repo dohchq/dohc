@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ExternalLink } from "lucide-react";
 import { bridge } from "./bridge";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 
@@ -59,6 +60,7 @@ export function ExternalLinkConfirm(props: { workspaceId: string }) {
   if (url === null) return null;
   return (
     <ConfirmDialog
+      icon={ExternalLink}
       title="Open this link outside dohc?"
       confirmLabel="Open link"
       onCancel={() => settle(false)}
@@ -69,11 +71,11 @@ export function ExternalLinkConfirm(props: { workspaceId: string }) {
     >
         <p
           data-testid="external-link-confirm-url"
-          className="mb-0 mt-2 break-all font-mono text-xs leading-5 text-ink"
+          className="break-all font-mono text-xs leading-5 text-ink"
         >
           {url}
         </p>
-        <p className="mb-0 mt-2 text-xs leading-5 text-muted">
+        <p className="text-xs leading-5">
           dohc opens this link in another app. Turn off Confirm external links
           in Settings to open links without asking.
         </p>

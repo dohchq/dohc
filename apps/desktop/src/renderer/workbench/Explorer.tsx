@@ -16,6 +16,7 @@ import {
   FolderOpen,
   Laptop,
   RefreshCw,
+  Trash2,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -2086,6 +2087,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           title={`Delete ${confirmDelete.length === 1 ? basenameOf(confirmDelete[0]!) : `${confirmDelete.length} items`}?`}
           confirmLabel="Delete"
           intent="danger"
+          icon={Trash2}
           testId="delete-confirm"
           cancelTestId="cancel-delete"
           confirmTestId="confirm-delete"
@@ -2096,28 +2098,47 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }}
           details={
             confirmDelete.length > 1 ? (
-              <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+              // Seven rows show; the rest scroll.
+              <ul className="m-0 max-h-[204px] list-none overflow-auto rounded-lg border border-line bg-bg p-1">
                 {confirmDelete.map((path) => (
-                  <li
-                    key={path}
-                    className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
-                  >
-                    <span className="break-all">{path}</span>
+                  <li key={path} title={path} className="flex h-7 items-center gap-2 rounded-md px-2">
+                    {isFolderPath(path) ? (
+                      <Folder size={14} aria-hidden className="shrink-0 text-subtle" />
+                    ) : (
+                      <FileGlyph
+                        kind={listedFileKind(path, fileByPath.get(path)?.kind)}
+                        icon={fileByPath.get(path)?.icon}
+                        size={14}
+                        className="text-subtle"
+                      />
+                    )}
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{basenameOf(path)}</span>
+                    <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">{dirnameOf(path)}</span>
                   </li>
                 ))}
               </ul>
             ) : null
           }
         >
-          <p className="m-0 mt-2 text-[13px] text-muted">
-            {props.shareView
-              ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-                  confirmDelete.length === 1 ? "it" : "them"
-                } from. ${
-                  props.shareView.granterEmail ?? "The person who shared it"
-                } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-              : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
-          </p>
+          {props.shareView ? (
+            <p>
+              {`${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
+                confirmDelete.length === 1 ? "it" : "them"
+              } from. ${
+                props.shareView.granterEmail ?? "The person who shared it"
+              } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
+            </p>
+          ) : confirmDelete.length === 1 ? (
+            <>
+              <p>It moves to the system trash, where you can restore it.</p>
+              <p className="text-[12px]">If the system trash refuses it, it goes to .dohc/local/trash in this workspace.</p>
+            </>
+          ) : (
+            <>
+              <p>They move to the system trash, where you can restore them.</p>
+              <p className="text-[12px]">If the system trash refuses one, it goes to .dohc/local/trash in this workspace.</p>
+            </>
+          )}
         </ConfirmDialog>
       ) : null}
     </>
