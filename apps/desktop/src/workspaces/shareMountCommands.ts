@@ -104,7 +104,7 @@ export interface ShareMountCommands<WorkspaceSummary> {
   refresh(input: {
     workspace: ShareMountCommandWorkspace;
     assertCurrent(): void;
-  }): Promise<{ results: ShareMountStatusRow[] }>;
+  }): Promise<{ results: ShareMountStatusRow[]; abortMessage?: string }>;
   unmount(input: {
     workspace: ShareMountCommandWorkspace;
     shareId: string;
@@ -535,9 +535,13 @@ export function createShareMountCommands<WorkspaceSummary>(
               // on its row.
               const setAside = thrown instanceof SetAsideRefreshError;
               const error = setAside ? thrown.failure : thrown;
+              const setAsideRow = setAside ? { collisionRecordQuarantined: true as const } : {};
               const verdict = classifyShareMountRefreshError(error);
               if (verdict.kind === "abort") {
-                throw new Error(verdict.message);
+                // The refresh stops here, and its rows still say which
+                // records it set aside.
+                pushResult(mount, "failed", 0, setAsideRow);
+                return { results, abortMessage: verdict.message };
               }
               reportFailure(
                 `share-mount refresh failed for ${mount.label}:`,
@@ -547,7 +551,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                 ...(verdict.status === "failed" && isCollisionRecordRefusal(error)
                   ? { errorKind: "collision-record" as const }
                   : {}),
-                ...(setAside ? { collisionRecordQuarantined: true as const } : {}),
+                ...setAsideRow,
               });
             }
           }

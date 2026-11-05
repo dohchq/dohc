@@ -154,8 +154,9 @@ export function useShareMounts(
       const newest = () => token !== null && token === announcedRefreshToken.current;
       const rowsToken = ++rowsRefreshToken.current;
       let results: RefreshShareMountsResult["results"];
+      let abortMessage: RefreshShareMountsResult["abortMessage"];
       try {
-        results = (await bridge().refreshShareMounts({ workspaceId })).results;
+        ({ results, abortMessage } = await bridge().refreshShareMounts({ workspaceId }));
       } catch (error) {
         if (newest()) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
         return;
@@ -168,6 +169,10 @@ export function useShareMounts(
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
       if (!newest()) return;
+      if (abortMessage !== undefined) {
+        reportShellError("Couldn't refresh shares.", new Error(abortMessage), null, "share-refresh");
+        return;
+      }
       // A share dohc cannot read or did not refresh is a failure the person
       // has to see. Each refresh's summary replaces the last one's row, so a
       // clean refresh clears an earlier failure.

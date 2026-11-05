@@ -34,6 +34,8 @@ const SELECTOR = {
 };
 const LEASE = {} as WorkspaceOperationLease;
 const assertCurrent = () => undefined;
+const SESSION_EXPIRED = "Your server session expired. Sign in again, then refresh shares.";
+const ALEX_FAILED = { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0 };
 
 function retiringCaller() {
   let current = true;
@@ -867,7 +869,7 @@ describe("share mount commands", () => {
         workspace: WORKSPACE,
         assertCurrent: caller.assertCurrent,
       }),
-    ).rejects.toThrow("session expired");
+    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
     expect(h.events).toEqual([
       "lease:start",
       "files:reconcile",
@@ -893,9 +895,7 @@ describe("share mount commands", () => {
 
     await expect(
       h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
-    ).rejects.toThrow(
-      "session expired",
-    );
+    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
     expect(h.events.at(-1)).toBe("notify:workspace-one");
   });
 
@@ -925,7 +925,7 @@ describe("share mount commands", () => {
 
     await expect(
       h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
-    ).rejects.toThrow("session expired");
+    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
     expect(loggedErrors).toEqual([notifyFailure]);
   });
 
@@ -1278,4 +1278,50 @@ it("reports a mount refresh that set aside its collision record and then failed 
     { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true },
   ]);
   expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
+});
+
+it("keeps a mount's set-aside row when its refresh then finds the session expired", async () => {
+  const h = harness();
+  const { record } = await mountOnDisk(h, () => ({
+    pull: async () => { throw new RelayUnauthorizedError(); },
+  }));
+  await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+  await writeFile(record, "not json");
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result).toEqual({
+    results: [{ ...ALEX_FAILED, collisionRecordQuarantined: true }],
+    abortMessage: SESSION_EXPIRED,
+  });
+  expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
+});
+
+it("keeps an earlier mount's set-aside row when a later one finds the session expired", async () => {
+  const h = harness();
+  h.mounts = ["alex", "blair", "casey"].map((label, index) => ({
+    shareId: `${index + 1}`.repeat(8) + "-1111-4111-8111-111111111111",
+    label,
+    granterEmail: null,
+    relayUrl: "https://relay.example",
+    recipientEmail: null,
+    grantedSelector: SELECTOR,
+  }));
+  vi.mocked(h.files.reconcile)
+    .mockResolvedValueOnce({
+      kind: "refresh",
+      outcome: { status: "updated", changedPaths: 1, collisionRecordQuarantined: true },
+    } as Awaited<ReturnType<ShareViewFiles["reconcile"]>>)
+    .mockRejectedValueOnce(new RelayUnauthorizedError());
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result).toEqual({
+    results: [
+      { shareId: SHARE_ID, label: "alex", status: "updated", changedPaths: 1, collisionRecordQuarantined: true },
+      { shareId: "22222222-1111-4111-8111-111111111111", label: "blair", status: "failed", changedPaths: 0 },
+    ],
+    abortMessage: SESSION_EXPIRED,
+  });
+  expect(h.files.reconcile).toHaveBeenCalledTimes(2);
 });
