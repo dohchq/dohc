@@ -13,6 +13,11 @@ async function connect(ctx: ToolContext) {
   connections.push({ client, server });
   return { client, server };
 }
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
 afterEach(async () => {
   for (const { client, server } of connections.splice(0)) {
     await server.close();
@@ -43,7 +48,7 @@ describe("wait for messages", () => {
   });
 
   it("refuses waits past the connection limit and releases the slots", async () => {
-    const entered = Promise.withResolvers<void>();
+    const entered = deferred();
     const releases: Array<() => void> = [];
     const request: NonNullable<ToolContext["request"]> = async () => releases.length === 4 ? { messages: [], cursor: "next" } : new Promise(resolve => {
       releases.push(() => resolve({ messages: [], cursor: "next" }));
@@ -61,8 +66,8 @@ describe("wait for messages", () => {
   });
 
   it.each(["request", "disconnect", "shutdown"] as const)("passes %s cancellation to the desktop socket", async kind => {
-    const entered = Promise.withResolvers<void>();
-    const cancelled = Promise.withResolvers<void>();
+    const entered = deferred();
+    const cancelled = deferred();
     const request: NonNullable<ToolContext["request"]> = async (_request, options) => new Promise((_resolve, reject) => {
       options!.signal!.addEventListener("abort", () => { cancelled.resolve(); reject(new Error("cancelled")); }, { once: true });
       entered.resolve();
