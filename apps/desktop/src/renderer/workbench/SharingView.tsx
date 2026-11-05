@@ -9,7 +9,7 @@ import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
-import { DangerButton, RetryRow, SecondaryButton } from "../ui/controls";
+import { DangerButton, Pill, RetryRow, SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { KindGlyph } from "../ui/KindGlyph";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
@@ -125,11 +125,10 @@ type LeveledRow = AccessShareRow & { access: Level };
 const VERBS: readonly string[] = ["edit", "comment", "view"];
 const verbOf = (access: Level) => LEVELS[access].label.toLowerCase();
 
-// Who can do what, as a row's second line says it, in two parts: the one
-// that may cut, and the one that never does. `spoken` is how a row's name
-// reads it, when that differs. The title says it whole.
-type Who = { lead: string; rest: string; cut: "lead" | "rest"; title: string; spoken?: string };
-const sentenceOf = (who: Who) => who.spoken ?? `${who.lead}${who.rest}`;
+// Who can do what, as a row's second line says it, wrapped whole. `spoken`
+// is how a row's name reads it, when that differs. The title names each.
+type Who = { text: string; title: string; spoken?: string };
+const sentenceOf = (who: Who) => who.spoken ?? who.text;
 
 // How many people have each level, widest first: "1 person can edit", "2 can view".
 function countClauses(people: readonly LeveledRow[]): string[] {
@@ -165,29 +164,18 @@ function grantedWho(group: ShareGroup): Who | null {
     const linkVerb = verbOf(link.access);
     const anyone = `with ${links.length === 1 ? "the" : "a"} link can ${linkVerb}`;
     const above = people.filter((row) => VERBS.indexOf(verbOf(row.access)) < VERBS.indexOf(linkVerb));
-    const [first, ...others] = [...countClauses(above), `anyone ${anyone}`];
-    // The first clause stays whole; what follows it cuts.
-    return others.length === 0
-      ? { lead: `Anyone ${anyone}`, rest: "", cut: "rest", title }
-      : { lead: first!, rest: others.map((clause) => `, ${clause}`).join(""), cut: "rest", title };
+    const clauses = countClauses(above);
+    return { text: clauses.length === 0 ? `Anyone ${anyone}` : [...clauses, `anyone ${anyone}`].join(", "), title };
   }
   const [only] = people;
   if (!only) return null;
-  if (people.length === 1) return { lead: recipientOf(only), rest: ` can ${verbOf(only.access)}`, cut: "lead", title };
-  // The count cuts; its verb and the counts after it do not.
-  const [first, ...others] = countClauses(people);
-  const verbAt = first!.indexOf(" can ");
-  return {
-    lead: first!.slice(0, verbAt),
-    rest: [first!.slice(verbAt), ...others].join(", "),
-    cut: "lead",
-    title,
-  };
+  if (people.length === 1) return { text: `${recipientOf(only)} can ${verbOf(only.access)}`, title };
+  return { text: countClauses(people).join(", "), title };
 }
 
 // A share sent to the account, by its sender alone.
 function fromWho(sender: string, full: string): Who {
-  return { lead: "From ", rest: sender, cut: "rest", title: `From ${full}`, spoken: `from ${sender}` };
+  return { text: `From ${sender}`, title: `From ${full}`, spoken: `from ${sender}` };
 }
 
 /** The names a list shows more than once: those rows show their folder too. */
@@ -268,25 +256,40 @@ function endConfirmWords(group: ShareGroup, waiting: WaitingChanges | undefined)
 }
 
 type Word = "damaged" | "ended" | "removed";
+const WORD_SHOWN: Record<Word, string> = { damaged: "Damaged", ended: "Ended", removed: "Removed" };
 
-function StatusWord(props: { word: Word }) {
+function StatusPill(props: { word: Word }) {
   return (
-    <span data-testid="sharing-row-status" className="shrink-0 text-[12px] leading-4 text-muted">
-      {props.word}
+    <span data-testid="sharing-row-status" className="mr-1">
+      <Pill tone={props.word === "damaged" ? "danger" : "muted"}>{WORD_SHOWN[props.word]}</Pill>
     </span>
   );
 }
 
+// A block under a row: the question that ends a share, or what a mount's pulls skipped.
+const CARD = "mb-1 flex flex-col gap-2 rounded-lg border border-line bg-bg p-3";
+
 // Wide enough for the rows' longest item, "Remove from workspace".
 const ROW_MENU_WIDTH = 200;
 
-// A row: the glyph, the name over who can do what, a control that stays
-// put, and a mark that says where the share lives. At rest the name has the
-// row's free width; on hover and keyboard focus the row's actions take the
-// end of it, on the row's fill. An ended, removed or damaged row says so on
-// its second line, after its sender when it was sent to the account. The
-// view focuses a row when it opens on it, and the row is named for a screen
-// reader by what it shows.
+// Over the end of the row's last line, on a 16px fade into the row's hover
+// fill. Hidden at rest; shown on hover, keyboard focus, and while its menu
+// is open. Inside the scroller, so its focus halos are inset.
+const ROW_ACTIONS = [
+  "pointer-events-none absolute bottom-0 right-1 flex h-6 items-center gap-0.5 pl-4 opacity-0 transition-opacity duration-75",
+  "bg-[image:linear-gradient(to_right,transparent,var(--color-hover)_16px),linear-gradient(to_right,transparent,var(--color-panel)_16px)]",
+  "[&_button:focus-visible]:-outline-offset-2",
+  "group-hover:pointer-events-auto group-hover:opacity-100",
+  "keyboard:group-focus-within:pointer-events-auto keyboard:group-focus-within:opacity-100",
+  "has-[[aria-expanded=true]]:pointer-events-auto has-[[aria-expanded=true]]:opacity-100",
+].join(" ");
+
+// A row: the glyph, then the name and the marks that say what waits and
+// where the share lives, over who can do what. An ended, removed or damaged
+// row starts its second line with a pill that says so. The second line and
+// the note wrap whole; no row changes height on hover, and the name line is
+// never covered except on a row of one line. The view focuses a row when it
+// opens on it, and the row is named for a screen reader by what it shows.
 function ShareRow(props: {
   lane: SharingLane;
   shareId: string;
@@ -309,41 +312,34 @@ function ShareRow(props: {
   const label = [props.name, who ? sentenceOf(who) : null, props.word].filter(Boolean).join(", ");
   // The note is sentences: it describes the row rather than joining its name.
   const noteId = `${useId()}-note`;
+  const oneLine = !who && !props.word && !props.note;
   return (
     <li data-testid={`sharing-${props.lane}-row`} data-share-id={props.shareId} data-status={props.status}>
       <div role="group" aria-label={label} aria-describedby={props.note ? noteId : undefined} data-sharing-row-focus
-        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover keyboard:focus-within:bg-hover dohc-focus-row`}>
-        {subject.glyph}
+        className={`group relative flex min-h-10 w-full gap-2 rounded-md px-2 py-0.5 text-left text-[13px] text-muted transition-colors duration-75 ${oneLine ? "items-center" : "items-start"} hover:bg-hover keyboard:focus-within:bg-hover has-[[aria-expanded=true]]:bg-hover dohc-focus-row`}>
+        <span className="flex h-5 shrink-0 items-center">{subject.glyph}</span>
         <span className="flex min-w-0 flex-1 flex-col">
-          <NameLine name={props.name} title={subject.title} className="leading-5" />
+          <span className="flex h-5 min-w-0 items-center gap-2">
+            <NameLine name={props.name} title={subject.title} className={`flex-1 leading-5 ${props.word ? "" : "text-ink"}`} />
+            {props.lead || props.mark ? <span className="flex shrink-0 items-center gap-1">{props.lead}{props.mark}</span> : null}
+          </span>
           {who || props.word ? (
-            <span className="flex min-w-0 gap-2">
-              {who ? (
-                <span data-testid="sharing-row-who" title={who.title} className="flex min-w-0 text-[12px] leading-4 text-muted">
-                  <span className={who.cut === "lead" ? "truncate" : "shrink-0 whitespace-pre"}>{who.lead}</span>
-                  {who.rest ? <span className={who.cut === "rest" ? "truncate" : "shrink-0 whitespace-pre"}>{who.rest}</span> : null}
-                </span>
-              ) : null}
-              {props.word ? <StatusWord word={props.word} /> : null}
+            <span className="text-[12px] leading-4 wrap-anywhere">
+              {props.word ? <StatusPill word={props.word} /> : null}
+              {props.word && who ? " " : null}
+              {who ? <span data-testid="sharing-row-who" title={who.title}>{who.text}</span> : null}
             </span>
           ) : null}
+          {props.note ? <span id={noteId} data-testid="sharing-row-note" className="mt-1 text-[12px] leading-4">{props.note}</span> : null}
         </span>
-        {props.lead}
-        {props.mark}
-        {/* Collapsed at rest, so the name keeps the room; still in the tab
-            order, so keyboard focus opens it. The negative margin takes back
-            the row's gap while it is empty. */}
         {acts ? (
-          <span data-testid={`sharing-${props.lane}-actions`}
-            className="-ml-2 flex max-w-0 shrink-0 items-center gap-0.5 overflow-hidden opacity-0 transition-opacity duration-75 group-hover:ml-0 group-hover:max-w-none group-hover:overflow-visible group-hover:opacity-100 group-focus-within:ml-0 group-focus-within:max-w-none group-focus-within:overflow-visible group-focus-within:opacity-100">
+          <span data-testid={`sharing-${props.lane}-actions`} className={ROW_ACTIONS}>
             {props.copies}
             {props.menu.length > 0 ? (
               <MoreMenu label="Share actions" testId={`sharing-${props.lane}-menu`} items={props.menu} width={ROW_MENU_WIDTH} />
             ) : null}
           </span>
         ) : null}
-        {/* The whole width under the name, past the glyph (15px and its 8px gap). */}
-        {props.note ? <span id={noteId} data-testid="sharing-row-note" className="basis-full pl-[23px] text-[11px] leading-4 text-subtle">{props.note}</span> : null}
       </div>
       {props.children}
     </li>
@@ -392,7 +388,7 @@ function GrantedRow(props: {
   }, [props.confirming]);
   const menu: MoreMenuItem[] = [
     ...(waiting ? [{ label: waiting.count > 1 ? `Review changes (${waiting.count})` : "Review changes", onSelect: () => actions.reviewChanges(waiting.oldestProposalId) }] : []),
-    ...(canEnd ? [{ label: "End share…", onSelect: () => actions.startEnd(group.shareId), disabled: props.busy }] : []),
+    ...(canEnd ? [{ label: "End share…", onSelect: () => actions.startEnd(group.shareId), disabled: props.busy, danger: true }] : []),
   ];
   return (
     <ShareRow
@@ -436,9 +432,9 @@ function GrantedRow(props: {
           onKeyDown={(event) => {
             if (event.key === "Escape") actions.cancelEnd();
           }}
-          className="mx-2 mb-1 flex flex-col gap-2 rounded-md bg-panel-2 px-2 py-2"
+          className={CARD}
         >
-          <p className="m-0 text-[12px] leading-4 text-muted">{endConfirmWords(group, waiting)}</p>
+          <p className="m-0 text-[12px] leading-4 text-ink">{endConfirmWords(group, waiting)}</p>
           <div className="flex justify-end gap-2">
             <SecondaryButton ref={cancelRef} size="compact" data-testid="sharing-end-cancel" onClick={actions.cancelEnd}>
               Cancel
@@ -460,7 +456,7 @@ function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
   const skipped = props.mount.skippedOps;
   if (!skipped) return null;
   return (
-    <div className="mx-2 mb-1 flex flex-col gap-1 rounded-md bg-panel-2 py-1.5 pl-2 pr-1.5 text-[12px] text-warning">
+    <div className={`${CARD} text-[12px] text-warning`}>
       {/* The lines take the block's width; Dismiss sits under them at its end. */}
       <ul className="m-0 flex min-w-0 list-none flex-col gap-0.5 p-0">
         {shareSkipNoticeLines(skipped, props.mount.granterEmail).map((line) => (
@@ -523,7 +519,7 @@ function ReceivedRow(props: {
   const word: Word | null = damaged ? "damaged" : removed ? "removed" : active || !row ? null : "ended";
   // The level only while the share is live and dohc knows it; else the sender alone.
   const who: Who = access && !word
-    ? { lead: sender, rest: ` lets you ${verbOf(access)}`, cut: "lead", title: `${parts.full} lets you ${verbOf(access)}` }
+    ? { text: `${sender} lets you ${verbOf(access)}`, title: `${parts.full} lets you ${verbOf(access)}` }
     : fromWho(sender, parts.full);
   const where = mount ? `In this workspace as shared-with-me/${mount.label}` : null;
   // A removal says it whole, in the relay's words, and what a copy still here does.
@@ -585,9 +581,9 @@ function Section(props: {
   const local = view.status === "loading" ? [] : props.local?.(known) ?? [];
   const localList = local.length > 0 ? <ul className="m-0 list-none p-0">{local}</ul> : null;
   return (
-    <section data-testid={`sharing-${lane}`} aria-label={words.label}>
+    <section data-testid={`sharing-${lane}`} aria-label={words.label} className="not-first:mt-4">
       <h3 tabIndex={-1} data-sharing-lane-focus
-        className="dohc-section-label m-0 flex items-center rounded-md px-4 pb-1.5 pt-3.5">
+        className="dohc-section-label m-0 flex h-6 items-center rounded-md px-3">
         {words.label}
         {known ? (
           <span data-testid={`sharing-${lane}-count`} className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal">
@@ -595,12 +591,12 @@ function Section(props: {
           </span>
         ) : null}
       </h3>
-      <div className="px-2 pb-1">
+      <div className="px-1 pb-1">
         {view.status === "loading" ? (
           <SkeletonLines rows={2} className="px-2 py-1" />
         ) : view.status === "failed" ? (
           <>
-            <RetryRow testId={`sharing-${lane}-failed`} onRetry={() => actions.retry(lane)} />
+            <RetryRow testId={`sharing-${lane}-failed`} onRetry={() => actions.retry(lane)}>{words.failed}</RetryRow>
             {localList}
           </>
         ) : (
@@ -680,9 +676,9 @@ export function SharingPanel(props: {
     return unlistedMounts.map((mount) => receivedRow(null, mount, listed));
   };
   return (
-    <div ref={props.ref} data-testid="sharing-view" className="min-h-0 flex-1 overflow-y-auto pb-2">
+    <div ref={props.ref} data-testid="sharing-view" className="min-h-0 flex-1 overflow-y-auto pb-2 pt-2">
       {props.conflictCount !== null ? (
-        <div data-testid="sharing-conflicts" className="mx-2 mt-2 flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 text-[13px]">
+        <div data-testid="sharing-conflicts" className="mx-1 flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 text-[13px]">
           <TriangleAlert size={15} aria-hidden className="shrink-0 text-danger" />
           <span className="min-w-0 flex-1 leading-4 text-ink">
             {props.conflictCount > 1 ? `${props.conflictCount} files changed on two machines` : "A file changed on two machines"}

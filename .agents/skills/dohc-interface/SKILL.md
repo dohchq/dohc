@@ -273,7 +273,8 @@ The after also drops the sentence about unsaved changes, because saving first is
 - If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself, except a dialog's own action, as above.
-- For a list or section whose read failed, show `RetryRow`.
+- If a list could not load, say so in its place in one line, with Try again. Pass the line as `RetryRow`'s children.
+- Keep the cause and Copy details in the toast and the Notices row, not in the list.
 
 ## Controls
 
@@ -416,6 +417,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
 - Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
+- If a row's name is content, such as a share's file, draw the name in `text-ink`. If the share ended or was removed, keep its name `text-muted`.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
 - Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
 - `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.
