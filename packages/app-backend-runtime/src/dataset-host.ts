@@ -580,7 +580,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       if (!recovery?.install) throw new DatasetHostError("invalid", "This host cannot restore Collections.");
       const sourceCursor = structuredClone(raw.sourceCursor), manifestSha256 = raw.manifestSha256, transferId = text(raw.transferId), activate = raw.activate === true;
       if (sourceCursor.workspaceId !== key.workspaceId || sourceCursor.datasetId !== key.datasetId) throw new DatasetHostError("invalid", "This recovery file holds a different Collection.");
-      const ownerToken = JSON.stringify(owner(context, key)), authorize = () => { raw.signal?.throwIfAborted(); if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const ownerToken = JSON.stringify(owner(context, key)), owns = () => { if (JSON.stringify(owner(context, key)) !== ownerToken) denied(); };
+      const authorize = () => { raw.signal?.throwIfAborted(); owns(); };
       const installer = createRecoveryInstaller({ ...recovery.install, db, transaction, journal });
       const prior = installer.status({ ...key, transferId, authorize });
       if (prior) {
@@ -592,7 +593,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       try {
         if (!equalRecoveryCursor(validated.manifest.cursor, sourceCursor)) throw new DatasetHostError("conflict", "This recovery file is from a different point in the Collection's history.");
         if (activate && validated.manifest.sourceState !== "fenced") throw new DatasetHostError("invalid", "This recovery file was saved while the Collection still accepted changes, so it cannot move the Collection. Publish the Collection's app to your sharing server to move it.");
-        const result = await installer.install(context, { transferId, manifestSha256, recovery: validated, authorize });
+        // A request cut off by its deadline or its caller still clears its copy, so the next try starts again.
+        const result = await installer.install(context, { transferId, manifestSha256, recovery: validated, authorize, authorizeCleanup: owns });
         return activate ? installer.claim(context, { ...key, transferId, sourceCursor, manifestSha256, authorize }) : result;
       } finally { await validated.dispose(); }
     },
