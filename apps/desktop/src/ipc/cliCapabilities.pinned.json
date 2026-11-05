@@ -15,6 +15,9 @@
     "threads": [
       "chat.threads.list"
     ],
+    "watch": [
+      "chat.inbox.read"
+    ],
     "inbox": [
       "chat.inbox.read"
     ],
@@ -260,6 +263,7 @@
     "document stop-again": "share.live.document.stop",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",
+    "chat watch": "chat.inbox.read",
     "chat inbox": "chat.inbox.read",
     "chat show": "chat.show",
     "chat post": "chat.post",
