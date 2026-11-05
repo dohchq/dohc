@@ -19,7 +19,7 @@ const shared = {
 it.each([
   { kind: "a share view", shareView: shared },
   { kind: "an ordinary workspace with no share record", shareView: null },
-])("doesn't reuse a window left from before Forget when $kind opens again", async ({ shareView }) => {
+])("doesn't count a window left from before Forget as showing $kind after it opens again", async ({ shareView }) => {
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "root", kind: "personal", mode: "local-first", ...(shareView ? { shareView } : {}),
   };
@@ -64,6 +64,13 @@ it.each([
   expect(registered).toBeNull();
   expect(sessions.current(view)?.workspaceId).toBe(workspace.workspaceId);
 
-  register();
+  const binding = register();
   expect(shows()).toBe(false);
+
+  // The folder opens in a new window. Only that window shows the workspace,
+  // so an action there that needs the workspace's only window isn't refused.
+  const reopened = renderer(2);
+  await sessions.open(reopened, binding, "document-2");
+  expect([view, reopened].filter(window =>
+    windowShowsWorkspace(sessions.current(window), workspace.workspaceId, authorities))).toEqual([reopened]);
 });
