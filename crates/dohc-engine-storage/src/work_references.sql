@@ -19,7 +19,8 @@
 -- Each target has at most one reference in this store, so asking again
 -- returns it. Another device may make a different reference to the same
 -- target. A new reference waits in work_reference_outbox until the
--- workspace's server registers it; both rows commit in one transaction.
+-- workspace's server registers it; both rows commit in one transaction. A
+-- reference with an outbox row is pending, and one without is registered.
 CREATE TABLE work_references (
     reference     TEXT    NOT NULL PRIMARY KEY
                   CHECK (length(reference) = 43 AND reference NOT GLOB '*[^A-Za-z0-9_-]*'),
@@ -34,7 +35,6 @@ CREATE TABLE work_references (
     thread_id     TEXT    CHECK (thread_id IS NULL OR length(thread_id) > 0),
     channel_id    TEXT    CHECK (channel_id IS NULL OR length(channel_id) > 0),
     created_at_ms INTEGER NOT NULL,
-    registration  TEXT    NOT NULL CHECK (registration IN ('pending', 'registered')),
     CHECK ((version_id IS NOT NULL) =
            (target_kind IN ('file', 'app', 'documentRecord', 'documentCollection'))),
     CHECK ((dataset_id IS NOT NULL) =
@@ -50,9 +50,7 @@ CREATE UNIQUE INDEX work_references_target ON work_references(
     ifnull(version_id, ''), ifnull(dataset_id, ''), ifnull(table_id, ''));
 
 CREATE TRIGGER work_references_immutable
-BEFORE UPDATE OF reference, workspace_id, target_kind, target_id, version_id, dataset_id,
-                 table_id, thread_id, channel_id, created_at_ms
-ON work_references
+BEFORE UPDATE ON work_references
 BEGIN
     SELECT RAISE(ABORT, 'work references are immutable');
 END;

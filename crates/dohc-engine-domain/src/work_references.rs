@@ -293,8 +293,8 @@ fn make_in(
     let reference = mint_work_reference()?;
     let inserted = tx.execute(
         "INSERT INTO work_references(reference, workspace_id, target_kind, target_id, version_id, \
-         dataset_id, table_id, thread_id, channel_id, created_at_ms, registration) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending')",
+         dataset_id, table_id, thread_id, channel_id, created_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             reference,
             workspace_id,
@@ -468,7 +468,7 @@ type ReferenceRow = (
     Option<String>,
     Option<String>,
     i64,
-    String,
+    bool,
 );
 
 fn resolve_in(
@@ -479,8 +479,9 @@ fn resolve_in(
     let row: Option<ReferenceRow> = conn
         .prepare_cached(
             "SELECT target_kind, target_id, version_id, dataset_id, table_id, thread_id, \
-             channel_id, created_at_ms, registration FROM work_references \
-             WHERE reference = ?1 AND workspace_id = ?2",
+             channel_id, created_at_ms, \
+             EXISTS (SELECT 1 FROM work_reference_outbox o WHERE o.reference = r.reference) \
+             FROM work_references r WHERE r.reference = ?1 AND r.workspace_id = ?2",
         )
         .map_err(DomainError::sql_corrupt)?
         .query_row(params![reference, workspace_id], |row| {
@@ -507,7 +508,7 @@ fn resolve_in(
         thread_id,
         channel_id,
         created_at_ms,
-        registration,
+        pending,
     )) = row
     else {
         return Ok(WorkReferenceResolution::Unknown);
@@ -515,10 +516,11 @@ fn resolve_in(
     let corrupt = || DomainError::StateCorrupt {
         reason: "work reference row does not match its kind",
     };
-    let registration = match registration.as_str() {
-        "pending" => WorkReferenceRegistration::Pending,
-        "registered" => WorkReferenceRegistration::Registered,
-        _ => return Err(corrupt()),
+    // The server registered the reference once its outbox row is gone.
+    let registration = if pending {
+        WorkReferenceRegistration::Pending
+    } else {
+        WorkReferenceRegistration::Registered
     };
     // The target, and where it is now: `None` when it is gone.
     let (target, current) = match kind.as_str() {
@@ -808,15 +810,20 @@ mod tests {
                      WHERE workspace_id = 'ws' AND target_kind = 'file' AND target_id = 'o' \
                        AND ifnull(version_id, '') = 'main' AND ifnull(dataset_id, '') = '' \
                        AND ifnull(table_id, '') = ''",
-                    "SELECT target_kind FROM work_references \
-                     WHERE reference = 'r' AND workspace_id = 'ws'",
+                    "SELECT target_kind, \
+                     EXISTS (SELECT 1 FROM work_reference_outbox o WHERE o.reference = r.reference) \
+                     FROM work_references r WHERE r.reference = 'r' AND r.workspace_id = 'ws'",
                 ] {
-                    let plan: String =
-                        conn.query_row(&format!("EXPLAIN QUERY PLAN {query}"), [], |row| {
-                            row.get(3)
-                        })?;
-                    assert!(plan.contains("SEARCH") && plan.contains("INDEX"), "{plan}");
-                    assert!(!plan.contains("SCAN"), "{plan}");
+                    let plan = conn
+                        .prepare(&format!("EXPLAIN QUERY PLAN {query}"))?
+                        .query_map([], |row| row.get::<_, String>(3))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    assert!(
+                        plan.iter()
+                            .any(|step| step.contains("SEARCH") && step.contains("INDEX")),
+                        "{plan:?}"
+                    );
+                    assert!(!plan.iter().any(|step| step.contains("SCAN")), "{plan:?}");
                 }
                 Ok(())
             })

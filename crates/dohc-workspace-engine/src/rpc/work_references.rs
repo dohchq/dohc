@@ -132,7 +132,7 @@ mod tests {
             "versionedText.write",
             json!({
                 "versionId": "main", "path": "notes/plan.md", "text": "Plan",
-                "objectId": "plan", "origin": "api", "publish": true,
+                "objectId": "plan", "origin": "api",
             }),
         )
         .await
@@ -208,6 +208,43 @@ mod tests {
                 "{refused}"
             );
         }
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_received_share_resolves_but_does_not_make_references() {
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let supervisor = Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": root.path(), "workspaceId": "received",
+                    "captureMode": "none", "projectCollections": true }),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        assert_eq!(
+            call(
+                &service,
+                &handle,
+                "workReferences.make",
+                json!({ "target": { "kind": "message", "messageId": "m" } }),
+            )
+            .await,
+            Err(ErrorCode::Forbidden)
+        );
+        assert_eq!(
+            call(
+                &service,
+                &handle,
+                "workReferences.resolve",
+                json!({ "reference": "A".repeat(43) }),
+            )
+            .await,
+            Ok(json!({ "status": "unknown" }))
+        );
         service.workspace_close(Some(handle)).await.unwrap();
     }
 }

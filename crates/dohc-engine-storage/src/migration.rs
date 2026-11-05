@@ -5603,7 +5603,7 @@ mod tests {
             ),
             (
                 "v2-work-references",
-                "47ea813d36d84c48a87bdd1daae1ad00382d54eadd3600954e2fca6b34ee4f67",
+                "7c56b7cc4fce9796ec7245bed34308a45f76b352bdb333067401a61edf964c4f",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5873,7 +5873,7 @@ mod tests {
 
     /// The work reference tables arrive empty on an existing store, and refuse
     /// a row that does not fit its kind, a second reference to one target, and
-    /// a changed target.
+    /// any change to a reference.
     #[test]
     fn work_references_upgrade_adds_empty_strict_tables() {
         let dir = tempdir();
@@ -5897,8 +5897,8 @@ mod tests {
         let insert = |reference: &str, kind: &str, version: Option<&str>, thread: Option<&str>| {
             conn.execute(
                 "INSERT INTO work_references(reference, workspace_id, target_kind, target_id, \
-                 version_id, thread_id, created_at_ms, registration) \
-                 VALUES (?1, 'ws', ?2, 'target', ?3, ?4, 1, 'pending')",
+                 version_id, thread_id, created_at_ms) \
+                 VALUES (?1, 'ws', ?2, 'target', ?3, ?4, 1)",
                 rusqlite::params![reference, kind, version, thread],
             )
         };
@@ -5919,26 +5919,26 @@ mod tests {
             );
         }
         assert!(insert(&"B".repeat(43), "app", Some("main"), None).is_ok());
-        assert!(
-            conn.execute(
-                "UPDATE work_references SET target_id = 'other' WHERE reference = ?1",
-                [&a],
-            )
-            .is_err()
-        );
-        assert_eq!(
-            conn.execute(
-                "UPDATE work_references SET registration = 'registered' WHERE reference = ?1",
-                [&a],
-            )
-            .unwrap(),
-            1
-        );
+        for change in [
+            "UPDATE work_references SET target_id = 'other' WHERE reference = ?1",
+            "UPDATE work_references SET created_at_ms = 2 WHERE reference = ?1",
+        ] {
+            assert!(conn.execute(change, [&a]).is_err(), "{change}");
+        }
         conn.execute(
             "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, 1)",
             [&a],
         )
         .unwrap();
+        assert_eq!(
+            conn.execute(
+                "DELETE FROM work_reference_outbox WHERE reference = ?1",
+                [&a]
+            )
+            .unwrap(),
+            1,
+            "registration removes the outbox row"
+        );
     }
 
     #[test]

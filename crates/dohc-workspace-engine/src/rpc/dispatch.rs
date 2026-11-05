@@ -1289,6 +1289,12 @@ impl EngineService {
                     "received shares do not keep retained versions",
                 ));
             }
+            if method == "workReferences.make" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not make work references",
+                ));
+            }
         }
         if read_only
             && !matches!(

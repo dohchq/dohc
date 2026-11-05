@@ -491,37 +491,39 @@ fn a_crash_leaves_both_rows_or_neither() {
 }
 
 #[test]
-fn the_store_refuses_a_second_reference_or_a_changed_one() {
+fn the_store_refuses_a_second_or_changed_reference_and_registration_clears_the_outbox() {
     let (_scratch, _db, mut store) = fresh();
     write(&mut store, MAIN, "a.md", "a", "A", 2);
     let made = make(&mut store, &file_by_path("a.md"), 3).reference;
     let second = store.write_with(&NoFaults, |tx| {
         tx.execute(
             "INSERT INTO work_references(reference, workspace_id, target_kind, target_id, \
-             version_id, created_at_ms, registration) \
-             VALUES (?1, ?2, 'file', 'a', 'main', 4, 'pending')",
+             version_id, created_at_ms) \
+             VALUES (?1, ?2, 'file', 'a', 'main', 4)",
             params!["B".repeat(43), WS],
         )
         .map_err(StorageError::persist_public)
     });
     assert!(second.is_err(), "one target has one reference");
-    let retarget = store.write_with(&NoFaults, |tx| {
-        tx.execute(
-            "UPDATE work_references SET target_id = 'b' WHERE reference = ?1",
-            [&made],
-        )
-        .map_err(StorageError::persist_public)
-    });
-    assert!(retarget.is_err(), "a reference never changes its target");
+    for change in [
+        "UPDATE work_references SET target_id = 'b' WHERE reference = ?1",
+        "UPDATE work_references SET created_at_ms = 9 WHERE reference = ?1",
+    ] {
+        let changed = store.write_with(&NoFaults, |tx| {
+            tx.execute(change, [&made])
+                .map_err(StorageError::persist_public)
+        });
+        assert!(changed.is_err(), "a reference never changes: {change}");
+    }
     let registered = store
         .write_with(&NoFaults, |tx| {
             tx.execute(
-                "UPDATE work_references SET registration = 'registered' WHERE reference = ?1",
+                "DELETE FROM work_reference_outbox WHERE reference = ?1",
                 [&made],
             )
             .map_err(StorageError::persist_public)
         })
-        .expect("registration may advance");
+        .expect("registration removes the outbox row");
     assert!(matches!(registered, TxnOutcome::Committed(1)));
     let resolution = resolve_work_reference(&store, WS, &made).expect("resolve");
     assert!(matches!(
