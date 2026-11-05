@@ -374,7 +374,7 @@ describe("a lossy note", () => {
     const user = userEvent.setup();
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    await screen.findByText("Couldn't read this file.");
+    await screen.findByText("dohc could not read this file.");
     expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();
     expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();

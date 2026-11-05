@@ -1053,7 +1053,7 @@ describe("engine markdown source view", () => {
     expect(notice.textContent).toContain(
       "dohc could not open this document for editing.",
     );
-    expect(notice.textContent).toContain("It is read-only for now.");
+    expect(notice.textContent).toContain("You can still read it.");
     // The content still renders — read-only, not replaced.
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(
@@ -1142,7 +1142,7 @@ describe("engine markdown source view", () => {
 
   // The read had failed, so the inspector's
   // loading/error branch owned the surface. A successful retry clears
-  // `engineMayHoldDocument` — and the user was left at "Couldn't read this file."
+  // `engineMayHoldDocument` — and the user was left at "dohc could not read this file."
   // with no document and no retry, while main held a live session.
   // A note opens its session only once a read has checked it (CONTEXT.md, lossy
   // note), so the read that fails under a bound document is a later one.
@@ -1161,7 +1161,7 @@ describe("engine markdown source view", () => {
     await laterReadFailed(read);
 
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
-    expect(screen.queryByText("Couldn't read this file."), "let the read-error branch win over a bound engine doc -> the document is replaced by 'Couldn't read this file.'").toBeNull();
+    expect(screen.queryByText("dohc could not read this file."), "let the read-error branch win over a bound engine doc -> the document is replaced by 'dohc could not read this file.'").toBeNull();
   });
 
   // The other direction of the same guard. The
@@ -1228,7 +1228,7 @@ describe("engine markdown source view", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    await screen.findByText("Couldn't read this file.");
+    await screen.findByText("dohc could not read this file.");
     expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull();
     await user.click(screen.getByTestId("file-read-retry"));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
@@ -1271,7 +1271,7 @@ describe("engine markdown source view", () => {
 
     // The document is on screen through the bound Y.Doc, with no disk text.
     await screen.findByTestId("view-markdown");
-    expect(screen.queryByText("Couldn't read this file.")).toBeNull();
+    expect(screen.queryByText("dohc could not read this file.")).toBeNull();
 
     await waitFor(() => expect(onScrollConsumed, "keep `textReady` on the disk read alone -> this never fires, the shell holds the jump, and it replays on a later open of this path.").toHaveBeenCalledWith(1));
   });
@@ -2668,7 +2668,7 @@ describe("engine markdown source view", () => {
       rejectSecondRead(new Error("read failed"));
       await Promise.resolve();
     });
-    await screen.findByText("Couldn't read this file.");
+    await screen.findByText("dohc could not read this file.");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
@@ -2724,7 +2724,7 @@ describe("engine markdown source view", () => {
         engineVersionKey={1}
       />,
     );
-    await screen.findByText("Couldn't read this file.");
+    await screen.findByText("dohc could not read this file.");
     expect(reads).toBe(2);
 
     // The retry: read 3, for the same switch, succeeds.
@@ -3455,7 +3455,7 @@ describe("engine markdown source view", () => {
         />,
       );
       await screen.findByTestId("engine-may-hold-document-notice");
-      expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+      expect(screen.getByText("dohc could not read this file.")).toBeTruthy();
 
       // The armed autosave must not land either.
       await act(async () => {
@@ -3516,7 +3516,7 @@ describe("engine markdown source view", () => {
           engineVersionKey={1}
         />,
       );
-      await screen.findByText("Couldn't read this file.");
+      await screen.findByText("dohc could not read this file.");
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
@@ -3597,7 +3597,7 @@ describe("engine markdown source view", () => {
   // same-path reread can ENOENT before the queued Y.Doc open answers. The
   // parent then takes its loading/error branch, and if the engine open lives
   // in the child that branch unmounts, the refusal lands on nobody: the user
-  // is told "Couldn't read this file", which is true of the read and says
+  // is told "dohc could not read this file", which is true of the read and says
   // nothing about the version.
   it("shows the version-specific notice when the reread fails before the open refuses", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
@@ -3652,7 +3652,7 @@ describe("engine markdown source view", () => {
       />,
     );
     // The reread loses the file first.
-    await screen.findByText("Couldn't read this file.");
+    await screen.findByText("dohc could not read this file.");
     expect(reads).toBeGreaterThan(1);
 
     // ...and only THEN does the open answer. The notice must still arrive.
@@ -3662,7 +3662,7 @@ describe("engine markdown source view", () => {
     });
     const notice = await screen.findByTestId("file-not-in-version");
     expect(notice.textContent).toContain("This version doesn't have this file.");
-    expect(screen.queryByText("Couldn't read this file.")).toBeNull();
+    expect(screen.queryByText("dohc could not read this file.")).toBeNull();
   });
 
 
