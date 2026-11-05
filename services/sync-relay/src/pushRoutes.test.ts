@@ -122,7 +122,8 @@ describe("push subscriptions", () => {
     f.auth.resolve.mockClear();
     expect((await f.post("subscribe", "alice-1", {installationId: installation(1), vapidKeyId: VAPID_KEY_ID,
       endpoint: endpoint("evil"), ...browserKeys, expiresAtMs: null}, {origin: "https://evil.example"})).status).toBe(404);
-    for (const headers of [{origin: "https://evil.example"}, {"x-dohc-relay-exchange-key": "forged-exchange-key-at-least-32-chars"}]) {
+    const forged: Record<string, string>[] = [{origin: "https://evil.example"}, {"x-dohc-relay-exchange-key": "forged-exchange-key-at-least-32-chars"}];
+    for (const headers of forged) {
       expect((await f.post("unsubscribe", "alice-1", {installationId: installation(1)}, headers)).status).toBe(404);
       expect((await f.call(`status?installationId=${installation(1)}`, "alice-1", {headers})).status).toBe(404);
     }
@@ -135,7 +136,8 @@ describe("push subscriptions", () => {
 
   it("refuses a link holder, who has no account session", async () => {
     const f = await fixture();
-    for (const headers of [{authorization: "LinkCapability " + "a".repeat(43)}, {cookie: "dohc_link=secret"}]) {
+    const linkHolders: Record<string, string>[] = [{authorization: "LinkCapability " + "a".repeat(43)}, {cookie: "dohc_link=secret"}];
+    for (const headers of linkHolders) {
       const response = await f.post("subscribe", null, {installationId: installation(1), vapidKeyId: VAPID_KEY_ID,
         endpoint: endpoint("one"), ...browserKeys, expiresAtMs: null}, headers);
       expect(response.status).toBe(401);
