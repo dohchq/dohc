@@ -138,24 +138,64 @@ describe("History timeline rows", () => {
     expect(marker.textContent).not.toContain("Created version");
   });
 
-  it("keeps an undated Collection change under the day main placed it, and says its date is unknown", () => {
-    view({ entries: [file("m-1"), change(4, null, GUESTS, "Guests", { sortAtMs: DAY - 4_000 }), file("m-0", { recordedAtMs: DAY - 6_000 })] });
-    expect(screen.getByTestId("history-collection-date-unknown").textContent).toBe("Date unknown");
-    const headings = screen.getAllByTestId("engine-history-day-heading");
-    expect(headings).toHaveLength(1);
-    expect(headings[0]!.textContent).not.toBe("Date unknown");
+  // Main reaches an undated change three ways: with its Collection's
+  // previous time to sort by, with no time at all so it sorts last, and
+  // holding its Collection's older dated changes back behind it.
+  it("lists dated days in order, then one Date unknown heading with every undated change", () => {
+    view({ entries: [
+      file("m-2"),
+      change(5, null, GUESTS, "Guests", { sortAtMs: DAY - 1_000 }),
+      file("m-1", { recordedAtMs: DAY - 2 * DAY_MS }),
+      change(6, null, BUDGET, "Budget", { sortAtMs: null }),
+      change(5, DAY - DAY_MS, BUDGET, "Budget"),
+      change(4, null, BUDGET, "Budget", { sortAtMs: DAY - DAY_MS }),
+    ] });
+    expect(listOrder()).toEqual([
+      `day:${dayKey(DAY)}`, "m-2",
+      `day:${dayKey(DAY - DAY_MS)}`, `collection:${BUDGET}:5`,
+      `day:${dayKey(DAY - 2 * DAY_MS)}`, "m-1",
+      "day:Date unknown", `collection:${GUESTS}:5`, `collection:${BUDGET}:6`, `collection:${BUDGET}:4`,
+    ]);
+    expect(screen.getAllByTestId("engine-history-day-heading").at(-1)!.hasAttribute("datetime")).toBe(false);
+    // An undated change is one line with no time.
+    const guests = screen.getAllByRole("listitem").find((row) => row.dataset.historyKey === `collection:${GUESTS}:5`)!;
+    expect(guests.querySelector("time")).toBeNull();
+    expect(guests.textContent).not.toContain("Date unknown");
+    expect(guests.firstElementChild!.className.split(" ")).toContain("h-7");
     // A Collection this computer cannot open is a row, not a control.
     expect(screen.queryByRole("button", { name: "Open Collection history for Guests" })).toBeNull();
   });
 
-  it("gives a change with no date and no placement its own Date unknown heading", () => {
-    view({ entries: [file("m-1"), change(4, null, GUESTS, "Guests", { sortAtMs: null })] });
-    const headings = screen.getAllByTestId("engine-history-day-heading");
-    expect(headings).toHaveLength(2);
-    expect(headings[1]!.textContent).toBe("Date unknown");
-    expect(headings[1]!.hasAttribute("datetime")).toBe(false);
+  it("keeps older dated days above the Date unknown group as earlier pages load", () => {
+    const props = { hasMore: true, loadingMore: false, onLoadMore: () => {}, onOpenMoment: () => {} };
+    const firstPage = [file("m-2"), change(6, null, BUDGET, "Budget", { sortAtMs: null })];
+    const { rerender } = render(<EngineHistoryView entries={firstPage} {...props} />);
+    expect(listOrder()).toEqual([`day:${dayKey(DAY)}`, "m-2", "day:Date unknown", `collection:${BUDGET}:6`]);
+    rerender(<EngineHistoryView entries={[...firstPage, change(5, DAY - DAY_MS, BUDGET, "Budget"), file("m-1", { recordedAtMs: DAY - 2 * DAY_MS })]} {...props} hasMore={false} />);
+    expect(listOrder()).toEqual([
+      `day:${dayKey(DAY)}`, "m-2",
+      `day:${dayKey(DAY - DAY_MS)}`, `collection:${BUDGET}:5`,
+      `day:${dayKey(DAY - 2 * DAY_MS)}`, "m-1",
+      "day:Date unknown", `collection:${BUDGET}:6`,
+    ]);
   });
 });
+
+const DAY_MS = 24 * 60 * 60 * 1_000;
+
+function dayKey(ms: number): string {
+  const day = new Date(ms);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+}
+
+// The list from top to bottom: each day heading by its date, then each row by its key.
+function listOrder(): string[] {
+  return screen.getAllByRole("listitem").flatMap((row) => {
+    if (row.dataset.historyKey) return [row.dataset.historyKey];
+    const heading = row.querySelector('[data-testid="engine-history-day-heading"]');
+    return heading ? [`day:${heading.getAttribute("datetime") ?? heading.textContent}`] : [];
+  });
+}
 
 describe("History timeline changes", () => {
   const nova = { kind: "agent" as const, agentId: "nova", agentRunId: "run" };
@@ -171,10 +211,57 @@ describe("History timeline changes", () => {
     expect(screen.getAllByTestId("engine-moment-source")[0]!.textContent).toBe("Nova");
     // A local edit leads with its origin's mark and names it, then says
     // its file and folder.
-    expect(local!.querySelector('[title="Local file edit"] .lucide-hard-drive')).not.toBeNull();
+    // An edit made outside dohc draws a file being edited.
+    expect(local!.querySelector('[title="Local file edit"] .lucide-file-pen')).not.toBeNull();
     expect(local!.textContent).toContain("plan.mdnotes");
     expect(local!.textContent).not.toContain("Edited");
     expect(screen.getAllByTestId("engine-moment-source")[1]!.textContent).toBe("Local file edit");
+  });
+
+  // jsdom has no layout, so this checks the parts that set who gives way:
+  // the folder only takes leftover room and wraps out of a clipped line,
+  // the actor shrinks before the name, and the name cuts in its middle.
+  it("lets the file's name win its line: the folder goes first, then the actor, then the name's middle", () => {
+    const row = (overrides: Partial<EngineMomentRecord>) => {
+      cleanup();
+      const moment = (file("m-1", { path: "work/clients/product-planning-notes.md", namedAuthor: { userId: "m", label: "Margaret Okonkwo-Fitzgerald" }, ...overrides }) as Extract<TimelineEntry, { kind: "file" }>).moment;
+      render(<HistoryRow moment={moment} context="workspace" onOpen={() => {}} />);
+      return screen.getByTestId("engine-moment-open");
+    };
+    const open = row({});
+    expect(open.getAttribute("title")).toBe("Open diff for work/clients/product-planning-notes.md");
+    const line = within(open).getByTestId("engine-moment-line");
+    expect(line.className.split(" ")).toEqual(expect.arrayContaining(["flex-wrap", "h-4", "overflow-hidden"]));
+    const actor = within(open).getByTestId("engine-moment-source");
+    expect(actor.getAttribute("title")).toBe("Margaret Okonkwo-Fitzgerald");
+    expect(actor.className).toContain("shrink-[1000]");
+    expect(actor.className).not.toContain("max-w-");
+    const base = within(open).getByText("product-planning-notes");
+    expect(base.className).toContain("truncate");
+    expect(base.nextElementSibling!.textContent).toBe(".md");
+    expect(base.nextElementSibling!.className).toContain("shrink-0");
+    const folder = within(open).getByTestId("engine-moment-folder");
+    expect(folder.textContent).toBe("work/clients");
+    expect(folder.className.split(" ")).toEqual(expect.arrayContaining(["grow", "basis-6", "max-w-max", "truncate"]));
+    // The actor and the name share a part that never wraps; the folder is outside it.
+    expect(folder.parentElement).toBe(line);
+    expect(actor.parentElement!.parentElement).toBe(line);
+
+    // A summary that does not name the file gives way first, cut at its end.
+    const summarized = row({ summary: "Added the ferry times" });
+    expect(within(summarized).getByText("product-planning-notes")).toBeTruthy();
+    const summary = within(summarized).getByTestId("engine-moment-summary");
+    expect(summary.textContent).toBe("Added the ferry times");
+    expect(summary.className).toContain("shrink-[1000000]");
+    expect(within(summarized).queryByTestId("engine-moment-folder")).toBeNull();
+
+    // A summary that names the file takes the name's place, cut at its end.
+    const deleted = row({ operation: "delete" });
+    expect(within(deleted).queryByText("product-planning-notes")).toBeNull();
+    const named = within(deleted).getByTestId("engine-moment-summary");
+    expect(named.textContent).toBe("Deleted product-planning-notes.md");
+    expect(named.className).toContain("truncate");
+    expect(named.className).not.toContain("shrink-[");
   });
 
   it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
@@ -313,6 +400,24 @@ describe("History timeline sources", () => {
     fireEvent.click(screen.getByTestId("history-sources-retry"));
     expect(calls.retry).toHaveBeenCalledOnce();
     expect(screen.getByTestId("engine-moment-open")).toBeTruthy();
+  });
+
+  // A warning, not one more row: the warning's mark, the words in ink that
+  // wrap rather than cut a name, and the small bordered Try again.
+  it("shows a Collection that did not load as a warning row", () => {
+    view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }] });
+    const words = screen.getByTestId("history-sources-unavailable-words");
+    expect(words.textContent).toBe("dohc could not load Guests");
+    expect(words.className).not.toContain("truncate");
+    const row = words.parentElement!;
+    expect(row.className.split(" ")).toContain("text-ink");
+    expect(row.className.split(" ")).not.toContain("h-7");
+    expect(row.getAttribute("title")).toBe("dohc could not load changes from Guests.");
+    expect(row.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain("text-warning");
+    const retry = screen.getByRole("button", { name: "Try again" });
+    expect(retry.dataset.testid).toBe("history-sources-retry");
+    expect(retry.className.split(" ")).toEqual(expect.arrayContaining(["border", "border-line", "h-6"]));
+    expect(screen.getByTestId("history-sources-unavailable").textContent).toBe("dohc could not load changes from Guests.");
   });
 
   it("counts the Collections the source limit left out, without a retry that cannot help", () => {

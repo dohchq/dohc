@@ -214,7 +214,7 @@ describe("groupTimeline", () => {
     const items = groupTimeline([
       { kind: "file", moment: moment({ id: "m2", momentOrder: 2, correlationId: "pass" }) },
       { kind: "version", version: { id: "draft", workspaceId: "workspace", kind: "named", name: "Draft", createdAtMs: 90 } },
-      { kind: "file", moment: moment({ id: "m1", momentOrder: 1, correlationId: "pass" }) },
+      { kind: "file", moment: moment({ id: "m1", momentOrder: 1, correlationId: "pass", recordedAtMs: 80 }) },
       { kind: "collection", datasetId: "00000000-0000-4000-8000-000000000001", name: "Budget", sortAtMs: null, change: {
         revision: 4, operation: "addRow", callerReference: null, recordedAtMs: null, approvedRevisionHash: "a".repeat(64), changesetBytes: 10, attachmentCount: 0,
       } },
