@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
@@ -522,6 +522,20 @@ describe("registered settings IPC", () => {
     h.openPath.mockResolvedValueOnce("No application is associated with this file.");
     await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, { ...workspacePayload, file: ".dohc/files.toml" }))
       .rejects.toThrow(`dohc could not open ${files}. No application is associated with this file. Open the file in a text editor.`);
+  });
+
+  it("refuses a rules file or a .dohc folder that links outside the workspace", async () => {
+    const h = await harness();
+    const outside = await createTestScratch("settings-ipc-outside-");
+    await writeFile(join(outside, "visibility.toml"), "");
+    await mkdir(join(h.root, ".dohc"), { recursive: true });
+    await symlink(join(outside, "visibility.toml"), join(h.root, ".dohc", "visibility.toml"));
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload))
+      .rejects.toThrow("It isn't a regular file.");
+    await rm(join(h.root, ".dohc"), { recursive: true });
+    await symlink(outside, join(h.root, ".dohc"), "junction");
+    await expect(h.invoke(settingsOperations.openWorkspacePolicyFile.channel, policyPayload)).rejects.toThrow();
+    expect(h.openPath).not.toHaveBeenCalled();
   });
 
   it("creates the settings file before opening it, and never replaces one that exists", async () => {
