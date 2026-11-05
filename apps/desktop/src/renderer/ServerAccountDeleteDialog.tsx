@@ -5,7 +5,7 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { DangerButton, SecondaryButton } from "./ui/controls";
-import { ConfirmActions, ConfirmationCard, ConfirmationHead } from "./ui/ConfirmDialog";
+import { ConfirmActions, ConfirmationCard, ConfirmationHead, confirmPanel } from "./ui/ConfirmDialog";
 import { SkeletonRows } from "./ui/SkeletonRows";
 
 export interface ServerAccountDeleted {
@@ -130,14 +130,15 @@ function Delete(props: ServerAccountDeleteDialogProps) {
 
   const server = preview?.server ?? props.server;
   return (
-    <Overlay appearance="warning" onClose={deleting ? undefined : props.onClose}>
-      <ConfirmationCard
-        icon={UserX}
-        intent="danger"
-        testId="server-account-delete"
-        labelledBy="delete-server-account-title"
-        describedBy={preview ? "delete-server-account-server delete-server-account-facts" : "delete-server-account-server"}
-      >
+    <Overlay
+      appearance="warning"
+      onClose={deleting ? undefined : props.onClose}
+      panelProps={confirmPanel(
+        "delete-server-account-title",
+        preview ? "delete-server-account-server delete-server-account-facts" : "delete-server-account-server",
+      )}
+    >
+      <ConfirmationCard icon={UserX} intent="danger" testId="server-account-delete">
         {/* `contents`, so each part stays a part of the card's column. */}
         <form
           className="contents"

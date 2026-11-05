@@ -4,7 +4,7 @@ import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import { Overlay } from "./Overlay";
 import { modalFocusableElements } from "./modalFocus";
 import { DangerButton, GhostButton, SecondaryButton } from "./ui/controls";
-import { ConfirmActions, ConfirmationCard, ConfirmationHead, ConfirmEscape, FOCUS_RING, onDialogKeyDown, useOpeningFocus } from "./ui/ConfirmDialog";
+import { ConfirmActions, ConfirmationCard, ConfirmationHead, ConfirmEscape, FOCUS_RING, confirmPanel, useOpeningFocus } from "./ui/ConfirmDialog";
 import { CollectionAffectedApps } from "./CollectionAffectedApps";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 
@@ -75,8 +75,8 @@ function Delete(props: CollectionDeleteDialogProps) {
   // Only the delete itself locks the dialog. Saving a recovery file and
   // closing both work while the apps load.
   const deleting = busy && lock.current;
-  return <><Overlay onClose={deleting || exporting ? undefined : props.onClose} panelRef={panelRef} panelProps={{ onKeyDown: onDialogKeyDown }}>
-    <ConfirmationCard icon={Trash2} intent="danger" labelledBy="delete-collection-title" describedBy="delete-collection-body">
+  return <><Overlay onClose={deleting || exporting ? undefined : props.onClose} panelRef={panelRef} panelProps={confirmPanel("delete-collection-title", "delete-collection-body")}>
+    <ConfirmationCard icon={Trash2} intent="danger">
       <ConfirmationHead titleId="delete-collection-title" bodyId="delete-collection-body" title={`Delete ${props.name} permanently?`}>
         <p>This deletes every table, record, upload, history entry, and app grant in this Collection. {props.folder ? <>The <span className="wrap-anywhere">{props.folder}</span> folder and its files stay.</> : "Its files stay."} Find them in Files.</p>
         <p className="text-danger">This cannot be undone on this host.</p>

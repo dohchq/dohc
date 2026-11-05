@@ -31,14 +31,19 @@ type ConfirmDialogProps = {
 // where Enter acts. The dohc-interface skill states the rule.
 export const FOCUS_RING = "focus-visible:outline-2 focus-visible:outline-focus";
 
+// What a confirmation's Overlay panel carries. The panel takes focus as the
+// dialog opens, so it is the dialog: a screen reader reads the title and the
+// sentences there. It also takes the dialog's keys.
+export function confirmPanel(titleId: string, bodyId?: string) {
+  return { role: "dialog", "aria-modal": true, "aria-labelledby": titleId, "aria-describedby": bodyId, onKeyDown: onDialogKeyDown } as const;
+}
+
 // Every confirmation: a tile tinted by intent beside one text column. The
 // title, the sentences, lists, escape steps and the buttons all start at the
 // title's edge. The parts of the column sit 24px apart.
 export function ConfirmationCard(props: {
   icon: LucideIcon;
   intent?: Intent;
-  labelledBy: string;
-  describedBy?: string;
   testId?: string;
   children: ReactNode;
 }) {
@@ -47,10 +52,6 @@ export function ConfirmationCard(props: {
     <div
       data-testid={props.testId}
       className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] gap-3 rounded-xl border border-line bg-panel p-6 text-ink"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby={props.labelledBy}
-      aria-describedby={props.describedBy}
     >
       <div
         aria-hidden
@@ -95,14 +96,15 @@ export function ConfirmActions(props: { children: ReactNode }) {
 
 // The card alone. ConfirmDialog puts it in an Overlay; the states page
 // renders it over a frame with no keyboard behavior.
-export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref<HTMLButtonElement> }) {
+export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref<HTMLButtonElement>; idBase?: string }) {
   // The states page shows one card in each theme, so ids come from useId.
-  const id = useId();
+  const ownId = useId();
+  const id = props.idBase ?? ownId;
   const titleId = `${id}-title`;
   const bodyId = `${id}-body`;
   const Confirm = props.intent === "danger" ? DangerButton : PrimaryButton;
   return (
-    <ConfirmationCard icon={props.icon} intent={props.intent} labelledBy={titleId} describedBy={bodyId} testId={props.testId}>
+    <ConfirmationCard icon={props.icon} intent={props.intent} testId={props.testId}>
       <ConfirmationHead titleId={titleId} bodyId={bodyId} title={props.title}>
         {props.children}
       </ConfirmationHead>
@@ -166,6 +168,7 @@ export function useOpeningFocus(pick: () => HTMLElement | null | undefined): voi
 // Focus starts on the confirm button, so Enter confirms and Escape cancels.
 // A confirm that waits for a choice starts on the dialog's first control.
 export function ConfirmDialog(props: ConfirmDialogProps) {
+  const id = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   useOpeningFocus(() => {
@@ -173,8 +176,8 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     return props.confirmDisabled ? panel && modalFocusableElements(panel)[0] : confirmRef.current;
   });
   return (
-    <Overlay onClose={props.onCancel} panelRef={panelRef} panelProps={{ onKeyDown: onDialogKeyDown }}>
-      <ConfirmDialogCard {...props} confirmRef={confirmRef} />
+    <Overlay onClose={props.onCancel} panelRef={panelRef} panelProps={confirmPanel(`${id}-title`, `${id}-body`)}>
+      <ConfirmDialogCard {...props} idBase={id} confirmRef={confirmRef} />
     </Overlay>
   );
 }

@@ -154,7 +154,7 @@ Every confirmation is the same card, 440px wide:
 - A 32px tile holds the action's 16px glyph at the card's left, `rounded-lg`. A danger confirmation tints it `bg-danger-tint text-danger`; any other uses `bg-panel-2 text-muted`.
 - The glyph names the action: `Trash2` for a delete, `Archive` for archive, `Eraser` for clear, `Layers` for a version.
 - The text starts 44px in, after the tile and a 12px gap. The title, the body, lists, escape steps and the buttons all start at that edge.
-- A confirmation that needs more than `ConfirmDialog`, such as a busy state or a dialog of its own, builds the same card from `ConfirmationCard`, `ConfirmationHead` and `ConfirmActions`.
+- A confirmation that needs more than `ConfirmDialog`, such as a busy state or a dialog of its own, builds the same card from `ConfirmationCard`, `ConfirmationHead` and `ConfirmActions`, and passes `confirmPanel` to its `Overlay`. The panel takes focus as the dialog opens, so it carries the dialog's role, title and sentences, and the arrow and held-Enter keys.
 
 - The title names the action and its object: `Merge version-1 into Main`, `Delete 12 files from Research?`.
 - The body states the one fact the title and buttons leave out, such as what stays or what cannot come back. Most dialogs need none.

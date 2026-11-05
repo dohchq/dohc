@@ -157,8 +157,17 @@ describe("RecoveryCloseGuard", () => {
     const last = buttons[buttons.length - 1];
 
     expect(document.activeElement).toBe(dialog);
+    // The focused panel is the dialog, so a screen reader reads its title.
+    expect(screen.getByRole("dialog", { name: /without your set-aside edit\?$/ })).toBe(dialog);
     await user.keyboard("{Shift>}{Tab}{/Shift}");
     expect(document.activeElement).toBe(last);
+
+    // The arrows move between Go back and the confirm, as in every confirmation.
+    screen.getByTestId("recovery-close-goback").focus();
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByTestId("recovery-close-anyway"));
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByTestId("recovery-close-goback"));
 
     dialog.focus();
     await user.keyboard("{Tab}");
