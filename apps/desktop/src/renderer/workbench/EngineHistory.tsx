@@ -563,6 +563,12 @@ const ACTOR_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size,
 const LEAD_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 50%))" };
 const PART_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 25%))" };
 const COLLECTION_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 72px, 35%))" };
+// How soon a part gives way. A line shares its shortfall by each part's width
+// times its factor and rounds each share to 1/64 px, so each step is a
+// million times the next: the part that should hold rounds to no loss.
+const GIVES_FIRST = "shrink-[1000000000000000000]";
+const GIVES_SECOND = "shrink-[1000000000000]";
+const GIVES_THIRD = "shrink-[1000000]";
 
 // A summary that names the file, around its name: the words before it cut at
 // their end, down to their floor; the name cuts in its middle and keeps its
@@ -573,9 +579,9 @@ function NamedSummary(props: { summary: string; name: string }) {
   const after = props.summary.slice(at + props.name.length);
   return (
     <span data-testid="engine-moment-summary" className="flex min-w-0">
-      {before ? <span className="min-w-0 shrink-[1000000] overflow-hidden text-ellipsis whitespace-pre" style={LEAD_FLOOR}>{before}</span> : null}
+      {before ? <span className={`min-w-0 ${GIVES_THIRD} overflow-hidden text-ellipsis whitespace-pre`} style={LEAD_FLOOR}>{before}</span> : null}
       <NameLine name={props.name} className="text-ink" />
-      {after ? <span className="min-w-0 shrink-[100000000] overflow-hidden text-ellipsis whitespace-pre">{after}</span> : null}
+      {after ? <span className={`min-w-0 ${GIVES_SECOND} overflow-hidden text-ellipsis whitespace-pre`}>{after}</span> : null}
     </span>
   );
 }
@@ -598,12 +604,12 @@ function WorkspaceMomentLine(props: { moment: EngineMomentRecord; fileOnly?: boo
   return (
     <span data-testid="engine-moment-line" className="flex h-4 min-w-0 flex-wrap content-start items-center gap-x-2 overflow-hidden text-[12px] leading-4 text-muted">
       <span className="flex min-w-0 items-center gap-2">
-        <MomentName moment={moment} title={momentAuthorLabel(moment)} style={ACTOR_FLOOR} className="shrink-[1000]" />
+        <MomentName moment={moment} title={momentAuthorLabel(moment)} style={ACTOR_FLOOR} className={GIVES_THIRD} />
         {namesFile
           ? <NamedSummary summary={summary} name={name} />
           : <NameLine name={name} className="text-ink" />}
         {summary !== null && !namesFile
-          ? <span data-testid="engine-moment-summary" className="min-w-0 shrink-[1000000] truncate">{summary}</span>
+          ? <span data-testid="engine-moment-summary" className={`min-w-0 ${GIVES_SECOND} truncate`}>{summary}</span>
           : null}
         <ContentMark moment={moment} />
       </span>
@@ -906,21 +912,21 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
       </span>
       {/* An undated row is one line, and this takes all of it beside the mark. */}
       <span data-testid="history-collection-line" className={`${LINE_TWO} flex-1 overflow-hidden`}>
-        <span data-testid="history-collection-title" className="min-w-0 shrink-[1000] truncate" style={PART_FLOOR}>
+        <span data-testid="history-collection-title" className={`min-w-0 ${GIVES_THIRD} truncate`} style={PART_FLOOR}>
           {title}
         </span>
         {agent !== undefined ? (
-          <span data-testid="history-collection-agent" className="min-w-0 shrink-[1000000] truncate" style={PART_FLOOR}>{agent}</span>
+          <span data-testid="history-collection-agent" className={`min-w-0 ${GIVES_SECOND} truncate`} style={PART_FLOOR}>{agent}</span>
         ) : null}
         {change.automation ? (
-          <span className="inline-flex min-w-0 shrink-[1000000] items-center gap-1" style={PART_FLOOR}>
+          <span className={`inline-flex min-w-0 ${GIVES_SECOND} items-center gap-1`} style={PART_FLOOR}>
             <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
             <span className="sr-only">Automation </span>
             <span className="truncate">{automationName(change.automation)}</span>
           </span>
         ) : null}
         {unlabelled ? (
-          <span data-testid="history-collection-operation" className="min-w-0 shrink-[1000000000] truncate text-subtle">{change.operation}</span>
+          <span data-testid="history-collection-operation" className={`min-w-0 ${GIVES_FIRST} truncate text-subtle`}>{change.operation}</span>
         ) : (
           <span data-testid="history-collection-name" className="min-w-0 truncate text-subtle" style={COLLECTION_FLOOR}>{name}</span>
         )}

@@ -64,6 +64,11 @@ function view(props: Partial<Parameters<typeof EngineHistoryView>[0]> = {}) {
   return calls;
 }
 
+// A part's flex-shrink factor from its class; 1 when it sets none.
+const shrinkOf = (el: Element) => Number(el.className.match(/shrink-\[(\d+)\]/)?.[1] ?? 1);
+// How much sooner each part of a History line gives way than the next.
+const STEP = 1e6;
+
 describe("History timeline rows", () => {
   it("shows files, versions and Collection changes as one list, each with its own way in", () => {
     const calls = view({ entries: [file("m-1"), version, change(4, DAY - 2_000)] });
@@ -115,21 +120,23 @@ describe("History timeline rows", () => {
 
   // As the line runs short, the operation's name gives way first, then who
   // made the change, then what changed; the Collection's name goes last.
-  // Their floors are inline widths the states page measures.
+  // Each step's factor is a million times the next's, so the part that
+  // should hold loses nothing; the states page measures the floors.
   it("cuts a Collection change's line from its end inward, keeping the Collection's name", () => {
     view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" }), change(2, null, GUESTS, "Guests")] });
     const [rules, undated] = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);
     const line = within(rules!).getByTestId("history-collection-line");
-    const shrink = (el: Element) => el.className.match(/shrink-\[(\d+)\]/)?.[1];
     const [title, agent, name] = [...line.children];
     expect([title, agent, name].map((el) => el!.getAttribute("data-testid")))
       .toEqual(["history-collection-title", "history-collection-agent", "history-collection-name"]);
-    expect([shrink(title!), shrink(agent!), shrink(name!)]).toEqual(["1000", "1000000", undefined]);
+    expect(shrinkOf(name!)).toBe(1);
+    expect(shrinkOf(title!) / shrinkOf(name!)).toBeGreaterThanOrEqual(STEP);
+    expect(shrinkOf(agent!) / shrinkOf(title!)).toBeGreaterThanOrEqual(STEP);
     expect(line.className).toContain("overflow-hidden");
     // An undated change is one line, and its parts share all of it.
     const undatedLine = within(undated!).getByTestId("history-collection-line");
     expect(undatedLine.className.split(" ")).toEqual(expect.arrayContaining(["flex-1", "overflow-hidden"]));
-    expect(shrink(within(undated!).getByTestId("history-collection-operation"))).toBe("1000000000");
+    expect(shrinkOf(within(undated!).getByTestId("history-collection-operation")) / shrinkOf(agent!)).toBeGreaterThanOrEqual(STEP);
   });
 
   // The name stays in the line's ink; colour belongs to faces.
@@ -255,7 +262,7 @@ describe("History timeline changes", () => {
     expect(line.className.split(" ")).toEqual(expect.arrayContaining(["flex-wrap", "h-4", "overflow-hidden"]));
     const actor = within(open).getByTestId("engine-moment-source");
     expect(actor.getAttribute("title")).toBe("Margaret Okonkwo-Fitzgerald");
-    expect(actor.className).toContain("shrink-[1000]");
+    expect(shrinkOf(actor)).toBeGreaterThanOrEqual(STEP);
     expect(actor.className).not.toContain("max-w-");
     const base = within(open).getByText("product-planning-notes");
     expect(base.className).toContain("truncate");
@@ -273,7 +280,7 @@ describe("History timeline changes", () => {
     expect(within(summarized).getByText("product-planning-notes")).toBeTruthy();
     const summary = within(summarized).getByTestId("engine-moment-summary");
     expect(summary.textContent).toBe("Added the ferry times");
-    expect(summary.className).toContain("shrink-[1000000]");
+    expect(shrinkOf(summary) / shrinkOf(actor)).toBeGreaterThanOrEqual(STEP);
     expect(within(summarized).queryByTestId("engine-moment-folder")).toBeNull();
 
     // A summary that names the file takes the name's place and keeps the
@@ -284,7 +291,8 @@ describe("History timeline changes", () => {
     expect(named.textContent).toBe("Deleted product-planning-notes.md");
     const [verb, fileName] = [...named.children];
     expect(verb!.textContent).toBe("Deleted ");
-    expect(verb!.className.split(" ")).toEqual(expect.arrayContaining(["shrink-[1000000]", "text-ellipsis", "whitespace-pre"]));
+    expect(verb!.className.split(" ")).toEqual(expect.arrayContaining(["text-ellipsis", "whitespace-pre"]));
+    expect(shrinkOf(verb!) / shrinkOf(fileName!)).toBeGreaterThanOrEqual(STEP);
     // Its trailing space stays; `truncate`'s nowrap would drop it.
     expect(verb!.className).not.toContain("truncate");
     expect(fileName!.className).toContain("text-ink");
@@ -295,7 +303,7 @@ describe("History timeline changes", () => {
     const moved = row({ summary: "Moved product-planning-notes.md to the archive" });
     const [, , rest] = [...within(moved).getByTestId("engine-moment-summary").children];
     expect(rest!.textContent).toBe(" to the archive");
-    expect(rest!.className).toContain("shrink-[100000000]");
+    expect(shrinkOf(rest!) / shrinkOf(within(moved).getByTestId("engine-moment-summary").firstElementChild!)).toBeGreaterThanOrEqual(STEP);
   });
 
   it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
