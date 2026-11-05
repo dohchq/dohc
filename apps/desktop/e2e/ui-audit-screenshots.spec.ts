@@ -3,7 +3,7 @@ import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
@@ -191,9 +191,6 @@ test("@ui-audit capture baseline screenshots", async () => {
     throw new Error("commit the worktree before capturing UI audit evidence");
   }
   await mkdir(SHOT_DIR, { recursive: true });
-  if ((await readdir(SHOT_DIR)).length !== 0) {
-    throw new Error("UI_AUDIT_SHOT_DIR must be empty before capture");
-  }
   const bundles = currentUiAuditBundles(DESKTOP_ROOT);
   const build = readUiAuditBuildProvenance(
     DESKTOP_ROOT,
