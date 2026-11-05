@@ -338,6 +338,7 @@ describe("a History diff the rules hide", () => {
             tabPath={momentDiffTabPath("m-1")}
             onBeforeRestore={async () => noop}
             onOpenFile={noop}
+            onOpenRulesFile={noop}
             onPathResolved={onPathResolved}
             registerActiveUndo={noop}
             onRestored={noop}
