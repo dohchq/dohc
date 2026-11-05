@@ -68,7 +68,7 @@ Every error and empty state needs a Next. A toast usually reports a Change. A st
 - Use sentence case: `New folder`.
 - Leave the period off labels, buttons, and fragments. Full sentences keep theirs.
 - Use numerals for counts a person scans or acts on: `Delete 12 files`. Inside a sentence, a word can read better: `A file changed on two machines`.
-- A count beside a list is the number of rows under it.
+- A count beside a list counts every item the list holds, whatever its state. It includes items in collapsed groups or past **Show more**, but not folder or group rows.
 - State the mechanism or say nothing. Cut promises such as `magically`, `just works`, `powered by AI`, `seamless`, `powerful`, and `smart`.
 - Keep sync clearly opt-in. Sync starts off, and signing in alone does not turn it on.
 
@@ -382,7 +382,7 @@ Position:
 | Panel header | `h-9` (36 px), `px-3`, the same height as the tab strip |
 | Panel content | Starts 8 px under the header |
 | Section in a panel | `mt-4` (16 px) before it, except the first. Its label row is `h-6 px-3`, and the first row follows directly. |
-| Icon button | `size-6` (24 px) in panels, rows, and toolbars. `size-7` in the title bar. `size-9` in the rail. Inside a line of text, such as a Try again beside a count, a plain `button` at `size-4` (16 px), `align-top`, its glyph `text-muted`, so the line keeps its height. `IconButton` stays 24 px even when given `size-4`. |
+| Icon button | `size-6` (24 px) in panels, rows, and toolbars. `size-7` in the title bar. `size-9` in the rail. Inside a line of text, a plain `button` at `size-4` (16 px), so the line keeps its height. Give it `align-top` and a `text-muted` glyph, as on the Try again beside a count in Versions. `IconButton` stays 24 px even when given `size-4`. |
 | Button | `h-8 px-3 text-[13px]` for `PrimaryButton`, `SecondaryButton`, and `DangerButton`. `h-7` compact, `h-6` in a row. `GhostButton` is `h-6 px-2 text-xs`, with `gap-2` after its icon. |
 | Card | `p-3`, with `gap-2` inside |
 | Popover | `p-3`. A menu's frame is `p-1`, because its rows bring their own `px-2`. |
