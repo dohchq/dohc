@@ -546,6 +546,21 @@ describe("CloudLogin", () => {
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
   });
 
+  // While signing in again connects, the panel keeps the session's server in
+  // view with its button busy, never the form for another address.
+  it("keeps the session's server in view while signing in again connects", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue(CONNECTED);
+    bridgeMock.cloudLoginStart.mockReturnValueOnce(new Promise(() => {}));
+
+    render(<CloudLogin renew handOffSession />);
+
+    const start = await screen.findByTestId("cloud-renew-start");
+    expect(screen.getByTestId("cloud-renew-server").textContent).toBe("https://dohc.example.test");
+    expect(start.textContent).toBe("Connecting…");
+    expect((start as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+  });
+
   // A failed or refused renewal stays at the session's server: the panel
   // offers Sign in again there, never an address to change, and a notice's
   // Try again starts at the same server.
