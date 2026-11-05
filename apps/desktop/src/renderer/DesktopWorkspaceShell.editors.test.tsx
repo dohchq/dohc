@@ -1811,8 +1811,10 @@ describe("ui-state merge-on-load", () => {
       refusedDetail: null,
     };
     let refreshes = 0;
-    const refresh = vi.fn(async () => (++refreshes > 1 ? refreshed : refused));
+    const retried = deferred<RefreshSharedViewResult>();
+    const refresh = vi.fn(() => (++refreshes > 1 ? retried.promise : Promise.resolve(refused)));
     bridge.refreshSharedView = refresh;
+    const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
       shareView: {
@@ -1826,7 +1828,7 @@ describe("ui-state merge-on-load", () => {
     expect(toast.textContent).toContain(words);
     expect(toast.textContent).not.toContain("Couldn't refresh the shared view.");
     // Details carries what kept dohc from reading the record.
-    fireEvent.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toContain("Cause: Invalid share collision record."),
     );
@@ -1836,11 +1838,16 @@ describe("ui-state merge-on-load", () => {
     const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
 
-    // Try again runs the refresh, and the refresh that completes ends the row.
+    // Try again closes Notices and runs the refresh. The refresh that completes ends the row.
+    const refreshButton = () => screen.getByTestId("shared-view-refresh") as HTMLButtonElement;
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(within(notices).queryByText(words, { exact: false })).toBeNull());
+    await waitFor(() => expect(refreshButton().disabled).toBe(true));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    retried.resolve(refreshed);
+    await waitFor(() => expect(refreshButton().disabled).toBe(false));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).queryByText(words, { exact: false })).toBeNull();
   });
 
   it("repaints changed files and removes generic chat before an ended share becomes read-only", async () => {
