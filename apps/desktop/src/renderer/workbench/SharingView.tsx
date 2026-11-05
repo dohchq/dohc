@@ -13,6 +13,7 @@ import { DangerButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { KindGlyph } from "../ui/KindGlyph";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
+import { NameLine } from "../ui/NameLine";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import {
@@ -276,20 +277,6 @@ function StatusWord(props: { word: Word }) {
   );
 }
 
-// A name cut in its middle, so a short extension stays: "product-pl….md".
-// Only the last part of a path has an extension: "v1.2/README" has none.
-function NameLine(props: { name: string; title: string }) {
-  const dot = props.name.lastIndexOf(".");
-  const base = props.name.lastIndexOf("/") + 1;
-  const cut = dot > base && props.name.length - dot <= 12 ? dot : props.name.length;
-  return (
-    <span className="flex min-w-0 leading-5" title={props.title}>
-      <span className="truncate">{props.name.slice(0, cut)}</span>
-      <span className="shrink-0 whitespace-pre">{props.name.slice(cut)}</span>
-    </span>
-  );
-}
-
 // Wide enough for the rows' longest item, "Remove from workspace".
 const ROW_MENU_WIDTH = 200;
 
@@ -328,7 +315,7 @@ function ShareRow(props: {
         className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover keyboard:focus-within:bg-hover dohc-focus-row`}>
         {subject.glyph}
         <span className="flex min-w-0 flex-1 flex-col">
-          <NameLine name={props.name} title={subject.title} />
+          <NameLine name={props.name} title={subject.title} className="leading-5" />
           {who || props.word ? (
             <span className="flex min-w-0 gap-2">
               {who ? (
