@@ -291,9 +291,9 @@ export function PageIdentity(props: PageIdentityProps) {
     }
   }
 
-  // The title keeps its own draft so typing stays smooth; it re-syncs from
-  // frontmatter whenever an external change lands and the field isn't focused
-  // (mirrors how PropertiesPanel avoids a dirty-loop with the editor).
+  // While the field has focus it shows its own draft, so typing stays smooth
+  // and an outside change waits for the blur. Without focus it shows the
+  // frontmatter's title in the same render that changes it.
   const [titleDraft, setTitleDraft] = useState(title);
   const [titleFocused, setTitleFocused] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
@@ -343,9 +343,6 @@ export function PageIdentity(props: PageIdentityProps) {
     titleCaret.current = null;
     titleRef.current?.setSelectionRange(caret, caret);
   });
-  useEffect(() => {
-    if (!titleFocused) setTitleDraft(title);
-  }, [title, titleFocused]);
   // The same field folds and unfolds, so focus, caret and Tab order stay.
   // It folds while it holds no text, whether or not it has focus, so focus
   // and blur never move what is below it: the first character typed opens
@@ -511,7 +508,7 @@ export function PageIdentity(props: PageIdentityProps) {
           aria-label="Page title"
           rows={1}
           autoFocus={props.autoFocus}
-          value={titleDraft}
+          value={titleFocused ? titleDraft : title}
           placeholder={folded ? "Add title" : props.filenameStem}
           spellCheck={false}
           readOnly={readOnly}
@@ -520,6 +517,8 @@ export function PageIdentity(props: PageIdentityProps) {
             titleComposing.current = false;
             setBlurHeld(false);
             setOpenWhileComposing(false);
+            // A held blur keeps the draft it was composing.
+            if (!titleFocused) setTitleDraft(title);
             setTitleFocused(true);
           }}
           onBlur={() => {
@@ -528,7 +527,6 @@ export function PageIdentity(props: PageIdentityProps) {
               return;
             }
             setTitleFocused(false);
-            setTitleDraft(title);
           }}
           onCompositionStart={() => {
             titleComposing.current = true;
