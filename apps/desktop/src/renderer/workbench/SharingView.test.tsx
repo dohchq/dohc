@@ -226,6 +226,20 @@ describe("the Sharing view's two lists", () => {
     expect(who.children[1]!.textContent).toBe(", anyone with the link can view");
   });
 
+  it.each([["a view link first", ["view", "edit"]], ["an edit link first", ["edit", "view"]]] as const)(
+    "says the widest of several links, and lists each in the tooltip: %s",
+    async (_case, levels) => {
+      answerWith({ granted: answer("granted", { rows: [
+        ...levels.map((access, index) => granted({ grantId: `link-${index}`, ...LINK, access })),
+        granted({ grantId: "sam", access: "comment" }),
+      ] }) });
+      render(<View />);
+      const who = within(await screen.findByTestId("sharing-granted-row")).getByTestId("sharing-row-who");
+      expect(who.textContent).toBe("Anyone with a link can edit");
+      expect(who.getAttribute("title")).toBe("1 link lets anyone edit\n1 link lets anyone view\nsam@example.com can comment");
+    },
+  );
+
   it("names a share sent to the account by its sender when its level is unknown", async () => {
     answerWith({ received: answer("received", { rows: [received({ access: null })] }) });
     render(<View />);
@@ -260,6 +274,18 @@ describe("the Sharing view's two lists", () => {
     expect(base.nextElementSibling!.textContent).toBe(".md");
     expect(base.nextElementSibling!.className).toContain("shrink-0");
     expect(base.parentElement!.getAttribute("title")).toBe("plans/product-plan-2027.md");
+  });
+
+  it("finds an extension only in the last part of a path", async () => {
+    answerWith({ granted: answer("granted", { rows: [
+      granted({ shareId: "a", selector: { paths: ["v1.2/README"], versionId: null } }),
+      granted({ shareId: "b", selector: { paths: ["v2.0/README"], versionId: null } }),
+    ] }) });
+    render(<View />);
+    await screen.findAllByTestId("sharing-granted-row");
+    const name = screen.getByText("v1.2/README");
+    expect(name.className).toContain("truncate");
+    expect(name.nextElementSibling!.textContent).toBe("");
   });
 
   it("shows the folder before a name only where its list repeats the name", async () => {
