@@ -181,6 +181,23 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
     expect(await screen.findByText("invalid-yaml on line 3")).toBeTruthy();
   });
 
+  it("marks a file it cannot read as it marks an automation it cannot read, and offers the file", async () => {
+    makeBridge({ status: "shared", definitions: {
+      file: { status: "unreadable", diagnostic: { code: "invalid-yaml", path: "", line: 3 } }, contentHash: HASH, canSwitch: true,
+      sync: "accepted",
+    } });
+    const onOpenFile = vi.fn();
+    render(<Panel onOpenFile={onOpenFile} />);
+    const words = await screen.findByText("dohc cannot read automations.yaml.");
+    const mark = screen.getByLabelText("Cannot read");
+    expect(mark.getAttribute("class")).toContain("text-danger");
+    const line = mark.parentElement!;
+    expect(line.contains(words)).toBe(true);
+    expect(within(line).getByText("invalid-yaml on line 3")).toBeTruthy();
+    await userEvent.click(within(line).getByRole("button", { name: "Open file" }));
+    expect(onOpenFile).toHaveBeenCalledWith("Tasks/automations.yaml");
+  });
+
   it("switches from the keyboard with the file's id, value, and hash, and says Waiting to sync until the relay takes it", async () => {
     const user = userEvent.setup();
     const { bridge, replace, changed } = makeBridge(shared([valid(stamp), valid(nudge)]));
