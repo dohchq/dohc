@@ -1960,6 +1960,10 @@ export function createWorkspaceEngineCapture(
   const durableLocalListeners = new Set<(path: string) => void>();
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
+  // Quit cancels capture waits at once. A save dohc accepted before quit waits
+  // on this one instead, which ends when the work queued before quit has run,
+  // so the save still reaches the disk.
+  const admittedCaptureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
@@ -6382,7 +6386,7 @@ export function createWorkspaceEngineCapture(
           throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
-        await engine.flushCapture?.();
+        await engine.flushCapture?.({ signal: admittedCaptureWaitAbort.signal });
         const versionId = writeOptions.versionId ?? await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
           origin: localFileOrApi(author),
@@ -6657,6 +6661,7 @@ export function createWorkspaceEngineCapture(
       shuttingDown = true;
       ydocOpenAbort.abort();
       captureWaitAbort.abort();
+      void chain.then(() => admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason));
     },
 
     settleAndCloseAllLiveSessions() {
@@ -8388,6 +8393,7 @@ export function createWorkspaceEngineCapture(
         }
       } finally {
         captureWaitAbort.abort();
+        admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason);
         await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every
