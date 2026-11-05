@@ -25,7 +25,7 @@ import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAut
 import type { NoticeTarget } from "../shell/noticeTarget";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
-import { SYNC_NOT_CONNECTED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 
 export type NoticeAction = {
   label: string;
@@ -637,6 +637,24 @@ export function accountUnconfirmedNotice(input: {
   });
 }
 
+// The server stopped accepting this computer's sign-in. Sign in again
+// renews it at the same server, the same action as Settings' row.
+const SIGN_IN_EXPIRED_TITLE = "Your sign-in expired";
+export function signInExpiredNotice(input: {
+  workspaceId: string;
+  onSignInAgain: (() => void) | undefined;
+}): Notice {
+  return syncBlockedNotice({
+    id: "sign-in-expired",
+    tone: "danger",
+    title: SIGN_IN_EXPIRED_TITLE,
+    body: `${SYNC_SIGN_IN_EXPIRED} Your changes stay on this computer.`,
+    actions: [input.onSignInAgain ? { label: "Sign in again", onClick: input.onSignInAgain } : null],
+    workspaceId: input.workspaceId,
+    Icon: AlertTriangle,
+  });
+}
+
 // An oversized unclaimed lineage shares its latest saved file at each push,
 // never its live edits. An open copy elsewhere takes it only after closing.
 type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
@@ -978,6 +996,9 @@ export function NoticeCenter(props: {
   onOpenSettings: () => void;
   // While nobody is connected: Settings' connect flow.
   onConnectServer?: () => void;
+  // While the server stopped accepting the sign-in: the same Sign in again
+  // as Settings' row.
+  onSignInAgain?: () => void;
   // While dohc can't confirm the workspace's account: Try again reads the
   // account again, the way Settings' Try again does, and Sync settings opens
   // Settings at the workspace's sync row.
@@ -1573,6 +1594,8 @@ export function NoticeCenter(props: {
       });
     } else if (state === "not-connected") {
       next.push(notConnectedNotice({ workspaceId: props.workspaceId, onConnectServer: props.onConnectServer }));
+    } else if (state === "sign-in-expired") {
+      next.push(signInExpiredNotice({ workspaceId: props.workspaceId, onSignInAgain: props.onSignInAgain }));
     } else if (state === "account-unconfirmed") {
       next.push(accountUnconfirmedNotice({
         workspaceId: props.workspaceId,
@@ -1708,6 +1731,7 @@ export function NoticeCenter(props: {
     props.onRefreshShareView,
     props.onOpenSettings,
     props.onConnectServer,
+    props.onSignInAgain,
     props.onConfirmSyncAccount,
     props.onOpenSyncSettings,
     props.onRebuildEngineStore,

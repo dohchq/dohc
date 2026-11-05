@@ -90,7 +90,7 @@ import { EditorTabs } from "../workbench/EditorTabs";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
-import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice } from "../workbench/NoticeCenter";
+import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice, signInExpiredNotice } from "../workbench/NoticeCenter";
 import { EngineHistoryView, HistoryRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
@@ -2031,6 +2031,13 @@ function Pane(props: { theme: "light" | "dark" }) {
               onAction={noop}
               onDismiss={noop}
             />
+            <LocalNoticeRow
+              notice={signInExpiredNotice({ workspaceId: "ws-trip", onSignInAgain: noop })}
+              unread
+              onKeyDown={noop}
+              onAction={noop}
+              onDismiss={noop}
+            />
           </ul>
         </div>
       </Section>
@@ -3326,6 +3333,14 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
           </div>
         </Specimen>
+        <Specimen label="sign-in expired: not syncing, with Sign in again and Pause sync">
+          <div className="w-[640px]">
+            <CloudSyncSettings
+              workspaceId="ws-trip"
+              cloud={{ ...settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true, workspaceSyncConnected: true }), signInExpired: true, onSignInAgain: noop }}
+            />
+          </div>
+        </Specimen>
         <Specimen label="not connected: not syncing, with Connect server and Pause sync">
           <div className="w-[640px]">
             <CloudSyncSettings
@@ -4018,6 +4033,7 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
   { label: "account unconfirmed", syncStatus: { ...SYNCED_STATUS, state: "account-unconfirmed" }, failedSaves: 0 },
   { label: "not connected", syncStatus: { ...SYNCED_STATUS, state: "not-connected" }, failedSaves: 0 },
+  { label: "sign-in expired", syncStatus: { ...SYNCED_STATUS, state: "sign-in-expired" }, failedSaves: 0 },
   {
     label: "not connected: live editing shows beside it",
     syncStatus: { ...SYNCED_STATUS, state: "not-connected", ownerLiveDelivery: "retrying" },

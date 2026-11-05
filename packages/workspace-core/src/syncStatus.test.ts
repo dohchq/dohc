@@ -46,7 +46,7 @@ describe("deriveSyncStatus", () => {
     ).toBe("conflict");
   });
 
-  it.each(["not-connected", "account-unconfirmed", "update-required"] as const)("reports a blocked sync as %s", (syncBlocked) => {
+  it.each(["not-connected", "account-unconfirmed", "sign-in-expired", "update-required"] as const)("reports a blocked sync as %s", (syncBlocked) => {
     expect(deriveSyncStatus({ ...base, syncBlocked }).state).toBe(syncBlocked);
   });
 

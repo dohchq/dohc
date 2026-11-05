@@ -10,6 +10,7 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   "sync-failed": "Sync failed",
   "not-connected": "Connect server to sync",
   "account-unconfirmed": "Couldn't confirm account",
+  "sign-in-expired": "Sign in again to sync",
   // The update the title bar names replaces it.
   "update-required": "Sync stopped",
 };
@@ -19,6 +20,7 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
 const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
   "not-connected": "Not syncing. Connect your server to sync this workspace.",
   "account-unconfirmed": "Not syncing. dohc couldn't confirm this workspace's account.",
+  "sign-in-expired": "Not syncing. Your sign-in expired.",
 };
 
 // The dot's shape says the kind of state before its color does: filled is
@@ -36,6 +38,7 @@ const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
   // Disconnecting is a choice, not a fault.
   "not-connected": "waiting",
   "account-unconfirmed": "attention",
+  "sign-in-expired": "attention",
   "update-required": "attention",
 };
 
@@ -75,8 +78,9 @@ function liveDeliveryLabel(
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
-// The sync state names the server as the problem. No server connection, or
-// an account dohc can't confirm, is not the server's fault, so neither does.
+// The sync state names the server as the problem. No server connection, an
+// account dohc can't confirm, or an expired sign-in is not the server's
+// fault, so none of them does.
 export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
   return syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable";
 }
