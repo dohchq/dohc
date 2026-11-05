@@ -37,7 +37,7 @@ describe("chat message waits", () => {
     const queried = Promise.withResolvers<void>();
     let calls = 0;
     const pending = f.waiters.wait({ subscribe: f.subscribe, empty, timeoutMs: 25_000, query: async () => {
-      if (++calls === 1) { queried.resolve(); return new Promise(resolve => { release = resolve; }); }
+      if (++calls === 1) { queried.resolve(); return new Promise<typeof empty>(resolve => { release = resolve; }); }
       return { messages: ["message"], cursor: "next" };
     } });
     await queried.promise;
