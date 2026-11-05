@@ -1,6 +1,6 @@
 import { Check, Layers, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
+import type { ListVersionLastChangesResult, ListWorkspaceVersionConflictsResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
@@ -300,7 +300,7 @@ export function VersionsPage(props: {
       let after: string | null = null;
       try {
         for (let page = 0; page < CONFLICT_PAGES_MAX; page += 1) {
-          const result = await withDeadline(bridge().listWorkspaceVersionConflicts({
+          const result: ListWorkspaceVersionConflictsResult = await withDeadline(bridge().listWorkspaceVersionConflicts({
             workspaceId,
             ...(after === null ? {} : { afterConflictId: after }),
           }), "listWorkspaceVersionConflicts");
