@@ -132,6 +132,7 @@ it("keeps the complete account email when the sender label exceeds the subject l
 it.each([
   [404, "dohc could not open this app with this account. Ask the owner to share it with you."],
   [503, "dohc could not reach the app. Check your connection, then try again."],
+  [410, "This app can't find its data. Ask the person who shared it with you."],
 ])("marks a failed Open app (%s) with the alert icon and error tone, and names nothing from the link", async (status, message) => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
