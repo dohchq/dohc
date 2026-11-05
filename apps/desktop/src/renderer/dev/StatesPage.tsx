@@ -2581,7 +2581,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* The Explorer's Home, at the sidebar's narrowest. */}
-      <Section part="explorer-home" title="Explorer Home">
+      <Section part="explorer-home" title="Explorer Home" menusAtRest>
         <Specimen label="pinned, recent, pages in folders, Collections, apps, other files; a page open; a row hovered">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover"
             data-force-target='[data-section="pages"]:nth-of-type(1)'>
