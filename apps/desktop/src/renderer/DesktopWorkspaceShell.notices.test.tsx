@@ -5101,6 +5101,110 @@ it("signs in again at the same server from a failed renewal's notice after the d
   expect(screen.queryByTestId("settings-dialog")).toBeNull();
 });
 
+// The renewal's first step, the status check, failed. Its notice still signs
+// in again once the dialog has closed, instead of opening Settings.
+it("signs in again from a renewal's failed status check after the dialog closes", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+  let failStatus = false;
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudLoginStart: vi.fn(async (_payload: { serverUrl: string }) => ({
+      userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device",
+    })),
+    cloudLoginPoll: vi.fn(async () => ({ status: "pending" as const })),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => {
+    if (failStatus) {
+      failStatus = false;
+      throw new Error("The engine stopped answering.");
+    }
+    return {
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true, workspaceSyncConnected: true,
+    };
+  });
+  const user = userEvent.setup();
+  renderShell(bridge);
+
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const row = await screen.findByTestId("notice-sign-in-expired");
+  failStatus = true;
+  await user.click(within(row).getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("workspace-shell-error");
+  expect(bridge.cloudLoginStart).not.toHaveBeenCalled();
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+  await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+  await screen.findByTestId("cloud-user-code");
+  expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+});
+
+// A connection that failed before the sign-in expired keeps its notice. Its
+// Try again during a renewal leaves the renewal a renewal, so the renewal's
+// own failure still signs in again from its notice after the dialog closes.
+it("keeps a renewal a renewal when an older connection notice is retried during it", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+  let connected = false;
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudLoginStart: vi.fn(async (payload: { serverUrl: string }) => {
+      throw new Error(`dohc couldn't reach ${payload.serverUrl}.`);
+    }),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => (connected
+    ? {
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true, workspaceSyncConnected: true,
+    }
+    : { connected: false, email: "", serverUrl: "", workspaceSynced: false }));
+  const user = userEvent.setup();
+  renderShell(bridge);
+  // The first row with these words.
+  const noticeRow = async (text: string) => {
+    if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+    const [notice] = await within(await screen.findByTestId("notice-center")).findAllByText(text);
+    const row = notice?.closest("li");
+    if (!row) throw new Error(`"${text}" has no Notices row.`);
+    return row;
+  };
+
+  // Signed out, a connection to another server fails.
+  await user.keyboard("{Control>}k{/Control}");
+  await user.click(await screen.findByText("Connect server"));
+  await user.type(await screen.findByTestId("cloud-server-url"), "https://old.dohc.test");
+  await user.click(screen.getByTestId("cloud-connect-start"));
+  await screen.findByTestId("workspace-shell-error");
+  connected = true;
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+
+  // Signing in again after the sign-in expired fails too.
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  await user.click(within(await screen.findByTestId("notice-sign-in-expired")).getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("cloud-renew");
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+
+  // The older notice's Try again restarts the renewal at its server.
+  await user.click(within(await noticeRow("dohc couldn't reach https://old.dohc.test.")).getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(3));
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(await screen.findByTestId("cloud-renew")).toBeTruthy();
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+  await user.click(within(await noticeRow("dohc couldn't reach https://cloud.dohc.test.")).getByRole("button", { name: "Try again" }));
+
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(4));
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(await screen.findByTestId("cloud-renew")).toBeTruthy();
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+});
+
 // Settings shows the same expired row: no switch reading on while nothing
 // syncs, and Sign in again in Try again's place.
 it.each([
