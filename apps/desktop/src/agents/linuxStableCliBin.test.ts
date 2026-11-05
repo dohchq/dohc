@@ -22,6 +22,7 @@ import {
 
 const scratchDirs: string[] = [];
 let failLauncherPublish = false;
+let failNextLauncherRead = false;
 const pinned = vi.hoisted(() => ({ sha256: "" }));
 // Flushes and renames, in order, with temp names shortened to "<name>.tmp".
 const fsEvents = vi.hoisted((): string[] => []);
@@ -42,6 +43,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.writeFile(...args);
     }) as typeof actual.writeFile,
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      if (failNextLauncherRead && basename(String(args[0])) === "dohc-mcp") {
+        failNextLauncherRead = false;
+        throw Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+      }
+      return actual.readFile(...args);
+    }) as typeof actual.readFile,
     open: (async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
       const sync = handle.sync.bind(handle);
@@ -60,6 +68,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 afterEach(() => {
   failLauncherPublish = false;
+  failNextLauncherRead = false;
   fsEvents.length = 0;
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -193,6 +202,23 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
     expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([f.nodeFileName]);
     expect(readdirSync(f.targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
     expect(await refreshLinuxStableCliBin({ ...f, onError: () => {} })).toBe(f.targetDir);
+  });
+
+  it("keeps the Node.js its launcher names when the launcher can't be read, so a failed refresh still has it", async () => {
+    const f = x64Fixture();
+    await syncLinuxStableCliBin(f);
+    const launcher = readFileSync(join(f.targetDir, "dohc-mcp"), "utf8");
+    writeFileSync(join(f.resourcesCliBinDir, "..", "app-compiler", "node"), `${RUNTIME}# changed\n`);
+    pinned.sha256 = createHash("sha256").update("the pinned release").digest("hex");
+    failNextLauncherRead = true;
+    const onError = vi.fn();
+
+    const result = await refreshLinuxStableCliBin({ ...f, onError });
+    expect(failNextLauncherRead, "the launcher read failed with EIO").toBe(false);
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "dohc's Node.js does not match its pinned release." }));
+    expect(result, "after EIO and a failed publish, the previous launcher still works").toBe(f.targetDir);
+    expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toBe(launcher);
+    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([f.nodeFileName]);
   });
 
   it("is not intact when the Node.js its launcher names is missing", async () => {
