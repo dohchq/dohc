@@ -40,6 +40,8 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
   let clock = 0;
   let relay: RelayAutomationHost | null = null;
   let reachable = true;
+  // The relay takes each request and never answers: only its signal ends it.
+  let hung = false;
   let signedIn = true;
   let finish: number | null = 5_000;
   let finishes = 0;
@@ -58,10 +60,15 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     installId: () => ME,
     label: () => "Ice's laptop",
     synced: () => options.synced ?? true,
-    send: async (_workspaceId, request) => {
+    send: async (_workspaceId, request, signal) => {
       if (!signedIn) return null;
       if (!reachable) throw new Error("offline");
       requests.push(request);
+      if (hung) {
+        return await new Promise<HostAnswer>((_resolve, reject) => {
+          if (signal) signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
       if (request.action === "check-in") {
         if (request.body.claim && relay === null) relay = host(ME, 1, null, null);
         return answer(relay);
@@ -109,6 +116,7 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     setRelay: (row: RelayAutomationHost | null) => { relay = row; },
     relay: () => relay,
     setReachable: (value: boolean) => { reachable = value; },
+    setHung: (value: boolean) => { hung = value; },
     setSignedIn: (value: boolean) => { signedIn = value; },
     setFinish: (value: number | null) => { finish = value; },
     whileFinishing: (run: (stillHandingOver: () => boolean) => void) => { whileFinishing = run; },
@@ -455,18 +463,46 @@ describe("automation hosts", () => {
   it("admits a Group trigger's computer as the host when none is named, and reads nothing once one is", async () => {
     const w = world();
     w.hosts.open("ws");
-    await w.hosts.admit("ws");
+    await w.hosts.admit("ws", new AbortController().signal);
     expect(w.requests.at(-1), "no host named, so it claims").toEqual({ action: "check-in", body: { installId: ME, label: "Ice's laptop", claim: true } });
     expect(w.hosts.stillRuns("ws")).toBe(true);
     const reads = w.requests.length;
     w.advance(HOST_FRESH_MS + 1);
-    await w.hosts.admit("ws");
+    await w.hosts.admit("ws", new AbortController().signal);
     expect(w.requests.length, "a named host, even an old copy, answers at once").toBe(reads);
 
     const unsynced = world({ synced: false });
     unsynced.hosts.open("ws");
-    await unsynced.hosts.admit("ws");
+    await unsynced.hosts.admit("ws", new AbortController().signal);
     expect(unsynced.requests, "nothing to ask before it syncs").toEqual([]);
+  });
+
+  it("stops a Group trigger's check-in when the workspace closes, and reports nothing", async () => {
+    const w = world();
+    w.hosts.open("ws");
+    await w.settle();
+    const hostChanges = w.hostChanges();
+    w.setHung(true);
+    const closing = new AbortController();
+    let admitted = false;
+    const admitting = w.hosts.admit("ws", closing.signal).then(() => { admitted = true; });
+    await w.settle();
+    expect(w.requests.at(-1), "the check-in is out").toEqual({ action: "check-in", body: { installId: ME, label: "Ice's laptop", claim: true } });
+    expect(admitted).toBe(false);
+    closing.abort();
+    await admitting;
+    expect(w.errors).toEqual([]);
+    expect(w.hostChanges(), "host work hears nothing").toBe(hostChanges);
+
+    // A read the open started still runs, and admit stops waiting for it.
+    const joined = world();
+    joined.setHung(true);
+    joined.hosts.open("ws");
+    const stop = new AbortController();
+    const waiting = joined.hosts.admit("ws", stop.signal);
+    stop.abort();
+    await waiting;
+    expect(joined.errors).toEqual([]);
   });
 
   it("tells host work once when a read fails while no host is named, and again only after an answer", async () => {

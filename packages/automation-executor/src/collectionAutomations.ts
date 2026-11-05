@@ -374,23 +374,25 @@ export interface CollectionAutomationsOptions {
   /**
    * The relay's last release or take over, read at this host generation,
    * with the handover when a release left it for this computer. Throws when
-   * the relay does not answer.
+   * the relay does not answer, or when `signal` aborts at workspace close.
    */
-  groupRelayRecord(generation: number): Promise<AutomationGroupRelayRecord>;
+  groupRelayRecord(generation: number, signal: AbortSignal): Promise<AutomationGroupRelayRecord>;
   /**
    * The relay's last release or take over, read at this host generation,
    * with the reach verdicts when a release left them for this computer.
-   * Throws when the relay does not answer.
+   * Throws when the relay does not answer, or when `signal` aborts at
+   * workspace close.
    */
-  reachRelayRecord(generation: number): Promise<ReachRelayRecord>;
+  reachRelayRecord(generation: number, signal: AbortSignal): Promise<ReachRelayRecord>;
   /** A server replica without reach history must hold steps in a workspace that was shared. */
   holdUnprovenWithoutHistory?(): Promise<boolean>;
   /**
    * An enabled Group trigger asks the host module, as a schedule does, to
    * record this computer as the host when the relay names none. Resolves at
-   * once when a host is named, or after the read that learns one.
+   * once when a host is named, or after the read that learns one, or when
+   * `signal` aborts at workspace close.
    */
-  requestHost(): Promise<unknown>;
+  requestHost(signal: AbortSignal): Promise<unknown>;
   /** Tells the owner, once a day, that Group messages started no automations here, and why. */
   groupMessagesSkipped(reason: GroupMessagesSkipped, atMs: number): Promise<void>;
   /** A message's whole body, for a claim that carried it truncated. */
@@ -1276,6 +1278,8 @@ export class CollectionAutomations {
   // The next expiry while the workspace stays open.
   private historyTimer: ReturnType<typeof setTimeout> | null = null;
   private runAbort = new AbortController();
+  // Aborts at workspace close, so a relay read does not hold the close up.
+  private readonly relayReads = new AbortController();
   private readonly nowMs: () => number;
   // Claims waiting for their dataset, with its id.
   private readonly datasetWaits = new Map<string, string>();
@@ -1667,6 +1671,7 @@ export class CollectionAutomations {
    */
   async dispose(): Promise<void> {
     if (this.state === "disposed") return;
+    this.relayReads.abort();
     this.generation += 1;
     this.stopRuns();
     // Disposed before the drain ends, so it starts no further drain that
@@ -4707,11 +4712,15 @@ export class CollectionAutomations {
     let record: ReachRelayRecord;
     try {
       await this.markHostClaims(generation);
-      record = await this.options.reachRelayRecord(generation);
+      record = await this.options.reachRelayRecord(generation, this.relayReads.signal);
     } catch (error) {
-      this.options.onError("read the last automation host's reach verdicts", error);
+      // A read that the workspace close stopped is not an error.
+      if (!this.relayReads.signal.aborted) this.options.onError("read the last automation host's reach verdicts", error);
       return false;
     }
+    // An answer that arrives after the workspace closed is not taken either:
+    // the next open reads again.
+    if (this.relayReads.signal.aborted) return false;
     await this.updateVerdicts(() => {
       this.reachPending = null;
       this.reachTakenAt = generation;
@@ -4869,13 +4878,19 @@ export class CollectionAutomations {
     // Asked first, so a computer the relay names no host for yet claims it
     // before this decides, and does not drop its Group subscriptions only
     // to add them again. Once a host is named this waits for nothing.
+    const reads = this.relayReads.signal;
     if (this.everyAutomation().some(({ automation }) => automation.enabled && automation.when.kind === "group-message")) {
-      await this.options.requestHost();
+      await this.options.requestHost(reads);
     }
+    // The workspace closed while a relay read was out: change nothing, so
+    // the next open finds the subscriptions and verdicts as they were.
+    if (reads.aborted) return;
     // Only a computer the relay names watches Groups.
     const generation = await this.options.groupHost();
+    if (reads.aborted) return;
     this.groupTriggersHere = generation !== null;
     const verdictsTaken = await this.takeHostVerdicts(generation);
+    if (reads.aborted) return;
     const desired = this.desiredSubscriptions();
     let changed = false;
     for (const [automationId, subscription] of [...this.subscribed]) {
@@ -4945,9 +4960,11 @@ export class CollectionAutomations {
     if (answer?.needsHandover) {
       let relay: AutomationGroupRelayRecord;
       try {
-        relay = await this.options.groupRelayRecord(generation);
+        relay = await this.options.groupRelayRecord(generation, this.relayReads.signal);
       } catch (error) {
-        // Nothing changed in the engine. The next sync pull asks again.
+        // Nothing changed in the engine. The next sync pull, or the next
+        // open after a workspace close stopped the read, asks again.
+        if (this.relayReads.signal.aborted) return;
         this.handoverUnread = true;
         this.options.onError("read the Group handover", error);
         return;
