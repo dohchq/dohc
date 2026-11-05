@@ -173,6 +173,7 @@ it("keeps a share's collision-record refusal in Notices until that share refresh
     message: REFUSAL_WORDS,
     retry: expect.any(Function),
     noDismiss: true,
+    kind: "share-collision-record",
     identity: "share-mount-collision-record:share-1",
     quiet: true,
   });

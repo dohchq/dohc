@@ -38,6 +38,7 @@ export function useShareMounts(
     message: string;
     retry?: (() => void) | null;
     noDismiss?: boolean;
+    kind?: ShellErrorKind;
     identity?: string;
     repeat?: boolean;
     quiet?: boolean;
@@ -127,6 +128,7 @@ export function useShareMounts(
               "It keeps a refresh from replacing your own files.",
             retry: () => void refreshShareMountsRef.current(true),
             noDismiss: true,
+            kind: "share-collision-record",
             identity: collisionRecordRefusal(row.shareId),
             ...(announce ? { quiet: true } : { repeat: true }),
           });
