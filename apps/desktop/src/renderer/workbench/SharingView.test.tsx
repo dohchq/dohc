@@ -136,7 +136,7 @@ async function openMenu(row: HTMLElement) {
 }
 
 describe("the Sharing view's two lists", () => {
-  it("lists this workspace's shares and the account's, each with its count, folder, faces and level", async () => {
+  it("lists this workspace's shares and the account's, each with its count and who can do what", async () => {
     answerWith({
       granted: answer("granted", { rows: [granted(), granted({ grantId: "grant-2", recipientEmail: "nova@example.com" }),
         granted({ shareId: "share-2", grantId: "grant-3", selector: { paths: ["research/competitors.md"], versionId: null }, access: "view" })] }),
@@ -146,14 +146,15 @@ describe("the Sharing view's two lists", () => {
 
     const grantedRows = await screen.findAllByTestId("sharing-granted-row");
     expect(grantedRows).toHaveLength(2);
-    expect(grantedRows[0]!.textContent).toContain("product-plan.md");
-    expect(grantedRows[0]!.textContent).toContain("notes/");
-    expect(within(grantedRows[0]!).getByRole("img", { name: "Edit" })).toBeTruthy();
+    expect(grantedRows[0]!.textContent).toBe("product-plan.md2 people can edit");
+    // The count's tooltip names each person with their level, one per line.
+    expect(within(grantedRows[0]!).getByTestId("sharing-row-who").getAttribute("title"))
+      .toBe("sam@example.com can edit\nnova@example.com can edit");
+    expect(grantedRows[1]!.textContent).toBe("competitors.mdsam@example.com can view");
     expect(screen.getByTestId("sharing-granted-count").textContent).toBe("2");
     const receivedRow = await screen.findByTestId("sharing-received-row");
-    expect(receivedRow.textContent).toContain("funnel.csv");
-    expect(receivedRow.textContent).toContain("from Sam");
-    expect(within(receivedRow).getByRole("img", { name: "View" })).toBeTruthy();
+    expect(receivedRow.textContent).toBe("funnel.csvSam lets you view");
+    expect(within(receivedRow).getByTestId("sharing-row-who").getAttribute("title")).toBe("Sam (sam@example.com) lets you view");
     expect(screen.getByTestId("sharing-received-count").textContent).toBe("1");
     expect(screen.getByTestId("sharing-granted-freshness").getAttribute("data-state")).toBe("fresh");
     // Each list says what it covers, rows or not.
@@ -162,6 +163,123 @@ describe("the Sharing view's two lists", () => {
     // Opening the view asks main to check again once, for both lists.
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(1);
     expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledWith({ workspaceId: "workspace-a", reason: "sharing-open" });
+  });
+
+  it("says one level per person, widest first, and a link for everyone who has it", async () => {
+    answerWith({ granted: answer("granted", { rows: [
+      granted({ grantId: "sam", access: "edit" }),
+      granted({ grantId: "tea", recipientEmail: "tea@example.com", access: "view" }),
+      granted({ grantId: "kim", recipientEmail: null, recipientUserId: "kim", access: "read-only" }),
+      granted({ grantId: "nova", recipientEmail: "nova@example.com", status: "revoked", access: "comment" }),
+      granted({ shareId: "share-link", grantId: "link", via: "link", recipientEmail: null, recipientUserId: null, access: "comment" }),
+    ] }) });
+    render(<View />);
+    const [mixed, link] = await screen.findAllByTestId("sharing-granted-row");
+    // An ended grant no longer counts.
+    const who = within(mixed!).getByTestId("sharing-row-who");
+    expect(who.textContent).toBe("1 person can edit, 2 can view");
+    expect(who.getAttribute("title")).toBe("sam@example.com can edit\ntea@example.com can view\nkim can view");
+    // The subject cuts; the verb never does.
+    expect(who.children[0]!.className).toContain("truncate");
+    expect(who.children[1]!.className).toContain("shrink-0");
+    expect(within(link!).getByTestId("sharing-row-who").textContent).toBe("Anyone with the link can comment");
+  });
+
+  const LINK = { via: "link" as const, recipientEmail: null, recipientUserId: null };
+  it.each([
+    ["one person above a view link", [{ grantId: "link", ...LINK, access: "view" as const }, { grantId: "sam", access: "edit" as const }],
+      "1 person can edit, anyone with the link can view"],
+    ["one person at edit and two at comment above a view link", [
+      { grantId: "link", ...LINK, access: "view" as const }, { grantId: "sam", access: "edit" as const },
+      { grantId: "tea", recipientEmail: "tea@example.com", access: "comment" as const },
+      { grantId: "kim", recipientEmail: "kim@example.com", access: "comment" as const },
+    ], "1 person can edit, 2 can comment, anyone with the link can view"],
+    ["two people below an edit link", [
+      { grantId: "link", ...LINK, access: "edit" as const }, { grantId: "sam", access: "view" as const },
+      { grantId: "tea", recipientEmail: "tea@example.com", access: "view" as const },
+    ], "Anyone with the link can edit"],
+    ["two people at a view link's level", [
+      { grantId: "link", ...LINK, access: "view" as const }, { grantId: "sam", access: "view" as const },
+      { grantId: "tea", recipientEmail: "tea@example.com", access: "read-only" as const },
+    ], "Anyone with the link can view"],
+  ])("folds people at or below a link's level into it: %s", async (_case, grants, line) => {
+    answerWith({ granted: answer("granted", { rows: grants.map((grant) => granted(grant)) }) });
+    render(<View />);
+    const row = await screen.findByTestId("sharing-granted-row");
+    const who = within(row).getByTestId("sharing-row-who");
+    expect(who.textContent).toBe(line);
+    expect(row.querySelector("[data-sharing-row-focus]")!.getAttribute("aria-label")).toBe(`product-plan.md, ${line}`);
+    // The tooltip names everyone: the link first, then each person.
+    expect(who.getAttribute("title")!.split("\n")).toHaveLength(grants.length);
+    expect(who.getAttribute("title")!.split("\n")[0]).toMatch(/^Anyone with the link can /);
+    // The first clause stays whole; what follows it cuts at its end.
+    expect(who.children[0]!.className).toContain("shrink-0");
+    if (who.children[1]) expect(who.children[1].className).toContain("truncate");
+  });
+
+  it("names a person with their level beside a link in the tooltip", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ grantId: "link", ...LINK, access: "view" }), granted({ grantId: "sam" })] }) });
+    render(<View />);
+    const who = within(await screen.findByTestId("sharing-granted-row")).getByTestId("sharing-row-who");
+    expect(who.getAttribute("title")).toBe("Anyone with the link can view\nsam@example.com can edit");
+    expect(who.children[0]!.textContent).toBe("1 person can edit");
+    expect(who.children[1]!.textContent).toBe(", anyone with the link can view");
+  });
+
+  it("names a share sent to the account by its sender when its level is unknown", async () => {
+    answerWith({ received: answer("received", { rows: [received({ access: null })] }) });
+    render(<View />);
+    const row = await screen.findByTestId("sharing-received-row");
+    const who = within(row).getByTestId("sharing-row-who");
+    expect(who.textContent).toBe("From Sam");
+    expect(who.getAttribute("title")).toBe("From Sam (sam@example.com)");
+    // "From" stays whole; the sender cuts.
+    expect(who.children[0]!.className).toContain("shrink-0");
+    expect(who.children[1]!.className).toContain("truncate");
+    expect(screen.getByRole("group", { name: "funnel.csv, from Sam" })).toBeTruthy();
+  });
+
+  it.each([["revoked", "ended"], ["damaged", "damaged"]] as const)(
+    "keeps the sender on a share sent to the account that is %s, then says so",
+    async (status, word) => {
+      answerWith({ received: answer("received", { rows: [received({ status, selector: null, access: null })] }) });
+      render(<View />);
+      const row = await screen.findByTestId("sharing-received-row");
+      expect(within(row).getByTestId("sharing-row-who").textContent).toBe("From Sam");
+      expect(within(row).getByTestId("sharing-row-status").textContent).toBe(word);
+      expect(screen.getByRole("group", { name: `funnel.csv, from Sam, ${word}` })).toBeTruthy();
+    },
+  );
+
+  it("cuts a long name in its middle, keeps its extension, and keeps the whole path in its tooltip", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ selector: { paths: ["plans/product-plan-2027.md"], versionId: null } })] }) });
+    render(<View />);
+    const row = await screen.findByTestId("sharing-granted-row");
+    const base = within(row).getByText("product-plan-2027");
+    expect(base.className).toContain("truncate");
+    expect(base.nextElementSibling!.textContent).toBe(".md");
+    expect(base.nextElementSibling!.className).toContain("shrink-0");
+    expect(base.parentElement!.getAttribute("title")).toBe("plans/product-plan-2027.md");
+  });
+
+  it("shows the folder before a name only where its list repeats the name", async () => {
+    answerWith({
+      granted: answer("granted", { rows: [
+        granted({ shareId: "a", selector: { paths: ["plans/notes.md"], versionId: null } }),
+        granted({ shareId: "b", selector: { paths: ["research/notes.md"], versionId: null } }),
+        granted({ shareId: "c", selector: { paths: ["research/budget.csv"], versionId: null } }),
+      ] }),
+      received: answer("received", { rows: [received({ selector: { paths: ["data/notes.md"], versionId: null } })] }),
+    });
+    render(<View />);
+    const rows = await screen.findAllByTestId("sharing-granted-row");
+    expect(rows.map((row) => row.querySelector("[data-sharing-row-focus]")!.getAttribute("aria-label"))).toEqual([
+      "plans/notes.md, sam@example.com can edit",
+      "research/notes.md, sam@example.com can edit",
+      "budget.csv, sam@example.com can edit",
+    ]);
+    // The other list's name does not count.
+    expect((await screen.findByTestId("sharing-received-row")).textContent).toBe("notes.mdSam lets you view");
   });
 
   it("shows loading lines until each list answers", async () => {
@@ -476,8 +594,9 @@ describe("the actions Settings offers on a share", () => {
     const mount: ShareMount = { shareId: "in-1", label: "funnel", granterEmail: "sam@example.com", access: "view" };
     render(<View mounts={[mount]} />);
     const row = await screen.findByTestId("sharing-received-row");
-    expect(within(row).getByTestId("sharing-mounted")).toBeTruthy();
-    expect(within(row).getByRole("img", { name: "View" })).toBeTruthy();
+    const where = within(row).getByRole("img", { name: "In this workspace as shared-with-me/funnel" });
+    expect(where.getAttribute("title")).toBe("In this workspace as shared-with-me/funnel");
+    expect(within(row).getByTestId("sharing-row-who").textContent).toBe("Sam lets you view");
     await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }));
     expect(callbacks.onUnmount).toHaveBeenCalledWith("shared-with-me/funnel");
   });
@@ -537,9 +656,12 @@ describe("copying a share's code or invitation", () => {
     for (const shareId of ["share-link", "share-bad", "share-chat"]) {
       expect(within(await rowOf(shareId)).queryByRole("button", { name: /^Copy/ })).toBeNull();
     }
-    // The actions take the trail's place, so the name keeps the room.
+    // The actions sit in the row, on its fill, and take no room at rest.
     const actions = within(named).getByTestId("sharing-granted-actions");
-    expect(actions.parentElement).toBe(within(named).getByRole("img", { name: "Edit" }).parentElement!.parentElement);
+    expect(actions.parentElement).toBe(named.querySelector("[data-sharing-row-focus]"));
+    expect(actions.className).toContain("max-w-0");
+    expect(actions.className).toContain("group-hover:max-w-none");
+    expect(actions.className).toContain("group-focus-within:max-w-none");
   });
 
   it.each([
@@ -637,7 +759,7 @@ describe("copying a share's code or invitation", () => {
     answerWith({ granted: answer("granted", { rows: [granted(), granted({ shareId: "share-old", grantId: "old", status: "revoked",
       selector: null, access: null, subjectName: "budget.csv" })] }) });
     render(<CopyView />);
-    expect(await screen.findByRole("group", { name: "product-plan.md, notes/, Edit" })).toBeTruthy();
+    expect(await screen.findByRole("group", { name: "product-plan.md, sam@example.com can edit" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "budget.csv, ended" })).toBeTruthy();
   });
 
@@ -679,12 +801,12 @@ describe("mounts and their skipped changes", () => {
     const row = await screen.findByTestId("sharing-received-row");
     expect(row.dataset.status).toBe("removed");
     expect(row.textContent).toContain("notes");
-    expect(row.textContent).toContain("from sam@example.com");
+    // The sender stays, then the state word, which stays while the actions show.
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("removed");
+    expect(within(row).getByTestId("sharing-row-who").textContent).toBe("From sam@example.com");
+    expect(screen.getByRole("group", { name: "notes, from sam@example.com, removed" })).toBeTruthy();
     expect(within(row).getByTestId("sharing-row-note").textContent).toBe("Your copy stays readable but won't update.");
-    // The second line can be read whole, and the status word stays while the actions show.
-    expect(within(row).getByText("from sam@example.com").getAttribute("title")).toBe("from sam@example.com");
-    expect(within(row).getByTestId("sharing-row-status").parentElement).toBe(row.querySelector("[data-sharing-row-focus]"));
+    expect(within(row).getByTestId("sharing-received-actions").contains(within(row).getByTestId("sharing-row-status"))).toBe(false);
     expect(screen.queryByTestId("sharing-received-empty")).toBeNull();
     const menu = await openMenu(row);
     // Wide enough that no item is cut off.
@@ -703,7 +825,7 @@ describe("mounts and their skipped changes", () => {
     expect(within(row).getByTestId("sharing-row-note").textContent)
       .toBe("Sam removed your access. Your copy stays readable but won't update.");
     // Named by what it is; the note's sentences describe it.
-    const group = screen.getByRole("group", { name: /^notes, from .+, removed$/ });
+    const group = screen.getByRole("group", { name: "notes, from sam@example.com, removed" });
     expect(group.getAttribute("aria-describedby")).toBe(within(row).getByTestId("sharing-row-note").id);
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("removed");
     expect(within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" })).toBeTruthy();
