@@ -8,6 +8,7 @@ import { sharedViewAccessOperations } from "./bridgeContract";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { fetchShareViewAccess, probeShareViewLog, ShareSelectorInvalidError, type ShareViewInfo } from "../workspaces/shareViewInfo";
 import { SharePinInvalidError } from "../workspaces/shareViewRecords";
+import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import { buildShareCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
 import { createSharedViewsIpcHarness as harness, credentials, info, outcome, ready } from "../testing/sharedViewsIpcHarness";
@@ -421,6 +422,36 @@ describe("registered received-view handlers", () => {
     expect(h.workspace.shareView!.genericChatWritable).toBe(true);
     expect(h.workspace.shareView).toMatchObject({subjectName: "Renamed", sharerName: "Ana"});
     expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: pinned });
+  });
+
+  it("fills the sharer's email on refresh for a share reopened after Forget", async () => {
+    const h = await harness();
+    Object.assign(h.workspace.shareView!, { granterEmail: null, subjectName: null, sharerName: null, unsavedPaths: null });
+    await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
+    expect(h.workspace.shareView).toMatchObject({ granterEmail: info.granterEmail, grantedSelector: info.selector, unsavedPaths: null });
+  });
+
+  it("keeps the sharer's email on refresh when the server sends a different one", async () => {
+    const h = await harness();
+    h.fetchInfo.mockResolvedValue({ ...info, granterEmail: "other@example.test" });
+    await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" });
+    expect(h.fetchInfo).toHaveBeenCalled();
+    expect(h.workspace.shareView!.granterEmail).toBe(info.granterEmail);
+  });
+
+  it.each(["background", "manual"] as const)("asks the server nothing on a %s refresh while another account is signed in", async (trigger) => {
+    const h = await harness();
+    // A share reopened after Forget, which another account opened.
+    Object.assign(h.workspace.shareView!, { recipientUserId: "someone-else", granterEmail: null, unsavedPaths: null });
+    const result = await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing", trigger });
+    if (trigger === "background") {
+      expect(result).toMatchObject({ ok: false, errorKind: "unauthorized" });
+      expect(h.storeFor).not.toHaveBeenCalled(); expect(h.reconcile).not.toHaveBeenCalled();
+    }
+    // The pull itself skips another account's share (main's resolveRelay).
+    expect(h.fetchInfo).not.toHaveBeenCalled(); expect(h.recordIdentity).not.toHaveBeenCalled(); expect(h.setView).not.toHaveBeenCalled();
+    expect(h.workspace.shareView!.granterEmail).toBeNull();
+    expect(workspaceWriteRefusal(h.workspace.shareView)).toContain("This is a shared view");
   });
 
   it("rejects stale metadata before writing the grant or starting file reconciliation", async () => {

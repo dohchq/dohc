@@ -732,6 +732,74 @@ describe("workspace manager with registered workspaces", () => {
     expect(await screen.findByText(/Forgot team\. Its folder was not deleted\./)).toBeTruthy();
   });
 
+  it("reports a failed Forget in a toast and one Notices row, not inline, and Try again forgets again", async () => {
+    const user = userEvent.setup();
+    const onForgot = vi.fn(async () => [KNOWN[0]]);
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:forget-workspace': Error: This workspace changed while this ran. Try again.",
+    ));
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={onForgot} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Forget" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not forget team. This workspace changed while this ran. Try again.");
+    expect(screen.getAllByRole("alert")).toEqual([toast]);
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeDefined();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(within(notices).getAllByText(/Could not forget team\. This workspace changed while this ran\. Try again\./)).toHaveLength(1);
+    expect(onForgot).not.toHaveBeenCalled();
+
+    await user.click(within(notices).getByRole("button", { name: "Try again" }));
+    expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(2);
+    expect(bridge.forgetWorkspace).toHaveBeenLastCalledWith({ workspaceId: "ws-b" });
+    await waitFor(() => expect(onForgot).toHaveBeenCalledOnce());
+    // Once Forget works, no toast or Notices row is left, so Notices goes away.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+  });
+
+  it("takes back a failed Forget's notice when Forget from the menu then works", async () => {
+    const user = userEvent.setup();
+    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("This workspace changed while this ran. Try again."));
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={async () => [KNOWN[0]]} onOpenWorkspace={() => {}} />,
+    );
+    const forgetFromMenu = async () => {
+      await user.click(await screen.findByRole("button", { name: "More for team" }));
+      await user.click(screen.getByRole("menuitem", { name: "Forget" }));
+    };
+    await forgetFromMenu();
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("Could not forget team.");
+    await forgetFromMenu();
+    await waitFor(() => expect(screen.queryByTestId("connection-notices")).toBeNull());
+    expect(bridge.forgetWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it("says Forget worked when only the list refresh fails, and Try again only refreshes", async () => {
+    const user = userEvent.setup();
+    const onForgot = vi
+      .fn<() => Promise<Workspace[]>>()
+      .mockRejectedValueOnce(new Error("The workspace list could not be read."))
+      .mockResolvedValue([KNOWN[0]]);
+    render(
+      <WorkspaceManager workspaces={KNOWN} current={KNOWN[0]} onForgot={onForgot} onOpenWorkspace={() => {}} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "More for team" }));
+    await user.click(screen.getByRole("menuitem", { name: "Forget" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not refresh the workspace list.");
+    expect(toast.textContent).not.toContain("Could not forget");
+    expect(screen.getByText(/Forgot team\. Its folder was not deleted\./)).toBeTruthy();
+
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(onForgot).toHaveBeenCalledTimes(2));
+    expect(bridge.forgetWorkspace).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+  });
+
   it("stays open with the reason when opening fails, then lets the person retry", async () => {
     const user = userEvent.setup();
     const onOpen = vi

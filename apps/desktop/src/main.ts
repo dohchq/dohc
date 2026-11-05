@@ -221,6 +221,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
+import { windowShowsWorkspace } from "./window/workspaceWindowReuse";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
   createRendererWorkspaceOperationRunner,
@@ -568,6 +569,7 @@ import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
 import { confirmWorkspaceTrust, createWorkspaceTrust, folderIdentity } from "./workspaces/workspaceTrust";
+import { createForgottenShareViews } from "./workspaces/forgottenShareViews";
 import { workspaceTrustHandlers } from "./ipc/workspaceTrustIpc";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
@@ -644,6 +646,11 @@ const crashReports = createCrashReportStore({
 const workspaceTrust = createWorkspaceTrust({
   file: join(stateDir(), "workspace-trust.json"),
   onChange: (workspaceId, trusted) => agentTrustChanged(workspaceId, trusted),
+});
+// Share views the person forgot here, so their folders open as those shares
+// again. Main's own record, in this computer's dohc profile.
+const forgottenShareViews = createForgottenShareViews({
+  file: join(stateDir(), "forgotten-share-views.json"),
 });
 
 // Every trust change, from the dialog, Settings, Forget, or New workspace:
@@ -2126,11 +2133,13 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
 
 // Forget: close every handle the app holds on the workspace and drop its
 // registry row. The folder is untouched; opening it again re-adopts the
-// manifest and its identity.
+// manifest and its identity, and a share view's folder opens as that share.
 const forgetWorkspace = createWorkspaceForget({
   currentBinding: workspaceId => workspaceAuthorities.currentBinding(workspaceId),
+  findWorkspace,
   removePhysicalWorkspace,
   trust: workspaceTrust,
+  forgottenShareViews,
   clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
   notifyRenderer,
 });
@@ -6101,9 +6110,9 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
   },
   register: async (rootPath) => {
     const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal", computer: thisComputer() });
-    const workspace = WorkspaceSummary.parse(created);
-    registerPhysicalWorkspace(created);
-    return workspace;
+    WorkspaceSummary.parse(created);
+    // As Open folder does: a share forgotten in this folder opens as that share.
+    return workspaceSummaryFor(await forgottenShareViews.reopen(created, registerPhysicalWorkspace));
   },
   activate: async (workspace, file, window) => {
     const shown = await sendWorkspaceActivated(window, workspace);
@@ -6445,13 +6454,12 @@ function registerIpcHandlers(): void {
     trustNewWorkspace: (workspace, fresh) => workspaceTrust.trust(workspace, fresh),
     showItemInFolder: (path) => shell.showItemInFolder(path),
     openWorkspaceWindow: (workspace) =>
-      desktopWindows.openWorkspaceInWindow(workspace, (window) => {
-        const session = rendererWorkspaceSessions.current(window.webContents);
-        return session?.workspaceId === workspace.workspaceId;
-      }),
+      desktopWindows.openWorkspaceInWindow(workspace, (window) =>
+        windowShowsWorkspace(rendererWorkspaceSessions.current(window.webContents), workspace.workspaceId, workspaceAuthorities)),
     openWorkspaceManager: () => desktopWindows.showOrCreateManagerWindow(),
     closeWindowOf: (event) => BrowserWindow.fromWebContents(event.sender)?.close(),
     registerPhysicalWorkspace,
+    forgottenShareViews,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
   });

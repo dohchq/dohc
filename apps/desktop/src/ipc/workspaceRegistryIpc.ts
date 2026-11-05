@@ -8,7 +8,9 @@ import type {
   createWorkspaceFolderWithFreshness,
   FreshWorkspaceFolder,
 } from "../workspaces/createWorkspaceFolder";
+import type { ForgottenShareViews } from "../workspaces/forgottenShareViews";
 import type { Computer } from "../workspaces/syncHistory";
+import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -95,6 +97,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   openWorkspaceManager(): unknown;
   closeWindowOf(event: Event): void;
   registerPhysicalWorkspace(workspace: CreatedWorkspace): unknown;
+  // Registers a folder Open folder chose, as the share the person forgot in
+  // it when this computer saved one.
+  forgottenShareViews: Pick<ForgottenShareViews, "reopen">;
   // New workspace's one default: a workspace made from nothing starts
   // trusted, in the folder that creation made. Every other way in starts in
   // Restricted Mode.
@@ -122,6 +127,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     openWorkspaceManager,
     closeWindowOf,
     registerPhysicalWorkspace,
+    forgottenShareViews,
     trustNewWorkspace,
     refreshNativeWorkspaceSurfaces,
     desktopMarks,
@@ -214,10 +220,10 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     // Parse-then-register (see createLocalWorkspace): a foreign manifest's
     // workspaceId is untrusted input — an oversized or non-hostname-safe id
     // must fail the attach with a visible error, not brick the registry.
-    const summary = WorkspaceSummary.parse(attached);
-    registerPhysicalWorkspace(attached);
+    WorkspaceSummary.parse(attached);
+    const entry = await forgottenShareViews.reopen(attached, registerPhysicalWorkspace);
     refreshNativeWorkspaceSurfaces();
-    return summary;
+    return workspaceSummaryFor(entry);
   });
 
   registerHandler(CHANNELS.forgetWorkspace, async (event, payload) => {
