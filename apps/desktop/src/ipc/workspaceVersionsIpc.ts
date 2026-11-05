@@ -21,7 +21,8 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "deleteRetainedCopies"
 >;
 
-// A version as the versions menu and the CLI show it.
+// A version as the versions menu and the CLI show it. The CLI's rows leave
+// out what the version was made from.
 export function workspaceVersionForIpc(version: {
   id: string;
   name: string;

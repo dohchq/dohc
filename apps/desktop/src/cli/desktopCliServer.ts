@@ -503,7 +503,13 @@ export function createDesktopCliServer<State>(
             versions: {
               list: async () => {
                 const snapshot = await capture.listVersions();
-                return { versions: snapshot.versions.map(workspaceVersionForIpc), activeVersionId: snapshot.activeVersionId };
+                // The CLI's version rows are strict and don't say what a
+                // version was made from.
+                const versions = snapshot.versions.map(version => {
+                  const { madeFromVersionId: _madeFrom, ...row } = workspaceVersionForIpc(version);
+                  return row;
+                });
+                return { versions, activeVersionId: snapshot.activeVersionId };
               },
               compare: async (versionId, afterPath) => {
                 // Unreadable rules hide every file, as the desktop's History does.
