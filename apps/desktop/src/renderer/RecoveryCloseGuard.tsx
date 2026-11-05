@@ -1,3 +1,4 @@
+import { LogOut, Power, RefreshCw, RotateCw, type LucideIcon } from "lucide-react";
 import { hasPendingYDocDeliveries, settleYDocDeliveries } from "./pendingYDocDeliveries";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import {
@@ -20,6 +21,7 @@ import { Overlay } from "./Overlay";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 import { DangerButton, SecondaryButton } from "./ui/controls";
+import { ConfirmActions, ConfirmationCard, ConfirmationHead } from "./ui/ConfirmDialog";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
 
@@ -28,12 +30,12 @@ type UnloadKind = "close" | "reload" | "update" | "quit";
 // because Restart is the action the user clicked.
 const UNLOAD_COPY: Record<
   UnloadKind,
-  { title: string; verb: string; confirm: string }
+  { title: string; verb: string; confirm: string; icon: LucideIcon }
 > = {
-  close: { title: "Close", verb: "closes", confirm: "Close anyway" },
-  reload: { title: "Reload", verb: "reloads", confirm: "Reload anyway" },
-  update: { title: "Restart", verb: "restarts", confirm: "Restart anyway" },
-  quit: { title: "Quit", verb: "quits", confirm: "Quit anyway" },
+  close: { title: "Close", verb: "closes", confirm: "Close anyway", icon: LogOut },
+  reload: { title: "Reload", verb: "reloads", confirm: "Reload anyway", icon: RefreshCw },
+  update: { title: "Restart", verb: "restarts", confirm: "Restart anyway", icon: RotateCw },
+  quit: { title: "Quit", verb: "quits", confirm: "Quit anyway", icon: Power },
 };
 
 // The guard cannot tell one unload's beforeunload from another's, but the
@@ -619,31 +621,30 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         <Overlay
           appearance="warning"
           panelRef={warningRef}
-          panelProps={{
-            "data-testid": "recovery-close-warning",
-            role: "dialog",
-            "aria-modal": "true",
-            "aria-labelledby": "recovery-close-warning-title",
-            className: "dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5",
-          }}
+          panelProps={{ "data-testid": "recovery-close-warning" }}
         >
-            <h3
-              id="recovery-close-warning-title"
-              className="m-0 text-sm font-semibold text-ink"
+          <ConfirmationCard
+            icon={UNLOAD_COPY[closeWarning.kind].icon}
+            intent="danger"
+            labelledBy="recovery-close-warning-title"
+            describedBy="recovery-close-warning-body"
+          >
+            <ConfirmationHead
+              titleId="recovery-close-warning-title"
+              bodyId="recovery-close-warning-body"
+              title={`${UNLOAD_COPY[closeWarning.kind].title} without your set-aside ${liveCount === 1 ? "edit" : "edits"}?`}
             >
-              {UNLOAD_COPY[closeWarning.kind].title}{" "}
-              without your set-aside {liveCount === 1 ? "edit" : "edits"}?
-            </h3>
-            <p className="mb-0 mt-2 text-xs leading-5 text-muted">
-              {`${liveCount} set-aside ${
-                liveCount === 1 ? "edit is" : "edits are"
-              } lost when dohc ${UNLOAD_COPY[closeWarning.kind].verb}.`}{" "}
-              Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
-            </p>
-            <div className="mt-3 max-h-60 overflow-y-auto">
+              <p>
+                {`${liveCount} set-aside ${
+                  liveCount === 1 ? "edit is" : "edits are"
+                } lost when dohc ${UNLOAD_COPY[closeWarning.kind].verb}.`}{" "}
+                Copy {liveCount === 1 ? "it" : "them"} here to keep the text.
+              </p>
+            </ConfirmationHead>
+            <div className="max-h-60 overflow-y-auto">
               <RecoveryList rows={liveDrafts} showWorkspace />
             </div>
-            <div className="mt-4 flex justify-end gap-2">
+            <ConfirmActions>
               <SecondaryButton
                 data-testid="recovery-close-goback"
                 autoFocus
@@ -727,11 +728,11 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     if (uncovered) showCloseWarning({ kind, resume });
                   });
                 }}
-                className="h-8 py-0 text-xs"
               >
                 {UNLOAD_COPY[closeWarning.kind].confirm}
               </DangerButton>
-            </div>
+            </ConfirmActions>
+          </ConfirmationCard>
         </Overlay>
       ) : null}
     </>

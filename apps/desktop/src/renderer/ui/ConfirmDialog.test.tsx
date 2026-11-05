@@ -2,11 +2,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Trash2 } from "lucide-react";
 import { ConfirmDialog, ConfirmDialogCard } from "./ConfirmDialog";
 
 function card(intent?: "default" | "danger") {
   return (
     <ConfirmDialogCard
+      icon={Trash2}
       title="Delete 12 files from Research?"
       confirmLabel="Delete files"
       intent={intent}
@@ -44,6 +46,21 @@ describe("ConfirmDialog intent", () => {
     expect(confirm.textContent).toBe("Delete files");
   });
 
+  // The tile's tint shows the intent before a word is read. It is decoration,
+  // so a screen reader skips it.
+  it("tints its tile by intent", () => {
+    render(card("danger"));
+    const danger = screen.getByTestId("confirm").querySelector("[aria-hidden]")!;
+    expect(danger.className).toContain("bg-danger-tint");
+    expect(danger.className).toContain("text-danger");
+    expect(danger.querySelector("svg")).toBeTruthy();
+    cleanup();
+    render(card());
+    const quiet = screen.getByTestId("confirm").querySelector("[aria-hidden]")!;
+    expect(quiet.className).toContain("bg-panel-2");
+    expect(quiet.className).not.toContain("danger");
+  });
+
   // Focus opens on the confirm button, so a screen reader reads the title and
   // the button. The body says what is lost, so it must be read too.
   it("is described by its body", () => {
@@ -60,6 +77,7 @@ describe("ConfirmDialog intent", () => {
   it("leaves its details out of the description", () => {
     render(
       <ConfirmDialogCard
+      icon={Trash2}
         title="Delete 2 items?"
         confirmLabel="Delete"
         onCancel={vi.fn()}
@@ -87,6 +105,7 @@ function dialog(overrides: Partial<{ confirmDisabled: boolean; choice: boolean }
   const onConfirm = vi.fn();
   render(
     <ConfirmDialog
+      icon={Trash2}
       title="Delete notes.md?"
       confirmLabel="Delete"
       intent="danger"
@@ -174,7 +193,7 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
       <>
         {field}
         {open ? (
-          <ConfirmDialog title="Delete 3 kept copies?" confirmLabel="Delete" intent="danger" onCancel={vi.fn()} onConfirm={onConfirm}
+          <ConfirmDialog icon={Trash2} title="Delete 3 kept copies?" confirmLabel="Delete" intent="danger" onCancel={vi.fn()} onConfirm={onConfirm}
             testId="confirm" cancelTestId="confirm-cancel" confirmTestId="confirm-action">
             <p>They can't be restored.</p>
           </ConfirmDialog>

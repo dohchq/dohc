@@ -481,6 +481,7 @@ export function AutomationRuns(props: {
   const shownPreview = previewing !== null && scope.isCurrent(previewing.epoch) ? previewing : null;
   const dialog = shownPreview === null ? null : (
     <ConfirmDialog
+      icon={Undo2}
       title="Undo this run?"
       intent={shownPreview.preview.deletes + shownPreview.preview.unchecked > 0 ? "danger" : "default"}
       confirmLabel={shownPreview.preview.deletes + shownPreview.preview.unchecked > 0
@@ -499,7 +500,7 @@ export function AutomationRuns(props: {
         }, shownPreview.onServer);
       }}
       details={shownPreview.preview.choices.map((choice, index) => (
-        <fieldset key={choice.key} className="m-0 mt-3 flex flex-col gap-1 border-0 p-0">
+        <fieldset key={choice.key} className="m-0 flex flex-col gap-1 border-0 p-0">
           <legend className="mb-1 p-0 text-[12px] text-muted">
             Delete {count(choice.records, "added record", "added records")} in {choice.table} with
           </legend>
@@ -518,7 +519,7 @@ export function AutomationRuns(props: {
       ))}
     >
       {undoPreviewSentences(shownPreview.preview).map((line) => (
-        <p key={line} className="m-0 mt-2 text-[13px] text-muted">{line}</p>
+        <p key={line}>{line}</p>
       ))}
     </ConfirmDialog>
   );

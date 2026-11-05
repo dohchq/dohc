@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Trash2 } from "lucide-react";
 import {
   MAX_RETAINED_COPIES_PER_DELETE,
   type RetainedCopiesSummary,
@@ -184,6 +185,7 @@ export function useRetainedCopiesNotice(input: {
   return pending ? (
     <ConfirmDialog
       intent="danger"
+      icon={Trash2}
       testId="retained-copies-confirm"
       cancelTestId="retained-copies-cancel"
       confirmTestId="retained-copies-delete"
@@ -192,7 +194,7 @@ export function useRetainedCopiesNotice(input: {
       onCancel={() => setPending(null)}
       onConfirm={() => void confirm()}
     >
-      <p className="m-0 mt-2 text-[13px] text-muted">
+      <p>
         Close other programs that use this workspace first. A program that still uses one of these copies may lose
         what it writes next. This can't be undone.
       </p>

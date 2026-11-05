@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, Trash2, X } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -1463,6 +1463,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
       <OverlayFrame panelRef={panelRef}>
         <ConfirmDialogCard
           {...deleteConfirmText(DELETE_PATHS, null)}
+          icon={Trash2}
           onCancel={noop}
           onConfirm={noop}
           testId={`states-dialog-${props.theme}`}
