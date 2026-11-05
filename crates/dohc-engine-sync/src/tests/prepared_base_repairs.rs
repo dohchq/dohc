@@ -743,12 +743,11 @@ fn a_refused_second_page_restores_the_token_read_by_the_next_fetch() {
         dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
     let relay = touching(seed(&mut store, &["doc".into()], &claim), "doc");
     let identity = crate::read_sync_identity(&store, "ws").unwrap().unwrap();
-    let earlier = match crate::cursor::begin_ordinary_pull(&mut store, &identity, &NoFaults)
-        .unwrap()
-    {
-        TxnOutcome::Committed(token) => token,
-        TxnOutcome::Crashed { .. } => panic!("begin earlier pass"),
-    };
+    let earlier =
+        match crate::cursor::begin_ordinary_pull(&mut store, &identity, &NoFaults).unwrap() {
+            TxnOutcome::Committed(token) => token,
+            TxnOutcome::Crashed { .. } => panic!("begin earlier pass"),
+        };
     let client = RelaySyncClient::new(relay);
     for _ in 0..2 {
         let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();

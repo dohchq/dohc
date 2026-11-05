@@ -4243,7 +4243,11 @@ mod tests {
                     .to_string(),
             )
         } else if method == "GET" && path.contains("/log/") && repair_probe.is_some() {
-            assert_eq!(*repair_probe, Some(true), "the probe completed before lookup");
+            assert_eq!(
+                *repair_probe,
+                Some(true),
+                "the probe completed before lookup"
+            );
             if let Some(released) = released.take() {
                 started.store(true, Ordering::SeqCst);
                 let _ = released.recv();
