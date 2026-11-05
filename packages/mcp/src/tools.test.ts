@@ -2543,6 +2543,9 @@ describe("what an agent reports about itself", () => {
       .toEqual({ product: "claude-code", version: "2.1" });
     const long = "x".repeat(80);
     expect(reportedAgent({ name: long, version: "1" }, undefined)).toEqual({ product: "x".repeat(64), version: "1" });
+    // An emoji is two UTF-16 units, so 64 units hold 32 of them, never half of one.
+    expect(reportedAgent({ name: "\u{1F600}".repeat(40) }, undefined)).toEqual({ product: "\u{1F600}".repeat(32) });
+    expect(reportedAgent({ name: "claude-code", title: "﻿Claude Code" }, undefined)).toEqual({ product: "Claude Code" });
   });
 
   it("leaves out what it can't read and never guesses", () => {

@@ -1636,6 +1636,7 @@ export function ChatsView(props: {
                       createdAtMs: preview.createdAtMs,
                       bodySnippet: preview.bodySnippet,
                       ...(preview.automation ? { automation: preview.automation } : {}),
+                      ...(preview.authorReported ? { authorReported: preview.authorReported } : {}),
                     }
                   : null,
                 reactions: preview?.reactions ?? [],

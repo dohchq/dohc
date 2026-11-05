@@ -2125,6 +2125,7 @@ interface FileChatStart {
   body: string;
   runId?: string;
   agent?: string;
+  reported?: CliReportedAgent;
 }
 
 // A comment on a file takes the path a person's does: a chat linked to the
@@ -3432,6 +3433,7 @@ async function dispatchWorkspace(
         body: request.args.body,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         ...(request.args.agent ? { agent: request.args.agent } : {}),
+        ...(request.args.reported ? { reported: request.args.reported } : {}),
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await startFileChat(context, input, options)).result;
@@ -3439,7 +3441,7 @@ async function dispatchWorkspace(
         context,
         options,
         requestId,
-        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null],
+        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null, input.reported ?? null],
         async () => {
           const started = await startFileChat(context, input, options);
           return { done: started.created, result: started.result };

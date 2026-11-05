@@ -66,9 +66,10 @@ struct PendingMessageAppend {
     link_principal_id: Option<String>,
     /// The agent that wrote an agent message, which sync apply also checked.
     author_agent_id: Option<String>,
-    /// What an agent reported about itself, which sync apply also checked.
+    /// What an agent reported about itself. A build that did not know the
+    /// field parked it unchecked, so replay checks it.
     #[serde(default)]
-    author_reported: Option<super::ChatReportedAgent>,
+    author_reported: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -505,6 +506,11 @@ fn replay_pending_chat_operation(
                 .map_err(|_| DomainError::StateCorrupt {
                 reason: "pending chat message payload is corrupt",
             })?;
+            let Some(author_reported) = pending_reported_agent(&payload) else {
+                return Ok(PendingReplayOutcome::Refused(
+                    "pending chat message reported agent is invalid",
+                ));
+            };
             let thread_exists: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM chat_threads \
@@ -523,7 +529,12 @@ fn replay_pending_chat_operation(
                 )?;
                 return Ok(PendingReplayOutcome::Deferred);
             }
-            automation_claims.extend(apply_pending_message(tx, workspace_id, payload)?);
+            automation_claims.extend(apply_pending_message(
+                tx,
+                workspace_id,
+                payload,
+                author_reported,
+            )?);
             Ok(PendingReplayOutcome::Applied)
         }
         _ => Ok(PendingReplayOutcome::Refused(
@@ -532,10 +543,23 @@ fn replay_pending_chat_operation(
     }
 }
 
+/// The parked message's report, checked as sync apply checks it. `None` means
+/// it is invalid; `Some(None)` means the message reported nothing.
+fn pending_reported_agent(
+    payload: &PendingMessageAppend,
+) -> Option<Option<super::ChatReportedAgent>> {
+    let reported = match &payload.author_reported {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
+    };
+    normalize_reported_agent(payload.author_kind == "agent", reported.as_ref()).ok()
+}
+
 fn apply_pending_message(
     tx: &Transaction<'_>,
     workspace_id: &str,
     payload: PendingMessageAppend,
+    author_reported: Option<super::ChatReportedAgent>,
 ) -> Result<Vec<AutomationClaim>, DomainError> {
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
@@ -573,13 +597,6 @@ fn apply_pending_message(
             reason: "pending chat message agent id is invalid",
         });
     }
-    let author_reported = normalize_reported_agent(
-        payload.author_kind == "agent",
-        payload.author_reported.as_ref(),
-    )
-    .map_err(|_| DomainError::StateCorrupt {
-        reason: "pending chat message reported agent is invalid",
-    })?;
     let previous: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(message_order), -1) FROM chat_messages \

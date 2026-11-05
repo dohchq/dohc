@@ -4243,6 +4243,16 @@ fn only_a_valid_agent_report_is_kept() {
             ChatActorKind::Agent,
             product(&"x".repeat(MAX_REPORTED_AGENT_CHARS + 1)),
         ),
+        // JavaScript counts an emoji as two units, so 40 of them are 80.
+        (
+            ChatActorKind::Agent,
+            ChatReportedAgent {
+                model: Some("\u{1F600}".repeat(40)),
+                ..ChatReportedAgent::default()
+            },
+        ),
+        // JavaScript's trim strips a byte order mark; Rust's does not.
+        (ChatActorKind::Agent, product("\u{FEFF}Claude Code")),
         (
             ChatActorKind::Agent,
             ChatReportedAgent {
@@ -4269,4 +4279,13 @@ fn only_a_valid_agent_report_is_kept() {
     chats
         .send_message(&longest, &NO_FAULTS)
         .expect("the longest product fits");
+    let mut emoji = send_msg("t1", "emoji", None, "Hi", 50);
+    emoji.author_kind = ChatActorKind::Agent;
+    emoji.author_reported = Some(ChatReportedAgent {
+        model: Some("\u{1F600}".repeat(MAX_REPORTED_AGENT_CHARS / 2)),
+        ..ChatReportedAgent::default()
+    });
+    chats
+        .send_message(&emoji, &NO_FAULTS)
+        .expect("64 units of emoji fit");
 }

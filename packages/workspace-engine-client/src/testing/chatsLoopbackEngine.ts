@@ -134,7 +134,7 @@ function messageReported(params: ChatsJsonObject): ChatReportedAgent | undefined
   for (const key of ["product", "version", "model"] as const) {
     const value = optionalString(reported, key);
     if (value === undefined) continue;
-    if (value === "" || [...value].length > MAX_REPORTED_AGENT_CHARS || value.trim() !== value || /\p{Cc}/u.test(value)) {
+    if (value === "" || value.length > MAX_REPORTED_AGENT_CHARS || value.trim() !== value || /\p{Cc}/u.test(value)) {
       throw new Error("invalid-input");
     }
     parts[key] = value;

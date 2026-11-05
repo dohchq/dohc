@@ -466,10 +466,12 @@ describe("MCP tool results", () => {
     expect(sent.every(args => !Object.hasOwn(args as object, "model"))).toBe(true);
     expect((sent[2] as { reported: object }).reported).not.toHaveProperty("model");
 
-    const refused = await client.callTool({
-      name: "dohc_reply_to_chat", arguments: { threadId: "thread-1", body: "On it.", model: " Opus\n" },
-    });
-    expect(refused.isError).toBe(true);
+    for (const model of [" Opus\n", "﻿Opus", "\u{1F600}".repeat(40)]) {
+      const refused = await client.callTool({
+        name: "dohc_reply_to_chat", arguments: { threadId: "thread-1", body: "On it.", model },
+      });
+      expect(refused.isError).toBe(true);
+    }
     expect(sent).toHaveLength(3);
   });
 

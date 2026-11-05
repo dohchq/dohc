@@ -343,24 +343,20 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
           {props.run.command}
         </code>
       </span>
-      {product || model ? (
-        <span className="grid grid-cols-2 gap-2">
-          {product ? (
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Product</span>
-              <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
-                {product} {AS_REPORTED}
-              </span>
-            </span>
-          ) : null}
-          {model ? (
-            <span className="grid gap-0.5">
-              <span className="text-[11px] text-muted">Model</span>
-              <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
-                {model} {AS_REPORTED}
-              </span>
-            </span>
-          ) : null}
+      {product ? (
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Product</span>
+          <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
+            {product} {AS_REPORTED}
+          </span>
+        </span>
+      ) : null}
+      {model ? (
+        <span className="grid gap-0.5">
+          <span className="text-[11px] text-muted">Model</span>
+          <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
+            {model} {AS_REPORTED}
+          </span>
         </span>
       ) : null}
       <span className="grid grid-cols-2 gap-2">

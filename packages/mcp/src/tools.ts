@@ -2068,14 +2068,14 @@ interface ChatWriteInput {
 
 // What an agent reports about itself. The product and version come from its
 // MCP client's handshake, preferring the client's display title to its name;
-// the model is what the agent states. A part that isn't printable text is
-// unknown, and dohc never fills in a guess.
+// the model is what the agent states. A part with a control character, or
+// with no text, is unknown, and dohc never fills in a guess.
 export function reportedAgent(
   client: { name?: unknown; title?: unknown; version?: unknown } | undefined,
   model: string | undefined,
 ): CliReportedAgent | undefined {
   const part = (value: unknown): string | undefined => {
-    if (typeof value !== "string") return undefined;
+    if (typeof value !== "string" || /\p{Cc}/u.test(value)) return undefined;
     let capped = "";
     for (const char of value.trim()) {
       if (capped.length + char.length > MAX_REPORTED_AGENT_CHARS) break;

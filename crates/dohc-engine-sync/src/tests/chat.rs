@@ -6274,10 +6274,34 @@ fn an_imported_agent_message_keeps_what_it_reported_and_a_bad_report_is_refused(
         })
     );
 
+    // A message from a build that sends no report stores none.
+    let (_scratch, _path, mut engine) = open_store();
+    setup(&mut engine, "unreported");
+    let mut unreported = message("agent", json!(null));
+    unreported
+        .as_object_mut()
+        .expect("payload")
+        .remove("authorReported");
+    let op = envelope("unreported", 2, "chat.message.append", unreported);
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut engine)
+            .get_message("ws", "message-1")
+            .expect("message")
+            .author_reported,
+        None
+    );
+
     for (author_kind, reported) in [
         ("human", json!({"product": "Claude Code"})),
         ("agent", json!({"version": "2.1"})),
         ("agent", json!({"product": "Claude\u{7}Code"})),
+        // 40 emoji are 80 UTF-16 units, past the limit JavaScript counts.
+        ("agent", json!({"model": "\u{1F600}".repeat(40)})),
+        ("agent", json!({"product": "\u{FEFF}Claude Code"})),
     ] {
         let (_scratch, _path, mut engine) = open_store();
         setup(&mut engine, "bad-report");
@@ -6288,5 +6312,122 @@ fn an_imported_agent_message_keeps_what_it_reported_and_a_bad_report_is_refused(
             message(author_kind, reported),
         );
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
+}
+
+/// An agent message that arrives before its thread keeps its report when it
+/// replays. A build that did not know the field parked any value, so replay
+/// checks it and refuses a bad one instead of failing the thread.
+#[test]
+fn a_parked_agent_message_keeps_its_report_and_a_bad_parked_report_is_refused() {
+    use dohc_engine_domain::{ChatReportedAgent, LinkedChatStore};
+    let channel = envelope(
+        "channel-peer",
+        0,
+        "chat.channel.create",
+        json!({"channelId": "channel-1", "name": "General", "slug": "general", "kind": "channel", "createdAtMs": 10}),
+    );
+    let message = envelope(
+        "message-peer",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "message-1",
+            "threadId": "thread-1",
+            "authorKind": "agent",
+            "authorDisplayName": "Nova",
+            "authorOwnerDisplayName": "Ice",
+            "body": "Opened a PR",
+            "createdAtMs": 20,
+            "authorReported": {"product": "Claude Code", "version": "2.1"},
+        }),
+    );
+    let thread = envelope(
+        "thread-peer",
+        0,
+        "chat.thread.create",
+        json!({"threadId": "thread-1", "title": "", "createdAtMs": 20, "channelSlug": "general", "channelWireId": "channel-1"}),
+    );
+    let park = |engine: &mut EngineStore| {
+        for op in [&channel, &message] {
+            assert_eq!(
+                apply_chat_envelope(engine, op, &NoFaults).expect("apply or park"),
+                ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+            );
+        }
+    };
+    let stored = |engine: &EngineStore| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'message-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("count messages")
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    park(&mut engine);
+    assert_eq!(stored(&engine), 0, "the message waits for its thread");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut engine)
+            .get_message("ws", "message-1")
+            .expect("replayed message")
+            .author_reported,
+        Some(ChatReportedAgent {
+            product: Some("Claude Code".to_owned()),
+            version: Some("2.1".to_owned()),
+            model: None,
+        })
+    );
+
+    for bad in [
+        json!({"product": "\u{FEFF}Claude Code"}),
+        json!({"version": "2.1"}),
+        json!("Claude Code"),
+        json!(42),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        park(&mut engine);
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log \
+                     SET payload_json=json_set(payload_json,'$.authorReported',json(?1)) \
+                     WHERE origin_id='message-peer' AND origin_seq=0",
+                    [bad.to_string()],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("park the report an older build kept");
+        let ApplyOutcome {
+            primary,
+            refusals,
+            sharing_declined,
+        } = apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread applies");
+        assert!(sharing_declined.is_empty());
+        assert_eq!(primary, ApplyDisposition::Applied(Vec::new()), "{bad}");
+        assert_eq!(
+            refusals,
+            vec![ReplicationRefusal {
+                workspace_id: "ws".to_owned(),
+                origin_id: "message-peer".to_owned(),
+                origin_seq: 0,
+                op_kind: "chat.message.append".to_owned(),
+                reason: RefusalReason::InvalidInput {
+                    reason: "pending chat message reported agent is invalid".to_owned(),
+                },
+            }],
+            "{bad}"
+        );
+        assert_eq!(stored(&engine), 0, "{bad}");
     }
 }

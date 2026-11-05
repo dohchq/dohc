@@ -1815,7 +1815,8 @@ fn normalize_message_agents(
     Ok((author_agent_id.map(str::to_owned), named))
 }
 
-/// The longest reported product, version, or model, in characters.
+/// The longest reported product, version, or model, in UTF-16 code units,
+/// as JavaScript and the wire count it.
 pub const MAX_REPORTED_AGENT_CHARS: usize = 64;
 
 /// Check what an agent reported about itself. Only an agent message carries
@@ -1841,8 +1842,8 @@ pub fn normalize_reported_agent(
     let part_is_valid = |part: &Option<String>| {
         part.as_deref().is_none_or(|part| {
             !part.is_empty()
-                && part.chars().count() <= MAX_REPORTED_AGENT_CHARS
-                && part.trim() == part
+                && part.encode_utf16().count() <= MAX_REPORTED_AGENT_CHARS
+                && part.trim_matches(is_js_trim_ws) == part
                 && !part.chars().any(char::is_control)
         })
     };
