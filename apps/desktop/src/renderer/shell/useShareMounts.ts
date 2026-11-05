@@ -105,19 +105,20 @@ export function useShareMounts(
   // Announced refreshes share one Notices row, so only the newest may write
   // it: an older one that finishes late must not replace a newer failure.
   const announcedRefreshToken = useRef(0);
-  // Every refresh, polled or not, may file or end a share's rows, so only
-  // the newest one to start writes them.
+  // Every refresh, polled or not, may file or end a share's refusal row, so
+  // only the newest one to start writes it.
   const rowsRefreshToken = useRef(0);
   const refreshShareMountsRef = useRef<(announce?: boolean) => Promise<void>>(
     async () => undefined,
   );
   // A refresh the person starts has one toast, its summary, so these rows go
   // into Notices unread. A polled refresh has no summary: a refusal toasts
-  // only when its row is new.
+  // only when its row is new. Every refresh files its set-aside rows: the
+  // record is gone, so a newer refresh has none to report.
   const reportCollisionRecords = useCallback(
-    (results: RefreshShareMountsResult["results"], announce: boolean) => {
+    (results: RefreshShareMountsResult["results"], announce: boolean, newest: boolean) => {
       for (const row of results) {
-        if (row.status === "failed" && row.errorKind === "collision-record") {
+        if (newest && row.status === "failed" && row.errorKind === "collision-record") {
           // The record keeps the person's own files apart while dohc can't
           // read it, so its row has no ×.
           reportShellFailure({
@@ -129,7 +130,7 @@ export function useShareMounts(
             identity: collisionRecordRefusal(row.shareId),
             ...(announce ? { quiet: true } : { repeat: true }),
           });
-        } else if (row.status !== "failed" && row.status !== "damaged") {
+        } else if (newest && row.status !== "failed" && row.status !== "damaged") {
           clearIdentity(collisionRecordRefusal(row.shareId));
         }
         if (row.collisionRecordQuarantined) {
@@ -157,7 +158,7 @@ export function useShareMounts(
         if (newest()) reportShellError("Couldn't refresh shares.", error, null, "share-refresh");
         return;
       }
-      if (rowsToken === rowsRefreshToken.current) reportCollisionRecords(results, announce);
+      reportCollisionRecords(results, announce, rowsToken === rowsRefreshToken.current);
       const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
       if (changed > 0) {
         setMountContentEpoch((epoch) => epoch + 1);
