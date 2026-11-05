@@ -840,6 +840,42 @@ describe("workspace manager with registered workspaces", () => {
     expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
+  it.each([
+    { order: "an older refresh that works leaves a newer failure", newer: "fails", older: "works" },
+    { order: "an older refresh that fails stays quiet after a newer one worked", newer: "works", older: "fails" },
+  ] as const)("only the newest list refresh reports: $order", async ({ newer, older }) => {
+    const user = userEvent.setup();
+    const first = deferred<Workspace[]>();
+    const onForgot = vi
+      .fn<() => Promise<Workspace[]>>()
+      .mockReturnValueOnce(first.promise)
+      .mockImplementationOnce(async () => {
+        if (newer === "fails") throw new Error("The workspace list could not be read.");
+        return [];
+      });
+    render(<WorkspaceManager workspaces={KNOWN} current={null} onForgot={onForgot} onOpenWorkspace={() => {}} />);
+    const remove = async (name: string) => {
+      await user.click(await screen.findByRole("button", { name: `More for ${name}` }));
+      await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    };
+    await remove("team");
+    await remove("personal");
+    await waitFor(() => expect(onForgot).toHaveBeenCalledTimes(2));
+    if (newer === "fails") await screen.findByTestId("workspace-shell-error");
+
+    await act(async () => {
+      if (older === "works") first.resolve([]);
+      else first.reject(new Error("The workspace list could not be read."));
+      await first.promise.catch(() => {});
+    });
+    if (newer === "fails") {
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Could not refresh the workspace list.");
+    } else {
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(screen.queryByTestId("connection-notices")).toBeNull();
+    }
+  });
+
   it("asks first when the row holds more than its place, and Cancel keeps it", async () => {
     const user = userEvent.setup();
     const synced = [KNOWN[0], { ...KNOWN[1], sync: "on" as const, joinedChatCount: 2 }];

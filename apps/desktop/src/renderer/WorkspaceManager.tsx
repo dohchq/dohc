@@ -22,6 +22,7 @@ import { Menu } from "./ui/Menu";
 import { removalFacts } from "./workspaceRemoval";
 import { PathLine } from "./ui/PathLine";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
+import { useRequestSequence } from "./useRequestSequence";
 import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
 
 // The workspace manager. It is the first-run screen and the "manage
@@ -246,6 +247,7 @@ export function WorkspaceManager(props: {
   };
   // A retry reads the list as it is now: the row may have gone, or gained
   // something the removal has to ask about.
+  const listRefresh = useRequestSequence();
   const workspacesRef = useRef(props.workspaces);
   workspacesRef.current = props.workspaces;
 
@@ -299,11 +301,14 @@ export function WorkspaceManager(props: {
   }
 
   // The removal already worked, so trying again only refreshes the list.
+  // Only the newest refresh reports, so an older one can't undo its result.
   async function refreshAfterRemoval() {
+    const token = listRefresh.next();
     try {
       await props.onForgot();
-      clearIdentity(LIST_REFRESH);
+      if (listRefresh.isCurrent(token)) clearIdentity(LIST_REFRESH);
     } catch (cause) {
+      if (!listRefresh.isCurrent(token)) return;
       reportError("Could not refresh the workspace list.", cause, () => void refreshAfterRemoval(), undefined, LIST_REFRESH);
     }
   }
