@@ -554,30 +554,53 @@ function FileMomentWhat(props: { moment: EngineMomentRecord }) {
   return saysIt ? null : <span className="min-w-0 truncate">{fileMomentSummary(moment)}</span>;
 }
 
-// The actor cuts no narrower than 48px beside its face, and a shorter name
-// keeps its own width. Inline, so no CSS tool rewrites it.
+// How narrow a part of a History line cuts. A shorter part keeps its own
+// width. The actor stops at 48px beside its face. The words before a file's
+// name stop there too, or at half their summary, so the name keeps room. A
+// Collection's parts stop at a share of their line, so all of them fit at
+// the sidebar's narrowest. Inline, so no CSS tool rewrites them.
 const ACTOR_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px))" };
+const LEAD_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 50%))" };
+const PART_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 48px, 25%))" };
+const COLLECTION_FLOOR: CSSProperties = { minWidth: "calc-size(max-content, min(size, 72px, 35%))" };
+
+// A summary that names the file, around its name: the words before it cut at
+// their end, down to their floor; the name cuts in its middle and keeps its
+// extension, in the ink a name takes; what follows it gives way first.
+function NamedSummary(props: { summary: string; name: string }) {
+  const at = props.summary.lastIndexOf(props.name);
+  const before = props.summary.slice(0, at);
+  const after = props.summary.slice(at + props.name.length);
+  return (
+    <span data-testid="engine-moment-summary" className="flex min-w-0">
+      {before ? <span className="min-w-0 shrink-[1000000] overflow-hidden text-ellipsis whitespace-pre" style={LEAD_FLOOR}>{before}</span> : null}
+      <NameLine name={props.name} className="text-ink" />
+      {after ? <span className="min-w-0 shrink-[100000000] overflow-hidden text-ellipsis whitespace-pre">{after}</span> : null}
+    </span>
+  );
+}
 
 // Who made a change and what it changed, on one line of the workspace's
 // History. The file's name wins. As the line runs short, a summary that
 // does not name the file gives way first, cut at its end; the folder gives
 // way and drops once it would show only an ellipsis; then the actor cuts
 // down to its floor; then the name cuts in its middle and keeps its
-// extension. A summary that names the file takes the name's place. The
-// folder takes only the room the rest leaves; below its 24px basis it wraps
-// onto a second line that the line clips. The row's tooltip keeps the path.
+// extension. A summary that names the file takes the name's place and keeps
+// the name whole as long as it can. The folder takes only the room the rest
+// leaves; below its 24px basis it wraps onto a second line that the line
+// clips. The row's tooltip keeps the path.
 function WorkspaceMomentLine(props: { moment: EngineMomentRecord; fileOnly?: boolean }) {
   const { moment } = props;
   const name = basenameOf(moment.path);
   const summary = props.fileOnly || (!moment.summary && moment.operation === "write") ? null : engineMomentSummary(moment);
-  const namesFile = summary?.includes(name) === true;
+  const namesFile = summary !== null && summary.includes(name);
   const folder = summary === null ? dirnameOf(moment.path) : "";
   return (
     <span data-testid="engine-moment-line" className="flex h-4 min-w-0 flex-wrap content-start items-center gap-x-2 overflow-hidden text-[12px] leading-4 text-muted">
       <span className="flex min-w-0 items-center gap-2">
         <MomentName moment={moment} title={momentAuthorLabel(moment)} style={ACTOR_FLOOR} className="shrink-[1000]" />
         {namesFile
-          ? <span data-testid="engine-moment-summary" className="min-w-0 truncate">{summary}</span>
+          ? <NamedSummary summary={summary} name={name} />
           : <NameLine name={name} className="text-ink" />}
         {summary !== null && !namesFile
           ? <span data-testid="engine-moment-summary" className="min-w-0 shrink-[1000000] truncate">{summary}</span>
@@ -848,15 +871,26 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
 // Collection's History, where the change and its Undo are, when this
 // computer can open that Collection. A Collection change has no face, so
 // what changed follows the time, beside the Collection's mark; who made it
-// and where come after.
+// and where come after. As the line runs short, an operation's name gives
+// way first; then who made it cuts to its floor; then what changed; the
+// Collection's name stays whole up to its own floor.
 function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; openHistory?: () => void }) {
   const { name, change } = props.entry;
   const agent = approvalAgentName(change);
+  const title = collectionChangeTitle(props.entry, props.label);
   // Only a record change with no label names its Collection in its title,
   // and only it needs its operation's own name to say which change it was.
   const unlabelled = !change.schema && props.label === undefined;
-  // The row's name says what it opens, so the change is its description.
-  const metaId = useId();
+  // The row's name says what it opens, so the change is its description:
+  // the line as it reads, then when, as a file's change says it.
+  const descriptionId = useId();
+  const description = [
+    title,
+    agent === undefined ? undefined : authorWords("agent", agent),
+    change.automation ? authorWords("automation", automationName(change.automation)) : undefined,
+    unlabelled ? change.operation : name,
+    change.recordedAtMs === null ? undefined : formatChatTime(change.recordedAtMs).label,
+  ].filter((part) => part !== undefined).join(", ");
   // An undated change sits under the Date unknown heading, so it is one
   // line with no time.
   const frame = change.recordedAtMs === null ? ONE_LINE : TWO_LINES;
@@ -870,38 +904,44 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
       <span className={`${MARK_BOX} text-subtle`}>
         <Database size={14} aria-hidden />
       </span>
-      <span className={`${LINE_TWO} flex-1`}>
-        <span data-testid="history-collection-title" className="min-w-0 max-w-[60%] shrink-0 truncate">
-          {collectionChangeTitle(props.entry, props.label)}
+      {/* An undated row is one line, and this takes all of it beside the mark. */}
+      <span data-testid="history-collection-line" className={`${LINE_TWO} flex-1 overflow-hidden`}>
+        <span data-testid="history-collection-title" className="min-w-0 shrink-[1000] truncate" style={PART_FLOOR}>
+          {title}
         </span>
-        <span id={metaId} className="flex min-w-0 items-center gap-2">
-          {agent !== undefined ? (
-            <span data-testid="history-collection-agent" className="min-w-0 shrink-0 truncate">{agent}</span>
-          ) : null}
-          {change.automation ? (
-            <span className="inline-flex min-w-0 shrink-0 items-center gap-1">
-              <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-              <span className="sr-only">Automation </span>
-              <span className="truncate">{automationName(change.automation)}</span>
-            </span>
-          ) : null}
-          <span className="min-w-0 truncate text-subtle">{unlabelled ? change.operation : name}</span>
-        </span>
+        {agent !== undefined ? (
+          <span data-testid="history-collection-agent" className="min-w-0 shrink-[1000000] truncate" style={PART_FLOOR}>{agent}</span>
+        ) : null}
+        {change.automation ? (
+          <span className="inline-flex min-w-0 shrink-[1000000] items-center gap-1" style={PART_FLOOR}>
+            <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
+            <span className="sr-only">Automation </span>
+            <span className="truncate">{automationName(change.automation)}</span>
+          </span>
+        ) : null}
+        {unlabelled ? (
+          <span data-testid="history-collection-operation" className="min-w-0 shrink-[1000000000] truncate text-subtle">{change.operation}</span>
+        ) : (
+          <span data-testid="history-collection-name" className="min-w-0 truncate text-subtle" style={COLLECTION_FLOOR}>{name}</span>
+        )}
       </span>
     </>
   );
   return props.openHistory ? (
-    <button
-      type="button"
-      data-testid="history-collection-open"
-      aria-describedby={metaId}
-      aria-label={`Open Collection history for ${name}`}
-      title={`Open Collection history for ${name}`}
-      onClick={props.openHistory}
-      className={`${frame} text-muted hover:bg-hover`}
-    >
-      {body}
-    </button>
+    <>
+      <button
+        type="button"
+        data-testid="history-collection-open"
+        aria-describedby={descriptionId}
+        aria-label={`Open Collection history for ${name}`}
+        title={`Open Collection history for ${name}`}
+        onClick={props.openHistory}
+        className={`${frame} text-muted hover:bg-hover`}
+      >
+        {body}
+      </button>
+      <HiddenWords id={descriptionId}>{description}</HiddenWords>
+    </>
   ) : (
     <div className={frame}>{body}</div>
   );

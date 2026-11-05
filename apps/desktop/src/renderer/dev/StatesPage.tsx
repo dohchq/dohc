@@ -710,13 +710,15 @@ function timelineChange(datasetId: string, name: string, revision: number, recor
   } };
 }
 const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
+const TIMELINE_RULES = timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" });
+const TIMELINE_UNDATED = timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null);
 const TIMELINE_MIXED: TimelineEntry[] = [
   TIMELINE_FILE,
   timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
   TIMELINE_DATED,
-  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" }),
+  TIMELINE_RULES,
   timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
-  timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
+  TIMELINE_UNDATED,
 ];
 // One afternoon in History, one line per change: Nova's three edits to one
 // file fold into one row, a person's edit shows their face, and the machine's
@@ -2229,6 +2231,12 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
               collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Collections at the sidebar's default width: who made a change cuts before the Collection's name">
+          <div data-testid={`states-history-collections-narrow-${theme}`} className="flex h-[200px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_DATED, TIMELINE_RULES, TIMELINE_UNDATED]} hasMore={false} loadingMore={false} onLoadMore={noop}
+              onOpenMoment={noop} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="partial: a Collection did not load">

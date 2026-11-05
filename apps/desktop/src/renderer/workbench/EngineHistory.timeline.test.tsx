@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Fragment, type ReactNode } from "react";
 import type { EngineMomentRecord, TimelineEntry } from "../../ipc/bridgeContract";
+import { formatChatTime } from "../time";
 import { EngineHistoryView, HistoryRow, type HistoryCollections } from "./EngineHistory";
 
 // This suite checks what each row says and offers, not viewport measurement.
@@ -101,14 +102,34 @@ describe("History timeline rows", () => {
     expect(labelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Add row");
     expect(labelled!.textContent).not.toContain("addRow");
     expect(unlabelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed Guests");
-    expect(unlabelled!.querySelector("[id]")!.lastElementChild!.textContent).toBe("addRow");
-    // The title already names the Collection, so the meta line does not.
-    expect(unlabelled!.querySelector("[id]")!.textContent).not.toContain("Guests");
-    // The row's name says what it opens; the change describes it.
+    expect(unlabelled!.querySelector('[data-testid="history-collection-operation"]')!.textContent).toBe("addRow");
+    // The title already names the Collection, so the line does not again.
+    expect(unlabelled!.querySelector('[data-testid="history-collection-name"]')).toBeNull();
+    // The row's name says what it opens; the change describes it, as its
+    // line reads, then when.
     const button = screen.getByRole("button", { name: "Open Collection history for Budget" });
     const description = document.getElementById(button.getAttribute("aria-describedby")!);
-    expect(description?.textContent).toContain("Budget");
-    expect(description?.textContent).toContain("Stamp the date");
+    expect(description?.hidden).toBe(true);
+    expect(description?.textContent).toBe(`Add row, Automation Stamp the date, Budget, ${formatChatTime(DAY - 2_000).label}`);
+  });
+
+  // As the line runs short, the operation's name gives way first, then who
+  // made the change, then what changed; the Collection's name goes last.
+  // Their floors are inline widths the states page measures.
+  it("cuts a Collection change's line from its end inward, keeping the Collection's name", () => {
+    view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" }), change(2, null, GUESTS, "Guests")] });
+    const [rules, undated] = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);
+    const line = within(rules!).getByTestId("history-collection-line");
+    const shrink = (el: Element) => el.className.match(/shrink-\[(\d+)\]/)?.[1];
+    const [title, agent, name] = [...line.children];
+    expect([title, agent, name].map((el) => el!.getAttribute("data-testid")))
+      .toEqual(["history-collection-title", "history-collection-agent", "history-collection-name"]);
+    expect([shrink(title!), shrink(agent!), shrink(name!)]).toEqual(["1000", "1000000", undefined]);
+    expect(line.className).toContain("overflow-hidden");
+    // An undated change is one line, and its parts share all of it.
+    const undatedLine = within(undated!).getByTestId("history-collection-line");
+    expect(undatedLine.className.split(" ")).toEqual(expect.arrayContaining(["flex-1", "overflow-hidden"]));
+    expect(shrink(within(undated!).getByTestId("history-collection-operation"))).toBe("1000000000");
   });
 
   // The name stays in the line's ink; colour belongs to faces.
@@ -117,7 +138,8 @@ describe("History timeline rows", () => {
     const agents = screen.getAllByTestId("history-collection-agent");
     expect(agents.map((agent) => agent.textContent)).toEqual(["trip-agent", "Agent"]);
     expect(agents[0]!.className).not.toContain("text-agent");
-    expect(agents[0]!.parentElement!.firstElementChild).toBe(agents[0]);
+    // Who made it follows what changed.
+    expect(agents[0]!.previousElementSibling!.getAttribute("data-testid")).toBe("history-collection-title");
   });
 
   // The engine names every rules change "Fields and rules". That is not an
@@ -126,9 +148,8 @@ describe("History timeline rows", () => {
     view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" })] });
     const row = screen.getAllByRole("listitem").find((item) => item.dataset.historyKey)!;
     expect(row.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed fields and rules");
-    const meta = row.querySelector("[id]")!;
-    expect(meta.textContent).toContain("Guests");
-    expect(meta.textContent).not.toContain("Fields and rules");
+    expect(row.querySelector('[data-testid="history-collection-name"]')!.textContent).toBe("Guests");
+    expect(row.textContent).not.toContain("Fields and rules");
   });
 
   it("marks where the workspace started, not a version someone created", () => {
@@ -255,13 +276,26 @@ describe("History timeline changes", () => {
     expect(summary.className).toContain("shrink-[1000000]");
     expect(within(summarized).queryByTestId("engine-moment-folder")).toBeNull();
 
-    // A summary that names the file takes the name's place, cut at its end.
+    // A summary that names the file takes the name's place and keeps the
+    // name whole longest: the words before it cut first, down to their floor,
+    // and the name cuts in its middle, in a name's ink.
     const deleted = row({ operation: "delete" });
-    expect(within(deleted).queryByText("product-planning-notes")).toBeNull();
     const named = within(deleted).getByTestId("engine-moment-summary");
     expect(named.textContent).toBe("Deleted product-planning-notes.md");
-    expect(named.className).toContain("truncate");
-    expect(named.className).not.toContain("shrink-[");
+    const [verb, fileName] = [...named.children];
+    expect(verb!.textContent).toBe("Deleted ");
+    expect(verb!.className.split(" ")).toEqual(expect.arrayContaining(["shrink-[1000000]", "text-ellipsis", "whitespace-pre"]));
+    // Its trailing space stays; `truncate`'s nowrap would drop it.
+    expect(verb!.className).not.toContain("truncate");
+    expect(fileName!.className).toContain("text-ink");
+    expect(fileName!.firstElementChild!.textContent).toBe("product-planning-notes");
+    expect(fileName!.lastElementChild!.textContent).toBe(".md");
+    expect(fileName!.lastElementChild!.className).toContain("shrink-0");
+    // What follows the name gives way before the words that lead to it.
+    const moved = row({ summary: "Moved product-planning-notes.md to the archive" });
+    const [, , rest] = [...within(moved).getByTestId("engine-moment-summary").children];
+    expect(rest!.textContent).toBe(" to the archive");
+    expect(rest!.className).toContain("shrink-[100000000]");
   });
 
   it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
