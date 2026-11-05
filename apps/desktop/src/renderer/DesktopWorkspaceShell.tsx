@@ -427,6 +427,17 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 // The Notices row of a shared view whose refresh can't read its collision record.
 const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
 
+// What a refresh that set a shared view's collision record aside tells the
+// person, whether the refresh then completed or failed.
+function collisionRecordSetAsideMessage(takesLocalWrites: boolean | undefined): string {
+  return (
+    "dohc could not read this share's record of your files with the same path as a shared file. " +
+    (takesLocalWrites
+      ? "A refresh can count them as your edits, so check Send changes before you send."
+      : "A refresh can replace them with the shared version, and dohc keeps no copy of yours.")
+  );
+}
+
 // The commands that still run under the opening cover.
 const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
 
@@ -5068,6 +5079,9 @@ export function DesktopWorkspaceShell(props: {
           probeFailure = outcome.probed === true;
           if (outcome.changedPaths > 0) await bestEffortRepaint();
           if (!isCurrent()) return "stale";
+          if (outcome.collisionRecordQuarantined) {
+            reportShellFailure({ message: collisionRecordSetAsideMessage(outcome.takesLocalWrites) });
+          }
           if (outcome.errorKind === "collision-record") {
             // The record keeps the person's own files apart while dohc can't
             // read it, so its row has no ×. The next refresh that completes
@@ -5092,13 +5106,7 @@ export function DesktopWorkspaceShell(props: {
         if (outcome.probed) return "current";
         clearIdentity(SHARE_COLLISION_RECORD_ROW);
         if (outcome.collisionRecordQuarantined) {
-          reportShellFailure({
-            message:
-              "dohc could not read this share's record of your files with the same path as a shared file. " +
-              (outcome.takesLocalWrites
-                ? "A refresh can count them as your edits, so check Send changes before you send."
-                : "A refresh can replace them with the shared version, and dohc keeps no copy of yours."),
-          });
+          reportShellFailure({ message: collisionRecordSetAsideMessage(outcome.takesLocalWrites) });
         }
         if (outcome.status === "ended") {
           shareViewEndedRef.current = true;

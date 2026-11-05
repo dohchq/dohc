@@ -88,7 +88,7 @@ export type StandaloneShareViewRefreshOutcome =
       ok: true;
       collisionRecordQuarantined: boolean;
     } & RefreshSharedViewOutcome)
-  | {
+  | ({
       ok: false;
       changedPaths: number;
       errorMessage: string;
@@ -96,7 +96,17 @@ export type StandaloneShareViewRefreshOutcome =
       // For a collision-record refusal: what kept dohc from reading or
       // setting aside the record.
       errorCause?: string;
-    };
+    } & SetAsideCollisionRecord);
+
+// Set when this refresh's capture set the collision record aside, whether the
+// refresh then completed or failed.
+type SetAsideCollisionRecord = Pick<RefreshSharedViewOutcome, "collisionRecordQuarantined" | "takesLocalWrites">;
+
+export function setAsideCollisionRecord(captured: CaptureSharedViewLocalDivergenceOutcome): SetAsideCollisionRecord {
+  return captured.collisionRecordQuarantined
+    ? { collisionRecordQuarantined: true, takesLocalWrites: captured.takesLocalWrites ?? false }
+    : {};
+}
 
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
@@ -147,7 +157,7 @@ class SharedViewTargetAccessError extends Error {
   }
 }
 
-function standaloneShareViewFailureOutcome(
+export function standaloneShareViewFailureOutcome(
   error: unknown,
   changedPaths: number,
 ): Extract<StandaloneShareViewRefreshOutcome, { ok: false }> {
@@ -2678,9 +2688,7 @@ async function refreshCapturedShareView(
   }, records);
   return {
     ...outcome,
-    ...(captured.collisionRecordQuarantined
-      ? { collisionRecordQuarantined: true, takesLocalWrites: captured.takesLocalWrites ?? false }
-      : {}),
+    ...setAsideCollisionRecord(captured),
     status:
       outcome.status === "unchanged" && localChanges > 0
         ? "updated"
@@ -2709,7 +2717,10 @@ async function reconcileStandaloneShareView(
       collisionRecordQuarantined: captured.collisionRecordQuarantined,
     };
   } catch (error) {
-    return standaloneShareViewFailureOutcome(error, totalLocalChanges);
+    return {
+      ...standaloneShareViewFailureOutcome(error, totalLocalChanges),
+      ...setAsideCollisionRecord(input.captured),
+    };
   }
 }
 

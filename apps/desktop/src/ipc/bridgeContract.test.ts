@@ -1443,6 +1443,17 @@ describe("shared view refresh IPC contract", () => {
       errorMessage: "relay failed",
     });
   });
+
+  it("carries a set-aside collision record on a failed refresh", () => {
+    const failed = {
+      ok: false,
+      changedPaths: 0,
+      errorMessage: "relay failed",
+      collisionRecordQuarantined: true,
+      takesLocalWrites: false,
+    };
+    expect(RefreshSharedViewResult.parse(failed)).toEqual(failed);
+  });
 });
 
 describe("workbench menu IPC contract", () => {
