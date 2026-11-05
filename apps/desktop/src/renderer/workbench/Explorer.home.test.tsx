@@ -218,6 +218,24 @@ describe("Explorer Home", () => {
 
     view.rerender(<Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />);
     expect(rowLabels("Apps")).toEqual(["Trip"]);
+
+    // A share that holds only an app shows no Pages either.
+    view.rerender(<Explorer {...explorerProps({ files: [file("trip/index.html")], folders: ["trip"], dataCollections: [], collectionFolders: new Set(),
+      shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(rowLabels("Apps")).toEqual(["Trip"]);
+    expect(screen.queryByRole("region", { name: "Pages" })).toBeNull();
+    expect(screen.queryByTestId("explorer-pages-empty")).toBeNull();
+  });
+
+  // Show archived Collections clears the list and reads it again. Until that
+  // read lands, the list is not known to be empty.
+  it("holds Collections' place while its list is read again, and says nothing yet", () => {
+    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
+      includeArchivedCollections: true, collectionsReading: true })} />);
+
+    expect(section("Collections")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    expect(screen.getByTestId("explorer-collections-toggle").hasAttribute("aria-describedby")).toBe(false);
   });
 
   it("waits for the first listing before drawing any section", () => {

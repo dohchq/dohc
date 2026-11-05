@@ -207,18 +207,24 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     collectionActions.push({ id: "restore", label: "Restore from recovery file…", testId: "collections-restore", onSelect: explorer.onRestoreCollection });
   }
 
+  // A read on its way holds one row's height and says nothing, so the
+  // sections under it stay put and no section claims to be empty too soon.
+  const holdRow = <div aria-hidden className="h-7" />;
+  const collectionsReading = !refusal && !!explorer.collectionsReading;
   const sections: Section[] = [];
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
   if (recent.length > 0) sections.push({ id: "recent", label: "Recent", rows: recent });
-  sections.push({
-    id: "pages",
-    label: "Pages",
-    count: kinds.pages.length,
-    countLabel: (count) => plural(count, "page", "pages"),
-    rows: pages,
-    add: { label: "New page", onClick: () => explorer.onNewPage("") },
-    ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
-  });
+  if (pages.length > 0 || !explorer.shareView) {
+    sections.push({
+      id: "pages",
+      label: "Pages",
+      count: kinds.pages.length,
+      countLabel: (count) => plural(count, "page", "pages"),
+      rows: pages,
+      add: { label: "New page", onClick: () => explorer.onNewPage("") },
+      ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
+    });
+  }
   if (showCollections) {
     sections.push({
       id: "collections",
@@ -233,11 +239,11 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ...(collectionActions.length > 0 ? { actions: collectionActions } : {}),
       body: refusal ? (
         <CollectionsRefusalRow refusal={refusal} onKeep={explorer.onKeepCollections} onRetry={explorer.onRetryCollections} />
-      ) : undefined,
+      ) : collectionsReading ? holdRow : undefined,
       after: !refusal && explorer.collectionsElsewhere ? (
         <CollectionsElsewhereRow elsewhere={explorer.collectionsElsewhere} onKeep={explorer.onKeepCollections} />
       ) : undefined,
-      ...(!refusal && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
+      ...(!refusal && !collectionsReading && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
         ? { empty: "No Collections yet." }
         : {}),
     });
@@ -250,9 +256,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       countLabel: (count) => plural(count, "app", "apps"),
       rows: appRows,
       ...(apps?.state.status === "failed" ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> } : {}),
-      // The first read holds one row's height, so the sections under Apps
-      // stay put when its first app arrives.
-      ...(appsStatus === "loading" ? { body: <div aria-hidden className="h-7" /> } : {}),
+      ...(appsStatus === "loading" ? { body: holdRow } : {}),
       ...(appsStatus === "ready" && appList.length === 0
         ? { empty: "No apps yet. Any folder with a web app in it shows up here." }
         : {}),

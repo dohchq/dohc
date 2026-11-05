@@ -98,7 +98,7 @@ Check that the action exists on that surface before you name it.
 A Home section with nothing in it keeps its header and shows one muted line under it, not `EmptyState`: `No pages yet.`
 The header's + is that line's Next, so the line names a Next only when the header has none, as Apps does.
 The line is not a keyboard stop. The header's toggle reads it as its description.
-In a workspace of your own, Pages, Collections and Apps always show. A share view shows only the kinds it holds.
+In a workspace of your own, Pages, Collections and Apps always show. A share view shows only the kinds it holds. While a section's list is still being read, it holds one row's height and shows no line, so it never says it is empty too soon.
 
 ### Agents
 

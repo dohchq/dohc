@@ -32,12 +32,15 @@ export function useCollectionFolders(
   // `elsewhere`: another computer keeps the workspace's Collections, and the
   // list holds the ones on this computer's server. It says where the others
   // are, or, when the server didn't answer, where all of them are.
-  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: CollectionsElsewhere | null } | null>(null);
+  // `reading`: the list was cleared for another read, such as the archived
+  // list, and that read has not landed, so the list is not known to be empty.
+  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: CollectionsElsewhere | null; reading?: true } | null>(null);
   const datasets = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
   const collectionsElsewhere = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.elsewhere : null;
   // The list has loaded at least once. Showing the archived list again keeps it loaded.
   const collectionsListed = !shareViewEnded && dataState?.workspaceId === workspaceId;
+  const collectionsReading = collectionsListed && dataState?.reading === true;
   // Why this computer cannot list the workspace's Collections, such as
   // another computer keeping them. The list says so in place, so a refresh
   // after each change does not report it again.
@@ -48,7 +51,7 @@ export function useCollectionFolders(
   const includeArchived = !isShareView && archiveView.workspaceId === workspaceId && archiveView.enabled;
   const setIncludeArchived = useCallback((enabled: boolean) => {
     datasetRequest.current++;
-    setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
+    setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null, reading: true });
     setArchiveView({ workspaceId, enabled });
   }, [workspaceId]);
   const refreshDatasets = useCallback(async () => {
@@ -121,5 +124,5 @@ export function useCollectionFolders(
     void refreshCollections();
   }, [workspaceIsReady, isShareView, shareViewReadsCollections, refreshCollections]);
 
-  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed };
+  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsReading };
 }

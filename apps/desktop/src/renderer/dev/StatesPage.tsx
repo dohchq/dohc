@@ -2594,10 +2594,11 @@ function Pane(props: { theme: "light" | "dark" }) {
               appFolders={new Set()} dataCollections={[]} onIncludeArchivedCollections={noop} />
           </div>
         </Specimen>
-        <Specimen label="a share view: only the kinds it holds">
+        <Specimen label="a share view holding one app: only Apps shows">
           <div className="w-60 rounded-lg border border-line bg-panel">
-            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={HOME_NO_APPS}
-              appFolders={new Set()} dataCollections={[]} shareView={{ granterEmail: "sam@example.com" }} />
+            <Explorer {...HOME_SPECIMEN} files={[{ path: "trip-planner/index.html", kind: "file" }]} folders={["trip-planner"]} pinned={[]}
+              recentFiles={[]} apps={HOME_SHARED_APP} appFolders={new Set(["trip-planner"])} dataCollections={[]}
+              shareView={{ granterEmail: "sam@example.com" }} />
           </div>
         </Specimen>
         <Specimen label="loading: blank for 150 ms, then skeleton rows">
@@ -3778,6 +3779,9 @@ const HOME_APPS: ExplorerApps = {
 };
 
 const HOME_NO_APPS: ExplorerApps = { ...HOME_APPS, state: { status: "ready", workspaceId: "states", apps: [] }, pinnedApps: [] };
+
+// A share that holds one app and nothing else.
+const HOME_SHARED_APP: ExplorerApps = { ...HOME_NO_APPS, state: { status: "ready", workspaceId: "states", apps: [SHELF_APP] } };
 
 const HOME_FILES = [
   "Trip plan.md", "Packing list.md", "Budget.md",

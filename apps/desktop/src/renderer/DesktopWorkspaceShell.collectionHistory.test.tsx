@@ -147,7 +147,10 @@ describe("the Collections section", () => {
 
     await act(async () => listed.resolve({ kind: "list", datasets: [], nextCursor: null }));
     await user.click(await screen.findByRole("button", { name: "Collections actions" }));
+    expect(screen.getByTestId("explorer-collections-empty").textContent).toBe("No Collections yet.");
     await user.click(screen.getByRole("menuitemradio", { name: "Show archived Collections" }));
+    // The archived list is on its way, so the section doesn't say it's empty.
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Collections actions" }));
     expect(screen.getByRole("menuitem", { name: "Restore from recovery file…" })).toBeTruthy();
     expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" }).getAttribute("aria-checked")).toBe("true");

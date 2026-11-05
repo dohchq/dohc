@@ -140,6 +140,9 @@ export interface ExplorerProps {
   apps?: ExplorerApps;
   dataCollections?: readonly DataCollection[];
   includeArchivedCollections?: boolean;
+  // The list was cleared for another read, such as the archived list, and
+  // that read has not landed.
+  collectionsReading?: boolean;
   onIncludeArchivedCollections?(enabled: boolean): void;
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
