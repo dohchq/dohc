@@ -324,7 +324,8 @@ function ShareRow(props: {
             {props.lead || props.mark ? <span className="flex shrink-0 items-center gap-1">{props.lead}{props.mark}</span> : null}
           </span>
           {who || props.word ? (
-            <span className="text-[12px] leading-4 wrap-anywhere">
+            // 4px under the name line, so the 24px actions over the last line never reach it.
+            <span className="mt-1 text-[12px] leading-4 wrap-anywhere">
               {props.word ? <StatusPill word={props.word} /> : null}
               {props.word && who ? " " : null}
               {who ? <span data-testid="sharing-row-who" title={who.title}>{who.text}</span> : null}
