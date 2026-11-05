@@ -7,6 +7,7 @@ import { currentObjectPath } from "./currentFiles";
 // process's answers, so each answer also expires.
 const PRESENCE_TTL_MS = 2_000;
 const MAX_WORKSPACES = 256;
+const MAX_FOLLOWED_FILES = 8;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const remembered = new WeakMap<StorageContext, Map<string, Map<string, { present: boolean; expiresAtMs: number }>>>();
 
@@ -17,9 +18,8 @@ export function forgetCollectionFilePresence(storage: StorageContext, workspaceI
 
 /**
  * Whether the server's copy of the workspace still has the Collection's
- * dataset.json, decided as the desktop's Collection lists decide it: the file
- * in the approved folder names the Collection or names none, or that file
- * moved and still names it.
+ * dataset.json: the file in the approved folder names the Collection or names
+ * none, or a file that was there moved and still names it.
  */
 export function collectionFilePresent(storage: StorageContext, workspaceId: string, datasetId: string, nowMs: number): boolean {
   let workspaces = remembered.get(storage);
@@ -43,12 +43,16 @@ function readPresence(storage: StorageContext, workspaceId: string, datasetId: s
   const folder = datasetBaseFolder(parseDatasetRevision(JSON.parse(String(approved.revision_json))).definition);
   const path = folder === "." ? "dataset.json" : `${folder}/dataset.json`;
   const named = namedCollection(storage, workspaceId, path);
-  if (named !== undefined) return named === null || named === datasetId;
-  // Moving a folder keeps its files' objects, so follow the file that was here.
-  const last = storage.db.prepare(`SELECT object_id FROM sync_relay_object_moments
-    WHERE workspace_id=? AND version_id=? AND path=? ORDER BY relay_seq DESC LIMIT 1`).get(workspaceId, MAIN_VERSION_ID, path);
-  const moved = last && currentObjectPath(storage, { workspaceId, versionId: MAIN_VERSION_ID, objectId: String(last.object_id) });
-  return !!moved && (moved === "dataset.json" || moved.endsWith("/dataset.json")) && namedCollection(storage, workspaceId, moved) === datasetId;
+  if (named === null || named === datasetId) return true;
+  // Moving a folder keeps its files' objects, so follow the files that were here,
+  // whatever now sits at this path.
+  const objects = storage.db.prepare(`SELECT object_id FROM sync_relay_object_moments
+    WHERE workspace_id=? AND version_id=? AND path=? GROUP BY object_id ORDER BY MAX(relay_seq) DESC LIMIT ${MAX_FOLLOWED_FILES}`)
+    .all(workspaceId, MAIN_VERSION_ID, path);
+  return objects.some(({ object_id }) => {
+    const moved = currentObjectPath(storage, { workspaceId, versionId: MAIN_VERSION_ID, objectId: String(object_id) });
+    return !!moved && (moved === "dataset.json" || moved.endsWith("/dataset.json")) && namedCollection(storage, workspaceId, moved) === datasetId;
+  });
 }
 
 /** The Collection a main dataset.json names: undefined with no file there, null when it names none. */
