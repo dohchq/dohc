@@ -615,7 +615,14 @@ function rawChatMessage(
       ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
     } : {}),
     ...agentRequestsFor(message),
+    ...reportedFor(message),
   };
+}
+
+// What an agent's client reported about itself, so an agent reading the
+// chat sees what a person sees beside the name.
+function reportedFor(message: ChatMessage) {
+  return message.authorReported ? { authorReported: { ...message.authorReported } } : {};
 }
 
 // The agents still asked to answer a message, as the engine reports them.
@@ -1224,6 +1231,7 @@ function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved"
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
     })),
     ...agentRequestsFor(message),
+    ...reportedFor(message),
   };
 }
 

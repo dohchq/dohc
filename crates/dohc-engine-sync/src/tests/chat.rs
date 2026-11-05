@@ -6253,7 +6253,10 @@ fn an_imported_agent_message_keeps_what_it_reported_and_a_bad_report_is_refused(
         "reported",
         2,
         "chat.message.append",
-        message("agent", json!({"product": "Claude Code", "version": "2.1", "model": "Claude Opus 5.5"})),
+        message(
+            "agent",
+            json!({"product": "Claude Code", "version": "2.1", "model": "Claude Opus 5.5"}),
+        ),
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
@@ -6278,7 +6281,12 @@ fn an_imported_agent_message_keeps_what_it_reported_and_a_bad_report_is_refused(
     ] {
         let (_scratch, _path, mut engine) = open_store();
         setup(&mut engine, "bad-report");
-        let op = envelope("bad-report", 2, "chat.message.append", message(author_kind, reported));
+        let op = envelope(
+            "bad-report",
+            2,
+            "chat.message.append",
+            message(author_kind, reported),
+        );
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
 }

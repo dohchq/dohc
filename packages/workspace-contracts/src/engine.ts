@@ -443,11 +443,11 @@ export interface ChatMessageAppendPayload {
 // names in the handshake, and the model the agent states. dohc can't check
 // any of it, so it is only ever shown as reported. Absent means unknown, and
 // a version always comes with its product.
-export interface ChatReportedAgent {
+export type ChatReportedAgent = {
   product?: string;
   version?: string;
   model?: string;
-}
+};
 
 type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
 type ChatFollowState = "following" | "unfollowed";

@@ -1636,11 +1636,13 @@ fn apply_message(
             reason: "chat message agent id is invalid",
         });
     }
-    let author_reported =
-        normalize_reported_agent(payload.author_kind == "agent", payload.author_reported.as_ref())
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "chat message reported agent is invalid",
-            })?;
+    let author_reported = normalize_reported_agent(
+        payload.author_kind == "agent",
+        payload.author_reported.as_ref(),
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "chat message reported agent is invalid",
+    })?;
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),

@@ -4170,7 +4170,10 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
         silent.author_kind = ChatActorKind::Agent;
         silent.author_reported = Some(ChatReportedAgent::default());
         chats.send_message(&silent, &NO_FAULTS).expect("silent");
-        assert_eq!(chats.get_message(WS, "m3").expect("read").author_reported, None);
+        assert_eq!(
+            chats.get_message(WS, "m3").expect("read").author_reported,
+            None
+        );
 
         // The post's preview in the channel carries it too.
         let listed = chats
@@ -4191,7 +4194,9 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
                 "SELECT payload_json FROM replication_log \
                  WHERE workspace_id = ?1 AND op_kind = 'chat.message.append' ORDER BY origin_seq",
             )?;
-            query.query_map([WS], |row| row.get::<_, String>(0))?.collect()
+            query
+                .query_map([WS], |row| row.get::<_, String>(0))?
+                .collect()
         })
         .expect("journaled messages")
         .iter()
@@ -4234,7 +4239,10 @@ fn only_a_valid_agent_report_is_kept() {
         (ChatActorKind::Agent, product("")),
         (ChatActorKind::Agent, product(" Claude Code")),
         (ChatActorKind::Agent, product("Claude\nCode")),
-        (ChatActorKind::Agent, product(&"x".repeat(MAX_REPORTED_AGENT_CHARS + 1))),
+        (
+            ChatActorKind::Agent,
+            product(&"x".repeat(MAX_REPORTED_AGENT_CHARS + 1)),
+        ),
         (
             ChatActorKind::Agent,
             ChatReportedAgent {
@@ -4258,5 +4266,7 @@ fn only_a_valid_agent_report_is_kept() {
     let mut longest = send_msg("t1", "longest", None, "Hi", 40);
     longest.author_kind = ChatActorKind::Agent;
     longest.author_reported = Some(product(&"x".repeat(MAX_REPORTED_AGENT_CHARS)));
-    chats.send_message(&longest, &NO_FAULTS).expect("the longest product fits");
+    chats
+        .send_message(&longest, &NO_FAULTS)
+        .expect("the longest product fits");
 }

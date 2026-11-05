@@ -3212,6 +3212,15 @@ describe("CLI socket server", () => {
       ["Nova", { product: "Claude Code" }],
       ["Sam", undefined],
     ]);
+
+    // An agent reading the chat sees what a person sees, through MCP and the CLI.
+    const expected = [reported, { product: "Claude Code" }, undefined];
+    const read = await invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: engineThread.id });
+    if (!read.ok) throw new Error(read.reason);
+    expect(read.messages.map(message => message.authorReported)).toEqual(expected);
+    expect(read.messages[2]).not.toHaveProperty("authorReported");
+    const shown = await invoke("show", { cwd: workspaceRoot, actor: "agent", target: thread, peek: true });
+    expect(shown.messages.map(message => message.authorReported)).toEqual(expected);
   });
 
   it("comments on a file through the chat write path a person's comment takes", async () => {

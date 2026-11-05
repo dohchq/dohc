@@ -781,6 +781,7 @@ const cliShowMessageSchema = z
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
@@ -1086,6 +1087,7 @@ const rawChatMessageSchema = z
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 const rawFailureSchema = z
