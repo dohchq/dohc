@@ -272,7 +272,8 @@ describe("Home's Apps section", () => {
     const view = render(<Harness enabled={false} />);
     await Promise.resolve();
     expect(bridgeMock.listSites).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
+    expect(screen.queryByTestId("sites-row")).toBeNull();
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
 
     view.rerender(<Harness enabled />);
     expect(await screen.findByText("Client Portal")).toBeTruthy();
@@ -305,28 +306,29 @@ describe("Home's Apps section", () => {
     expect(notices.clear).toHaveBeenCalledWith("apps:workspace-a");
   });
 
-  it("draws no section while the first read is on its way", () => {
+  it("draws only the section's header while the first read is on its way", () => {
     bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
     render(<Harness />);
 
-    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
+    expect(screen.getByTestId("explorer-apps-section")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
     expect(screen.queryByTestId("sites-row")).toBeNull();
   });
 
-  it("draws no section for a workspace with no apps, then shows one once an app settles", async () => {
+  it("says a workspace has no apps, then lists one once an app settles", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
     const onHasApps = vi.fn();
     const view = render(<Harness onHasApps={onHasApps} />);
     await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(1));
     await act(async () => undefined);
 
-    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
+    expect(screen.getByTestId("explorer-apps-empty").textContent).toBe("No apps yet. Any folder with a web app in it shows up here.");
     expect(onHasApps).toHaveBeenLastCalledWith(false);
 
     // An agent wrote an app folder; the listing settled.
     view.rerender(<Harness filesSettledRevision={1} onHasApps={onHasApps} />);
     expect(await screen.findByText("Client Portal")).toBeTruthy();
-    expect(screen.getByTestId("explorer-apps-section")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
     expect(onHasApps).toHaveBeenLastCalledWith(true);
   });
 
@@ -394,13 +396,14 @@ describe("Home's Apps section", () => {
     expect(onRevealed).toHaveBeenCalledOnce();
   });
 
-  it("drops an Add an app here… request once the read finds no apps", async () => {
+  it("lands an Add an app here… request on the Apps header once the read finds no apps", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
     const onRevealed = vi.fn();
     render(<Harness reveal onRevealed={onRevealed} />);
 
     await vi.waitFor(() => expect(onRevealed).toHaveBeenCalledOnce());
-    expect(screen.queryByTestId("explorer-apps-section")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
+    expect(screen.getByTestId("explorer-apps-empty")).toBeTruthy();
   });
 
   it("marks apps opened from a mounted share", async () => {

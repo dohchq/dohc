@@ -2588,9 +2588,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <Explorer {...HOME_SPECIMEN} />
           </div>
         </Specimen>
-        <Specimen label="a new workspace: Pages and its +">
+        <Specimen label="a new workspace: Pages, Collections and Apps each say they have nothing">
           <div className="w-60 rounded-lg border border-line bg-panel">
-            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={undefined} dataCollections={[]} />
+            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={HOME_NO_APPS}
+              appFolders={new Set()} dataCollections={[]} onIncludeArchivedCollections={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a share view: only the kinds it holds">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={HOME_NO_APPS}
+              appFolders={new Set()} dataCollections={[]} shareView={{ granterEmail: "sam@example.com" }} />
           </div>
         </Specimen>
         <Specimen label="loading: blank for 150 ms, then skeleton rows">
@@ -3769,6 +3776,8 @@ const HOME_APPS: ExplorerApps = {
   reveal: false,
   onRevealed: noop,
 };
+
+const HOME_NO_APPS: ExplorerApps = { ...HOME_APPS, state: { status: "ready", workspaceId: "states", apps: [] }, pinnedApps: [] };
 
 const HOME_FILES = [
   "Trip plan.md", "Packing list.md", "Budget.md",

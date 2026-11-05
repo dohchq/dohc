@@ -95,6 +95,11 @@ Check that the action exists on that surface before you name it.
 | `No results` | `No files match "budget". Try a shorter search.` |
 | `Nothing here yet` | `This folder is empty. Add a file to start.` |
 
+A Home section with nothing in it keeps its header and shows one muted line under it, not `EmptyState`: `No pages yet.`
+The header's + is that line's Next, so the line names a Next only when the header has none, as Apps does.
+The line is not a keyboard stop. The header's toggle reads it as its description.
+In a workspace of your own, Pages, Collections and Apps always show. A share view shows only the kinds it holds.
+
 ### Agents
 
 - Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.

@@ -159,6 +159,67 @@ describe("Explorer Home", () => {
     expect(onNewPage).toHaveBeenCalledWith("");
   });
 
+  it("says when Pages, Collections or Apps has nothing, in a line the arrows pass over", async () => {
+    const user = userEvent.setup();
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [],
+          folders: [],
+          dataCollections: [],
+          collectionFolders: new Set(),
+          appFolders: new Set(),
+          apps: apps({ state: { status: "ready", workspaceId: "workspace-1", apps: [] } }),
+          onIncludeArchivedCollections: vi.fn(),
+        })}
+      />,
+    );
+
+    const lines = {
+      pages: "No pages yet.",
+      collections: "No Collections yet.",
+      apps: "No apps yet. Any folder with a web app in it shows up here.",
+    };
+    for (const [id, words] of Object.entries(lines)) {
+      const line = screen.getByTestId(`explorer-${id}-empty`);
+      expect(line.textContent).toBe(words);
+      // The header's toggle reads the line, since focus never lands on it.
+      expect(screen.getByTestId(`explorer-${id}-toggle`).getAttribute("aria-describedby")).toBe(line.id);
+    }
+    expect(screen.queryByTestId("sites-count")).toBeNull();
+
+    screen.getByTestId("explorer-pages-toggle").focus();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-collections-toggle"));
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
+
+    // A folded section shows no line, and its toggle no longer points at one.
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
+    expect(screen.getByTestId("explorer-apps-toggle").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("holds Apps' place while its first read runs, and says nothing yet", () => {
+    render(<Explorer {...explorerProps({ apps: apps({ state: { status: "loading" } }) })} />);
+
+    expect(section("Apps")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
+    expect(screen.queryByTestId("sites-row")).toBeNull();
+  });
+
+  it("shows an empty Apps section in a workspace of your own, and none in a share view", () => {
+    const empty = apps({ state: { status: "ready", workspaceId: "workspace-1", apps: [] } });
+    const view = render(<Explorer {...explorerProps({ apps: empty })} />);
+    expect(screen.getByTestId("explorer-apps-empty")).toBeTruthy();
+
+    view.rerender(<Explorer {...explorerProps({ apps: empty, shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
+
+    view.rerender(<Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(rowLabels("Apps")).toEqual(["Trip"]);
+  });
+
   it("waits for the first listing before drawing any section", () => {
     render(<Explorer {...explorerProps({ listed: false })} />);
 
