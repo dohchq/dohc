@@ -856,6 +856,46 @@ describe("notice center", () => {
     expect(onDismissWorkspaceError).toHaveBeenCalledWith("shell-error-1");
   });
 
+  // Beside Try again, the words don't say it again. "Try again later." says
+  // more than the button, so it stays, and so do words with no button.
+  it("drops a closing Try again from words shown beside Try again, on the toast and the row", async () => {
+    const user = userEvent.setup();
+    const timedOut = "dohc could not refresh History. dohc did not answer in time. Try again.";
+    const busy = "dohc could not join. Too many people are connected right now. Try again later.";
+    const error = (id: string, message: string, canRetry: boolean, seen: boolean) =>
+      ({ id, message, details: `Error: ${message}`, atMs: 1_000, canRetry, seen });
+    const shown = (element: HTMLElement) => element.textContent ?? "";
+
+    render(<WorkspaceErrorToast error={error("toast", timedOut, true, false)} onRetry={vi.fn()} />);
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(shown(toast)).toContain("dohc did not answer in time.");
+    expect(shown(toast)).not.toContain("Try again.");
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    cleanup();
+
+    render(<WorkspaceErrorToast error={error("toast", timedOut, true, false)} />);
+    expect(shown(screen.getByTestId("workspace-shell-error"))).toContain("dohc did not answer in time. Try again.");
+    cleanup();
+
+    renderNotices({
+      workspaceErrors: [
+        error("retry", timedOut, true, true),
+        error("later", busy, true, true),
+        error("no-retry", timedOut, false, true),
+      ],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const retry = screen.getByTestId("notice-retry");
+    expect(shown(retry)).toContain("dohc did not answer in time.");
+    expect(shown(retry)).not.toContain("Try again.");
+    expect(within(retry).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(shown(screen.getByTestId("notice-later"))).toContain("Try again later.");
+    expect(shown(screen.getByTestId("notice-no-retry"))).toContain("dohc did not answer in time. Try again.");
+  });
+
   // An import notice and the failed refresh right after it can share a
   // millisecond. The later one is the news.
   it("shows the later of two messages from the same millisecond first", async () => {

@@ -560,6 +560,13 @@ function toneClass(tone: Notice["tone"]): string {
   return "text-subtle";
 }
 
+// Beside a Try again button, a message drops its own closing "Try again.",
+// so the notice says it once. A longer ending, such as "Try again later.",
+// says more than the button does, so it stays.
+function besideTryAgain(message: string): string {
+  return message.replace(/\s+Try again\.$/, "");
+}
+
 // The toast for the newest workspace error, or the notice that something
 // finished. The states page renders it too, so it is its own piece.
 export function WorkspaceErrorToast(props: {
@@ -591,6 +598,7 @@ export function WorkspaceErrorToast(props: {
       Try again
     </button>
   ) : null;
+  const message = retry ? besideTryAgain(error.message) : error.message;
   useEffect(() => {
     if (!fades || held || !onHide) return;
     const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
@@ -614,9 +622,9 @@ export function WorkspaceErrorToast(props: {
           : <AlertTriangle size={14} aria-hidden className={error.tone === "warning" ? "text-warning" : "text-danger"} />}
       </span>
       <NoticeText
-        title={error.title ?? error.message}
+        title={error.title ?? message}
         titleClass={error.title ? "font-medium text-ink" : "text-ink"}
-        body={error.title ? error.message : ""}
+        body={error.title ? message : ""}
         paths={error.paths}
         after={error.lastLine}
         onOpenChange={setOpen}
@@ -1246,11 +1254,12 @@ export function NoticeCenter(props: {
             ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
           }]
         : [];
+      const message = retry.length ? besideTryAgain(error.message) : error.message;
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",
-        title: error.title ?? error.message,
-        body: error.title ? error.message : "",
+        title: error.title ?? message,
+        body: error.title ? message : "",
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.command ? { command: error.command } : {}),
         actions: error.actionAfterRetry ? [...retry, ...steps] : [...steps, ...retry],
