@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCookies } from "better-auth/cookies";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
-import { datasetColumnFields, parseDatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, datasetColumnFields, parseDatasetDefinition } from "@dohc/security-contract/dataset";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { compileClosedApp } from "../../../apps/desktop/src/workspaces/closedAppCompiler";
 import { sourceCaptureAdapter } from "../../../apps/desktop/src/testing/sourceCaptureAdapter";
@@ -40,6 +40,8 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
   const sources = new Map<string, Uint8Array>([["fundraiser/app.publish.json", manifestBytes]]);
   // app.publish.json paths are relative to the app folder.
   for (const path of manifest.inputs as string[]) sources.set(`fundraiser/${path}`, options.loadScenario ? Buffer.from(loadFrontend) : readFileSync(new URL(`../../../examples/fundraiser/${path}`, import.meta.url)));
+  // The manifest names its Collection by this file, so publishing reads it.
+  sources.set("fundraiser/dataset.json", readFileSync(new URL("../../../examples/fundraiser/dataset.json", import.meta.url)));
   const prepared = await prepareOwnerAppPublication({workspaceId:"w",appRoot:"fundraiser",shareId:"s",grantId:"g"},
     {shareId:"s",grantId:"g",generation:1,status:"active",revokedAtMs:null,selector:{paths:["fundraiser"],versionId:null}}, {
       signal: new AbortController().signal, assertCurrent() {}, compile: compileClosedApp,
@@ -48,12 +50,22 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     });
   const directory=mkdtempSync(join(tmpdir(),"dohc-fundraiser-browser-"));
   const storage=openSyncRelayStorage(join(directory,"relay.sqlite")) as StorageContext;
+  let clockOffset=0;
   const datasetHost=await storage.createDatasetHost({directory:join(directory,"workers"),limits:APP_PUBLICATION_LIMITS,
-    compileOperations:compileDatasetOperations,
+    compileOperations:compileDatasetOperations,nowMs:()=>Date.now()+clockOffset,
     onShutdownError(error){throw error;}});
   const linkKey="fundraiser-browser-link-key-with-thirty-two-bytes",exchangeKey="fundraiser-browser-relay-exchange-key-with-thirty-two-bytes";
   const secret="S".repeat(43);
   storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});
+  // The relay stops a Collection's apps when the owner's synced files lose its dataset.json.
+  const datasetFile=Buffer.from(JSON.stringify(definition)),datasetSha=sha(datasetFile),datasetPath=`${datasetBaseFolder(definition)}/dataset.json`;
+  storage.putBlob({workspaceId:"w",sha256:datasetSha,content:datasetFile,createdAtMs:1});
+  const pushDatasetFile=(originSeq:number,present:boolean)=>storage.appendLogBatch({workspaceId:"w",originId:"owner-desktop",ops:[{originSeq,opKind:"moment.append",recordedAtMs:1,payloadJson:JSON.stringify({
+    momentId:`dataset-file-${originSeq}`,versionId:"main",objectId:"dataset-file",path:datasetPath,recordedAtMs:1,operation:present?"write":"delete",
+    beforePresent:present?"null":"present",payloadBeforeBlobSha256:present?null:datasetSha,payloadBeforePath:present?null:datasetPath,
+    payloadAfterBlobSha256:present?datasetSha:null,payloadAfterPath:present?datasetPath:null,
+    ...(present?{payloadAfterContentKind:"text",payloadAfterByteLength:datasetFile.byteLength}:{}),metadata:{origin:"api"}})}]});
+  pushDatasetFile(0,true);
   storage.createFileLinkShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",selectorJson:JSON.stringify({paths:["fundraiser"],versionId:null}),createdAtMs:1},
     grant:{grantId:"g",shareId:"s",principalKind:"link",principalUserId:null,principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null},
     credential:{credentialId:"credential",grantId:"g",secretHash:hashLinkBearer(secret,linkKey),generation:1,mintedAtMs:1,retiredAtMs:null},guard(){}});
@@ -99,6 +111,7 @@ export async function actualFundraiserFixture(options: {loadScenario?: "generic"
     },
   });
   return {application,publicationId,secret,calls,compiler:prepared.candidate.compilerIdentity,
+    deleteCollectionFile:()=>pushDatasetFile(1,false),advance(ms:number){clockOffset+=ms;},
     counts:()=>({participants:Number(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_participants").get()!.n),
       profiles:profiles.size,
       receipts:Number(storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n)}),

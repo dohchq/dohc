@@ -18,11 +18,19 @@ it("forwards only the exact scoped rate refusal", async () => {
   }
 });
 
-function forward(body: unknown, fetchRelay: (request: Request) => Promise<Response>, contentType = "application/json", signal = new AbortController().signal) {
+it("forwards a deleted Collection's refusal to link and named apps", async () => {
+  const body = linkRefusalBody("app_collection_missing");
+  const link = await forward(invoke, async () => Response.json(body, {status: 410}));
+  expect(link.status).toBe(410); expect(await link.json()).toEqual(body);
+  const named = await forward(invoke, async () => Response.json(body, {status: 410}), "application/json", undefined, false);
+  expect(named.status).toBe(410); expect(await named.json()).toEqual(body);
+});
+
+function forward(body: unknown, fetchRelay: (request: Request) => Promise<Response>, contentType = "application/json", signal = new AbortController().signal, link = true) {
   return forwardAppBackend({
     request: new Request("https://app.example.net/backend", { method: "POST", body: JSON.stringify(body), headers: { "content-type": contentType, cookie: "app=cookie", "x-dohc-app-proof": "proof", authorization: "Bearer attacker" } }),
     relayUrl: "https://relay.example.org", publicationId: "a".repeat(64), authorityRevision: 7,
-    capability: "server-cap", profileSecret: "server-profile", signal, fetchRelay,
+    ...(link ? { capability: "server-cap", profileSecret: "server-profile" } : {}), signal, fetchRelay,
   });
 }
 

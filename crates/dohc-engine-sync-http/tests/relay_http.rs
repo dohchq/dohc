@@ -1305,6 +1305,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "ambiguous_selector" => RelayError::AmbiguousSelector,
         "api_version_too_new" => RelayError::ApiVersionTooNew,
         "api_version_too_old" => RelayError::ApiVersionTooOld,
+        "app_collection_missing" => RelayError::HttpStatus(410),
         "authorship_mismatch" => RelayError::AuthorshipMismatch,
         "bad_request" | "empty_selector" | "invalid_access" | "invalid_path"
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,

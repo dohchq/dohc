@@ -7,7 +7,7 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
-import { fixture, limits } from "./datasetTestFixture";
+import { fixture, limits, pushFile } from "./datasetTestFixture";
 import { createSyncRelayHandler, streamsRequestBody } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
@@ -77,6 +77,7 @@ const revision = describeDatasetRevision({definition, revision: 1, schemaSql, op
 
 async function httpFixture(maxParticipantsPerGrant?: number) {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
+  pushFile(f.storage, "dataset-file", null, {path: "data/dataset.json", text: JSON.stringify({datasetId: id(1)})});
   let now = 10;
   const host = await f.storage.createDatasetHost({directory, limits, maxParticipantsPerGrant, nowMs: () => now, onShutdownError(error) {throw error;}});
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});});
@@ -442,6 +443,17 @@ async function attachmentsFixture() {
   const bind = (enabled: boolean) => f.http(`${f.path}/binding`, {publicationId, enabled});
   return {...f, app, named, bind, publicationId};
 }
+
+it("refuses a missing Collection's app calls with the same words for people and agents", async () => {
+  const f = await attachmentsFixture(); await f.bind(true);
+  const submit = (key: string) => ({authorityRevision: 1, operation: "submit", input: {name: key}, idempotencyKey: key});
+  pushFile(f.storage, "dataset-file", {path: "data/dataset.json", text: JSON.stringify({datasetId: id(1)})}, null);
+  expect((await f.app("invoke", submit("first"))).status).toBe(200);
+  f.advance(120_000);
+  const refused = await f.named("invoke", submit("second"));
+  expect(refused.status).toBe(410);
+  expect(await refused.json()).toEqual({ok: false, error: "This app can't find its data. Ask the person who shared it with you.", code: "app_collection_missing"});
+});
 
 it("uploads and atomically attaches a receipt, then discloses bytes only through the approved read operation", async () => {
   const f = await attachmentsFixture();
