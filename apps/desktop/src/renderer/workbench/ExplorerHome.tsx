@@ -210,7 +210,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   // A read on its way holds one row's height and says nothing, so the
   // sections under it stay put and no section claims to be empty too soon.
   const holdRow = <div aria-hidden className="h-7" />;
-  const collectionsReading = !refusal && !!explorer.collectionsReading;
+  const collectionsUnknown = refusal ? undefined : explorer.collectionsUnknown;
   const sections: Section[] = [];
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
   if (recent.length > 0) sections.push({ id: "recent", label: "Recent", rows: recent });
@@ -239,11 +239,13 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ...(collectionActions.length > 0 ? { actions: collectionActions } : {}),
       body: refusal ? (
         <CollectionsRefusalRow refusal={refusal} onKeep={explorer.onKeepCollections} onRetry={explorer.onRetryCollections} />
-      ) : collectionsReading ? holdRow : undefined,
+      ) : collectionsUnknown === "failed" && explorer.onRetryCollections ? (
+        <RetryRow testId="collections-failed" onRetry={explorer.onRetryCollections} />
+      ) : collectionsUnknown ? holdRow : undefined,
       after: !refusal && explorer.collectionsElsewhere ? (
         <CollectionsElsewhereRow elsewhere={explorer.collectionsElsewhere} onKeep={explorer.onKeepCollections} />
       ) : undefined,
-      ...(!refusal && !collectionsReading && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
+      ...(!refusal && !collectionsUnknown && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
         ? { empty: "No Collections yet." }
         : {}),
     });

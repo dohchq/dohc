@@ -231,11 +231,22 @@ describe("Explorer Home", () => {
   // read lands, the list is not known to be empty.
   it("holds Collections' place while its list is read again, and says nothing yet", () => {
     render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
-      includeArchivedCollections: true, collectionsReading: true })} />);
+      includeArchivedCollections: true, collectionsUnknown: "reading" })} />);
 
     expect(section("Collections")).toBeTruthy();
     expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    expect(screen.queryByTestId("collections-failed")).toBeNull();
     expect(screen.getByTestId("explorer-collections-toggle").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("leaves Try again in Collections' place when that read fails, and still says nothing", () => {
+    const onRetryCollections = vi.fn();
+    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
+      includeArchivedCollections: true, collectionsUnknown: "failed", onRetryCollections })} />);
+
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("collections-failed")).getByRole("button", { name: "Try again" }));
+    expect(onRetryCollections).toHaveBeenCalledOnce();
   });
 
   it("waits for the first listing before drawing any section", () => {

@@ -32,15 +32,15 @@ export function useCollectionFolders(
   // `elsewhere`: another computer keeps the workspace's Collections, and the
   // list holds the ones on this computer's server. It says where the others
   // are, or, when the server didn't answer, where all of them are.
-  // `reading`: the list was cleared for another read, such as the archived
-  // list, and that read has not landed, so the list is not known to be empty.
-  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: CollectionsElsewhere | null; reading?: true } | null>(null);
+  // `unknown`: the list was cleared for another read, such as the archived
+  // list, and no read has landed since. It is being read, or that read failed.
+  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: CollectionsElsewhere | null; unknown?: "reading" | "failed" } | null>(null);
   const datasets = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
   const collectionsElsewhere = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.elsewhere : null;
   // The list has loaded at least once. Showing the archived list again keeps it loaded.
   const collectionsListed = !shareViewEnded && dataState?.workspaceId === workspaceId;
-  const collectionsReading = collectionsListed && dataState?.reading === true;
+  const collectionsUnknown = collectionsListed ? dataState?.unknown : undefined;
   // Why this computer cannot list the workspace's Collections, such as
   // another computer keeping them. The list says so in place, so a refresh
   // after each change does not report it again.
@@ -51,12 +51,21 @@ export function useCollectionFolders(
   const includeArchived = !isShareView && archiveView.workspaceId === workspaceId && archiveView.enabled;
   const setIncludeArchived = useCallback((enabled: boolean) => {
     datasetRequest.current++;
-    setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null, reading: true });
+    setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null, unknown: "reading" });
     setArchiveView({ workspaceId, enabled });
   }, [workspaceId]);
   const refreshDatasets = useCallback(async () => {
     const request = ++datasetRequest.current;
-    const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, ...(includeArchived ? { includeArchived: true } : {}) });
+    // A list that isn't known shows Try again when its read fails, and holds
+    // its place again while Try again reads it.
+    setDataState(current => current?.workspaceId === workspaceId && current.unknown === "failed" ? { ...current, unknown: "reading" } : current);
+    const failed = (error: unknown): never => {
+      if (request === datasetRequest.current) {
+        setDataState(current => current?.workspaceId === workspaceId && current.unknown ? { ...current, unknown: "failed" } : current);
+      }
+      throw error;
+    };
+    const result = await bridge().dataset({ workspaceId, action: "list", limit: 50, ...(includeArchived ? { includeArchived: true } : {}) }).catch(failed);
     const latest = request === datasetRequest.current;
     if (result.kind === "collections-refused") {
       const { refusal } = result;
@@ -77,7 +86,7 @@ export function useCollectionFolders(
       throw new Error(refusal.failure);
     }
     if (!latest) return;
-    if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
+    if (result.kind !== "list") return failed(Error("dohc could not read the Collections list."));
     setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor, elsewhere: elsewhereOf(result.elsewhere, result.datasets) });
     setRefusalState(null);
   }, [workspaceId, includeArchived]);
@@ -124,5 +133,5 @@ export function useCollectionFolders(
     void refreshCollections();
   }, [workspaceIsReady, isShareView, shareViewReadsCollections, refreshCollections]);
 
-  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsReading };
+  return { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived, collectionsRefusal, collectionsElsewhere, collectionsListed, collectionsUnknown };
 }
