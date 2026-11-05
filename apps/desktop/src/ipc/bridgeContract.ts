@@ -984,6 +984,10 @@ export const ShowExplorerMenuPayload = z.object({
   path: PATH_STRING.optional(),
   kind: z.enum(["file", "folder", "root"]),
   pinned: z.boolean(),
+  // Shows this row in the file manager without the menu, as Try again does.
+  reveal: z.literal(true).optional(),
+}).refine((input) => input.reveal === undefined || (input.path !== undefined && input.kind !== "root"), {
+  message: "Only a file or folder can be shown in the file manager.",
 });
 export type ShowExplorerMenuPayload = z.infer<typeof ShowExplorerMenuPayload>;
 

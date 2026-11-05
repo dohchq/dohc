@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShowExplorerMenuResult } from "../ipc/bridgeContract";
@@ -55,7 +55,7 @@ afterEach(() => {
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
 describe("Show in File Explorer", () => {
-  it("says in a toast and a Notices row that dohc could not show a removed file", async () => {
+  it("says in a toast and a Notices row that dohc could not show a removed file, and Try again asks for the reveal alone", async () => {
     const bridge = bridgeListing();
     bridge.showExplorerMenu.mockRejectedValueOnce(REMOVED);
     const user = userEvent.setup();
@@ -64,12 +64,21 @@ describe("Show in File Explorer", () => {
     await rightClickReport();
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(WORDS);
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = (await within(await screen.findByTestId("notice-center")).findByText(WORDS)).closest("li")!;
     expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
     await nextTurn();
     expect(unhandled).toEqual([]);
+
+    bridge.showExplorerMenu.mockResolvedValueOnce("open-externally");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    expect(bridge.showExplorerMenu).toHaveBeenCalledTimes(2);
+    expect(bridge.showExplorerMenu).toHaveBeenLastCalledWith({
+      workspaceId: WORKSPACE.workspaceId, path: "report.pdf", kind: "file", pinned: false, reveal: true,
+    });
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
 
   // DesktopRoot remounts the shell on a switch. Keeping the same shell is the

@@ -705,6 +705,25 @@ describe("registered native menu handlers", () => {
     })).resolves.toBe("open-externally");
     expect(h.reveal).toHaveBeenCalledWith(expect.stringMatching(/notes\.md$/));
   });
+
+  it("runs the same contained reveal, with no menu, when the renderer asks for the reveal", async () => {
+    const h = await harness();
+    const outside = await createTestScratch("reveal-outside-");
+    await writeFile(join(outside, "secret.md"), "secret");
+    await symlink(outside, join(h.workspace.rootPath, "escape"), process.platform === "win32" ? "junction" : "dir");
+    const reveal = (path: string | undefined, kind: "file" | "folder" | "root" = "file") =>
+      h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", ...(path !== undefined ? { path } : {}), kind, pinned: false, reveal: true });
+    for (const path of ["../outside.md", join(outside, "secret.md"), "escape/secret.md", "escape"]) {
+      await expect(reveal(path, path === "escape" ? "folder" : "file"), path).rejects.toThrow();
+    }
+    await expect(reveal(undefined, "root")).rejects.toThrow("Only a file or folder can be shown in the file manager.");
+    expect(h.reveal).not.toHaveBeenCalled();
+
+    await writeFile(join(h.workspace.rootPath, "notes.md"), "body");
+    await expect(reveal("notes.md")).resolves.toBe("open-externally");
+    expect(h.reveal).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/notes\.md$/));
+    expect(h.buildMenu).not.toHaveBeenCalled();
+  });
 });
 
  it("delivers current visibility verdicts after only the policy file changes", async () => {

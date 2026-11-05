@@ -1178,30 +1178,49 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     };
   }, [workspaceId]);
 
+  // Main runs Show in File Explorer inside the menu call, after its path
+  // checks. With `reveal` it runs only that, so Try again can repeat it.
+  const askMenu = useCallback(
+    async function ask(
+      kind: "file" | "folder" | "root",
+      path: string | undefined,
+      pinnedRow: boolean,
+      reveal?: true,
+    ): Promise<ShowExplorerMenuResult> {
+      if (shownWorkspace.current !== workspaceId) return null;
+      try {
+        const command = await bridge().showExplorerMenu({
+          workspaceId,
+          ...(path !== undefined ? { path } : {}),
+          kind,
+          pinned: pinnedRow,
+          ...(reveal ? { reveal } : {}),
+        });
+        return shownWorkspace.current === workspaceId ? command : null;
+      } catch (cause) {
+        if (shownWorkspace.current !== workspaceId) return null;
+        // Only a row's menu offers the reveal.
+        if (path === undefined) throw cause;
+        const fileManager = fileManagerName(window.dohcDesktop?.platform);
+        onError(
+          ipcErrorMessage(cause, `dohc could not show ${basenameOf(path)} in ${fileManager}.`),
+          cause,
+          () => void ask(kind, path, pinnedRow, true),
+        );
+        return null;
+      }
+    },
+    [onError, workspaceId],
+  );
+
   const dispatchMenu = useCallback(
     async (
       kind: "file" | "folder" | "root",
       path: string | undefined,
       pinnedRow: boolean,
     ) => {
-      const asked = workspaceId;
-      let command: ShowExplorerMenuResult;
-      try {
-        command = await bridge().showExplorerMenu({
-          workspaceId,
-          ...(path !== undefined ? { path } : {}),
-          kind,
-          pinned: pinnedRow,
-        });
-      } catch (cause) {
-        if (shownWorkspace.current !== asked) return;
-        // Only a row's menu offers the reveal, which main runs inside this call.
-        if (path === undefined) throw cause;
-        const fileManager = fileManagerName(window.dohcDesktop?.platform);
-        onError(ipcErrorMessage(cause, `dohc could not show ${basenameOf(path)} in ${fileManager}.`), cause);
-        return;
-      }
-      if (command === null || shownWorkspace.current !== asked) return;
+      const command = await askMenu(kind, path, pinnedRow);
+      if (command === null) return;
       const targetDir =
         kind === "root" ? "" : kind === "folder" ? (path ?? "") : dirnameOf(path ?? "");
       switch (command) {
@@ -1250,10 +1269,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
     },
     [
-      workspaceId,
+      askMenu,
       beginCreateFolder,
       beginRename,
-      onError,
       onModeChange,
       onTogglePin,
       exportZip,
