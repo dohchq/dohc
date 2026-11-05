@@ -162,6 +162,7 @@ Put Cancel, then one primary, at the right.
 A secondary step that comes before the decision, such as `Save recovery file first`, sits at the left of the same row.
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
+A `DangerButton` that can't be pressed yet, or is working, keeps a danger tint under a faded label, with no hover. It turns solid red only when pressing it will act.
 Never label a button `OK`, `Yes`, or `Confirm`.
 
 ### Focus and keys
@@ -297,6 +298,8 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-agent`, `text-agent` | The default agent color |
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
+| `bg-danger-fill`, `text-on-danger` | A danger confirm's fill and label. Dark has its own deeper fill, so never put `text-danger` text on it |
+| `bg-danger-tint`, `text-danger-disabled` | The tint behind a danger glyph and a disabled danger confirm, and that confirm's label |
 
 ### Type
 
