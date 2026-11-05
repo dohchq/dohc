@@ -87,7 +87,6 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
         return settings.promise;
       }),
       applySettings: vi.fn((value) => { log.push("settings-apply"); zoom = value.zoom; }),
-      prepareCli: vi.fn(() => undefined),
       registerHandlers: vi.fn(() => { log.push("handlers"); }),
       markFirstWindow: vi.fn(() => { log.push("first-window"); }),
       reportFailure: vi.fn(() => { log.push("report-failure"); }),
@@ -171,21 +170,6 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.services.updateAfterStartupFailure).not.toHaveBeenCalled();
     expect(f.app.quit).not.toHaveBeenCalled();
     expect(f.dependencies.windows.activate).not.toHaveBeenCalled();
-  });
-
-  it("waits for platform CLI preparation before handlers without delaying the engine and settings reads", async () => {
-    const preparation = deferred();
-    const f = fixture((d) => { d.bootstrap.prepareCli = () => preparation.promise; });
-    const ready = f.lifecycle.start();
-    f.appReady.resolve();
-    await f.settingsRequested.promise;
-    expect(f.dependencies.bootstrap.startEngine).toHaveBeenCalledOnce();
-    expect(f.dependencies.bootstrap.registerHandlers).not.toHaveBeenCalled();
-    f.settings.resolve({ zoom: 2 });
-    f.engine.resolve(true);
-    preparation.resolve();
-    await ready;
-    expect(f.log.indexOf("handlers")).toBeLessThan(f.log.indexOf("window"));
   });
 
   it("opens launch paths before later intents and activates only after the renderer subscribes", async () => {
