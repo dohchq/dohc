@@ -360,7 +360,11 @@ export function CloudSyncSettings(props: {
               busy={syncBusy !== null}
               onStart={setPassphrasePurpose}
               onPassphrase={setPassphrase}
-              onSubmit={() => void enableSync()}
+              onSubmit={() => {
+                // Try again asked for the passphrase; the form goes once it unlocks.
+                if (unconfirmed) actionHeldFocus.current = true;
+                void enableSync();
+              }}
             />
           ) : null}
         </>

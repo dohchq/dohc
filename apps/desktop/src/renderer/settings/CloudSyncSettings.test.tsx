@@ -754,6 +754,28 @@ describe("CloudSyncSettings", () => {
     expect(screen.getByTestId("cloud-disconnect")).toBeTruthy();
   });
 
+  // Try again can ask for the passphrase. Once it unlocks, the form and the
+  // buttons go, and focus moves to the switch.
+  it("moves focus to the switch after unlocking from the unconfirmed row", async () => {
+    bridgeMock.cloudEnableSync
+      .mockRejectedValueOnce(new Error("Passphrase required to unlock synced secrets."))
+      .mockResolvedValueOnce(undefined);
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSyncConnected: false })} />);
+
+    const again = screen.getByTestId("cloud-relink-workspace");
+    again.focus();
+    fireEvent.click(again);
+    const input = await screen.findByTestId("cloud-sync-passphrase");
+    fireEvent.change(input, { target: { value: "shared passphrase" } });
+    const submit = screen.getByTestId("cloud-sync-passphrase-submit") as HTMLButtonElement;
+    submit.focus();
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("true"));
+    expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
+    expect(document.activeElement).toBe(syncSwitch());
+  });
+
   // A failed Try again keeps its buttons, so a confirmation that arrives
   // later, after the person has moved on, leaves focus where it is.
   it("doesn't move focus when the account is confirmed after a failed Try again", async () => {
