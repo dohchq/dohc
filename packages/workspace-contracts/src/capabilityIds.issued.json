@@ -265,5 +265,6 @@
   "device.update.download",
   "app.view",
   "app.local.check",
-  "capture.history.retry"
+  "capture.history.retry",
+  "history.rules.file.open"
 ]

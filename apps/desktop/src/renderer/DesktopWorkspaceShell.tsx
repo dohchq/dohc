@@ -46,6 +46,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceActivityEvent,
   WorkspaceSummary,
+  WorkspacePolicyFile,
   GetWorkspaceUiStateResult,
 } from "../ipc/bridgeContract";
 import {
@@ -2341,6 +2342,16 @@ export function DesktopWorkspaceShell(props: {
       } : null });
     },
     [workspaceAdmission, workspaceId, reportShellFailure],
+  );
+  // History's rules files open in the person's editor, as the settings file
+  // does, and a failure to open one is reported the same way.
+  const openHistoryRulesFile = useCallback(
+    (file: WorkspacePolicyFile) => {
+      void bridge()
+        .openWorkspacePolicyFile({ workspaceId, file })
+        .catch((error: unknown) => reportSettingsFailure(ipcErrorMessage(error, `dohc could not open ${file}.`)));
+    },
+    [reportSettingsFailure, workspaceId],
   );
   const showSettingsNotice = useCallback(
     (message: string, undo?: () => void) => {
@@ -5359,6 +5370,7 @@ export function DesktopWorkspaceShell(props: {
       <HistoryHiddenState
         testId="history-policy-hidden"
         result={engineHistoryPolicyError}
+        onOpenFile={openHistoryRulesFile}
         onRetry={() =>
           void refreshHistory().catch((error) =>
             reportShellError("Could not refresh history.", error),
@@ -6418,6 +6430,7 @@ export function DesktopWorkspaceShell(props: {
                   readOnly={!!shareView}
                   onBeforeRestore={beginLineageOperation}
                   onOpenFile={openFile}
+                  onOpenRulesFile={openHistoryRulesFile}
                   onPathResolved={resolveMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={onHistoryRestored}

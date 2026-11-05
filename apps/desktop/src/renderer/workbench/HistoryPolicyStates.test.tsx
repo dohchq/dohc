@@ -7,7 +7,7 @@ import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "..
 import { deferred } from "../../testing/deferred";
 import { EngineMomentDiffPage } from "./EngineMomentDiffPage";
 import * as unifiedDiff from "./unifiedDiff";
-import { HistoryHiddenState, historyHiddenWords, restoreRulesUnreadableWords } from "./HistoryPolicyStates";
+import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords, restoreRulesUnreadableWords } from "./HistoryPolicyStates";
 import { momentDiffTabPath } from "./workbenchState";
 
 const noop = () => {};
@@ -49,7 +49,7 @@ describe("History hidden by its rules", () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const onRetry = vi.fn();
-    render(<HistoryHiddenState testId="history-policy-hidden" result={hidden} onRetry={onRetry} />);
+    render(<HistoryHiddenState testId="history-policy-hidden" result={hidden} onOpenFile={noop} onRetry={onRetry} />);
     const state = screen.getByTestId("history-policy-hidden");
     expect(state.textContent).toContain("dohc can't read .dohc/visibility.toml, so History is hidden.");
     expect(state.textContent).not.toContain("TOML parse error");
@@ -59,6 +59,47 @@ describe("History hidden by its rules", () => {
     expect(writeText).toHaveBeenCalledWith(
       `Error: dohc can't read .dohc/visibility.toml, so History is hidden. Fix the file, then try again.\nCause: ${PARSER}`,
     );
+  });
+});
+
+describe("the file each rules panel opens", () => {
+  const buttons = () => screen.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent);
+
+  it.each([
+    [[".dohc/visibility.toml"], ".dohc/visibility.toml", "Open visibility.toml"],
+    [[".dohc/files.toml"], ".dohc/files.toml", "Open files.toml"],
+    [[".dohc/files.toml", ".dohc/visibility.toml"], ".dohc/files.toml", "Open files.toml"],
+  ] as const)("hidden by %j: opens %s first, then reads again on Try again", async (unreadable, file, label) => {
+    const user = userEvent.setup();
+    const onOpenFile = vi.fn();
+    const onRetry = vi.fn();
+    render(<HistoryHiddenState testId="history-policy-hidden" result={{ ...hidden, unreadable: [...unreadable] }} onOpenFile={onOpenFile} onRetry={onRetry} />);
+    expect(buttons()).toEqual([label, "Try again", "Copy details"]);
+    await user.click(screen.getByRole("button", { name: label }));
+    expect(onOpenFile).toHaveBeenCalledExactlyOnceWith(file);
+    expect(onRetry).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(onOpenFile).toHaveBeenCalledOnce();
+  });
+
+  it("offers no file to open when dohc can't read the .dohc folder itself", () => {
+    render(<HistoryHiddenState testId="history-policy-hidden" result={{ ...hidden, unreadable: [".dohc"] }} onOpenFile={noop} onRetry={noop} />);
+    expect(buttons()).toEqual(["Try again", "Copy details"]);
+  });
+
+  it("untracked: opens files.toml first, then reads again on Try again", async () => {
+    const user = userEvent.setup();
+    const onOpenFile = vi.fn();
+    const onRetry = vi.fn();
+    render(<HistoryUntrackedState testId="engine-diff-untracked" onOpenFile={onOpenFile} onRetry={onRetry} />);
+    expect(buttons()).toEqual(["Open files.toml", "Try again"]);
+    await user.click(screen.getByRole("button", { name: "Open files.toml" }));
+    expect(onOpenFile).toHaveBeenCalledExactlyOnceWith(".dohc/files.toml");
+    expect(onRetry).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(onOpenFile).toHaveBeenCalledOnce();
   });
 });
 
@@ -84,6 +125,7 @@ function renderPage(readEngineMoment: Mock, restoreEngineMomentFile: Mock = vi.f
   vi.stubGlobal("dohcDesktop", { readEngineMoment, restoreEngineMomentFile });
   const calls = {
     onPathResolved: vi.fn(),
+    onOpenRulesFile: vi.fn(),
     onError: vi.fn(),
     onSettled: vi.fn(),
     onReopenRestore: vi.fn(),
@@ -114,9 +156,11 @@ describe("a History diff the rules hide", () => {
     const read = vi.fn()
       .mockResolvedValueOnce({ ...hidden, moment: null })
       .mockResolvedValue({ moment: moment() });
-    renderPage(read);
+    const page = renderPage(read);
     const state = await screen.findByTestId("engine-diff-hidden");
     expect(state.textContent).not.toContain("TOML parse error");
+    fireEvent.click(screen.getByRole("button", { name: "Open visibility.toml" }));
+    expect(page.onOpenRulesFile).toHaveBeenCalledExactlyOnceWith(".dohc/visibility.toml");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByTestId("engine-diff-lines")).toBeTruthy();
     expect(read).toHaveBeenCalledTimes(2);
@@ -129,8 +173,10 @@ describe("a History diff the rules hide", () => {
     const page = renderPage(read);
     const state = await screen.findByTestId("engine-diff-untracked");
     expect(state.textContent).toBe(
-      "History no longer tracks this file, so this change is hidden. To show it, track the file in .dohc/files.toml.Try again",
+      "History no longer tracks this file, so this change is hidden. To show it, track the file in .dohc/files.toml.Open files.tomlTry again",
     );
+    fireEvent.click(screen.getByRole("button", { name: "Open files.toml" }));
+    expect(page.onOpenRulesFile).toHaveBeenCalledExactlyOnceWith(".dohc/files.toml");
     expect(page.onPathResolved).toHaveBeenCalledWith("m-1", null);
     expect(screen.queryByText("This change is no longer in the history record.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
