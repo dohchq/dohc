@@ -21,7 +21,7 @@ import { Overlay } from "./Overlay";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 import { DangerButton, SecondaryButton } from "./ui/controls";
-import { ConfirmActions, ConfirmationCard, ConfirmationHead } from "./ui/ConfirmDialog";
+import { ConfirmActions, ConfirmationCard, ConfirmationHead, confirmPanel } from "./ui/ConfirmDialog";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
 
@@ -621,14 +621,12 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         <Overlay
           appearance="warning"
           panelRef={warningRef}
-          panelProps={{ "data-testid": "recovery-close-warning" }}
+          panelProps={{
+            "data-testid": "recovery-close-warning",
+            ...confirmPanel("recovery-close-warning-title", "recovery-close-warning-body"),
+          }}
         >
-          <ConfirmationCard
-            icon={UNLOAD_COPY[closeWarning.kind].icon}
-            intent="danger"
-            labelledBy="recovery-close-warning-title"
-            describedBy="recovery-close-warning-body"
-          >
+          <ConfirmationCard icon={UNLOAD_COPY[closeWarning.kind].icon} intent="danger">
             <ConfirmationHead
               titleId="recovery-close-warning-title"
               bodyId="recovery-close-warning-body"

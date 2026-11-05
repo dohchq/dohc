@@ -4,7 +4,7 @@ import type { DatasetLifecyclePage } from "@dohc/cli/dataset";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
-import { ConfirmActions, ConfirmationCard, ConfirmationHead, FOCUS_RING, onDialogKeyDown } from "./ui/ConfirmDialog";
+import { ConfirmActions, ConfirmationCard, ConfirmationHead, FOCUS_RING, confirmPanel } from "./ui/ConfirmDialog";
 import { CollectionAffectedApps } from "./CollectionAffectedApps";
 
 interface Props {
@@ -44,8 +44,8 @@ function Archive(props: Props) {
     finally { locked.current = false; if (alive.current && request.current === token) setBusy(false); }
   }
   const archiving = busy && locked.current;
-  return <Overlay onClose={archiving ? undefined : props.onClose} panelProps={{ onKeyDown: onDialogKeyDown }}>
-    <ConfirmationCard icon={ArchiveIcon} labelledBy="archive-collection-title" describedBy="archive-collection-body">
+  return <Overlay onClose={archiving ? undefined : props.onClose} panelProps={confirmPanel("archive-collection-title", "archive-collection-body")}>
+    <ConfirmationCard icon={ArchiveIcon}>
       {/* The apps continue the first sentence, so they sit closer than the other parts. */}
       <div className="flex flex-col gap-3">
         <ConfirmationHead titleId="archive-collection-title" bodyId="archive-collection-body" title={`Archive ${props.name}?`}>
