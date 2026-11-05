@@ -764,7 +764,8 @@ impl ActorHandle {
         resolver: std::sync::Arc<dohc_engine_collab::reader_resolver::ReaderResolver>,
     ) -> Result<(), RuntimeError> {
         let configured = Arc::clone(&self.reader_configured);
-        self.run(move |_, cache| {
+        self.run(move |store, cache| {
+            dohc_engine_sync::retry_reader_recovery_failures(store)?;
             cache.reader_resolver = Some(resolver);
             configured.store(true, Ordering::Release);
             Ok(())

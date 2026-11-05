@@ -1190,7 +1190,7 @@ fn complete_drain_cleanup(
             let (waiting, path): (bool, Option<String>) = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL,path FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(SyncError::corrupt)?;
             if !waiting {
                 crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx,key)?;
-                crate::moment_apply::open_artifacts::remember_attempt_in_tx(tx,key)?;
+                crate::moment_apply::open_artifacts::remember_attempt_in_tx(tx,key,false)?;
                 let pending_artifact: bool = !cleanup.released_hold && tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM ydoc_pending_artifacts WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
                     params![key.workspace_id,key.version_id,key.object_id], |row|row.get(0),
@@ -8662,6 +8662,9 @@ fn validate_retryable_ydoc_identity(
     })
 }
 
+/// Why a document's change waits when the reader could not check it.
+pub(crate) const READER_UNAVAILABLE: &str = "dohc could not verify this file. Try again.";
+
 pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
         CollabError::MarkdownReaderPending(pending) => SyncError::MarkdownReaderPending(pending),
@@ -8669,7 +8672,7 @@ pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
             SyncError::MarkdownWitnessCheckPending { key, path, pending }
         }
         CollabError::MarkdownReaderUnavailable => SyncError::RetryableState {
-            reason: "dohc could not verify this file. Try again.",
+            reason: READER_UNAVAILABLE,
         },
         CollabError::MarkdownReaderRetryable => SyncError::RetryableState {
             reason: "markdown-reader-retryable",
