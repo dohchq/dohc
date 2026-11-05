@@ -173,7 +173,8 @@ describe("the Sharing view's two lists", () => {
       granted({ grantId: "tea", recipientEmail: "tea@example.com", access: "view" }),
       granted({ grantId: "kim", recipientEmail: null, recipientUserId: "kim", access: "read-only" }),
       granted({ grantId: "nova", recipientEmail: "nova@example.com", status: "revoked", access: "comment" }),
-      granted({ shareId: "share-link", grantId: "link", via: "link", recipientEmail: null, recipientUserId: null, access: "comment" }),
+      granted({ shareId: "share-link", grantId: "link", via: "link", recipientEmail: null, recipientUserId: null, access: "comment",
+        selector: { paths: ["notes/roadmap.md"], versionId: null } }),
     ] }) });
     render(<View />);
     const [mixed, link] = await screen.findAllByTestId("sharing-granted-row");
