@@ -5048,6 +5048,7 @@ export function DesktopWorkspaceShell(props: {
               ...(outcome.errorCause ? { details: [["Cause", outcome.errorCause] as const] } : {}),
               retry: () => { if (!workspaceAdmission.superseded) void refreshShareViewRef.current(); },
               noDismiss: true,
+              kind: "share-collision-record",
               identity: SHARE_COLLISION_RECORD_ROW,
               repeat: background,
             });

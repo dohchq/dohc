@@ -54,6 +54,7 @@ export type ShellErrorKind =
   | "import-files"
   | "share-refresh"
   | "share-capture"
+  | "share-collision-record"
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
@@ -982,7 +983,9 @@ export function useShellError(workspaceId: string) {
     // a failure that is being retried is no longer the newest thing this
     // surface knows. The retry runs once, outside the updater. Only the row
     // retried goes, so a failure the retry has already reported again stays.
-    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read"
+    // A share's collision-record row stays until a refresh completes.
+    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read" ||
+      target?.kind === "share-collision-record"
       ? current
       : current.filter(error => error !== target));
   }, []);
