@@ -1,4 +1,5 @@
 import {digest} from 'lib0/hash/sha256'
+import {LIVE_MARKDOWN_MAX_BYTES} from '@dohc/live-session-contract/limits'
 import {updateYFragment, yXmlFragmentToProseMirrorRootNode} from 'y-prosemirror'
 import * as Y from 'yjs'
 import {readMarkdownSourceWitness} from './artifact-markdown.js'
@@ -8,7 +9,7 @@ import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, m
 import {createLiveMarkdownJournalValidator, isProseMirrorSchemaError, type LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 import type {OrderedLiveUpdateCutPolicy} from './orderedLiveUpdateCut.js'
 
-const MAX_SOURCE_BYTES = 2 * 1024 * 1024
+const MAX_SOURCE_BYTES = LIVE_MARKDOWN_MAX_BYTES
 const MAX_UPDATE_BYTES = 20 * 1024 * 1024
 const utf8 = new TextEncoder()
 const sha = (bytes: Uint8Array) => Array.from(digest(bytes), byte => byte.toString(16).padStart(2, '0')).join('')

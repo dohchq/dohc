@@ -3,6 +3,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
@@ -14,7 +15,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 
 const MAX_FRAME_BYTES = 14 * 1024 * 1024;
-const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = LIVE_MARKDOWN_MAX_BYTES;
 const MAX_UPDATES = 16_384;
 const hash = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
