@@ -2322,8 +2322,8 @@ struct RealEnv {
     /// The correlation id of the workspace's unfinished first import, read
     /// at each layer start from a readable seed.
     first_import: Option<String>,
-    /// The paths a startup baseline found that no pass has recorded yet,
-    /// until a pass records them or a pass converges.
+    /// The paths a rescan found that no pass has recorded yet, until a pass
+    /// records them or a pass converges with no file held.
     carried: Option<Arc<CarriedPass>>,
     /// The rules the last pass captured under, or the layer was built with.
     /// A pass under other rules records as a rescan.
@@ -2353,9 +2353,13 @@ impl RealEnv {
             .clone()
     }
 
-    /// Release what a live pass recorded, and remember the rules it read.
+    /// Release what a live pass recorded, carry what a rescan left, and
+    /// remember the rules it read.
     fn after_pass(&mut self, applied: &ApplyOutcome) {
         carry_past(&mut self.carried, &applied.recorded);
+        if let Some(left) = &applied.left {
+            take_over(&mut self.carried, left);
+        }
         if let Some(rules) = &applied.rules {
             self.rules = Some(rules.clone());
         }
@@ -3140,9 +3144,15 @@ fn record_as_rescan(provenance: &mut CaptureProvenance) {
 /// could not read.
 fn note_found(left: &mut BTreeSet<String>, run: &ReconcileRun) {
     if let ReconcileRun::Completed(plan) = run {
-        left.extend(plan.ops.iter().map(|op| op.path().to_owned()));
-        left.extend(plan.degraded_paths.iter().cloned());
+        left.extend(found_paths(plan));
     }
+}
+
+fn found_paths(plan: &ReconcilePlan) -> impl Iterator<Item = String> + '_ {
+    plan.ops
+        .iter()
+        .map(|op| op.path().to_owned())
+        .chain(plan.degraded_paths.iter().cloned())
 }
 
 /// Remove the paths a pass recorded or found it does not own.
@@ -3174,6 +3184,16 @@ fn carry(provenance: &CaptureProvenance, left: BTreeSet<String>) -> Option<Arc<C
             paths: left,
         })
     })
+}
+
+/// A live rescan that left paths takes over the carry. The paths the carry
+/// still holds join it, as a rebuild's rescan would find them again.
+fn take_over(carried: &mut Option<Arc<CarriedPass>>, left: &CarriedPass) {
+    let mut pass = left.clone();
+    if let Some(older) = carried.take() {
+        pass.paths.extend(older.paths.iter().cloned());
+    }
+    *carried = Some(Arc::new(pass));
 }
 
 /// Finish the first import after a clean, uncancelled pass. Every file it
@@ -3243,6 +3263,8 @@ struct ApplyOutcome {
     recorded: Vec<String>,
     /// The rules the pass captured under, if it could read them.
     rules: Option<Arc<PolicyState>>,
+    /// What a live pass that recorded as a rescan found and did not record.
+    left: Option<Arc<CarriedPass>>,
 }
 
 impl ApplyOutcome {
@@ -3253,6 +3275,7 @@ impl ApplyOutcome {
         deferred_writes: None,
         recorded: Vec::new(),
         rules: None,
+        left: None,
     };
     const FAILED: Self = Self {
         clean: false,
@@ -3261,6 +3284,7 @@ impl ApplyOutcome {
         deferred_writes: None,
         recorded: Vec::new(),
         rules: None,
+        left: None,
     };
 }
 
@@ -3279,6 +3303,7 @@ impl CollectionReconcileFailure {
             deferred_writes: None,
             recorded: Vec::new(),
             rules: None,
+            left: None,
         }
     }
 }
@@ -3343,6 +3368,7 @@ async fn apply_bound_run_with_handle(
         import_priority,
         layer_rules,
     } = context;
+    let live = layer_rules.is_some();
     let now_ms = wall_now_ms();
     let RootBoundRun { captured_root, run } = run;
     status.offer_collection_reconcile_after_release(leases, workspace_id);
@@ -3853,6 +3879,15 @@ async fn apply_bound_run_with_handle(
     // The moments are durable whether or not the acknowledgement lands.
     let recorded = [&result.applied_paths[..], &result.not_owned_paths[..]].concat();
     let rules = matches!(pass_rules, PolicyState::Known(_)).then(|| Arc::new(pass_rules));
+    // A live pass that recorded as a rescan carries what it found and did
+    // not record, as a baseline does.
+    let left = if live && retire_provenance.summary.is_some() {
+        let mut left: BTreeSet<String> = found_paths(&plan).collect();
+        note_recorded(&mut left, &recorded);
+        carry(&retire_provenance, left)
+    } else {
+        None
+    };
     if completed && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
         return ApplyOutcome {
@@ -3862,6 +3897,7 @@ async fn apply_bound_run_with_handle(
             deferred_writes: None,
             recorded,
             rules,
+            left,
         };
     }
     ApplyOutcome {
@@ -3871,6 +3907,7 @@ async fn apply_bound_run_with_handle(
         deferred_writes: completed.then_some(deferred_writes),
         recorded,
         rules,
+        left,
     }
 }
 

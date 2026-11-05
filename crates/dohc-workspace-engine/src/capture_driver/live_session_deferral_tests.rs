@@ -3417,3 +3417,63 @@ async fn only_the_first_pass_under_changed_rules_records_as_a_rescan() {
     }
     close_env(env, layer, supervisor, db).await;
 }
+
+// The first pass under changed rules found two files while the person's
+// editor held one. It records the other as a rescan. The held file keeps
+// that pass's label and group until the session lets it go, though the
+// passes after it compare against the new rules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_the_first_pass_under_changed_rules_left_keeps_its_label() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE),
+    )
+    .expect("new file key");
+    let lease = leases
+        .acquire(&key)
+        .expect("the editor's session holds the new file");
+    let (mut env, layer) = started_env(&root, &actor, &leases, None).await;
+    env.rules = Some(Arc::new(PolicyState::Unavailable));
+
+    std::fs::write(root.join("notes/first.md"), b"text").expect("write file");
+    std::fs::write(root.join(NEW_FILE), b"text").expect("write file");
+    layer.files.handle().request_rescan();
+    assert!(matches!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { .. }
+    ));
+    let (summary, group) = moment_label(&db, "notes/first.md");
+    assert_eq!(summary.as_deref(), Some(RESCAN_SUMMARY));
+    assert!(
+        group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile"))
+    );
+    assert_eq!(
+        layer.files.handle().stats().await.expect("stats").deferred,
+        1
+    );
+
+    tick_until_converged(&mut env, &layer).await;
+    drop(lease);
+    assert_eq!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { clean: true }
+    );
+    assert_eq!(
+        moment_label(&db, NEW_FILE),
+        (Some(RESCAN_SUMMARY.to_owned()), group),
+        "the held file records with the rescan that found it"
+    );
+    assert!(env.carried.is_none(), "the release recorded the file");
+    close_env(env, layer, supervisor, db).await;
+}
