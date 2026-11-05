@@ -162,7 +162,7 @@ Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
 Never label a button `OK`, `Yes`, or `Confirm`.
 The safe choice reads **Cancel** when it cancels the action the person chose, such as Remove from list.
-It reads **Go back** only on a warning about leaving typing that dohc has not kept, because it returns the person to that typing: `Quit without your typing?`.
+It reads **Go back** only on a warning about leaving typing or drawing changes that dohc has not kept, because it returns the person to that work: `Quit without your typing?`.
 
 ### Focus and keys
 
