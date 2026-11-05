@@ -115,7 +115,7 @@ describe("stripMarkdown", () => {
     unclosedParenTitles: (size) => rep("[a](b (", size),
     unclosedAngles: (size) => rep("[a](<b", size),
     strike: (size) => rep("~~a ", size / 2) + rep("a~~ ", size / 2),
-    backtickRuns: (size) => Array.from({ length: 320 }, (_, run) => `e${"`".repeat(run + 1)}`).join("").slice(0, size),
+    backtickRuns: (size) => Array.from({ length: 361 }, (_, run) => `e${"`".repeat(run + 1)}`).join("").slice(0, size),
     singleTicks: (size) => rep("` ", size),
     angles: (size) => rep("<", size),
     autolinkOpeners: (size) => rep("<a:", size),
