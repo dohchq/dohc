@@ -1,8 +1,8 @@
 import type { RendererWorkspaceSession } from "./rendererWorkspaceSessionOwner";
 
-// Whether this window shows the workspace as it is open now. A window left
-// showing it from before Forget doesn't: choosing the folder again opens it in
-// a new window, and the old one isn't another window showing it.
+// Whether opening a workspace can reuse this window. The window must show the
+// workspace as it is open now: one left showing it from before Forget doesn't
+// count, so choosing the folder again opens it.
 export function windowShowsWorkspace(
   session: Pick<RendererWorkspaceSession, "workspaceId" | "attachmentId"> | undefined,
   workspaceId: string,
