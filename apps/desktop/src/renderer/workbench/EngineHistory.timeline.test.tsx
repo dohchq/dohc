@@ -445,6 +445,18 @@ describe("History timeline sources", () => {
     expect(screen.queryByTestId("history-sources-retry")).toBeNull();
   });
 
+  it("puts a Collection that did not load above the limit's band on a page with rows", () => {
+    view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }], omittedSources: 3 });
+    const notice = screen.getByTestId("history-sources-notice");
+    const band = within(notice).getByTestId("history-sources-limit");
+    const warning = within(notice).getByTestId("history-sources-unavailable-words").parentElement!;
+    expect([...notice.children]).toEqual([warning, band]);
+    expect(within(warning).getByTestId("history-sources-retry")).toBeTruthy();
+    expect(within(band).queryByRole("button")).toBeNull();
+    expect(within(band).getByTestId("history-sources-omitted").textContent).toBe(
+      "History includes 128 of 131 Collections. For another Collection, open it and choose History.");
+  });
+
   it("shows a Collection that did not load as History's failed state, not as empty History", () => {
     const calls = view({ unavailableSources: [{ datasetId: GUESTS }] });
     const state = screen.getByTestId("history-collections-unavailable");
