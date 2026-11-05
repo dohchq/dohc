@@ -345,6 +345,15 @@ function itemPlacement(item: TimelineItem): number | null {
   return item.entry.change.recordedAtMs;
 }
 
+// The oldest item with a time. A page that follows it lists older dated
+// changes, which sort in after it; undated ones stay last.
+function oldestDated(items: readonly TimelineItem[]): TimelineItem | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (itemPlacement(items[index]!) !== null) return items[index];
+  }
+  return undefined;
+}
+
 function dayKey(recordedAtMs: number): string {
   const recordedAt = new Date(recordedAtMs);
   const month = String(recordedAt.getMonth() + 1).padStart(2, "0");
@@ -968,9 +977,10 @@ export function EngineHistoryView(props: {
   const normalizedQuery = query.trim().toLowerCase();
   const { collections, entries } = props;
   const items = useMemo(() => groupTimeline(props.entries), [props.entries]);
-  // While earlier changes remain, the oldest loaded row may continue on the
-  // next page, so its count is only a lower bound.
-  const moreKey = props.hasMore ? items.at(-1)?.key ?? null : null;
+  // While earlier changes remain, the oldest dated row may continue on the
+  // next page, so its count is only a lower bound. Undated changes list
+  // after it.
+  const moreKey = props.hasMore ? oldestDated(items)?.key ?? null : null;
   const labelOf = useCallback(
     (entry: CollectionEntry) => collections?.get(entry.datasetId)?.operationLabels?.get(entry.change.operation),
     [collections],
