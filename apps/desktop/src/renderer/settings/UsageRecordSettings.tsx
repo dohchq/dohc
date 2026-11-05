@@ -277,13 +277,15 @@ export function UsageRecordClearConfirm(props: { record: Readable; card?: boolea
   return (
     <Dialog intent="danger" title="Clear the usage record?" confirmLabel="Clear record"
       testId="usage-record-clear-confirm" cancelTestId="usage-record-clear-cancel" confirmTestId="usage-record-clear-action"
-      onCancel={props.onCancel} onConfirm={props.onConfirm}>
+      onCancel={props.onCancel} onConfirm={props.onConfirm}
+      details={
+        <div className="mt-3">
+          <CopyButton label="Copy the record" testId="usage-record-clear-copy" getText={() => usageRecordText(props.record)} />
+        </div>
+      }>
       <p className="mt-2 text-[13px] text-muted">
         This deletes every saved count on this computer. dohc cannot restore them. Copy the record first to keep it.
       </p>
-      <div className="mt-3">
-        <CopyButton label="Copy the record" testId="usage-record-clear-copy" getText={() => usageRecordText(props.record)} />
-      </div>
     </Dialog>
   );
 }
