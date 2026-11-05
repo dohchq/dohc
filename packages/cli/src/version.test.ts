@@ -25,6 +25,23 @@ it("marks binary files and conflicts, and exits 1 with a refusal's reason", asyn
     stderr: "dohc: Versions belong to the owning workspace. Open it to continue.\n" });
 });
 
+it("says what each version was made from, by its id when the list doesn't have it", async () => {
+  const row = (id: string, name: string, madeFromVersionId?: string) => ({ id, name, kind: madeFromVersionId ? "named" : "main",
+    createdAtMs: 10, canMergeIntoMain: madeFromVersionId === "main", ...(madeFromVersionId ? { madeFromVersionId } : {}) });
+  const listed = { ok: true, activeVersionId: "draft",
+    versions: [row("main", "Main"), row("draft", "Draft", "main"), row("nested", "Nested", "draft"), row("orphan", "Orphan", "gone")] };
+  const request = vi.fn(async () => listed as never);
+  expect(await executeCli({ argv: ["version", "list"], request })).toEqual({ exitCode: 0, stderr: "", stdout: [
+    "  Main · main",
+    "* Draft · draft · made from Main",
+    "  Nested · nested · made from Draft",
+    "  Orphan · orphan · made from gone",
+    "",
+  ].join("\n") });
+  const json = JSON.parse((await executeCli({ argv: ["version", "list", "--json"], request })).stdout) as { versions: unknown[] };
+  expect(json.versions).toEqual(listed.versions);
+});
+
 it("parses the version changes and refuses a bad name or resolution before transport", async () => {
   expect(parseCliArguments(["version", "create", " Ideas "], {})).toMatchObject({ verb: "versionCreate", name: "Ideas" });
   expect(parseCliArguments(["version", "switch", "Draft"], {})).toMatchObject({ verb: "versionSwitch", version: "Draft" });

@@ -200,7 +200,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     inputSchema: { operationId: HistoryOperationId },
   }, async args => text(await undoOperation(ctx, args, agentName())));
   register("dohc_list_versions", {
-    description: "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. Owner workspace only.",
+    description: "List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.",
     inputSchema: {},
   }, async () => text(await listVersions(ctx)));
   register("dohc_compare_version", {

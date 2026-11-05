@@ -1301,6 +1301,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: {
       list: {
         capabilityId: "version.list", summary: "List the versions and which one is active.", operands: "",
+        notes: ["A version's madeFromVersionId is the id of the version it was made from."],
         parse: input => { noExtraArgs(input.operands, "version list"); return { verb: "versionList" }; },
       },
       compare: {
