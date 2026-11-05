@@ -706,6 +706,9 @@ export interface EngineClientSpawnOptions {
   signal?: AbortSignal;
   onStderr?: (text: string) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  /** Starts the engine as the leader of its own process group, so a stop signal
+   * sent to the owner's group reaches the owner only. Off by default. */
+  ownProcessGroup?: boolean;
 }
 
 export interface EngineClientConnectOptions {
@@ -2559,6 +2562,8 @@ export async function createEngineClient(
       [ENGINE_AUTH_TOKEN_ENV]: options.authToken,
     },
     stdio: ["pipe", "pipe", "pipe"],
+    // The engine still exits when its owner dies, because its stdin closes.
+    ...(options.ownProcessGroup ? { detached: true } : {}),
     windowsHide: true,
   }) as ChildProcessWithoutNullStreams;
   const connection = Duplex.from({

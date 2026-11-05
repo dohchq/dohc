@@ -683,6 +683,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         readerConfig: installedReaderConfig(dependencies.resourcesBasePath()),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         startupSmoke: startupSmoke.promise,
+        // On Linux, Ctrl+C or a stop sent to dohc's process group reaches dohc
+        // only. dohc quits and stops the engine at the end of its quit.
+        ownProcessGroup: process.platform === "linux",
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,

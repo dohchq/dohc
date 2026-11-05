@@ -149,6 +149,8 @@ export interface EngineDaemonLifecycleOptions {
   readerConfig?: string;
   privateOwnerHost?: {configPath: string; client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>};
   command: string;
+  // Starts the engine in its own process group. See EngineClientSpawnOptions.
+  ownProcessGroup?: boolean;
   launch?: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient>;
   fileExists?: (path: string) => boolean;
   tokenFactory?: () => string;
@@ -894,6 +896,7 @@ export class EngineDaemonLifecycle {
           DOHC_ENGINE_READER_CONFIG: this.options.readerConfig },
         command: this.options.command,
         cwd: dirname(this.options.command),
+        ...(this.options.ownProcessGroup ? { ownProcessGroup: true } : {}),
         authToken,
         protocolVersion: ENGINE_PROTOCOL_VERSION,
         capabilities: ["blobs", "progress"],
