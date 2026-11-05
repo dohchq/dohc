@@ -385,6 +385,18 @@ interface ChatsComposerReplyTarget {
 
 type ComposerReplyTarget = ChatsComposerReplyTarget;
 
+// The answering bar names whose question it is. Main marks this computer's
+// person with presentation.self, so a display name never makes it "your".
+// Before the question loads, the bar says "the question".
+function answeringWords(question: ChatMessageRecord | undefined, option: string | null): string {
+  const whose = question === undefined
+    ? "the"
+    : question.authorKind === "human" && question.presentation.self
+      ? "your"
+      : `${chatAuthorLabel(question)}'s`;
+  return option ? `Answering ${whose} question · ${option}` : `Answering ${whose} question`;
+}
+
 // Whether a new outgoing grant would deepen the over-limit state. Only the
 // granted lane can: an outgoing share adds a row there and nowhere else. A
 // full received lane is an inbound backlog the user did not create and cannot
@@ -3700,6 +3712,12 @@ export function ChatsView(props: {
       authorLabel: chatAuthorLabel(message),
     });
   }, []);
+  const answeringMessage = useMemo(
+    () => resolveTargetMessageId === null
+      ? undefined
+      : messages.find((message) => message.id === resolveTargetMessageId),
+    [messages, resolveTargetMessageId],
+  );
 
   const liveRunId = dispatchState?.liveRunId ?? null;
   const stopThreadRun = useCallback(async () => {
@@ -4499,22 +4517,16 @@ export function ChatsView(props: {
                         setResolveChosenOption(null);
                       }}
                     >
-                      {resolveChosenOption
-                        ? `Answering the question · ${resolveChosenOption}`
-                        : "Answering the question"}
+                      {answeringWords(answeringMessage, resolveChosenOption)}
                     </ComposerModeBar>
                   ) : null}
-                  {replyTarget ? (
+                  {/* An answer is also a reply to its question, so that reply needs no bar of its own. */}
+                  {replyTarget && replyTarget.messageId !== resolveTargetMessageId ? (
                     <ComposerModeBar
                       testId="chats-replying-mode"
                       cancelTestId="chats-replying-cancel"
                       cancelLabel="Cancel reply"
-                      onCancel={() => {
-                        if (resolveTargetMessageId === replyTarget.messageId) {
-                          setResolveTargetMessageId(null);
-                        }
-                        setReplyTarget(null);
-                      }}
+                      onCancel={() => setReplyTarget(null)}
                     >
                       Replying to {replyTarget.authorLabel}
                     </ComposerModeBar>

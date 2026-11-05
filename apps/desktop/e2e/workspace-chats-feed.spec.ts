@@ -219,8 +219,9 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
 
     await ownBubble(agentComment).getByTestId("chats-comment-decision-resolve").click();
     await expect(view.getByTestId("chats-resolving-mode")).toContainText(
-      "Answering the question",
+      "Answering Agent's question",
     );
+    await expect(view.getByTestId("chats-replying-mode")).toHaveCount(0);
     await composer.fill(resolutionBody);
     await composer.press("Enter");
     await expect(

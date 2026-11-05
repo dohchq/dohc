@@ -14,10 +14,13 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
+// The words of a composer bar, without its cancel button.
+const barWords = (testId: string) => screen.getByTestId(testId).firstElementChild?.textContent;
+
 describe("ChatsView decisions", () => {
   it("resolves from composer mode and uses the literal fallback for an empty reply", async () => {
     const user = userEvent.setup();
-    const opening = message();
+    const opening = message({ presentation: { group: "fixture", hue: null, self: true } });
     const openDecision = {
       threadId: "thread-1",
       messageId: opening.id,
@@ -48,12 +51,9 @@ describe("ChatsView decisions", () => {
     await user.click(await screen.findByTestId("chats-thread"));
     expect(await screen.findByTestId("chats-message-decision-open")).toBeTruthy();
     await user.click(screen.getByTestId("chats-message-decision-resolve"));
-    expect(screen.getByTestId("chats-resolving-mode").textContent).toContain(
-      "Answering the question",
-    );
-    expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
-      "Replying to You",
-    );
+    // The answer is also the reply, so one bar says both, and the reply link still goes.
+    expect(barWords("chats-resolving-mode")).toBe("Answering your question");
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
     await user.click(screen.getByTestId("chats-send"));
 
     await waitFor(() =>
@@ -67,6 +67,85 @@ describe("ChatsView decisions", () => {
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
     expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
+  });
+
+  // "your" comes from main's self mark on a person, never from the name, so a
+  // person named anything, and your own agent, are named.
+  const whoseQuestion: [words: string, name: string, kind: "human" | "agent", self: boolean, pick: string | null][] = [
+    ["Answering Nova's question", "Nova", "human", false, null],
+    ["Answering Nova's question · Region A", "Nova", "human", false, "Region A"],
+    ["Answering your question", "Sam", "human", true, null],
+    ["Answering James's question", "James", "human", false, null],
+    ["Answering Trip agent's question", "Trip agent", "agent", true, null],
+  ];
+  it.each(whoseQuestion)("says %s", async (words, name, kind, self, pick) => {
+    const user = userEvent.setup();
+    const opening = message({ authorKind: kind, authorDisplayName: name, presentation: { group: "fixture", hue: null, self } });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{
+      threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW,
+      ...(pick ? { options: ["Region A", "Region B"] } : {}),
+    }] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    if (pick) {
+      const options = await screen.findAllByTestId("chats-message-poll-option");
+      await user.click(options.find((option) => option.textContent === pick)!);
+    } else {
+      await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    }
+    expect(barWords("chats-resolving-mode")).toBe(words);
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+  });
+
+  it("cancels the answer and its reply together, so the next comment is neither", async () => {
+    const user = userEvent.setup();
+    const opening = message({ authorDisplayName: "Nova" });
+    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "comment-2", body: "Plain comment" }) });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click(screen.getByRole("button", { name: "Cancel answer" }));
+    expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    await user.type(screen.getByTestId("chats-composer"), "Plain comment");
+    await user.click(screen.getByTestId("chats-send"));
+
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        body: "Plain comment",
+      }),
+    );
+  });
+
+  it("keeps a reply bar of its own when the reply goes to another message", async () => {
+    const user = userEvent.setup();
+    const opening = message({ authorDisplayName: "Nova" });
+    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [opening, message({ id: "comment-1", authorDisplayName: "Sam", body: "Friday works." })],
+    });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click((await screen.findAllByTestId("chats-comment-reply"))[0]!);
+    expect(barWords("chats-resolving-mode")).toBe("Answering Nova's question");
+    expect(barWords("chats-replying-mode")).toBe("Replying to Sam");
   });
 
   it("says a reply that posted left its question open, with no Try again", async () => {
