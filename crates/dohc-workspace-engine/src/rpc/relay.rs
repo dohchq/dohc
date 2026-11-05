@@ -4427,6 +4427,10 @@ mod tests {
         f.write("tasks/source.md", &record(SOURCE, Some(TARGET)))
             .await
             .expect("local relation");
+        // Request a Collections update while the target is still missing.
+        f.service
+            .collections_changed(&RequestContext::unbounded(), &f.open)
+            .await;
         assert!(f.pull_token().is_some());
         assert!(f.owed(), "the local update waits for the target's page");
         let source = f
