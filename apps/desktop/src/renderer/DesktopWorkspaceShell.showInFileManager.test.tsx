@@ -23,6 +23,9 @@ const REMOVED = new Error(
 const LEFT = new Error(
   "Error invoking remote method 'desktop:show-explorer-menu': Error: Explorer action stopped because this window changed workspaces.",
 );
+const ESCAPES = new Error(
+  "Error invoking remote method 'desktop:show-explorer-menu': Error: Asset path escapes workspace: report.pdf",
+);
 const WORDS = "dohc could not show report.pdf in File Explorer. The file or folder is not there anymore.";
 
 function bridgeListing() {
@@ -81,10 +84,23 @@ describe("Show in File Explorer", () => {
     await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
 
+  it("puts its own sentence before a reason main gives in its own words", async () => {
+    const bridge = bridgeListing();
+    bridge.showExplorerMenu.mockRejectedValueOnce(ESCAPES);
+    renderShell(bridge);
+
+    await rightClickReport();
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not show report.pdf in File Explorer. Asset path escapes workspace: report.pdf",
+    );
+  });
+
   // DesktopRoot remounts the shell on a switch. Keeping the same shell is the
-  // stricter case. Either way main answers that the window left.
-  it.each(["remounts", "keeps"] as const)(
-    "says nothing when the menu answers after the window switches workspaces and %s its shell",
+  // stricter case, and coming back to the first workspace does not revive the
+  // old answer. Each time main answers that the window left.
+  it.each(["remounts its shell", "keeps its shell", "keeps its shell and switches back"] as const)(
+    "says nothing when the menu answers after the window switches workspaces and %s",
     async (mode) => {
       const bridge = bridgeListing();
       const answer = deferred<ShowExplorerMenuResult>();
@@ -102,10 +118,12 @@ describe("Show in File Explorer", () => {
 
       await rightClickReport();
       expect(bridge.showExplorerMenu).toHaveBeenCalledTimes(1);
-      if (mode === "keeps") view.rerender(shell(OTHER_WORKSPACE));
-      else {
+      if (mode === "remounts its shell") {
         view.unmount();
         render(shell(OTHER_WORKSPACE));
+      } else {
+        view.rerender(shell(OTHER_WORKSPACE));
+        if (mode === "keeps its shell and switches back") view.rerender(shell(WORKSPACE));
       }
       await act(async () => {
         answer.reject(LEFT);

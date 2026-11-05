@@ -56,9 +56,10 @@ import { ExplorerHome } from "./ExplorerHome";
 import type { DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
+import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { fileManagerName } from "../../workspaces/explorerMenu";
-import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -1168,15 +1169,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [pinnedApps, props.pinned],
   );
 
-  // The workspace this Explorer shows, or null once it unmounts. A menu
-  // answer for a workspace the window has left changes nothing and says nothing.
-  const shownWorkspace = useRef<string | null>(workspaceId);
-  useEffect(() => {
-    shownWorkspace.current = workspaceId;
-    return () => {
-      shownWorkspace.current = null;
-    };
-  }, [workspaceId]);
+  // Ends when this Explorer shows another workspace or unmounts. A menu answer
+  // from an earlier lifetime changes nothing and says nothing, even after the
+  // window comes back to this workspace.
+  const menuLifetime = useRequestSequence([workspaceId]);
 
   // Main runs Show in File Explorer inside the menu call, after its path
   // checks. With `reveal` it runs only that, so Try again can repeat it.
@@ -1187,7 +1183,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       pinnedRow: boolean,
       reveal?: true,
     ): Promise<ShowExplorerMenuResult> {
-      if (shownWorkspace.current !== workspaceId) return null;
+      const lifetime = menuLifetime.current();
       try {
         const command = await bridge().showExplorerMenu({
           workspaceId,
@@ -1196,21 +1192,23 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           pinned: pinnedRow,
           ...(reveal ? { reveal } : {}),
         });
-        return shownWorkspace.current === workspaceId ? command : null;
+        return menuLifetime.isCurrent(lifetime) ? command : null;
       } catch (cause) {
-        if (shownWorkspace.current !== workspaceId) return null;
+        if (!menuLifetime.isCurrent(lifetime)) return null;
         // Only a row's menu offers the reveal.
         if (path === undefined) throw cause;
         const fileManager = fileManagerName(window.dohcDesktop?.platform);
         onError(
-          ipcErrorMessage(cause, `dohc could not show ${basenameOf(path)} in ${fileManager}.`),
+          withErrorWords(`dohc could not show ${basenameOf(path)} in ${fileManager}.`, cause),
           cause,
-          () => void ask(kind, path, pinnedRow, true),
+          () => {
+            if (menuLifetime.isCurrent(lifetime)) void ask(kind, path, pinnedRow, true);
+          },
         );
         return null;
       }
     },
-    [onError, workspaceId],
+    [menuLifetime, onError, workspaceId],
   );
 
   const dispatchMenu = useCallback(
