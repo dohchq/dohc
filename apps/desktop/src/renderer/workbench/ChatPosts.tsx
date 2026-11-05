@@ -226,13 +226,15 @@ function AttachmentChip(props: {
   // chip names it only as an attachment and opens nothing.
   if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
   // An attachment is named by what it shows: the file and its heading, or
-  // the Collection a change file changes. The tooltip keeps the path.
+  // the Collection a change file changes, with the Collection's glyph. The
+  // tooltip keeps the path.
   const label = changeLabel
     ?? `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
   return (
     <Ref
       path={pathHint}
       title={changeLabel !== null ? label : undefined}
+      objectKind={changeLabel !== null ? "collection" : undefined}
       heading={headingText}
       label={label}
       testId="chats-attachment-chip"
