@@ -117,6 +117,7 @@ import { AboutConversationLinksView, type ConversationLinksView, type MentionedF
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { COLLECTIONS_WAITING_TITLE, collectionsWaitingMessage } from "../shell/useCollectionsWaitingNotice";
 import { MERGE_RETRY_AFTER_CLOSE } from "../shell/useVersionMergeNotices";
 import { DismissConfirm, RecoveryList } from "../RecoveryList";
 import type { OrphanedDraftRow } from "../orphanedDrafts";
@@ -1427,12 +1428,12 @@ const LONG_NOTICE = {
 const COLLECTIONS_WAITING_NOTICE = {
   id: "collections-waiting",
   tone: "warning" as const,
-  title: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings.",
-  body: "",
+  title: COLLECTIONS_WAITING_TITLE,
+  body: collectionsWaitingMessage("sync"),
   Icon: AlertTriangle,
   actions: [{ label: "Sync settings", onClick: noop }, { label: "Try again", onClick: noop }],
-  // It copies only what it shows, so it has a Copy icon, not Details.
-  copy: { report: "Collection updates are waiting for sync to finish. To continue offline, pause sync in Settings." },
+  // Its report follows the app's, the body and then the title, so it has Details.
+  copy: { report: `Notice: ${collectionsWaitingMessage("sync")}\nTitle: ${COLLECTIONS_WAITING_TITLE}` },
   onDismiss: noop,
 };
 
