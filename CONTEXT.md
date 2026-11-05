@@ -129,8 +129,8 @@ _Avoid_: linked chat, file chat (in the interface)
 An AI program that acts for one person, its owner, whether dohc starts it or not.
 _Avoid_: bot, assistant
 
-**Run**:
-One time dohc starts an agent to answer a request.
+**Agent run**:
+A period of an agent's work that dohc records, so History marks its changes as that agent's. dohc starts one when a person's message or an automation wakes an agent. A person can also start one in Settings for an agent working outside dohc.
 _Avoid_: job, session
 
 **Connected agent**:
@@ -138,11 +138,11 @@ An agent dohc does not start, which reaches dohc through the CLI or MCP.
 _Avoid_: outside agent, external agent
 
 **Personal agent link**:
-An MCP URL tied to one person's server account. An agent signs in with it to act as that person's agent, within the reach the person chose.
+An MCP URL tied to one person's server account. An agent signs in with it to act as that person's agent, within the reach the person chose. Planned, not built yet.
 _Avoid_: API key, agent token
 
 **Work card**:
-A chat card an agent posts for work happening elsewhere, such as a thread or a pull request. It shows a title, a link and a status the agent reports, and the agent updates it in place.
+A chat card an agent posts for work happening elsewhere, such as a thread or a pull request. It shows a title, a link and a status the agent reports, and the agent updates it in place. Planned, not built yet.
 _Avoid_: status message, task card
 
 ### Sharing
