@@ -328,6 +328,7 @@ fn a_second_fetch_gets_a_new_token_and_refuses_apply_after_release() {
     assert_eq!(read_relay_cursor(&engine, "ws").unwrap(), None);
     let next = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
     assert_ne!(next.pull_token(), retry.pull_token());
+    assert_ne!(next.pull_token(), first.pull_token());
     assert!(
         client
             .apply_pull(
