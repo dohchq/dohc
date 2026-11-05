@@ -768,6 +768,35 @@ describe("owner app publication", () => {
       expect(screen.getByTestId("app-access").textContent).not.toContain("records.create");
     });
 
+    // Past the size limit each operation keeps its kind and label without field names, so reads share their words.
+    const pastLimit = (removes: number) => {
+      const operations = [
+        ...Array.from({ length: 20 }, (_, n) => ({ operationId: `00000000-0000-4000-8000-${String(100 + n).padStart(12, "0")}`, name: `read${n}`, access: "helper" as const, readOnly: true,
+          display: { kind: "read" as const, label: `Read ${n}`, fields: [] } })),
+        ...Array.from({ length: removes }, (_, n) => ({ operationId: `00000000-0000-4000-8000-${String(200 + n).padStart(12, "0")}`, name: `remove${n}`, access: "helper" as const, readOnly: false,
+          display: { kind: "delete" as const, label: `Remove entry ${n}`, fields: [] } })),
+      ];
+      return { ...datasetCapability, operationIds: operations.map(operation => operation.operationId), operations };
+    };
+
+    it("shows operations with the same words as one line, as 20 reads past the size limit have", async () => {
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: pastLimit(1) }]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      expect(lines("Reads")).toEqual(["Records"]);
+      expect(lines("Changes")).toEqual(["Deletes records"]);
+    });
+
+    it("marks a shared line New when any of its operations is new", async () => {
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: pastLimit(1) }], { revision: "e".repeat(64), capabilities: [pastLimit(2)] }));
+      renderLocal();
+      await openLocal();
+      await ready();
+      expect(lines("Reads")).toEqual(["Records"]);
+      expect(lines("Changes")).toEqual(["Deletes recordsNew"]);
+    });
+
     it("removes an approval in place and returns to a first review", async () => {
       let approved = true;
       const onLocalChange = vi.fn();

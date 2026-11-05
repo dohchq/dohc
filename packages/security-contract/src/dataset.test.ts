@@ -152,17 +152,27 @@ describe("dataset publication binding", () => {
     expect(displayAppDatasetCapability(narrowed, approved).operations[0]!.display).toEqual({ kind: "create", label: "Submit", fields: [] });
   });
 
-  it("leaves the words out when they would pass the capability's byte bound", () => {
+  it("drops only the field names when the words would pass the capability's byte bound", () => {
     const approved = revision();
     const table = approved.definition.tables[0]!;
     // 128 fields with 128-byte names, each read by 20 operations, is about 330 KB of words.
     table.fields = Array.from({ length: 128 }, (_, n): DatasetField => ({ fieldId: id(100 + n), name: `${String(n).padStart(3, "0")}${"x".repeat(125)}`, sqlColumn: `c${n}`, type: "text", required: false, unique: false }));
-    approved.definition.operations = Array.from({ length: 20 }, (_, n) => ({ operationId: id(300 + n), name: `read${n}`, label: `Read ${n}`, tableId: table.tableId,
-      kind: "read" as const, access: "helper" as const, readOnly: true, fieldIds: table.fields.map(field => field.fieldId) }));
+    approved.definition.operations = [
+      ...Array.from({ length: 20 }, (_, n) => ({ operationId: id(300 + n), name: `read${n}`, label: `Read ${n}`, tableId: table.tableId,
+        kind: "read" as const, access: "helper" as const, readOnly: true, fieldIds: table.fields.map(field => field.fieldId) })),
+      { operationId: id(320), name: "remove", label: "Remove response", tableId: table.tableId, kind: "delete" as const, access: "helper" as const, readOnly: false, fieldIds: [] },
+      { operationId: id(321), name: "archive", label: "Archive responses", tableId: table.tableId, kind: "action" as const, access: "owner" as const, readOnly: false, fieldIds: [] },
+    ];
     const capability = parseAppDatasetCapability({ ...binding(approved), name: approved.definition.name,
       operations: approved.definition.operations.map(({ operationId, name, access, readOnly }) => ({ operationId, name, access, readOnly })) });
-    expect(displayAppDatasetCapability(capability, approved)).toEqual(capability);
-    expect(displayAppDatasetCapability(capability, approved).operations.some(operation => operation.display)).toBe(false);
+    const shown = displayAppDatasetCapability(capability, approved);
+    // A delete and an action still say what they do.
+    expect(shown.operations.map(operation => operation.display)).toEqual([
+      ...Array.from({ length: 20 }, (_, n) => ({ kind: "read", label: `Read ${n}`, fields: [] })),
+      { kind: "delete", label: "Remove response", fields: [] },
+      { kind: "action", label: "Archive responses", fields: [] },
+    ]);
+    expect({ ...shown, operations: shown.operations.map(({ display: _, ...operation }) => operation) }).toEqual(capability);
   });
 
   it.each(["source", "schemaSql", "operations", "dataPath"])("refuses %s supplied by a consumer binding", key => {

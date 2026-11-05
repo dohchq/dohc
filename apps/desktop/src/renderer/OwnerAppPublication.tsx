@@ -170,10 +170,19 @@ function operationWords({ display }: AppDatasetCapability["operations"][number])
 function accessOf(capability: Capability, approved: readonly Capability[] | null): Access {
   if (capability.kind === "dataset") {
     const same = approved?.find((value): value is AppDatasetCapability => value.kind === "dataset" && value.datasetId === capability.datasetId);
-    const line = (operation: AppDatasetCapability["operations"][number]) => ({ key: operation.operationId,
-      items: [{ text: operationWords(operation), added: approved !== null && !same?.operationIds.includes(operation.operationId) }] });
+    // Operations with the same words share one line, marked New if any of them is new.
+    const lines = (operations: AppDatasetCapability["operations"]) => {
+      const byText = new Map<string, Reach & { key: string }>();
+      for (const operation of operations) {
+        const text = operationWords(operation), added = approved !== null && !same?.operationIds.includes(operation.operationId);
+        const seen = byText.get(text);
+        if (seen) seen.added ||= added;
+        else byText.set(text, { key: operation.operationId, text, added });
+      }
+      return [...byText.values()].map(({ key, ...item }): Line => ({ key, items: [item] }));
+    };
     return { key: capability.datasetId, name: capability.name,
-      reads: capability.operations.filter(operation => operation.readOnly).map(line), changes: capability.operations.filter(operation => !operation.readOnly).map(line) };
+      reads: lines(capability.operations.filter(operation => operation.readOnly)), changes: lines(capability.operations.filter(operation => !operation.readOnly)) };
   }
   const same = approved?.find((value): value is AppCollectionCapability => value.kind !== "dataset" && value.collectionPath === capability.collectionPath);
   const items = (fields: readonly string[], allowed: readonly string[] | undefined) => fields.map(field => ({ text: field, added: approved !== null && !allowed?.includes(field) }));

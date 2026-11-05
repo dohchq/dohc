@@ -61,8 +61,11 @@ export function displayAppDatasetCapability(capability: AppDatasetCapability, ap
     const fieldIds = capability.createFields?.find(entry => entry.operationId === operation.operationId)?.fieldIds ?? declared.fieldIds;
     return { ...operation, display: { kind: declared.kind, label: declared.label, fields: table.fields.filter(field => fieldIds.includes(field.fieldId)).map(field => field.name) } };
   }) };
-  // The words count toward the capability's size bounds. Past them, Review app shows "Records" instead of failing to list or prepare.
-  try { return parseAppDatasetCapability(shown); } catch { return capability; }
+  // The words count toward the capability's size bounds. Past them, each operation keeps its kind and label without field names.
+  // Past that too, Review app shows "Records" instead of failing to list or prepare.
+  try { return parseAppDatasetCapability(shown); } catch {}
+  const short = { ...shown, operations: shown.operations.map(operation => ({ ...operation, display: { ...operation.display, fields: [] } })) };
+  try { return parseAppDatasetCapability(short); } catch { return capability; }
 }
 
 export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
