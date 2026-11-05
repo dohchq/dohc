@@ -114,11 +114,15 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Pause sync" }));
+    const pause = screen.getByRole("button", { name: "Pause sync" });
+    pause.focus();
+    fireEvent.click(pause);
 
     await waitFor(() => expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce());
     await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("false"));
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
+    // The switch can't turn on signed out, so focus goes to Connect server.
+    expect(document.activeElement).toBe(screen.getByTestId("settings-cloud-connect"));
     expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
     expect(screen.getByTestId("cloud-sync-needs-server").textContent).toBe(SYNC_ON_NEEDS_SERVER);
   });
@@ -748,6 +752,25 @@ describe("CloudSyncSettings", () => {
     expect(vi.mocked(settings.onError).mock.calls[0]![0].message).toBe("Sign in to the account that synced this workspace.");
     expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_UNCONFIRMED_ACCOUNT);
     expect(screen.getByTestId("cloud-disconnect")).toBeTruthy();
+  });
+
+  // A failed Try again keeps its buttons, so a confirmation that arrives
+  // later, after the person has moved on, leaves focus where it is.
+  it("doesn't move focus when the account is confirmed after a failed Try again", async () => {
+    bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Sign in to the account that synced this workspace."));
+    const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
+    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    const again = screen.getByTestId("cloud-relink-workspace") as HTMLButtonElement;
+    again.focus();
+    fireEvent.click(again);
+    await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
+    await waitFor(() => expect(again.disabled).toBe(false));
+    again.blur();
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(document.body);
   });
 
   // Signing in again undoes Disconnect, and Connect server takes its place,

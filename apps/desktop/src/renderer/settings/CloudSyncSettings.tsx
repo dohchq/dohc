@@ -108,13 +108,16 @@ export function CloudSyncSettings(props: {
   // row offers Try again and Pause sync in its place.
   const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
   // Either action ends by taking its buttons away, so focus they held moves
-  // to the switch that takes their place.
+  // to the switch that takes their place, or to Connect server while signed
+  // out, where the switch can't turn on.
   const syncSwitch = useRef<HTMLButtonElement | null>(null);
+  const connectButton = useRef<HTMLButtonElement | null>(null);
   const actionHeldFocus = useRef(false);
   useEffect(() => {
     if (unconfirmed || !actionHeldFocus.current) return;
     actionHeldFocus.current = false;
-    if (document.activeElement === document.body) syncSwitch.current?.focus();
+    if (document.activeElement !== document.body) return;
+    (syncSwitch.current?.disabled === false ? syncSwitch.current : connectButton.current)?.focus();
   }, [unconfirmed]);
   const relayUrl = status?.relayUrl?.trim() ?? "";
   // The join handle: one copyable line carrying the workspace id and its
@@ -155,6 +158,8 @@ export function CloudSyncSettings(props: {
       }
       cloud.onChanged();
     } catch (cause) {
+      // The buttons stay, so a later confirmation doesn't move focus.
+      actionHeldFocus.current = false;
       const message = cause instanceof Error ? cause.message : String(cause);
       if (here() && /passphrase/i.test(message)) {
         setPassphrasePurpose(/unlock/i.test(message) ? "unlock" : "protect");
@@ -208,6 +213,7 @@ export function CloudSyncSettings(props: {
       }
       cloud.onChanged();
     } catch (cause) {
+      actionHeldFocus.current = false;
       cloud.onError({
         message: ipcErrorMessage(cause, "dohc could not pause sync for this workspace."),
         cause,
@@ -239,7 +245,7 @@ export function CloudSyncSettings(props: {
 
   const connectRow = (
     <SettingRow title="Server" testId="settings-row-server">
-      <PrimaryButton data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
+      <PrimaryButton ref={connectButton} data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
         Connect server
       </PrimaryButton>
     </SettingRow>
