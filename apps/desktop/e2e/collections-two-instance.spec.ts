@@ -493,7 +493,9 @@ test("an agent's file save on one device opens a conflict against a record the o
       )
       .toBe("Doing");
     expect(await conflictsOnB()).toEqual([]);
-    expect(await readFile(join(temp.rootPath, zephyrPath), "utf8")).toContain("Status: Doing");
+    await expect
+      .poll(() => readFile(join(temp.rootPath, zephyrPath), "utf8"), { timeout: 30_000 })
+      .toContain("Status: Doing");
     await expect(doingZephyr).toBeVisible({ timeout: 30_000 });
     await expect(todoZephyr).toHaveCount(0);
 
