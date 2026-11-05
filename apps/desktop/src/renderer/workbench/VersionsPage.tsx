@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "rea
 import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
-import { EmptyState, IconButton, RetryRow, SecondaryButton } from "../ui/controls";
+import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { versionDotClass } from "./versionHue";
@@ -502,18 +502,19 @@ function VersionRow(props: {
     if (props.count === "failed") {
       parts.push([
         "count-retry",
-        <span className="inline-block align-top">
-          <IconButton
-            data-testid="versions-page-count-retry"
-            aria-label="dohc could not count the files that differ from Main. Try again."
-            title="dohc could not count the files that differ from Main. Try again."
-            aria-describedby={nameId}
-            onClick={props.onRetryCount}
-            className="size-4"
-          >
-            <RotateCw size={12} aria-hidden />
-          </IconButton>
-        </span>,
+        // As tall as the details line, so the row keeps its height while the
+        // count fails. Its ring sits inside, where the line doesn't clip it.
+        <button
+          type="button"
+          data-testid="versions-page-count-retry"
+          aria-label="dohc could not count the files that differ from Main. Try again."
+          title="dohc could not count the files that differ from Main. Try again."
+          aria-describedby={nameId}
+          onClick={props.onRetryCount}
+          className="inline-grid size-4 place-items-center rounded-sm align-top text-muted transition-colors hover:bg-hover hover:text-ink focus-visible:-outline-offset-2"
+        >
+          <RotateCw size={12} aria-hidden />
+        </button>,
       ]);
     } else if (props.count !== undefined) {
       parts.push(["count", <span data-testid="versions-page-count">{filesDiffer(props.count)}</span>]);
