@@ -36,7 +36,9 @@ async function assertOwnerWritable(base) {
   }
 }
 
-test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
+// Each case copies the packaged layout with its two Node binaries. On a slow
+// disk the cases take about 180 s in all, where a normal one takes 80 s.
+test("packaged macOS runtime signing", { timeout: 600000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-signing-")), source = join(root, "source");
   t.after(async () => { await removeLayout(source); await rm(root, { recursive: true, force: true }); });
   const staged = await stageEngineReader({ resources: source, platform: "darwin", arch: "arm64" });
