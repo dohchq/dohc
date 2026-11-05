@@ -418,6 +418,18 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("keeps a share's collision-record row through its retry", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({
+      message: "dohc did not update these shared files.", retry, noDismiss: true,
+      kind: "share-collision-record", identity: "share-collision-record",
+    }));
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(result.current.shellErrors.map((error) => error.message)).toEqual(["dohc did not update these shared files."]);
+  });
+
   // A retry answers false when it could not run, such as during an account
   // deletion review.
   it("keeps a newer report of the same failure when an older row's retry cannot run", () => {

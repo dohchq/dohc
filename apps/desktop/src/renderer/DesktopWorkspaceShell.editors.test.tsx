@@ -1840,9 +1840,12 @@ describe("ui-state merge-on-load", () => {
       refusedOps: 0,
       refusedDetail: null,
     };
-    let refreshes = 0;
     const retried = deferred<RefreshSharedViewResult>();
-    const refresh = vi.fn(() => (++refreshes > 1 ? retried.promise : Promise.resolve(refused)));
+    const retriedAgain = deferred<RefreshSharedViewResult>();
+    const refresh = vi.fn<() => Promise<RefreshSharedViewResult>>()
+      .mockResolvedValueOnce(refused)
+      .mockReturnValueOnce(retried.promise)
+      .mockReturnValueOnce(retriedAgain.promise);
     bridge.refreshSharedView = refresh;
     const user = userEvent.setup();
     renderShell(bridge, {
@@ -1868,16 +1871,33 @@ describe("ui-state merge-on-load", () => {
     const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
 
-    // Try again closes Notices and runs the refresh. The refresh that completes ends the row.
+    // Try again closes Notices and runs the refresh. The row stays while it runs.
     const refreshButton = () => screen.getByTestId("shared-view-refresh") as HTMLButtonElement;
+    const refusalRow = async () => {
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      return within(await screen.findByTestId("notice-center")).queryByText(words, { exact: false })?.closest<HTMLElement>("[data-notice-row]") ?? null;
+    };
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(refreshButton().disabled).toBe(true));
     expect(refresh).toHaveBeenCalledTimes(2);
-    retried.resolve(refreshed);
-    await waitFor(() => expect(refreshButton().disabled).toBe(false));
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    const pendingRow = await refusalRow();
+    expect(pendingRow).not.toBeNull();
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(within(await screen.findByTestId("notice-center")).queryByText(words, { exact: false })).toBeNull();
+
+    // A refresh that fails for another reason has not completed, so the row stays.
+    retried.resolve({ ok: false, changedPaths: 0, errorMessage: "Sign in to your server first." });
+    await waitFor(() => expect(refreshButton().disabled).toBe(false));
+    const keptRow = await refusalRow();
+    expect(keptRow).not.toBeNull();
+
+    // The refresh that completes ends the row.
+    fireEvent.click(within(keptRow!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refreshButton().disabled).toBe(true));
+    expect(refresh).toHaveBeenCalledTimes(3);
+    retriedAgain.resolve(refreshed);
+    await waitFor(() => expect(refreshButton().disabled).toBe(false));
+    expect(screen.queryByTestId("workspace-shell-error")?.textContent ?? "").not.toContain(words);
+    expect(await refusalRow()).toBeNull();
   });
 
   it("repaints changed files and removes generic chat before an ended share becomes read-only", async () => {
