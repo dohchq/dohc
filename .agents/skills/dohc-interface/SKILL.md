@@ -161,6 +161,8 @@ Put Cancel, then one primary, at the right.
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
 Never label a button `OK`, `Yes`, or `Confirm`.
+The safe choice reads **Cancel** when it cancels the action the person chose, such as Remove from list.
+It reads **Go back** only on a warning about leaving typing that dohc has not kept, because it returns the person to that typing: `Quit without your typing?`.
 
 ### Focus and keys
 
@@ -199,7 +201,6 @@ Main asks some questions in the system's message box, such as before a quit lose
 - Show it with `showMessageBox` from `window/messageBox.ts`. It titles the box `dohc` and gives it push buttons, where Windows would draw command links.
 - List the action first and the safe choice last: `Quit anyway`, `Go back`. Windows shows them in that order, and macOS reverses it.
 - When the action loses work, make the safe choice the default and Escape's answer.
-- The safe choice reads **Go back** when the box warns that typing or kept work will be lost.
 - Windows draws the box light in both themes. Leave it as the system draws it.
 
 ### Words in dialogs and explanations
