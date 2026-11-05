@@ -7255,7 +7255,7 @@ function registerIpcHandlers(): void {
     },
     discardLiveDraftRecovery: async (input, {event, operation}) => {
       operation.assertCurrent();
-      if (desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== event.sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === input.workspaceId)) throw new Error("Close the other window for this workspace, then dismiss this draft again.");
+      if (desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== event.sender && windowShowsWorkspace(rendererWorkspaceSessions.current(window.webContents), input.workspaceId, workspaceAuthorities))) throw new Error("Close the other window for this workspace, then dismiss this draft again.");
       return removeLiveDraftCopies(join(stateDir(), "live-draft-recovery"), operation.workspace.workspaceId, input.objectId, input.snapshotSha256, Math.min(input.discardedAtMs, Date.now()), input.path, input.recordId);
     },
   });
@@ -7267,7 +7267,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation,
     CloudSessionCredentials
   >({
-    hasOtherWorkspaceWindow: (sender, workspaceId) => desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== sender && rendererWorkspaceSessions.current(window.webContents)?.workspaceId === workspaceId),
+    hasOtherWorkspaceWindow: (sender, workspaceId) => desktopWindows.workspaceWindows.allLive().some(window => window.webContents !== sender && windowShowsWorkspace(rendererWorkspaceSessions.current(window.webContents), workspaceId, workspaceAuthorities)),
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
