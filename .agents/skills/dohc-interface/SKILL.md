@@ -305,7 +305,7 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
 
-A surface or list whose read failed, so it shows nothing, takes danger. When some of its sources didn't load beside others that did, what's missing takes warning, as does something held back on purpose or paused. An item that is broken, such as an automation dohc can't read, takes danger wherever it sits.
+A surface or list whose read failed, so it shows nothing, takes danger. When some of its sources didn't load beside others that did, what's missing takes warning, as does work dohc is holding or has paused. What the person's own rules or a list's limit leave out, such as a file History no longer tracks, takes the plain mark. An item that is broken, such as an automation dohc can't read, takes danger wherever it sits.
 
 ### Type
 
