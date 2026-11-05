@@ -656,9 +656,10 @@ describe("agent sign-in for share links", () => {
   });
 
   // The link's credential stays where it was in both cases, so nothing is
-  // cleaned up. Only the checks made inside each step refuse the agent: for an
-  // Edit link no longer served, the servable check alone; for a new owner, the
-  // binding check and the servable check both.
+  // cleaned up. Only each step's own checks refuse the agent: for an Edit link
+  // no longer served, the servable check alone; for a new owner, the binding
+  // check and the servable check both. Introspect makes its servable check in
+  // the route, after its read.
   const unservable: Array<[
     name: string,
     overrides: HandlerOverrides,
