@@ -43,7 +43,8 @@ function Archive(props: Props) {
     } catch (error) { if (alive.current && request.current === token) props.onError("Could not archive this Collection.", error, () => { void archive(); }); }
     finally { locked.current = false; if (alive.current && request.current === token) setBusy(false); }
   }
-  return <Overlay onClose={busy ? undefined : props.onClose} panelProps={{ onKeyDown: onDialogKeyDown }}>
+  const archiving = busy && locked.current;
+  return <Overlay onClose={archiving ? undefined : props.onClose} panelProps={{ onKeyDown: onDialogKeyDown }}>
     <ConfirmationCard icon={ArchiveIcon} labelledBy="archive-collection-title" describedBy="archive-collection-body">
       {/* The apps continue the first sentence, so they sit closer than the other parts. */}
       <div className="flex flex-col gap-3">
@@ -54,8 +55,8 @@ function Archive(props: Props) {
           onRetry={() => void load(failed?.after)} onMore={after => void load(after)} />
       </div>
       <ConfirmActions>
-        <SecondaryButton className={FOCUS_RING} disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton>
-        <PrimaryButton className={FOCUS_RING} disabled={busy || !page} onClick={() => void archive()}>{locked.current ? "Archiving…" : "Archive"}</PrimaryButton>
+        <SecondaryButton className={FOCUS_RING} disabled={archiving} onClick={props.onClose}>Cancel</SecondaryButton>
+        <PrimaryButton className={FOCUS_RING} disabled={busy || !page} onClick={() => void archive()}>{archiving ? "Archiving…" : "Archive"}</PrimaryButton>
       </ConfirmActions>
     </ConfirmationCard>
   </Overlay>;
