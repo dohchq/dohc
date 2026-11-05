@@ -1,9 +1,10 @@
 import { createContext, useContext, useId, useState, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
-import type { ActorPresentation } from "../../ipc/bridgeContract";
+import type { ActorPresentation, ChatReportedAgentRecord } from "../../ipc/bridgeContract";
 import { ownAgentNamed, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { useAgentInk } from "./ChatAvatar";
+import { reportedAgentLine } from "./reportedAgent";
 
 export const AgentSettingsContext = createContext<DesktopUserSettings | null>(null);
 
@@ -18,6 +19,7 @@ type AgentAuthor = {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  authorReported?: ChatReportedAgentRecord;
 };
 
 export function AgentBadge(props: {
@@ -37,6 +39,7 @@ export function AgentBadge(props: {
   const { author } = props;
   const ownAgent = props.presentation?.self && settings ? ownAgentNamed(settings, author.authorDisplayName) : null;
   const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
+  const reported = reportedAgentLine(author.authorReported);
   return (
     <span
       className={`relative inline-flex ${ink}`}
@@ -78,6 +81,7 @@ export function AgentBadge(props: {
           <span className="text-muted">
             {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
           </span>
+          {reported ? <span data-testid={`${props.testIdPrefix}-agent-reported`} className="text-muted">{reported}</span> : null}
           {command ? <span className="break-all text-[11px] text-muted">Current local command: <code className="font-mono">{command}</code></span> : null}
         </span>
       ) : null}

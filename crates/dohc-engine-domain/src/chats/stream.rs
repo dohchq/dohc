@@ -155,7 +155,7 @@ pub struct ThreadWithChannel {
 const MESSAGE_COLUMNS: &str = "workspace_id, thread_id, message_order, message_id, author_kind, \
      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, \
      author_owner_display_name, automation_id, chain_depth, author_actor_key, link_grant_id, \
-     link_principal_id, author_agent_id";
+     link_principal_id, author_agent_id, author_reported";
 
 fn corrupt(reason: &'static str) -> DomainError {
     DomainError::StateCorrupt { reason }

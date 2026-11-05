@@ -156,6 +156,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("decision-thread".to_owned()),
@@ -181,6 +182,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 30,
                 request_id: Some("local-resolver".to_owned()),
@@ -3065,6 +3067,7 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("default-thread-request".to_owned()),
@@ -3293,6 +3296,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("long-wire-local-request".to_owned()),
@@ -3876,6 +3880,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-message-after-refusal".to_owned()),
@@ -3919,6 +3924,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 33,
                 request_id: Some("authored-child-after-refusal".to_owned()),
@@ -4074,6 +4080,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 31,
                 request_id: Some("local-thread-after-refusal".to_owned()),
@@ -4099,6 +4106,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 32,
                 request_id: Some("second-local-message-after-refusal".to_owned()),
@@ -5941,6 +5949,7 @@ fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEn
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: Some("notes-request".to_owned()),
@@ -6200,4 +6209,76 @@ fn received_and_parked_messages_wake_no_agent_here() {
         (2, 0),
         "only the sender's computer records a request"
     );
+}
+
+#[test]
+fn an_imported_agent_message_keeps_what_it_reported_and_a_bad_report_is_refused() {
+    use dohc_engine_domain::{ChatReportedAgent, LinkedChatStore};
+    let setup = |engine: &mut EngineStore, origin: &str| {
+        for (seq, kind, payload) in [
+            (
+                0,
+                "chat.channel.create",
+                json!({"channelId": "channel-1", "name": "General", "slug": "general", "kind": "channel", "createdAtMs": 10}),
+            ),
+            (
+                1,
+                "chat.thread.create",
+                json!({"threadId": "thread-1", "title": "", "createdAtMs": 20, "channelSlug": "general", "channelWireId": "channel-1"}),
+            ),
+        ] {
+            apply_chat_envelope(engine, &envelope(origin, seq, kind, payload), &NoFaults)
+                .expect("apply chat op");
+        }
+    };
+    let message = |author_kind: &str, reported: serde_json::Value| {
+        let mut message = json!({
+            "messageId": "message-1",
+            "threadId": "thread-1",
+            "authorKind": author_kind,
+            "authorDisplayName": "Nova",
+            "body": "Opened a PR",
+            "createdAtMs": 20,
+            "authorReported": reported,
+        });
+        if author_kind == "agent" {
+            message["authorOwnerDisplayName"] = json!("Ice");
+        }
+        message
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    setup(&mut engine, "reported");
+    let op = envelope(
+        "reported",
+        2,
+        "chat.message.append",
+        message("agent", json!({"product": "Claude Code", "version": "2.1", "model": "Claude Opus 5.5"})),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let stored = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "message-1")
+        .expect("message");
+    assert_eq!(
+        stored.author_reported,
+        Some(ChatReportedAgent {
+            product: Some("Claude Code".to_owned()),
+            version: Some("2.1".to_owned()),
+            model: Some("Claude Opus 5.5".to_owned()),
+        })
+    );
+
+    for (author_kind, reported) in [
+        ("human", json!({"product": "Claude Code"})),
+        ("agent", json!({"version": "2.1"})),
+        ("agent", json!({"product": "Claude\u{7}Code"})),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        setup(&mut engine, "bad-report");
+        let op = envelope("bad-report", 2, "chat.message.append", message(author_kind, reported));
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
 }

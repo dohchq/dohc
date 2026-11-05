@@ -5,11 +5,11 @@
 //! the NON-TAUTOLOGICAL parity differentials (channel slug, projection path,
 //! base64url feed cursor) validated against real TS output — not Rust's own.
 
-use dohc_engine_domain::chats::channel_collision_slug;
+use dohc_engine_domain::chats::{MAX_REPORTED_AGENT_CHARS, channel_collision_slug};
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
     ChatChannelKind, ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
-    ChatThreadLane, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
+    ChatReportedAgent, ChatThreadLane, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
     GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput, NoFaults,
     PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark, SendMessage, SetFollow,
     SetReaction, StartChannelThread, base32_lowercase_no_padding, bookmark_id_for,
@@ -56,6 +56,7 @@ fn start_thread(
         now_ms: now,
         request_id: None,
         author_agent_id: None,
+        author_reported: None,
         named_agent_ids: Vec::new(),
     }
 }
@@ -85,6 +86,7 @@ fn send_msg(
         now_ms: now,
         request_id: None,
         author_agent_id: None,
+        author_reported: None,
         named_agent_ids: Vec::new(),
     }
 }
@@ -4124,4 +4126,137 @@ fn local_actor_key_commits_with_the_message_and_replays_its_original_admission()
         .send_admitted_message(&reply, Some(key), &NO_FAULTS)
         .expect("reply replay");
     assert_eq!(replay.author_actor_key.as_deref(), Some(later_key));
+}
+
+#[test]
+fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let reported = ChatReportedAgent {
+        product: Some("Claude Code".to_owned()),
+        version: Some("2.1".to_owned()),
+        model: Some("Claude Opus 5.5".to_owned()),
+    };
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen", 10, &NO_FAULTS)
+            .expect("channel");
+        let mut post = start_thread("gen", "t1", "m1", "Opened a PR", ChatActorKind::Agent, 20);
+        post.author_owner_display_name = Some("Ice".to_owned());
+        post.author_reported = Some(reported.clone());
+        let (_, opening) = chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
+        assert_eq!(opening.author_reported.as_ref(), Some(&reported));
+
+        let mut reply = send_msg("t1", "m2", None, "Checks pass", 30);
+        reply.author_kind = ChatActorKind::Agent;
+        reply.author_owner_display_name = Some("Ice".to_owned());
+        reply.author_reported = Some(ChatReportedAgent {
+            product: Some("Claude Code".to_owned()),
+            ..ChatReportedAgent::default()
+        });
+        chats.send_message(&reply, &NO_FAULTS).expect("reply");
+        assert_eq!(
+            chats.get_message(WS, "m2").expect("read").author_reported,
+            Some(ChatReportedAgent {
+                product: Some("Claude Code".to_owned()),
+                ..ChatReportedAgent::default()
+            })
+        );
+
+        // A report with no parts is no report.
+        let mut silent = send_msg("t1", "m3", None, "Done", 40);
+        silent.author_kind = ChatActorKind::Agent;
+        silent.author_reported = Some(ChatReportedAgent::default());
+        chats.send_message(&silent, &NO_FAULTS).expect("silent");
+        assert_eq!(chats.get_message(WS, "m3").expect("read").author_reported, None);
+
+        // The post's preview in the channel carries it too.
+        let listed = chats
+            .list_channel_threads(WS, "gen", None, 10)
+            .expect("posts");
+        assert_eq!(
+            listed[0]
+                .opening_message
+                .as_ref()
+                .and_then(|opening| opening.author_reported.as_ref()),
+            Some(&reported)
+        );
+    }
+
+    let payloads: Vec<serde_json::Value> = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT payload_json FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.message.append' ORDER BY origin_seq",
+            )?;
+            query.query_map([WS], |row| row.get::<_, String>(0))?.collect()
+        })
+        .expect("journaled messages")
+        .iter()
+        .map(|payload: &String| serde_json::from_str(payload).expect("json"))
+        .collect();
+    assert_eq!(
+        payloads
+            .iter()
+            .map(|payload| payload.get("authorReported").cloned())
+            .collect::<Vec<_>>(),
+        vec![
+            Some(json!({"product": "Claude Code", "version": "2.1", "model": "Claude Opus 5.5"})),
+            Some(json!({"product": "Claude Code"})),
+            None,
+        ],
+    );
+}
+
+#[test]
+fn only_a_valid_agent_report_is_kept() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen", 10, &NO_FAULTS)
+        .expect("channel");
+    chats
+        .start_channel_thread(
+            &start_thread("gen", "t1", "m1", "Hello", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("post");
+    let product = |value: &str| ChatReportedAgent {
+        product: Some(value.to_owned()),
+        ..ChatReportedAgent::default()
+    };
+    let refused = [
+        (ChatActorKind::Human, product("Claude Code")),
+        (ChatActorKind::Agent, product("")),
+        (ChatActorKind::Agent, product(" Claude Code")),
+        (ChatActorKind::Agent, product("Claude\nCode")),
+        (ChatActorKind::Agent, product(&"x".repeat(MAX_REPORTED_AGENT_CHARS + 1))),
+        (
+            ChatActorKind::Agent,
+            ChatReportedAgent {
+                version: Some("2.1".to_owned()),
+                ..ChatReportedAgent::default()
+            },
+        ),
+    ];
+    for (index, (kind, reported)) in refused.into_iter().enumerate() {
+        let mut message = send_msg("t1", &format!("bad-{index}"), None, "Hi", 30);
+        message.author_kind = kind;
+        message.author_reported = Some(reported);
+        assert!(
+            matches!(
+                chats.send_message(&message, &NO_FAULTS),
+                Err(DomainError::InvalidInput { .. })
+            ),
+            "case {index} is refused"
+        );
+    }
+    let mut longest = send_msg("t1", "longest", None, "Hi", 40);
+    longest.author_kind = ChatActorKind::Agent;
+    longest.author_reported = Some(product(&"x".repeat(MAX_REPORTED_AGENT_CHARS)));
+    chats.send_message(&longest, &NO_FAULTS).expect("the longest product fits");
 }

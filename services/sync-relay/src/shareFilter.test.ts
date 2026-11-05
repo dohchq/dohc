@@ -886,6 +886,18 @@ describe("chat share op filter", () => {
     expect(JSON.stringify(result.payload)).not.toContain("PRIVATE-");
   });
 
+  it("serves what an agent reported about itself", () => {
+    const authorReported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+    const result = decide("chat.message.append", {
+      messageId: "m-reported", threadId: "thread-in", authorKind: "agent",
+      authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", authorUserId: "u1",
+      body: "Opened a PR", createdAtMs: 2, authorReported,
+    });
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) return;
+    expect(result.payload).toMatchObject({ authorReported });
+  });
+
   it("shares the agent owner while stripping local runner configuration", () => {
     const result = decide("chat.message.append", {
       messageId: "m-agent", threadId: "thread-in", authorKind: "agent",

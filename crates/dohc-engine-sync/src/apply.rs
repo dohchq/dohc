@@ -7,8 +7,8 @@ use dohc_engine_domain::chats::{
     DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, agent_channel_slug,
     agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
     chat_thread_display_title, free_agent_channel_slug, index_replicated_chat_message_search_rows,
-    is_agent_channel_slug, is_agent_id, replicated_source_origin, truncate_slug_base,
-    upsert_chat_search_index_row,
+    is_agent_channel_slug, is_agent_id, normalize_reported_agent, replicated_source_origin,
+    truncate_slug_base, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
@@ -812,6 +812,9 @@ struct MessageAppend {
     /// The agent that wrote an agent message.
     #[serde(default, deserialize_with = "deserialize_present_string")]
     author_agent_id: Option<String>,
+    /// What an agent reported about itself. Absent from older messages.
+    #[serde(default)]
+    author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
 }
 
 #[derive(Deserialize)]
@@ -1633,6 +1636,11 @@ fn apply_message(
             reason: "chat message agent id is invalid",
         });
     }
+    let author_reported =
+        normalize_reported_agent(payload.author_kind == "agent", payload.author_reported.as_ref())
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "chat message reported agent is invalid",
+            })?;
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
@@ -1661,7 +1669,8 @@ fn apply_message(
             || owner_name.is_some()
             || payload.origin.is_some()
             || payload.chain_depth.is_some()
-            || payload.author_agent_id.is_some(),
+            || payload.author_agent_id.is_some()
+            || author_reported.is_some(),
         &body,
     )
     .map_err(|error| map_chat_rule(error, "chat message link author is invalid"))?;
@@ -1703,10 +1712,11 @@ fn apply_message(
     };
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
-         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id, author_reported) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name,
-            link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id), payload.author_agent_id],
+            link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id), payload.author_agent_id,
+            author_reported.as_ref().map(|reported| serde_json::to_string(reported).expect("a reported agent serializes"))],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {

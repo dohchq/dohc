@@ -219,7 +219,7 @@ export function ThreadedChat(props: {
         data-testid={`${prefix}-run-details`}
         className="mt-1.5 grid max-w-sm gap-2 rounded-lg border border-line bg-panel p-3"
       >
-        <RunDetails run={run} />
+        <RunDetails run={run} reported={message.authorReported} />
       </div>
     ) : null;
   }, [detailsId, prefix, runs]);

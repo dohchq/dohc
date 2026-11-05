@@ -3185,6 +3185,35 @@ describe("CLI socket server", () => {
     } finally { await usage.close(); }
   });
 
+  it("keeps what an agent reported on its posts and replies, beside its unchanged name", async () => {
+    if (!store) throw new Error("Store is not available");
+    const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+    const started = await invoke("post", {
+      cwd: workspaceRoot, actor: "agent", group: "general", attachments: [], needsDecision: false,
+      body: "Opened a PR", reported,
+    });
+    const thread = started.threadId;
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", thread, attachments: [], needsDecision: false,
+      body: "Checks pass", reported: { product: "Claude Code" },
+    });
+    // A person's write carries no report, even when the caller sends one.
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "human", thread, attachments: [], needsDecision: false,
+      body: "Thanks", reported,
+    });
+    const listed = await invoke("groupsFull", { cwd: workspaceRoot, actor: "agent" });
+    if (!listed.ok) throw new Error(listed.reason);
+    const engineThread = listed.groups.flatMap(group => group.threads).find(candidate => cliThreadId(candidate.id) === thread);
+    if (!engineThread) throw new Error("Posted thread is not listed");
+    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: engineThread.id });
+    expect(messages.map(message => [message.author.displayName, message.authorReported])).toEqual([
+      ["Nova", reported],
+      ["Nova", { product: "Claude Code" }],
+      ["Sam", undefined],
+    ]);
+  });
+
   it("comments on a file through the chat write path a person's comment takes", async () => {
     if (!store) throw new Error("Store is not available");
     const comment = (path: string, title: string, body: string, flags: string[] = []) => executeCli({

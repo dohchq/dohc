@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createWorkspaceDirectory,
   createApp,
+  reportedAgent,
   deleteWorkspacePath,
   duplicateWorkspaceFile,
   detectApps,
@@ -2531,5 +2532,23 @@ it("routes Duplicate to the owning socket and refuses secret and escaping paths"
     request.mockClear();
     for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await duplicateWorkspaceFile(ctx, {path})).toMatchObject({ok: false});
     expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("what an agent reports about itself", () => {
+  it("takes the client's title, else its name, and caps each part", () => {
+    expect(reportedAgent({ name: "claude-code", title: "Claude Code", version: "2.1" }, "Claude Opus 5.5"))
+      .toEqual({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" });
+    expect(reportedAgent({ name: "claude-code", title: "\u0007", version: " 2.1 " }, undefined))
+      .toEqual({ product: "claude-code", version: "2.1" });
+    const long = "x".repeat(80);
+    expect(reportedAgent({ name: long, version: "1" }, undefined)).toEqual({ product: "x".repeat(64), version: "1" });
+  });
+
+  it("leaves out what it can't read and never guesses", () => {
+    expect(reportedAgent(undefined, undefined)).toBeUndefined();
+    expect(reportedAgent({ name: "  ", version: "2.1" }, undefined)).toBeUndefined();
+    expect(reportedAgent({ name: 42, version: "2.1" }, "Opus")).toEqual({ model: "Opus" });
+    expect(reportedAgent({ name: "Codex", version: "1.0\n" }, undefined)).toEqual({ product: "Codex" });
   });
 });

@@ -1,6 +1,6 @@
 import { signalChatWrite } from "./chatWriteSignals";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
-import type { ChatMessage, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatMessage, ChatReportedAgent, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
@@ -27,10 +27,13 @@ import {
 // it the message carries the agent name from the person's settings.
 // `agentId` names the agent of a run dohc dispatched, which main knows; the
 // message carries that agent's id and settings name.
+// `reported` is what the agent said about itself: its MCP client's product
+// and version, and the model it stated. It sits beside the author's name and
+// never replaces it.
 // A person's own message in the app wakes each of their agents it names.
 export type ChatWriter =
   | { via: "renderer" }
-  | { via: "cli"; actor: "human" | "agent"; agentName?: string; agentId?: string }
+  | { via: "cli"; actor: "human" | "agent"; agentName?: string; agentId?: string; reported?: ChatReportedAgent }
   // `local` marks a message that stays on this computer, such as a wake in
   // an agent's chat, so it never waits for a session.
   | { via: "automation"; automationId: string; name: string; depth: number; local?: true };
@@ -220,6 +223,7 @@ export function createChatWrites(dependencies: {
           author: { kind: "agent" as const, displayName: writer.agentName ?? await agentDisplayName(writer.agentId) },
           authorOwnerDisplayName: localUserDisplayName(),
           ...(writer.agentId ? { authorAgentId: writer.agentId } : {}),
+          ...(writer.reported ? { authorReported: writer.reported } : {}),
         }
       : { author: { kind: "human" as const, displayName: localUserDisplayName() } };
   }

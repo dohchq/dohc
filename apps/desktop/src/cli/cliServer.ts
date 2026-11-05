@@ -27,6 +27,7 @@ import {
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
+  type CliReportedAgent,
   type CliRequest,
   type CliResultByVerb,
   type CliShowMessage,
@@ -745,15 +746,22 @@ function claimedAgentName(
 }
 
 // Who a chat write through this socket is. An agent's message during a run
-// dohc dispatched is that run's agent's.
+// dohc dispatched is that run's agent's. What an agent reported about itself
+// rides beside its name; a person's write carries none.
 function cliChatWriter(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
   agentName?: string,
+  reported?: CliReportedAgent,
 ): PersonWriter {
   const runAgentId = actor === "agent" ? options.dispatchedAgent(context.workspaceId) : null;
-  return { via: "cli", actor, ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}) };
+  return {
+    via: "cli",
+    actor,
+    ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}),
+    ...(actor === "agent" && reported ? { reported } : {}),
+  };
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
@@ -2141,7 +2149,7 @@ async function startFileChat(
   let message: ChatMessage;
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: cliChatWriter("agent", context, options, input.agent),
+      writer: cliChatWriter("agent", context, options, input.agent, input.reported),
       threadId: thread.id,
       body,
       resolveAttachments: async () => [],
@@ -3653,7 +3661,7 @@ async function dispatchWorkspace(
       }
       const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: cliChatWriter(actor, context, options),
+        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
         channelId: channel.engine.id,
         // A chat-only group shows only its chat lane.
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
@@ -3712,7 +3720,7 @@ async function dispatchWorkspace(
         }
       }
       const reply = {
-        writer: cliChatWriter(actor, context, options),
+        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,

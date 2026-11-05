@@ -18,7 +18,7 @@ import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { chatWatchInputSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
+import { chatWatchInputSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, reportedAgentPartSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -48,6 +48,7 @@ import {
   replyToChat,
   startGroupChat,
   startFileChat,
+  reportedAgent,
   createApp,
   duplicateWorkspaceFile,
   deleteWorkspacePath,
@@ -398,6 +399,10 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     const named = documentAgentNameSchema.safeParse(server.server.getClientVersion()?.name);
     return named.success ? named.data : undefined;
   };
+  // What the agent reports about itself on a chat write: its client's product
+  // and version from the handshake, and the model it states. It travels
+  // beside the author name and never changes it.
+  const reported = (model: string | undefined) => reportedAgent(server.server.getClientVersion(), model);
 
   register(
     "dohc_edit_document",
@@ -607,43 +612,45 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     needsDecision: z.boolean().optional(),
     options: z.array(z.string().min(1).max(200)).max(12).optional(),
     runId: z.string().min(1).max(200).optional(),
+    model: reportedAgentPartSchema.optional(),
   };
 
   register(
     "dohc_start_group_chat",
     {
       description:
-        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
+        "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. `model` names the model you run as, such as Claude Opus 5.5; people see it marked as reported, beside the product and version your MCP client reports. Leave it out if you don't know. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
         group: z.string().min(1).max(200),
         title: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
       },
     },
-    async (args) => text(await startGroupChat(ctx, args)),
+    async ({ model, ...args }) => text(await startGroupChat(ctx, args, reported(model))),
   );
 
   register(
     "dohc_start_file_chat",
     {
       description:
-        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` behaves as in dohc_start_group_chat.",
+        "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` and `model` behave as in dohc_start_group_chat.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         title: z.string().min(1).max(200),
         body: chatWriteInput.body,
         requestId: requestIdSchema.optional(),
         runId: chatWriteInput.runId,
+        model: chatWriteInput.model,
       },
     },
-    async (args) => text(await startFileChat(ctx, args, agentName())),
+    async ({ model, ...args }) => text(await startFileChat(ctx, args, agentName(), reported(model))),
   );
 
   register(
     "dohc_reply_to_chat",
     {
       description:
-        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_group_chat.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, and `model` behave as in dohc_start_group_chat.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         to: z.string().min(1).max(200).optional(),
@@ -652,7 +659,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         ...chatWriteInput,
       },
     },
-    async (args) => text(await replyToChat(ctx, args)),
+    async ({ model, ...args }) => text(await replyToChat(ctx, args, reported(model))),
   );
 
   register(

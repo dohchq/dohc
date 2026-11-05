@@ -700,6 +700,27 @@ describe("ActorKey local admission", () => {
     expect(sent.author.displayName).toBe(agentName ?? "Nova");
   });
 
+  it("keeps what an agent reported beside its name, and never on a person's message", async () => {
+    const test = fixture();
+    const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+    const agent = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName: "Nova", reported }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(agent.author.displayName).toBe("Nova");
+    expect(agent.authorReported).toEqual(reported);
+    const unreported = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName: "Nova" }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(unreported).not.toHaveProperty("authorReported");
+    const person = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "human", reported }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(person).not.toHaveProperty("authorReported");
+  });
+
   it("stores CLI human origin and automation definition identity locally", async () => {
     const test = fixture();
     const human = await test.writes.sendMessage(test.place, {

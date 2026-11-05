@@ -81,7 +81,7 @@ pub use chats::{
     ChatChannelKind, ChatChannelSummary, ChatChannelType, ChatDecision, ChatDecisionState,
     ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage,
     ChatMessageAutomation, ChatMessageLinkAuthor, ChatMessagePage, ChatProjectionFileAccess,
-    ChatReaction, ChatReactionState, ChatThread, ChatThreadLane, ChatThreadProjection,
+    ChatReaction, ChatReactionState, ChatReportedAgent, ChatThread, ChatThreadLane, ChatThreadProjection,
     ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord, DispatchRecovery,
     FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
     FollowTargetResolution, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,

@@ -42,6 +42,20 @@ describe("agent badge", () => {
     expect(tooltipFor({ authorDisplayName: "Cursor" }, mine, renamed)).not.toContain("Current local command");
   });
 
+  it("adds what the agent reported as one line, and no line when it reported nothing", () => {
+    const reported = (authorReported?: { product?: string; version?: string; model?: string }) => {
+      cleanup();
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ice", ...(authorReported ? { authorReported } : {}) }} presentation={theirs} />);
+      fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+      return screen.queryByTestId("chats-post-agent-reported")?.textContent ?? null;
+    };
+    expect(reported({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" })).toBe("Claude Code 2.1 · Claude Opus 5.5 (as reported)");
+    expect(reported({ product: "Claude Code", version: "2.1" })).toBe("Claude Code 2.1 (as reported)");
+    expect(reported({ model: "Claude Opus 5.5" })).toBe("Claude Opus 5.5 (as reported)");
+    expect(reported()).toBeNull();
+    expect(screen.getByRole("tooltip").textContent).toContain("Owned by Ice");
+  });
+
   it("closes on Escape, and stays open while it has focus", () => {
     render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }} presentation={theirs} />);
     const badge = screen.getByTestId("chats-post-agent-badge");

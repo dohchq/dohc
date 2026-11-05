@@ -6,6 +6,7 @@ import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
 import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import { asObject, optionalString } from "./json";
+import type { ChatReportedAgent } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   type ChatActor,
@@ -119,6 +120,30 @@ function messageAgents(params: ChatsJsonObject): { authorAgentId: string | undef
     throw new Error("invalid-input");
   }
   return { authorAgentId, namedAgentIds };
+}
+
+const MAX_REPORTED_AGENT_CHARS = 64;
+
+// The daemon's rule: only an agent's message carries what it reported. Each
+// part is printable text with no surrounding space, a version needs its
+// product, and a report with no parts is no report.
+function messageReported(params: ChatsJsonObject): ChatReportedAgent | undefined {
+  if (params.authorReported === undefined) return undefined;
+  const reported = strictObject(params.authorReported, "authorReported", ["product", "version", "model"]);
+  const parts: ChatReportedAgent = {};
+  for (const key of ["product", "version", "model"] as const) {
+    const value = optionalString(reported, key);
+    if (value === undefined) continue;
+    if (value === "" || [...value].length > MAX_REPORTED_AGENT_CHARS || value.trim() !== value || /\p{Cc}/u.test(value)) {
+      throw new Error("invalid-input");
+    }
+    parts[key] = value;
+  }
+  if (Object.keys(parts).length === 0) return undefined;
+  if (params.authorKind !== "agent" || (parts.version !== undefined && parts.product === undefined)) {
+    throw new Error("invalid-input");
+  }
+  return parts;
 }
 
 function requiredString(object: ChatsJsonObject, key: string, code = "invalid-input"): string {
@@ -707,7 +732,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "channelId", "threadId", "messageId", "title", "lane", "ownThread", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
         "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "namedAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "namedAgentIds", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -725,7 +750,7 @@ function allowedKeys(method: string): readonly string[] {
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
         "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "namedAgentIds", "nowMs",
+        "authorAgentId", "authorReported", "namedAgentIds", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -1230,9 +1255,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
 
   // Mirrors the daemon's message hash, which it takes after checking the
   // agents: the author's agent, then each named agent once, in first-named order.
-  private agentsFingerprint(params: ChatsJsonObject): [string, string] {
+  private agentsFingerprint(params: ChatsJsonObject): [string, string, string] {
     const { authorAgentId, namedAgentIds } = messageAgents(params);
-    return [authorAgentId ?? "", [...new Set(namedAgentIds)].join(",")];
+    const reported = messageReported(params);
+    return [
+      authorAgentId ?? "",
+      [...new Set(namedAgentIds)].join(","),
+      reported === undefined ? "" : JSON.stringify(reported),
+    ];
   }
 
   private normalizedOrigin(params: ChatsJsonObject): string {
@@ -1723,6 +1753,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
     const automation = messageAutomation(authorKind, params.automation);
     const { authorAgentId, namedAgentIds } = messageAgents(params);
+    const authorReported = messageReported(params);
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
     const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
@@ -1742,6 +1773,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       createdAtMs: atMs,
       ...(automation ? { automation } : {}),
       ...(authorAgentId !== undefined ? { authorAgentId } : {}),
+      ...(authorReported !== undefined ? { authorReported } : {}),
       attachments: [],
     };
     const ownerName = optionalString(params, "authorOwnerDisplayName");
@@ -1911,6 +1943,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
                       ? `${opening.body.slice(0, 500).trimEnd()}…`
                       : opening.body,
                   ...(opening.automation ? { automation: opening.automation } : {}),
+                  ...(opening.authorReported ? { authorReported: opening.authorReported } : {}),
                   reactions: activeMessageReactions(state, opening.id),
                 },
               }
