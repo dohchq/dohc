@@ -777,3 +777,73 @@ fn a_refused_second_page_restores_the_token_read_by_the_next_fetch() {
         assert_eq!(token.as_ref(), Some(&earlier));
     }
 }
+
+#[test]
+fn unchanged_base_answers_only_hold_groups_touched_by_the_page() {
+    unchanged_answers_only_hold_touched_groups(false, false);
+}
+
+#[test]
+fn unchanged_base_answers_include_groups_touched_by_queued_ops() {
+    unchanged_answers_only_hold_touched_groups(true, false);
+}
+
+#[test]
+fn unchanged_deferred_answers_only_hold_groups_touched_by_the_page() {
+    unchanged_answers_only_hold_touched_groups(false, true);
+}
+
+#[test]
+fn unchanged_deferred_answers_include_groups_touched_by_queued_ops() {
+    unchanged_answers_only_hold_touched_groups(true, true);
+}
+
+fn unchanged_answers_only_hold_touched_groups(queued: bool, deferred: bool) {
+    let (_scratch, _path, mut store) = open_store();
+    let claim =
+        dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state());
+    let mut objects = boundary_objects(0, &claim);
+    objects.push("zz-touched".into());
+    let mut relay = seed(&mut store, &objects, &claim);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE sync_identity SET origin_id='peer'", [])
+                .map_err(SyncError::persist)?;
+            if deferred {
+                tx.execute(
+                    "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq,recorded_at_ms) \
+                     SELECT workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq,1000 FROM ydoc_base_relay_candidates",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute("DELETE FROM ydoc_base_relay_candidates", [])
+                    .map_err(SyncError::persist)?;
+                tx.execute("UPDATE ydoc_docs SET base_relay_confirmed_absent=1", [])
+                    .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE replication_log SET payload_json=json_set(payload_json,'$.isBaseState',json('false')) WHERE origin_id='peer'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    if queued {
+        let mut op = relay.pages[&0].ops[0].clone();
+        op.origin_id = "queued".into();
+        op.payload = json!({"objectId": "zz-touched"});
+        let identity = crate::read_sync_identity(&store, "ws").unwrap().unwrap();
+        crate::deferred::retain(&mut store, &identity, None, &[&op], &NoFaults).unwrap();
+    } else {
+        relay = touching(relay, "zz-touched");
+    }
+    let client = RelaySyncClient::new(relay);
+    let page = client.fetch_pull(&mut store, "ws", &NoFaults).unwrap();
+    assert_eq!(page.repairs.decisions.len(), 1);
+    assert!(matches!(
+        page.repairs.decisions[0].1,
+        BaseRepairDecision::Unchanged
+    ));
+    apply(&mut store, &page);
+}

@@ -1717,7 +1717,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ));
                     }
                     deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
-                } else if matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                } else if matches!(&phase, BaseRepairPhase::Fetch(_))
+                    && touched.contains(&repair.object_id)
+                {
                     prepared_deferred.push((
                         deferred_repair_signature(local_pushed_seq, &repair),
                         BaseRepairDecision::Unchanged,
@@ -1798,7 +1800,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     if relay_seq.is_none()
                         && candidates.iter().any(|(_, _, unresolved)| *unresolved)
                     {
-                        if !answers.keep(signature, BaseRepairDecision::Unchanged) {
+                        if touched.contains(&chosen.key.object_id)
+                            && !answers.keep(signature, BaseRepairDecision::Unchanged)
+                        {
                             return Ok(());
                         }
                         continue;
