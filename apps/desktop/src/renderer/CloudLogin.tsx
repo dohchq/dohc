@@ -65,6 +65,11 @@ export function CloudLogin(props: {
   // The shell's dialog uses it to hand an existing session to Settings, where
   // its account row and sync switch live.
   handOffSession?: boolean;
+  // Sign in again to the server of the session already here, for a session
+  // the server stopped accepting. The first check starts the same sign-in as
+  // Connect server, with no Disconnect first, and its approval replaces the
+  // session. Ahead of handOffSession.
+  renew?: boolean;
   // Nested inside another elevated card (join/open-shared/handoff signed-out
   // gates): drop this panel's own frame so cards never stack elevation, drop
   // the dohc Drive note, and leave focus to the host.
@@ -160,6 +165,10 @@ export function CloudLogin(props: {
       .cloudStatus()
       .then((status) => {
         if (!sessionRef.isCurrent(session)) return;
+        if (props.renew && status.connected && status.serverUrl) {
+          void connect(status.serverUrl);
+          return;
+        }
         applyStatus(status);
         if (announceSession && status.connected) props.onConnected?.();
       })
