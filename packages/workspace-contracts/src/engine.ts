@@ -281,6 +281,17 @@ type VersionedTextConflictResolution =
   | "kept-current";
 type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
+/**
+ * A newer version of a conflict's file that another computer saved. dohc
+ * holds it until the conflict is resolved.
+ */
+interface VersionedTextConflictWaitingVersion {
+  code: "resolve-existing-conflict";
+  objectId: string;
+  originId: string;
+  originSeq: number;
+}
+
 export interface VersionedTextConflictRecord {
   id: VersionedTextConflictId;
   workspaceId: WorkspaceId;
@@ -296,6 +307,8 @@ export interface VersionedTextConflictRecord {
   chosenFrom: VersionedTextConflictChoice;
   metadata: ActorNeutralWriteMetadata;
   resolution?: VersionedTextConflictResolution;
+  /** Read from conflict listings; `null` elsewhere. */
+  waitingVersion: VersionedTextConflictWaitingVersion | null;
 }
 
 type VersionedTextMergeResult =

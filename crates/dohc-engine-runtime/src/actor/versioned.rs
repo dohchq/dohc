@@ -14,13 +14,14 @@ use crate::search::{delete_file_search_index, upsert_file_search_index};
 use dohc_engine_collab::{DocKey, LeaseRegistry, WriterDocCache};
 use dohc_engine_domain::{
     BinaryHead, BinaryWriteResult, CompareTextFileVersions, DeleteResult, DeleteTextFile,
-    DomainError, InbandBinary, InbandText, MergeTextFileFromVersion, MergeTextFileResult,
-    RenameResult, RenameTextFile, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, TextConflict, TextSnapshot, VersionedTextComparison,
-    VersionedTextStore, WriteBinary, WriteResult, WriteText, binary_delete_job_id,
-    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
-    binary_write_job_id, enqueue_binary_delete, enqueue_binary_rename,
-    insert_text_conflict_if_absent, rollback_compensating_moment_id, write_text_in_tx,
+    DomainError, InbandBinary, InbandText, ListedTextConflict, MergeTextFileFromVersion,
+    MergeTextFileResult, RenameResult, RenameTextFile, ResolveTextConflict,
+    ResolveTextConflictResult, RollbackTextFileMutation, TextConflict, TextSnapshot,
+    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
+    binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
+    binary_rollback_job_identity, binary_write_job_id, enqueue_binary_delete,
+    enqueue_binary_rename, insert_text_conflict_if_absent, rollback_compensating_moment_id,
+    write_text_in_tx,
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
@@ -679,19 +680,28 @@ impl ActorHandle {
         status: Option<String>,
         after_conflict_id: Option<String>,
         token: CancellationToken,
-    ) -> Result<Vec<TextConflict>, RuntimeError> {
+    ) -> Result<Vec<ListedTextConflict>, RuntimeError> {
         self.run(move |store, _| {
             if token.is_cancelled() {
-                Err(RuntimeError::Cancelled)
-            } else {
-                VersionedTextStore::new(store)
-                    .list_text_conflicts_page(
-                        &workspace_id,
-                        status.as_deref(),
-                        after_conflict_id.as_deref(),
-                    )
-                    .map_err(RuntimeError::from)
+                return Err(RuntimeError::Cancelled);
             }
+            let conflicts = VersionedTextStore::new(store).list_text_conflicts_page(
+                &workspace_id,
+                status.as_deref(),
+                after_conflict_id.as_deref(),
+            )?;
+            let ids: Vec<&str> = conflicts
+                .iter()
+                .map(|conflict| conflict.conflict_id.as_str())
+                .collect();
+            let mut waiting = dohc_engine_sync::waiting_versions(store, &workspace_id, &ids)?;
+            Ok(conflicts
+                .into_iter()
+                .map(|conflict| ListedTextConflict {
+                    waiting_version: waiting.remove(&conflict.conflict_id),
+                    conflict,
+                })
+                .collect())
         })
         .await
     }

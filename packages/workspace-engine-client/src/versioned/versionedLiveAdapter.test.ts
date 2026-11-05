@@ -728,6 +728,47 @@ describe("VersionedLiveAdapter", () => {
     ]);
   });
 
+  it("passes a listed conflict's waiting version through and refuses a malformed one", async () => {
+    const waitingVersion = {
+      code: "resolve-existing-conflict",
+      objectId: "object",
+      originId: "computer-d",
+      originSeq: 4,
+    } as const;
+    let answer: unknown = {
+      conflicts: [{ ...conflict, waitingVersion }],
+      nextAfterConflictId: null,
+    };
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        return { id: request.id, result: answer as never };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+    const list = () =>
+      adapter.listTextConflicts({ workspaceId: WORKSPACE, bodies: "withheld" });
+
+    await expect(list()).resolves.toMatchObject({
+      conflicts: [{ id: conflict.id, waitingVersion }],
+    });
+    for (const malformed of [
+      { ...waitingVersion, code: "conflict-wait-limit" },
+      { ...waitingVersion, originSeq: -1 },
+      { ...waitingVersion, originSeq: 1.5 },
+      { ...waitingVersion, originId: "" },
+      { ...waitingVersion, path: "a.md" },
+    ]) {
+      answer = {
+        conflicts: [{ ...conflict, waitingVersion: malformed }],
+        nextAfterConflictId: null,
+      };
+      await expect(list()).rejects.toThrow();
+    }
+  });
+
   it("maps one versions.compareFiles page onto the store's entry page", async () => {
     const requests: Request[] = [];
     const client: MinimalDaemonClient = {

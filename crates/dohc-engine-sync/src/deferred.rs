@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use dohc_engine_domain::WaitingVersion;
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -218,6 +219,93 @@ pub(crate) fn retained_namespace(
             .optional()
         })
         .map_err(local)
+}
+
+/// The stable code of a version that waits behind its conflict.
+pub const WAITING_VERSION_CODE: &str = crate::moment_apply::RESOLVE_EXISTING_CONFLICT;
+
+/// The newer version that waits behind each of `conflict_ids` still open
+/// from sync, by conflict id. Only an origin's first retained op still to
+/// apply can wait on a conflict, because the rest of that origin waits
+/// behind it. So this reads one index entry per retained op and decodes one
+/// envelope per held origin. A hosted replica reads none here: its journal,
+/// not an origin's acknowledgement, says what applied.
+pub fn waiting_versions(
+    store: &EngineStore,
+    workspace: &str,
+    conflict_ids: &[&str],
+) -> Result<BTreeMap<String, WaitingVersion>, SyncError> {
+    store.read_with(|conn| {
+        let mut waiting = BTreeMap::new();
+        if conflict_ids.is_empty() || crate::hosted::is_hosted(conn, workspace)? {
+            return Ok(waiting);
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT target_version_id,incoming_object_id,incoming_latest_moment_id FROM conflicts \
+                 WHERE workspace_id=?1 AND conflict_id=?2 AND status='open' AND metadata_origin='sync' \
+                   AND incoming_object_id IS NOT NULL",
+            )
+            .map_err(SyncError::corrupt)?;
+        let mut open = Vec::new();
+        for id in conflict_ids {
+            let row: Option<(String, String, Option<String>)> = stmt
+                .query_row(params![workspace, id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .optional()
+                .map_err(SyncError::corrupt)?;
+            open.extend(row.map(|row| (*id, row)));
+        }
+        if open.is_empty() {
+            return Ok(waiting);
+        }
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT d.origin_id,MIN(d.origin_seq) FROM relay_deferred_ops d
+                 WHERE d.workspace_id=?1 AND {UNAPPLIED} GROUP BY d.origin_id"
+            ))
+            .map_err(SyncError::corrupt)?;
+        let heads = stmt
+            .query_map([workspace], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT envelope_json FROM relay_deferred_ops
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            )
+            .map_err(SyncError::corrupt)?;
+        for (origin, seq) in heads {
+            let encoded: String = stmt
+                .query_row(params![workspace, origin, seq], |r| r.get(0))
+                .map_err(SyncError::corrupt)?;
+            let op: ReplicationEnvelope =
+                serde_json::from_str(&encoded).map_err(SyncError::corrupt)?;
+            if op.op_kind != "moment.append" {
+                continue;
+            }
+            let field = |name: &str| op.payload[name].as_str();
+            let (Some(object), Some(version)) = (field("objectId"), field("versionId")) else {
+                continue;
+            };
+            let before = field("beforeLatestMomentId");
+            // The open-conflict hold in moment_apply.rs (RESOLVE_EXISTING_CONFLICT):
+            // the same object and version, on another branch than the
+            // conflict's incoming side.
+            for (id, (target, incoming, incoming_latest)) in &open {
+                if target == version && incoming == object && incoming_latest.as_deref() != before {
+                    waiting.entry((*id).to_owned()).or_insert_with(|| WaitingVersion {
+                        object_id: object.to_owned(),
+                        origin_id: op.origin_id.clone(),
+                        origin_seq: op.origin_seq,
+                    });
+                }
+            }
+        }
+        Ok(waiting)
+    })
 }
 
 pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool, RelayError> {

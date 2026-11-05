@@ -24,6 +24,7 @@ use dohc_engine_domain::ConflictFileState;
 use dohc_engine_domain::ConflictMetadata;
 use dohc_engine_domain::ConflictResolution;
 use dohc_engine_domain::ConflictStatus;
+use dohc_engine_domain::ListedTextConflict;
 use dohc_engine_domain::MomentRecord;
 use dohc_engine_domain::ResolveConflictKind;
 use dohc_engine_domain::ResolveTextConflict;
@@ -439,6 +440,24 @@ fn conflict_json(conflict: &TextConflict, body: TextBody) -> Value {
     })
 }
 
+/// A listing's row: the conflict, and the newer version another computer
+/// saved that waits behind it, or null.
+fn listed_conflict_json(listed: &ListedTextConflict, body: TextBody) -> Value {
+    let mut row = conflict_json(&listed.conflict, body);
+    row["waitingVersion"] = listed
+        .waiting_version
+        .as_ref()
+        .map_or(Value::Null, |waiting| {
+            json!({
+                "code": dohc_engine_sync::WAITING_VERSION_CODE,
+                "objectId": waiting.object_id,
+                "originId": waiting.origin_id,
+                "originSeq": waiting.origin_seq,
+            })
+        });
+    row
+}
+
 fn conflict_state_json(state: &ConflictFileState, body: TextBody) -> Value {
     json!({
         "path": state.path,
@@ -542,7 +561,7 @@ impl EngineService {
         let candidates = conflicts.len().min(CONFLICTS_RESPONSE_ROW_LIMIT);
         let mut rows: Vec<Value> = conflicts[..candidates]
             .iter()
-            .map(|conflict| conflict_json(conflict, TextBody::Full))
+            .map(|conflict| listed_conflict_json(conflict, TextBody::Full))
             .collect();
         // A row past the hard cap can never ship in band, and refusing it
         // would refuse its healthy neighbors and dead-end the cursor: an
@@ -559,7 +578,7 @@ impl EngineService {
                 // near `CONFLICT_METADATA_BUDGET_BYTES` their sum still
                 // carries the row past the cap. With every body withheld,
                 // what remains is bounded at open, so the row fits.
-                *row = conflict_json(conflict, TextBody::Withheld);
+                *row = listed_conflict_json(conflict, TextBody::Withheld);
             }
         }
         let included = byte_budget_cut_serialized_with_row_cap(
@@ -592,7 +611,7 @@ impl EngineService {
             .then(|| {
                 conflicts[..included]
                     .last()
-                    .map(|conflict| conflict.conflict_id.clone())
+                    .map(|listed| listed.conflict.conflict_id.clone())
             })
             .flatten();
         let page_json = |rows: &[Value]| {
@@ -620,7 +639,7 @@ impl EngineService {
         if response_encoded_bytes(id, &page) > RESPONSE_FRAME_BYTES {
             let withheld: Vec<Value> = conflicts[..included]
                 .iter()
-                .map(|conflict| conflict_json(conflict, TextBody::Withheld))
+                .map(|conflict| listed_conflict_json(conflict, TextBody::Withheld))
                 .collect();
             page = page_json(&withheld);
             let observed = response_encoded_bytes(id, &page);

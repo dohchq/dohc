@@ -382,6 +382,23 @@ pub struct TextConflict {
     pub incoming: ConflictFileState,
 }
 
+/// A newer version of a conflict's file that another computer saved, held
+/// until the person resolves the conflict. A listing derives it when it
+/// reads; nothing stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingVersion {
+    pub object_id: String,
+    pub origin_id: String,
+    pub origin_seq: i64,
+}
+
+/// One row of a conflict listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedTextConflict {
+    pub conflict: TextConflict,
+    pub waiting_version: Option<WaitingVersion>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConflictRowUpdate {
     pub status: ConflictStatus,

@@ -1325,6 +1325,15 @@ const versionConflictsPage = {
     currentBinary: conflictBinarySchema.optional(),
     incomingBinary: conflictBinarySchema.optional(),
     baseBinary: conflictBinarySchema.optional(),
+    // Another computer saved a newer version, which dohc holds until this
+    // conflict is resolved. The rest are technical details.
+    waiting: z.object({
+      code: z.literal("resolve-existing-conflict"),
+      message: z.string().min(1),
+      objectId: z.string().min(1),
+      originId: z.string().min(1),
+      originSeq: z.number().int().nonnegative(),
+    }).strict().optional(),
   }).strict()),
   nextAfterConflictId: z.string().min(1).nullable(),
 };

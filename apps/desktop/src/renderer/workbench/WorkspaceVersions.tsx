@@ -3,7 +3,7 @@ import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
 import { isMergeStoppedPartway, isWorkspaceUpdatingError, isConflictStaleTarget, readError, versionNameRefusal } from "../../ipc/errorWords";
 import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../workspaces/syncedDeletionRefusal";
-import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
+import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Hourglass, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -35,6 +35,7 @@ import { errorDetails } from "../shell/copyDetails";
 import { SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
+import { createActivityCoalescer } from "../workspaceActivityCoalescer";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
   applyCombinedChange,
@@ -1549,6 +1550,15 @@ function ConflictResolver(props: {
       </button>
       {expanded ? (
         <div className="pt-2">
+          {conflict.origin === "sync" && conflict.waitingVersion ? (
+            <p
+              data-testid="version-conflict-waiting"
+              className="mb-2 mt-0 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
+            >
+              <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+              A newer version from another machine is waiting. It comes in after you resolve this conflict.
+            </p>
+          ) : null}
           {isBinary ? (
             <div
               data-testid="version-conflict-binary"
@@ -2113,12 +2123,16 @@ export function ConflictReviewDialog(props: {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const liveToken = useRequestSequence();
   // Same rule as the merge dialog: a "Show more" answer may only append to
-  // the window that asked, and every window replacement (the initial load,
-  // each resolution's remaining page) advances this.
+  // the window that asked, and every window change (the initial load, each
+  // resolution's remaining page, each reread, each append) advances this.
   const windowGeneration = useRef(0);
+  // The window a "Show more" in flight belongs to. A reread of that window
+  // waits for it, so neither answer discards the other. A page that a
+  // resolution abandoned holds nothing up.
+  const pageWindow = useRef<number | null>(null);
 
   useEffect(() => {
-    const token = liveToken.current();
+    const token = liveToken.next();
     void (async () => {
       try {
         const [result, versions] = await Promise.all([
@@ -2166,24 +2180,92 @@ export function ConflictReviewDialog(props: {
     if (state.status !== "ready" || state.nextAfterConflictId === null) return;
     const token = liveToken.current();
     const generation = windowGeneration.current;
-    const page = await bridge().listWorkspaceVersionConflicts({
-      workspaceId,
-      afterConflictId: state.nextAfterConflictId,
-    });
-    if (!liveToken.isCurrent(token)) return;
-    // A resolution replaced the window while this page was in flight; its
-    // rows belong to the window that asked, not the one that remains.
-    if (generation !== windowGeneration.current) return;
-    setState((current) =>
-      current.status === "ready"
-        ? {
-            ...current,
-            conflicts: [...current.conflicts, ...page.conflicts],
-            nextAfterConflictId: page.nextAfterConflictId,
-          }
-        : current,
-    );
+    pageWindow.current = generation;
+    try {
+      const page = await bridge().listWorkspaceVersionConflicts({
+        workspaceId,
+        afterConflictId: state.nextAfterConflictId,
+      });
+      if (!liveToken.isCurrent(token)) return;
+      // A resolution replaced the window while this page was in flight; its
+      // rows belong to the window that asked, not the one that remains.
+      if (generation !== windowGeneration.current) return;
+      windowGeneration.current += 1;
+      setState((current) =>
+        current.status === "ready"
+          ? {
+              ...current,
+              conflicts: [...current.conflicts, ...page.conflicts],
+              nextAfterConflictId: page.nextAfterConflictId,
+            }
+          : current,
+      );
+    } finally {
+      if (pageWindow.current === generation) pageWindow.current = null;
+    }
   }, [state, workspaceId]);
+
+  // A sync pass can hold a newer version behind a conflict on screen. Each
+  // pass signals without paths, so read the loaded window again then. Keys
+  // stay the conflict ids, so the open card and its combined copy survive.
+  // A signal during the first load or a Show more, or a window that changes
+  // during the reread, reads again once the window settles.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  useEffect(() => {
+    const refresh = createActivityCoalescer(() => {
+      const shown = stateRef.current;
+      if (shown.status === "loading" || pageWindow.current === windowGeneration.current) {
+        refresh.schedule();
+        return;
+      }
+      if (shown.status !== "ready") return;
+      const token = liveToken.current();
+      const generation = windowGeneration.current;
+      void (async () => {
+        const rows: WorkspaceVersionConflict[] = [];
+        let after: string | null = null;
+        try {
+          do {
+            const page = await bridge().listWorkspaceVersionConflicts({
+              workspaceId,
+              ...(after === null ? {} : { afterConflictId: after }),
+            });
+            if (!liveToken.isCurrent(token)) return;
+            if (generation !== windowGeneration.current) {
+              refresh.schedule();
+              return;
+            }
+            rows.push(...page.conflicts);
+            after = page.nextAfterConflictId;
+          } while (after !== null && rows.length < shown.conflicts.length);
+        } catch {
+          // The window on screen stays; the next change reads it again.
+          return;
+        }
+        if (pageWindow.current === windowGeneration.current) {
+          refresh.schedule();
+          return;
+        }
+        windowGeneration.current += 1;
+        const nextAfterConflictId = after;
+        setState((current) =>
+          current.status === "ready"
+            ? { ...current, conflicts: rows, nextAfterConflictId }
+            : current,
+        );
+      })();
+    });
+    const unsubscribe = bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+      if (event.paths?.length) return;
+      refresh.schedule();
+    });
+    return () => {
+      refresh.cancel();
+      unsubscribe();
+    };
+  }, [workspaceId]);
 
   const conflicts = state.status === "ready" ? state.conflicts : [];
   const hasMoreConflicts =

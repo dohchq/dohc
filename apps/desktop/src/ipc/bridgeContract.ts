@@ -3022,6 +3022,19 @@ export const WorkspaceVersionConflict = z.object({
     .object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1).max(128) })
     .nullable()
     .optional(),
+  // A newer version another computer saved, held until this conflict is
+  // resolved. Identifiers are bounded as the engine bounds them. Absent
+  // reads as none.
+  waitingVersion: z
+    .object({
+      code: z.literal("resolve-existing-conflict"),
+      objectId: z.string().min(1).max(512),
+      originId: z.string().min(1).max(512),
+      originSeq: z.number().int().nonnegative(),
+    })
+    .strict()
+    .nullable()
+    .default(null),
 });
 export type WorkspaceVersionConflict = z.infer<typeof WorkspaceVersionConflict>;
 

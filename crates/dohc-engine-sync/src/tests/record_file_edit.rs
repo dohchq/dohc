@@ -1170,6 +1170,7 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
     let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
     pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
     assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&flown))]);
+    assert!(waiting(&b).is_empty(), "nothing waits before a hold");
 
     // D's file comes from another branch. More unrelated work than one pass
     // fetches arrives behind it, over two pulls.
@@ -1211,6 +1212,12 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
         "D's file waits"
     );
     assert_eq!(retained(&b), 1);
+    let held = vec![(
+        RECORD.to_owned(),
+        "device-d".to_owned(),
+        splashed_op.origin_seq,
+    )];
+    assert_eq!(waiting(&b), held, "the conflict shows D's file waiting");
 
     pull(&mut b, 3 + limit, &reactions[limit as usize - 1..], &[]);
     assert_eq!(cursor(&b), 5 + limit);
@@ -1218,8 +1225,13 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
     assert!(ack(&b, "device-d") < splashed_op.origin_seq);
     assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&flown))]);
     assert_eq!(head_text(&b, RECORD), Some(draft.clone()));
+    assert_eq!(waiting(&b), held, "unrelated work leaves it waiting");
+    drop(b);
+    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    assert_eq!(waiting(&b), held, "it still waits after a restart");
 
     resolve(&mut b, ResolveConflictKind::KeepCurrent);
+    assert!(waiting(&b).is_empty(), "a resolved conflict holds nothing");
     drop(b);
     let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
     pull(&mut b, 5 + limit, &[], &[]);
@@ -1240,6 +1252,10 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
         open_conflicts(&b),
         vec![(sha(&draft), sha(&splashed))],
         "D's file meets the resolved head"
+    );
+    assert!(
+        waiting(&b).is_empty(),
+        "the fresh conflict inherits nothing"
     );
     assert_eq!(cursor(&b), 5 + limit);
 }
@@ -1796,4 +1812,220 @@ fn a_resolution_retires_a_bare_lineage_whatever_an_earlier_lineage_journaled() {
     })
     .expect("a bare lineage retires");
     assert_eq!(lineage_rows(&b), 0);
+}
+
+/// Each open conflict's waiting version, as object, origin and sequence, in
+/// the order the conflicts opened.
+fn waiting(b: &EngineStore) -> Vec<(String, String, i64)> {
+    let ids: Vec<String> = b
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT conflict_id FROM conflicts WHERE workspace_id='ws' AND status='open' \
+                 ORDER BY created_at_ms,conflict_id",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect()
+        })
+        .expect("open conflict ids");
+    let ids = ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut found = crate::waiting_versions(b, "ws", &ids).expect("waiting versions");
+    ids.iter()
+        .filter_map(|id| found.remove(*id))
+        .map(|held| (held.object_id, held.origin_id, held.origin_seq))
+        .collect()
+}
+
+/// B holds an open conflict between its typing and A's Flown file. A and D
+/// hold the record as A created it.
+fn b_holds_a_conflict() -> (Vec<ScratchDir>, EngineStore, EngineStore, EngineStore) {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (d_scratch, mut d) = device("device-d");
+    hydrate(&mut d, &[SCHEMA, &planned]);
+    for op in &created {
+        deliver(&mut d, op, &NoLiveLeases).expect("D pulls A's record");
+    }
+    let (b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    b_opens(&mut b, &richdoc(&planned), &planned, &[NOTES]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
+    assert_eq!(open_conflicts(&b).len(), 1);
+    (vec![a_scratch, b_scratch, d_scratch], a, b, d)
+}
+
+/// `op` as the save at `seq` from a computer named `origin`.
+fn from_origin(op: &ReplicationEnvelope, origin: &str, seq: i64) -> ReplicationEnvelope {
+    let mut op = op.clone();
+    op.origin_id = origin.into();
+    op.origin_seq = seq;
+    op
+}
+
+/// B retains `ops` unapplied, as a pull does with work held behind them.
+fn b_retains(b: &mut EngineStore, ops: &[ReplicationEnvelope], texts: &[&str]) {
+    hydrate(b, texts);
+    let identity = read_sync_identity(b, "ws")
+        .expect("identity")
+        .expect("B has an identity");
+    let ops = ops.iter().collect::<Vec<_>>();
+    crate::deferred::retain(b, &identity, None, &ops, &NoFaults).expect("retain");
+}
+
+/// A save that continues the conflict's incoming side updates the conflict,
+/// so it never waits behind it. A save from another branch does.
+#[test]
+fn a_continuation_of_the_incoming_side_is_not_a_waiting_version() {
+    let (_scratch, mut a, mut b, mut d) = b_holds_a_conflict();
+    let landed = format!("{}\nLanded.\n", md(FLOWN));
+    let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
+    b_retains(
+        &mut b,
+        &[from_origin(&landed_op, "device-f", 0)],
+        &[&landed],
+    );
+    assert!(
+        waiting(&b).is_empty(),
+        "A's next edit continues the conflict"
+    );
+
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    b_retains(
+        &mut b,
+        &[from_origin(&splashed_op, "device-g", 0)],
+        &[&splashed],
+    );
+    assert_eq!(
+        waiting(&b),
+        vec![(RECORD.to_owned(), "device-g".to_owned(), 0)]
+    );
+}
+
+/// Retained saves of another file, or of the same file on another version,
+/// never wait behind the conflict.
+#[test]
+fn saves_of_another_file_or_version_are_not_waiting_versions() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let gemini_op = a_saves(&mut d, "gemini", GEMINI_PATH, GEMINI, "gemini-saved", 45);
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let mut elsewhere = from_origin(&splashed_op, "device-g", 0);
+    elsewhere.payload["versionId"] = json!("draft");
+    b_retains(
+        &mut b,
+        &[from_origin(&gemini_op, "device-f", 0), elsewhere],
+        &[GEMINI, &splashed],
+    );
+    assert!(waiting(&b).is_empty());
+}
+
+/// Only an origin's first retained save can wait behind a conflict. A save
+/// for the conflict's file behind other retained work waits on that work.
+#[test]
+fn only_the_first_retained_save_of_an_origin_is_a_waiting_version() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let gemini_op = a_saves(&mut d, "gemini", GEMINI_PATH, GEMINI, "gemini-saved", 45);
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let crewed = format!("{splashed}\nCrew home.\n");
+    let crewed_op = a_saves(&mut d, RECORD, RECORD_PATH, &crewed, "apollo-crewed", 60);
+    b_retains(
+        &mut b,
+        &[
+            from_origin(&gemini_op, "device-f", 0),
+            from_origin(&splashed_op, "device-f", 1),
+        ],
+        &[GEMINI, &splashed],
+    );
+    assert!(waiting(&b).is_empty(), "D's save waits on Gemini");
+
+    b_retains(
+        &mut b,
+        &[
+            from_origin(&splashed_op, "device-g", 0),
+            from_origin(&crewed_op, "device-g", 1),
+        ],
+        &[&splashed, &crewed],
+    );
+    assert_eq!(
+        waiting(&b),
+        vec![(RECORD.to_owned(), "device-g".to_owned(), 0)],
+        "the first held save is the one waiting"
+    );
+}
+
+/// A retained row its origin already applied waits for nothing.
+#[test]
+fn an_applied_retained_save_is_not_a_waiting_version() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    b_retains(
+        &mut b,
+        &[from_origin(&splashed_op, "device-f", 0)],
+        &[&splashed],
+    );
+    assert_eq!(waiting(&b).len(), 1);
+    b.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO replication_peers(workspace_id,origin_id,acked_seq) \
+             VALUES('ws','device-f',0) \
+             ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=0",
+            [],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    })
+    .expect("device-f applied");
+    assert!(waiting(&b).is_empty());
+}
+
+/// A move from another branch waits too. The waiting version names no path,
+/// so a listing words it with the conflict's own path.
+#[test]
+fn a_move_from_another_branch_waits_under_the_conflicts_path() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let moved = a_moves_apollo(&mut d);
+    pull(&mut b, 3, std::slice::from_ref(&moved), &[]);
+    assert!(read_replication_acked_seq(&b, "ws", "device-d").expect("ack") < moved.origin_seq);
+    assert_eq!(
+        waiting(&b),
+        vec![(RECORD.to_owned(), "device-d".to_owned(), moved.origin_seq)]
+    );
+    assert_eq!(
+        count(
+            &b,
+            "SELECT COUNT(*) FROM conflicts WHERE status='open' AND path='missions/apollo.md'"
+        ),
+        1
+    );
 }

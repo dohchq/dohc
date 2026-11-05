@@ -22,7 +22,7 @@ const snapshot: Awaited<ReturnType<Operations["listVersions"]>> = {
 };
 const conflict: VersionedTextConflictRecord = {
   id: "conflict", workspaceId, path: "notes.md", targetVersionId: "main", sourceVersionId: versionId,
-  createdAtMs: 1, updatedAtMs: 2, status: "open", chosenFrom: "current", metadata: { origin: "sync" },
+  createdAtMs: 1, updatedAtMs: 2, status: "open", chosenFrom: "current", metadata: { origin: "sync" }, waitingVersion: null,
   base: { exists: false, path: "notes.md" },
   current: { exists: true, path: "notes.md", text: "current" },
   incoming: { exists: true, path: "notes.md", contentKind: "binary", sha256: "b".repeat(64), byteLength: 4 },

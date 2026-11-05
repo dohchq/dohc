@@ -454,9 +454,11 @@ function momentSummaryFromWire(
 }
 
 function conflictFromWire(conflict: ConflictRecord): VersionedTextConflictRecord {
-  const { resolution, ...record } = conflict;
+  const { resolution, waitingVersion, ...record } = conflict;
   return {
     ...record,
+    // An older engine and a resolve answer send none.
+    waitingVersion: waitingVersion ?? null,
     base: conflictStateFromWire(conflict.base),
     current: conflictStateFromWire(conflict.current),
     incoming: conflictStateFromWire(conflict.incoming),

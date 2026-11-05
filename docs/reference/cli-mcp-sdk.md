@@ -188,13 +188,13 @@ Returns `{ ok: true, version: { id, name }, files: { path, status, currentText?,
 
 ### `dohc_list_version_conflicts`
 
-Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
+Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.
 
 A shared view keeps no versions of its own, so it does not offer this tool.
 
 - `afterConflictId`: `string`
 
-Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_create_version`
 
@@ -224,7 +224,7 @@ Changes the workspace, so a shared view does not offer it.
 
 - `version`: `string`. Required.
 
-Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_resolve_version_conflict`
 
@@ -235,7 +235,7 @@ Changes the workspace, so a shared view does not offer it.
 - `conflictId`: `string`. Required.
 - `resolution`: `{ keep: "current" | "incoming" } | { keep: "combined", text: string }`. Required.
 
-Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId } | { ok: false, reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_changes`
 
@@ -1877,7 +1877,7 @@ With --json, print each conflict's sides.
 
 - `--after <conflict>`: Continue after this conflict ID from the previous page.
 
-With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
 #### `dohc version create`
 
@@ -1911,7 +1911,7 @@ Merge a version into Main.
 
 Only versions made from Main can merge into Main. Prints the open conflicts the merge leaves.
 
-With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+With `--json`, prints `{ schemaVersion, ok: true, version: { id, name }, mergedFileCount, unchangedFileCount, conflictCount, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
 #### `dohc version resolve`
 
@@ -1926,7 +1926,7 @@ Use - to read the combined text from stdin. Give exactly one of --keep, --text o
 - `--keep <side>`: Keep current or incoming, as version conflicts names the sides.
 - `--text <text>`: Replace both sides with this combined text.
 
-With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary? }[], nextAfterConflictId }`.
+With `--json`, prints `{ schemaVersion, ok: true, conflicts: { conflictId, path, sourceVersionId, targetVersionId, origin, contentKind, currentText, incomingText, baseText, currentBinary?, incomingBinary?, baseBinary?, waiting? }[], nextAfterConflictId }`.
 
 ### `dohc automation`
 

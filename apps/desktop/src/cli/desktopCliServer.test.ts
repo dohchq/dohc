@@ -445,7 +445,7 @@ describe("desktop CLI workspace context", () => {
       const conflict = (id: string, path: string, incomingPath = path) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
         base: side(path, "base"), current: side(path, "mine"), incoming: side(incomingPath, "theirs"),
-        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const }, waitingVersion: null });
       // c3's incoming side sits at a path History does not track.
       f.capture.listOpenConflictsPage.mockResolvedValue({ conflicts: [conflict("c1", "notes.md"),
         conflict("c2", "private/journal.md"), conflict("c3", "moved.md", "private/moved.md")], nextAfterConflictId: null });
@@ -485,6 +485,23 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionConflicts")).toMatchObject({ ok: true, nextAfterConflictId: null,
         conflicts: [{ conflictId: "c1", path: "notes.md", currentText: "mine", incomingText: "theirs", baseText: "base" }] });
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("private/");
+      // A conflict nothing waits behind says nothing about waiting.
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waiting");
+      // A newer version held behind a conflict reads as one fact, worded with
+      // the conflict's own path. Its coordinates sit beside the message.
+      const waitingVersion = { code: "resolve-existing-conflict" as const, objectId: "notes-object", originId: "computer-d", originSeq: 4 };
+      const held = { conflicts: [{ ...conflict("c1", "notes.md", "moved/notes.md"), metadata: { origin: "sync" as const }, waitingVersion }],
+        nextAfterConflictId: null };
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect(await mcp("versionConflicts")).toMatchObject({ ok: true, conflicts: [{ conflictId: "c1", origin: "sync", waiting: {
+        code: "resolve-existing-conflict",
+        message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
+        objectId: "notes-object", originId: "computer-d", originSeq: 4 } }] });
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waitingVersion");
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect((await cli("version", "conflicts")).stdout).toBe(
+        "c1 · sync · notes.md\n  A newer version from another machine is waiting. It comes in after you resolve this conflict.\n");
       f.capture.listOpenConflictsPage.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
       expect(await mcp("versionConflicts")).toEqual({ ok: true, conflicts: [], nextAfterConflictId: null });
 
@@ -531,7 +548,7 @@ describe("desktop CLI workspace context", () => {
       const conflict = (id: string, path: string, side: typeof text | typeof binary = text) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
         base: side(path, "base"), current: side(path, "mine"), incoming: side(path, "theirs"),
-        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const }, waitingVersion: null });
       const open = { conflicts: [conflict("c1", "notes.md"), conflict("c2", "logo.png", binary), conflict("c3", "private/journal.md")],
         nextAfterConflictId: null };
       f.capture.listOpenConflictsPage.mockResolvedValue(open);

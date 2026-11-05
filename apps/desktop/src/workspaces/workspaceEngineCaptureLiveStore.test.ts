@@ -1031,6 +1031,37 @@ describe("createCaptureLiveStores", () => {
     }
   });
 
+  it("carries a listed conflict's waiting version, and null when the engine sends none", async () => {
+    const waitingVersion = {
+      code: "resolve-existing-conflict" as const,
+      objectId: "object",
+      originId: "computer-d",
+      originSeq: 2,
+    };
+    const client = clientFor(async (request) => ({
+      id: request.id,
+      result: {
+        conflicts: [
+          { ...conflict(), id: "waiting", waitingVersion },
+          { ...conflict(), id: "none", waitingVersion: null },
+          { ...conflict(), id: "older-engine" },
+        ],
+        nextAfterConflictId: null,
+      },
+    }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const result = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
+    expect(result.conflicts.map(({ id, waitingVersion }) => [id, waitingVersion])).toEqual([
+      ["waiting", waitingVersion],
+      ["none", null],
+      ["older-engine", null],
+    ]);
+  });
+
   it("preserves nonempty binary conflict-side byte lengths", async () => {
     const binaryState = {
       path: "asset.bin",

@@ -208,7 +208,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     inputSchema: { version: z.string().min(1).max(200), afterPath: z.string().min(1).max(4096).optional() },
   }, async args => text(await compareVersion(ctx, args)));
   register("dohc_list_version_conflicts", {
-    description: "Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.",
+    description: "Read one page of open conflicts from merges and from sync, with each side's text. origin sync means two computers changed the file; waiting says another computer's newer version waits until that conflict is resolved. Files History does not track are left out. Continue with afterConflictId set to nextAfterConflictId until it is null. Owner workspace only.",
     inputSchema: { afterConflictId: z.string().min(1).max(200).optional() },
   }, async args => text(await listVersionConflicts(ctx, args)));
   register("dohc_create_version", {
