@@ -259,6 +259,18 @@ fn rename_and_move_keep_the_target() {
         7,
     );
     rename(&mut store, MAIN, "people/ada.md", "team/ada-lovelace.md", 8);
+    // The record's file gives its path before the Collection index catches up.
+    assert_eq!(
+        found(&store, &record),
+        (
+            WorkTarget::DocumentRecord {
+                version_id: MAIN.to_owned(),
+                record_id: RECORD.to_owned()
+            },
+            WorkTargetState::Live,
+            Some("team/ada-lovelace.md".to_owned())
+        )
+    );
     reconcile(&mut store);
 
     let (target, state, path) = found(&store, &file);
