@@ -776,9 +776,45 @@ describe("CloudSyncSettings", () => {
     expect(document.activeElement).toBe(syncSwitch());
   });
 
-  // A failed Try again keeps its buttons, so a confirmation that arrives
-  // later, after the person has moved on, leaves focus where it is.
-  it("doesn't move focus when the account is confirmed after a failed Try again", async () => {
+  // The account can be confirmed on its own, which takes the buttons away
+  // under a keyboard user.
+  it.each(["cloud-relink-workspace", "cloud-pause-sync"])(
+    "moves focus from %s to the switch when the account is confirmed on its own",
+    (testId) => {
+      const { rerender } = render(
+        <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSyncConnected: false })} />,
+      );
+      screen.getByTestId(testId).focus();
+
+      rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
+      expect(document.activeElement).toBe(syncSwitch());
+    },
+  );
+
+  // The switch stays disabled until Try again answers, so the move waits for it.
+  it("moves focus to the switch once Try again answers, when the account is confirmed while it runs", async () => {
+    const enable = deferred<void>();
+    bridgeMock.cloudEnableSync.mockReturnValueOnce(enable.promise);
+    const { rerender } = render(
+      <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSyncConnected: false })} />,
+    );
+    const again = screen.getByTestId("cloud-relink-workspace");
+    again.focus();
+    fireEvent.click(again);
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
+    expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      enable.resolve();
+    });
+    expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
+    expect(document.activeElement).toBe(syncSwitch());
+  });
+
+  // A failed Try again keeps its buttons. A confirmation that arrives later
+  // moves focus only while one of them still has it.
+  it("moves focus to the switch when the account is confirmed after a failed Try again", async () => {
     bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Sign in to the account that synced this workspace."));
     const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
     const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
@@ -788,11 +824,27 @@ describe("CloudSyncSettings", () => {
     fireEvent.click(again);
     await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
     await waitFor(() => expect(again.disabled).toBe(false));
-    again.blur();
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
+    expect(document.activeElement).toBe(syncSwitch());
+  });
+
+  it("leaves focus where the person moved it when the account is confirmed after a failed Try again", async () => {
+    bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Sign in to the account that synced this workspace."));
+    const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
+    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    const again = screen.getByTestId("cloud-relink-workspace") as HTMLButtonElement;
+    again.focus();
+    fireEvent.click(again);
+    await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
+    await waitFor(() => expect(again.disabled).toBe(false));
+    const disconnect = screen.getByTestId("cloud-disconnect");
+    disconnect.focus();
 
     rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
     expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(document.activeElement).toBe(document.body);
+    expect(document.activeElement).toBe(disconnect);
   });
 
   // Signing in again undoes Disconnect, and Connect server takes its place,

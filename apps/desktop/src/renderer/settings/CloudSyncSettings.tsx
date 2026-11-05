@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import { Sparkles, TriangleAlert } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
@@ -107,18 +107,28 @@ export function CloudSyncSettings(props: {
   // Sync is on, but nothing syncs. A switch can only read on or off, so the
   // row offers Try again and Pause sync in its place.
   const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
-  // Either action ends by taking its buttons away, so focus they held moves
-  // to the switch that takes their place, or to Connect server while signed
-  // out, where the switch can't turn on.
+  // The buttons go when either action works or the account is confirmed on
+  // its own. Focus they held moves to the switch that takes their place once
+  // it can be used, or to Connect server while signed out, where the switch
+  // can't turn on. Focus the person moved to another control stays there.
   const syncSwitch = useRef<HTMLButtonElement | null>(null);
   const connectButton = useRef<HTMLButtonElement | null>(null);
   const actionHeldFocus = useRef(false);
   useEffect(() => {
     if (unconfirmed || !actionHeldFocus.current) return;
+    const target = syncSwitch.current?.disabled === false ? syncSwitch.current : connectButton.current;
+    if (!target) return;
     actionHeldFocus.current = false;
-    if (document.activeElement !== document.body) return;
-    (syncSwitch.current?.disabled === false ? syncSwitch.current : connectButton.current)?.focus();
-  }, [unconfirmed]);
+    if (document.activeElement === document.body) target.focus();
+  }, [unconfirmed, syncBusy]);
+  const holdsFocus = {
+    onFocus: () => {
+      actionHeldFocus.current = true;
+    },
+    onBlur: (event: FocusEvent) => {
+      if (event.relatedTarget) actionHeldFocus.current = false;
+    },
+  };
   const relayUrl = status?.relayUrl?.trim() ?? "";
   // The join handle: one copyable line carrying the workspace id and its
   // relay. Absent when anything it needs is missing.
@@ -158,8 +168,6 @@ export function CloudSyncSettings(props: {
       }
       cloud.onChanged();
     } catch (cause) {
-      // The buttons stay, so a later confirmation doesn't move focus.
-      actionHeldFocus.current = false;
       const message = cause instanceof Error ? cause.message : String(cause);
       if (here() && /passphrase/i.test(message)) {
         setPassphrasePurpose(/unlock/i.test(message) ? "unlock" : "protect");
@@ -213,7 +221,6 @@ export function CloudSyncSettings(props: {
       }
       cloud.onChanged();
     } catch (cause) {
-      actionHeldFocus.current = false;
       cloud.onError({
         message: ipcErrorMessage(cause, "dohc could not pause sync for this workspace."),
         cause,
@@ -307,10 +314,8 @@ export function CloudSyncSettings(props: {
                   <SecondaryButton
                     data-testid="cloud-relink-workspace"
                     disabled={syncBusy !== null}
-                    onClick={() => {
-                      actionHeldFocus.current = true;
-                      void enableSync();
-                    }}
+                    {...holdsFocus}
+                    onClick={() => void enableSync()}
                   >
                     Try again
                   </SecondaryButton>
@@ -320,10 +325,8 @@ export function CloudSyncSettings(props: {
                 <SecondaryButton
                   data-testid="cloud-pause-sync"
                   disabled={syncBusy !== null}
-                  onClick={() => {
-                    actionHeldFocus.current = true;
-                    void stopSync();
-                  }}
+                  {...holdsFocus}
+                  onClick={() => void stopSync()}
                 >
                   Pause sync
                 </SecondaryButton>
