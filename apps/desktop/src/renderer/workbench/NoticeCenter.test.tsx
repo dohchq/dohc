@@ -857,11 +857,13 @@ describe("notice center", () => {
   });
 
   // Beside Try again, the words don't say it again. "Try again later." says
-  // more than the button, so it stays, and so do words with no button.
+  // more than the button, so it stays. So does a sentence that only ends in
+  // Try again, and words with no button.
   it("drops a closing Try again from words shown beside Try again, on the toast and the row", async () => {
     const user = userEvent.setup();
     const timedOut = "dohc could not refresh History. dohc did not answer in time. Try again.";
     const busy = "dohc could not join. Too many people are connected right now. Try again later.";
+    const choose = "dohc could not reach this server. Check the address, then choose Try again.";
     const error = (id: string, message: string, canRetry: boolean, seen: boolean) =>
       ({ id, message, details: `Error: ${message}`, atMs: 1_000, canRetry, seen });
     const shown = (element: HTMLElement) => element.textContent ?? "";
@@ -881,6 +883,7 @@ describe("notice center", () => {
       workspaceErrors: [
         error("retry", timedOut, true, true),
         error("later", busy, true, true),
+        error("choose", choose, true, true),
         error("no-retry", timedOut, false, true),
       ],
       onRetryWorkspaceError: vi.fn(),
@@ -893,6 +896,7 @@ describe("notice center", () => {
     expect(shown(retry)).not.toContain("Try again.");
     expect(within(retry).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(shown(screen.getByTestId("notice-later"))).toContain("Try again later.");
+    expect(shown(screen.getByTestId("notice-choose"))).toContain("Check the address, then choose Try again.");
     expect(shown(screen.getByTestId("notice-no-retry"))).toContain("dohc did not answer in time. Try again.");
   });
 

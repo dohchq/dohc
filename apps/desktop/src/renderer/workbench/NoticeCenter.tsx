@@ -560,11 +560,11 @@ function toneClass(tone: Notice["tone"]): string {
   return "text-subtle";
 }
 
-// Beside a Try again button, a message drops its own closing "Try again.",
+// Beside a Try again button, a message drops a closing "Try again." sentence,
 // so the notice says it once. A longer ending, such as "Try again later.",
-// says more than the button does, so it stays.
+// or a sentence that ends in it, such as "then choose Try again.", stays.
 function besideTryAgain(message: string): string {
-  return message.replace(/\s+Try again\.$/, "");
+  return message.replace(/([.!?])\s+Try again\.\s*$/, "$1");
 }
 
 // The toast for the newest workspace error, or the notice that something

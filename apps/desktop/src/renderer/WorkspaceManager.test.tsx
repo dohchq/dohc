@@ -797,13 +797,17 @@ describe("workspace manager with registered workspaces", () => {
     await user.click(await screen.findByRole("button", { name: "More for team" }));
     await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
     const toast = await screen.findByTestId("workspace-shell-error");
+    // Try again is the button, so the words don't say it again.
     expect(toast.textContent).toContain(
-      "dohc could not remove this workspace from the list. This workspace changed while this ran. Try again.",
+      "dohc could not remove this workspace from the list. This workspace changed while this ran.",
     );
+    expect(toast.textContent).not.toContain("Try again.");
     expect(screen.getAllByRole("alert")).toEqual([toast]);
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = screen.getByTestId("notice-center");
-    expect(within(notices).getAllByText(/dohc could not remove this workspace from the list\./)).toHaveLength(1);
+    expect(
+      within(notices).getAllByText("dohc could not remove this workspace from the list. This workspace changed while this ran."),
+    ).toHaveLength(1);
     expect(onForgot).not.toHaveBeenCalled();
 
     await user.click(within(notices).getByRole("button", { name: "Try again" }));
