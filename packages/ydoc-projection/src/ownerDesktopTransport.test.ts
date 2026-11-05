@@ -124,7 +124,8 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const dbPath = join(workspaceRoot,".dohc/engine/engine.db");
     const listeners = new Map<string,(payload: any) => void>();
     const sender = {id: 7,isDestroyed: () => false,send: (channel: string,payload: unknown) => listeners.get(channel)?.(payload),once() {return this;}};
-    ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: "workspace",generation: 1,isCurrent: () => true}),
+    ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: "workspace",attachmentId: workspace.attachmentId,generation: 1,isCurrent: () => true}),
+      authorities: {isCurrentAttachment: () => true},
       acquireWorkspace: () => ({workspace,assertCurrent() {},release() {}}),captureFor: () => capture,ensureCaptureFor: async () => undefined,
       isSharedView: () => false,resolveDocumentPath: async (_workspace,path) => path,localPersonId: () => "person-local",onError: (message,error) => {console.error(message,error);}});
     const openRenderer = async (sessionId: string) => {
