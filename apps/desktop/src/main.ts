@@ -2136,9 +2136,9 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
     await flushTypingCheckpoints(workspaceId);
     if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId))) return true;
     const answer = await showMessageBox({type: "warning", title: "Remove this workspace from the list?",
-      message: "This workspace has typing waiting to recover.", detail: "Removing it deletes its kept copies from dohc. The folder stays. This can't be undone.",
-      buttons: ["Go back", "Remove from list"], defaultId: 0, cancelId: 0});
-    return answer.response === 1;
+      message: "This workspace has typing waiting to recover.", detail: "Removing it deletes its kept copies from dohc. The folder stays. This cannot be undone.",
+      buttons: ["Remove from list", "Cancel"], defaultId: 1, cancelId: 1});
+    return answer.response === 0;
   },
   removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
   onError: (workspaceId, error) => console.warn(`[desktop] Could not remove recovery records for workspace "${workspaceId}":`, error),
