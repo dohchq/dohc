@@ -53,7 +53,7 @@ async function fixture(options: {vapid?: string | null; storage?: SyncRelayStora
       ...(token === null ? {} : {cookie: `session=${token}`}), ...init.headers}}));
   const post = (path: string, token: string | null, body: unknown, headers: Record<string, string> = {}) =>
     call(path, token, {method: "POST", body: JSON.stringify(body), headers: {"content-type": "application/json", ...headers}});
-  const status = (token: string | null, id = installation(1)) => call(`status?installationId=${id}`, token);
+  const status = (token: string | null, id = installation(1)) => post("status", token, {installationId: id});
   const subscribe = (token: string | null, changes: Record<string, unknown> = {}) => post("subscribe", token, {
     installationId: installation(1), vapidKeyId: VAPID_KEY_ID, endpoint: endpoint("one"), ...browserKeys, expiresAtMs: null, ...changes});
   const unsubscribe = (token: string | null, id = installation(1)) => post("unsubscribe", token, {installationId: id});
@@ -105,7 +105,7 @@ describe("push subscriptions", () => {
     f.auth.signIn("alice-1", "alice");
     expect((await f.subscribe("alice-1", {userId: "bob"})).status).toBe(400);
     expect((await f.subscribe("alice-1", {sessionId: "sign-in-bob"})).status).toBe(400);
-    expect((await f.call(`status?installationId=${installation(1)}&userId=bob`, "alice-1")).status).toBe(400);
+    expect((await f.post("status", "alice-1", {installationId: installation(1), userId: "bob"})).status).toBe(400);
     expect((await f.subscribe(null)).status).toBe(401);
     expect((await f.post("subscribe", null, {installationId: installation(1), vapidKeyId: VAPID_KEY_ID, endpoint: endpoint("one"),
       ...browserKeys, expiresAtMs: null}, {authorization: "Bearer test:alice", "x-user-id": "alice"})).status).toBe(401);
@@ -125,10 +125,10 @@ describe("push subscriptions", () => {
     const forged: Record<string, string>[] = [{origin: "https://evil.example"}, {"x-dohc-relay-exchange-key": "forged-exchange-key-at-least-32-chars"}];
     for (const headers of forged) {
       expect((await f.post("unsubscribe", "alice-1", {installationId: installation(1)}, headers)).status).toBe(404);
-      expect((await f.call(`status?installationId=${installation(1)}`, "alice-1", {headers})).status).toBe(404);
+      expect((await f.post("status", "alice-1", {installationId: installation(1)}, headers)).status).toBe(404);
     }
     expect((await f.call("subscribe", "alice-1")).status).toBe(404);
-    expect((await f.post("status", "alice-1", {installationId: installation(1)})).status).toBe(404);
+    expect((await f.call(`status?installationId=${installation(1)}`, "alice-1")).status).toBe(404);
     expect((await f.post("unsubscribe", "alice-1", {installationId: installation(1)}, {"content-type": "text/plain"})).status).toBe(400);
     expect(f.auth.resolve).not.toHaveBeenCalled();
     expect(rows(f.storage)).toHaveLength(1);
@@ -141,7 +141,7 @@ describe("push subscriptions", () => {
       const response = await f.post("subscribe", null, {installationId: installation(1), vapidKeyId: VAPID_KEY_ID,
         endpoint: endpoint("one"), ...browserKeys, expiresAtMs: null}, headers);
       expect(response.status).toBe(401);
-      expect((await f.call(`status?installationId=${installation(1)}`, null, {headers})).status).toBe(401);
+      expect((await f.post("status", null, {installationId: installation(1)}, headers)).status).toBe(401);
     }
     expect(rows(f.storage)).toEqual([]);
   });
@@ -165,6 +165,34 @@ describe("push subscriptions", () => {
     expect(await body(await f.subscribe("bob-1", {installationId: installation(2)}))).toMatchObject({enabled: true, generation: 2});
   });
 
+  it.each([["after Alice signs out", true], ["while Alice is still signed in", false]])(
+    "moves this browser's alerts to Bob when Bob signs in on it %s", async (_case, signsOut) => {
+      const f = await fixture();
+      f.auth.signIn("alice-1", "alice");
+      await f.subscribe("alice-1");
+      if (signsOut) f.auth.valid.delete("alice-1");
+      f.auth.signIn("bob-1", "bob");
+      // The installation alone, or the endpoint alone, still moves nothing.
+      expect((await f.subscribe("bob-1", {endpoint: endpoint("bob")})).status).toBe(409);
+      expect((await f.subscribe("bob-1", {installationId: installation(2)})).status).toBe(409);
+      expect(rows(f.storage)).toEqual([expect.objectContaining({account_user_id: "alice", generation: 1})]);
+
+      const moved = await f.subscribe("bob-1");
+      expect(moved.status).toBe(200);
+      expect(await body(moved)).toMatchObject({enabled: true, generation: 2, fingerprint: fingerprint(endpoint("one"))});
+      expect(await body(await f.status("bob-1"))).toMatchObject({enabled: true, generation: 2});
+      expect(rows(f.storage)).toEqual([{installation_id: installation(1), account_user_id: "bob", session_id: "sign-in-bob-1",
+        endpoint: endpoint("one"), generation: 2}]);
+      f.auth.signIn("alice-2", "alice");
+      const aliceTokens = signsOut ? ["alice-2"] : ["alice-1", "alice-2"];
+      for (const token of aliceTokens) {
+        expect(await body(await f.status(token))).toMatchObject({enabled: false, generation: null, fingerprint: null});
+        // Alice can no longer end Bob's alerts either.
+        expect((await f.unsubscribe(token)).status).toBe(200);
+      }
+      expect(rows(f.storage)).toEqual([expect.objectContaining({account_user_id: "bob", generation: 2})]);
+    });
+
   it("bounds how many installations one account binds", async () => {
     const f = await fixture();
     f.auth.signIn("alice-1", "alice");
@@ -182,11 +210,14 @@ describe("push subscriptions", () => {
     f.auth.valid.delete("alice-1");
     expect((await f.status("alice-1")).status).toBe(401);
     expect((await f.unsubscribe("alice-1")).status).toBe(401);
+    // The row stays, still naming the ended sign-in, so a sender checking that sign-in skips it.
+    expect(rows(f.storage)).toEqual([{installation_id: installation(1), account_user_id: "alice", session_id: "sign-in-alice-1",
+      endpoint: endpoint("one"), generation: 1}]);
     f.auth.signIn("alice-2", "alice");
     expect(await body(await f.status("alice-2"))).toMatchObject({enabled: false, generation: null, fingerprint: null});
     expect(await body(await f.subscribe("alice-2"))).toMatchObject({enabled: true, generation: 2});
     expect(rows(f.storage)).toEqual([expect.objectContaining({session_id: "sign-in-alice-2", generation: 2})]);
-    // Another account signing in on the same browser does not inherit it.
+    // Another account signing in on the same browser sees alerts off until it binds them itself.
     f.auth.signIn("bob-1", "bob");
     expect(await body(await f.status("bob-1"))).toMatchObject({enabled: false, fingerprint: null});
   });
@@ -267,6 +298,11 @@ describe("push subscriptions", () => {
     expect(rows(f.storage)).toEqual([expect.objectContaining({account_user_id: "bob"})]);
     expect((await f.status("alice-1")).status).toBe(404);
     expect((await f.subscribe("alice-1", {installationId: installation(3), endpoint: endpoint("three")})).status).toBe(404);
+    // A bind that passed the route's check before the fence still cannot land.
+    expect(() => f.storage.bindPushSubscription({installationId: installation(3), userId: "alice", sessionId: "sign-in-alice-1",
+      sessionExpiresAtMs: 1_000_000, endpoint: endpoint("three"), ...browserKeys, vapidKeyId: VAPID_KEY_ID,
+      browserExpiresAtMs: null, nowMs: 2_000})).toThrow(expect.objectContaining({code: "not_found"}));
+    expect(rows(f.storage)).toEqual([expect.objectContaining({account_user_id: "bob"})]);
     // The final purge removes whatever an account still binds.
     purgeAccountRows(context, "bob", "bob@dohc.test", {workspaces: [], shareIds: [], datasets: [], grantIds: [], publicationIds: []});
     expect(rows(f.storage)).toEqual([]);

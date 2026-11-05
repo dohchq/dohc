@@ -77,25 +77,19 @@ export function createPushRoutes(options: {
   };
 
   const work = async (request: Request, path: string, signal: AbortSignal): Promise<Response> => {
-    const url = new URL(request.url);
-    let input: Record<string, unknown>;
-    if (path === PUSH_STATUS_PATH) {
-      if ([...url.searchParams.keys()].join() !== "installationId") throw badRequest("invalid query");
-      input = {installationId: url.searchParams.get("installationId")};
-    } else {
-      if (url.search || request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
-        throw badRequest("invalid request");
-      }
-      let value: unknown;
-      try {value = await readBoundedJson(request, PUSH_MAX_REQUEST_BYTES, signal);}
-      catch (error) {
-        if (signal.aborted) throw error;
-        throw error instanceof RangeError ? relayError("payload_too_large") : badRequest("invalid request");
-      }
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("invalid request");
-      input = value as Record<string, unknown>;
-      const keys = Object.keys(input).sort().join();
-      if (keys !== (path === PUSH_SUBSCRIBE_PATH ? SUBSCRIBE_KEYS : "installationId")) throw badRequest("invalid request");
+    if (new URL(request.url).search || request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+      throw badRequest("invalid request");
+    }
+    let value: unknown;
+    try {value = await readBoundedJson(request, PUSH_MAX_REQUEST_BYTES, signal);}
+    catch (error) {
+      if (signal.aborted) throw error;
+      throw error instanceof RangeError ? relayError("payload_too_large") : badRequest("invalid request");
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("invalid request");
+    const input = value as Record<string, unknown>;
+    if (Object.keys(input).sort().join() !== (path === PUSH_SUBSCRIBE_PATH ? SUBSCRIBE_KEYS : "installationId")) {
+      throw badRequest("invalid request");
     }
     // Authenticate before answering anything about the installation.
     const session = await options.resolveAccountSession(new Request(request.url, {
@@ -128,8 +122,8 @@ export function createPushRoutes(options: {
 
   return async (request: Request): Promise<Response> => {
     const path = new URL(request.url).pathname.slice("/sync".length);
-    if (!(PUSH_PATHS as readonly string[]).includes(path) ||
-        request.method !== (path === PUSH_STATUS_PATH ? "GET" : "POST") ||
+    // Every route is a POST, so a browser always sends its Origin.
+    if (!(PUSH_PATHS as readonly string[]).includes(path) || request.method !== "POST" ||
         request.signal.aborted || request.headers.get("origin") !== options.publicOrigin ||
         !verifyRelayExchangeKey(request.headers.get("x-dohc-relay-exchange-key"), exchangeHash)) return refuse();
     if (pending >= limits.maxPendingRequests) return errorResponse(relayError("share_access_rate_limited"));

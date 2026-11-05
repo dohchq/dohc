@@ -25,7 +25,7 @@ function request(path: string, user: string | null = "alice", input?: unknown, h
     headers: {host: "share.example.test", origin, "content-type": "application/json",
       ...(user === null ? {} : {cookie: `${cookieName}=${user}`}), ...headers}});
 }
-const status = (user: string | null = "alice") => request(`status?installationId=${installationId}`, user);
+const status = (user: string | null = "alice", headers: Record<string, string> = {}) => request("status", user, {installationId}, headers);
 
 async function fixture(relayOverride?: (incoming: Request) => Promise<Response>) {
   const storage = await testStorage();
@@ -75,8 +75,12 @@ it("refuses cross-site and wrong-origin requests before they reach the relay", a
     request("subscribe", "alice", subscription, {"content-type": "text/plain"}),
     request("subscribe", "alice", subscription, {host: "evil.example"}),
     request(`subscribe?installationId=${installationId}`, "alice", subscription),
-    request(`status?installationId=${installationId}`, "alice", undefined, {origin: "https://evil.example"}),
-    request("status", "alice", {installationId}),
+    status("alice", {"sec-fetch-site": "cross-site"}),
+    status("alice", {origin: "https://evil.example"}),
+    // A status request with no Origin: browsers always send one on a POST.
+    new Request(`${origin}/api/push/status`, {method: "POST", body: JSON.stringify({installationId}),
+      headers: {host: "share.example.test", "content-type": "application/json", cookie: `${cookieName}=alice`}}),
+    request(`status?installationId=${installationId}`, "alice"),
     request("subscribe", "alice"),
     request("other", "alice", {installationId}),
   ]) {
