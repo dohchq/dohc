@@ -1,12 +1,5 @@
 .named-recipient {
-  --named-paper: #faf7f0;
-  --named-panel: #efeae0;
-  --named-line: #d6d0c3;
-  --named-selected: #ddd8cd;
-  --named-ink: #272923;
-  --named-muted: #565851;
-  --named-accent: #526a57;
-  color: var(--named-ink);
+  color: var(--viewer-ink);
   font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
 }
 
@@ -23,50 +16,50 @@
   border: 1px solid transparent;
   border-radius: 6px;
   padding: 9px 8px;
-  color: var(--named-muted);
+  color: var(--viewer-muted);
   font: 13px/1.5 ui-monospace, monospace;
   text-align: left;
   overflow-wrap: anywhere;
   white-space: normal;
 }
-.named-recipient .named-file[aria-current="page"] { background: var(--named-selected); color: var(--named-ink); }
+.named-recipient .named-file[aria-current="page"] { background: var(--viewer-selected); color: var(--viewer-ink); }
 .named-recipient .named-refresh { margin: 20px 8px 0; }
 .named-recipient button:disabled { opacity: .55; cursor: default; }
-.named-recipient :is(button, input, a):focus-visible { outline: 2px solid var(--named-accent); outline-offset: 3px; }
+.named-recipient :is(button, input, a):focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 3px; }
 .named-recipient .named-document { padding: 32px clamp(24px, 5vw, 72px) 48px; }
 .named-document > h1, .named-document-status, .named-body-editor { width: 100%; max-width: 820px; margin-inline: auto; }
 .named-document > h1 { font: 500 16px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
-.named-document-status { min-height: 20px; margin-block: 8px 24px; color: var(--named-muted); font-size: 12px; }
-.named-body-editor { border-top: 1px solid var(--named-line); }
+.named-document-status { min-height: 20px; margin-block: 8px 24px; color: var(--viewer-muted); font-size: 12px; }
+.named-body-editor { border-top: 1px solid var(--viewer-line); }
 .named-recipient .named-body-editor .ProseMirror {
   min-height: max(360px, calc(100dvh - 300px));
   max-width: none;
   padding: 24px 4px;
-  color: var(--named-ink);
-  background: var(--named-paper);
+  color: var(--viewer-ink);
+  background: var(--viewer-paper);
   font: 17px/1.7 Georgia, serif;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   outline: 2px solid transparent;
   outline-offset: 8px;
   border-radius: 4px;
-  caret-color: var(--named-accent);
+  caret-color: var(--viewer-accent);
 }
-.named-recipient .named-body-editor .ProseMirror:focus-visible { outline-color: var(--named-accent); }
+.named-recipient .named-body-editor .ProseMirror:focus-visible { outline-color: var(--viewer-accent); }
 .named-body-editor .ProseMirror > :first-child { margin-top: 0; }
 .named-body-editor .ProseMirror > :last-child { margin-bottom: 0; }
 .named-body-editor .ProseMirror :is(pre, table) { max-width: 100%; overflow-x: auto; }
 .named-body-editor .ProseMirror table { display: block; white-space: normal; }
-.named-body-editor .ProseMirror th, .named-body-editor .ProseMirror td { border: 1px solid var(--named-line); padding: 6px 10px; }
-.named-recipient .named-draft-recovery { grid-column: 2; border-top: 1px solid var(--named-line); border-left: 0; }
-.named-draft-recovery p { max-width: 65ch; color: var(--named-muted); }
+.named-body-editor .ProseMirror th, .named-body-editor .ProseMirror td { border: 1px solid var(--viewer-line); padding: 6px 10px; }
+.named-recipient .named-draft-recovery { grid-column: 2; border-top: 1px solid var(--viewer-line); border-left: 0; }
+.named-draft-recovery p { max-width: 65ch; color: var(--viewer-muted); }
 .named-recipient .download-card { width: calc(100% - 32px); }
 .named-recipient dialog.download-card { max-height: calc(100dvh - 48px); overflow-y: auto; }
 .named-recipient dialog .handoff-button { margin: 8px 8px 0 0; }
 
 @media (min-width: 1200px) {
   .named-recipient .named-recipient-layout:has(.named-draft-recovery) { grid-template-columns: 220px minmax(0, 1fr) 280px; }
-  .named-recipient .named-draft-recovery { grid-column: auto; border-top: 0; border-left: 1px solid var(--named-line); }
+  .named-recipient .named-draft-recovery { grid-column: auto; border-top: 0; border-left: 1px solid var(--viewer-line); }
 }
 
 @media (max-width: 720px) {

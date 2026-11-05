@@ -128,3 +128,22 @@ it("keeps the complete account email when the sender label exceeds the subject l
   await settle(() => container.textContent?.includes(sharerName) ?? false);
   expect(container.textContent).toContain("Shared by " + sharerName);
 });
+
+it.each([
+  [404, "dohc could not open this app with this account. Ask the owner to share it with you."],
+  [503, "dohc could not reach the app. Check your connection, then try again."],
+  [410, "This app can't find its data. Ask the person who shared it with you."],
+])("marks a failed Open app (%s) with the alert icon and error tone, and names nothing from the link", async (status, message) => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path === "/api/account/session") return jsonResponse({user: {id: "alice", name: "Alice"}});
+    if (path === "/api/apps/summary") return jsonResponse({ok: false, error: "not found"}, 404);
+    return jsonResponse({}, status);
+  }));
+  await render(); await click("Open app"); await settle(() => Boolean(container.querySelector('[role="alert"]')));
+  const alert = container.querySelector('[role="alert"]')!;
+  expect(alert.className).toBe("launch-failure"); expect(alert.textContent).toBe(message);
+  expect(alert.querySelector("svg.launch-failure-mark")?.getAttribute("aria-hidden")).toBe("true");
+  expect(container.querySelector("h1")?.textContent).toBe("Shared app");
+  for (const detail of [target.workspaceId, publicationId]) expect(container.innerHTML).not.toContain(detail);
+});

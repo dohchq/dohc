@@ -115,3 +115,10 @@ it("names an authorized named app without issuing a launch or exposing labels to
   expect((await f.summary("account=attacker")).status).toBe(404);
   f.revoke(); const response = await f.summary(); expect(response.status).toBe(404); expect(await response.text()).not.toContain("Trip planner");
 });
+
+it("gives a signed-in launch the same opening and stopped page, with no workspace, app or account details", async () => {
+  const { html } = await fixture().open();
+  expect(html).toContain('<body data-state="opening"><main id="message"><svg id="mark"');
+  expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent='This app session ended. Reopen the share link.';");
+  for (const detail of [workspaceId, publicationId, "Trip planner", "owner-session", "relay.example.org"]) expect(html).not.toContain(detail);
+});
