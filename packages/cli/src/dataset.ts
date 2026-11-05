@@ -90,8 +90,9 @@ const migrationValues = z.record(z.string().max(256), migrationValue);
 const migrationRowChange = z.object({ table: z.string().min(1).max(128), kind: z.enum(["insert", "update", "delete"]), key: migrationValues,
   before: migrationValues.nullable(), after: migrationValues.nullable() }).strict();
 export const DatasetMigrationPreviewPage = z.object({ changes: z.array(migrationRowChange).max(100), nextCursor: z.string().min(1).max(1024).nullable() }).strict();
-const migrationPreview = z.object({ tables: z.array(z.object({ table: z.string().min(1).max(128), beforeRows: z.number().int().nonnegative(), afterRows: z.number().int().nonnegative(), changedRows: z.number().int().nonnegative() }).strict()).max(128), firstPage: DatasetMigrationPreviewPage }).strict();
-export const DatasetMigrationCandidate = z.object({ candidateId: identity, expected: DatasetCursor, approvedRevisionHash: sha256, checkpointSha256: sha256,
+const valueCounts = z.record(z.string().max(256), z.number().int().nonnegative());
+const migrationPreview = z.object({ tables: z.array(z.object({ table: z.string().min(1).max(128), beforeRows: z.number().int().nonnegative(), afterRows: z.number().int().nonnegative(), changedRows: z.number().int().nonnegative(), deletedRows: z.number().int().nonnegative(), beforeValues: valueCounts, afterValues: valueCounts, clearedValues: valueCounts }).strict()).max(128), firstPage: DatasetMigrationPreviewPage }).strict();
+export const DatasetMigrationCandidate = z.object({ candidateId: identity, expected: DatasetCursor, approvedRevisionHash: sha256, checkpointSha256: sha256, changeSha256: sha256,
   expiresAtMs: z.number().int().positive(), preview: migrationPreview }).strict();
 export type DatasetMigrationPreviewPage = z.infer<typeof DatasetMigrationPreviewPage>;
 export type DatasetMigrationCandidate = z.infer<typeof DatasetMigrationCandidate>;
@@ -143,9 +144,11 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }).strict(),
   z.object({ ...pinned, action: z.literal("prepareHistoryRestore"), targetRevisionSha256: sha256, changedRevisionSha256: sha256 }).strict(),
   z.object({ ...selection, action: z.literal("prepareMigration"), migrationPath: z.string().min(1).max(1024) }).strict(),
+  z.object({ ...selection, action: z.literal("askToApply"), migrationPath: z.string().min(1).max(1024), note: z.string().trim().min(1).max(500).optional() }).strict(),
   z.object({ ...workspace, action: z.literal("migrationPreviewPage"), preparationId: identity, after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange }).strict(),
-  z.object({ ...workspace, action: z.literal("approveMigration"), agentLabel: z.string().min(1).max(160).optional(), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
+  z.object({ ...workspace, action: z.literal("approveMigration"), agentLabel: z.string().min(1).max(160).optional(), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256,
+    changeSha256: sha256.describe("The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs.").optional() }).strict(),
   z.object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("invoke"), operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
     input: json, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict(),
@@ -252,6 +255,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetMigrationPreviewPage.extend({ kind: z.literal("migration-preview-page") }).strict(),
   z.object({ kind: z.literal("migrated"), revision, cursor: DatasetCursor }).strict(),
   z.object({ kind: z.literal("migration-discarded") }).strict(),
+  z.object({ kind: z.literal("change-asked"), path: z.string().min(1).max(1024), changeSha256: sha256 }).strict(),
 ]);
 export type DatasetResult = z.infer<typeof DatasetResult>;
 
@@ -286,6 +290,7 @@ export const DATASET_CAPABILITIES = {
   approve: "dataset.approve",
   discard: "dataset.discard",
   prepareMigration: "dataset.migration.prepare",
+  askToApply: "dataset.change.ask",
   migrationPreviewPage: "dataset.migration.preview",
   prepareSchemaChange: "dataset.schema.change.prepare",
   approveMigration: "dataset.migration.approve",

@@ -132,9 +132,13 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // restore names this computer's person who made it; their other edits read as a local file
 // edit or a live edit. A live edit the relay admitted from an account or link
 // holder names them. Everything else keeps its actor-neutral origin label.
-export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">,
-): string {
+export function engineMomentSourceLabel(moment: SourcedMoment): string {
+  return sourceName(moment) ?? engineOriginLabel(moment.origin);
+}
+
+type SourcedMoment = Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
+
+function sourceName(moment: SourcedMoment): string | undefined {
   if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
   if (moment.authorLabels) {
     const [first, second, third, ...rest] = moment.authorLabels;
@@ -151,7 +155,7 @@ export function engineMomentSourceLabel(
   if (moment.namedAuthor) return moment.namedAuthor.label;
   return moment.agentAuthorName !== undefined
     ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: moment.agentAuthorName })
-    : engineOriginLabel(moment.origin);
+    : undefined;
 }
 
 // The group-level author: the shared agent author name when every moment in
@@ -456,8 +460,12 @@ export function fileMomentSummary(moment: Pick<EngineMomentRecord, "summary" | "
 // their face, so it names them too, unless it holds kept typing, which says
 // so instead. Everyone else is named as History sources name them.
 function momentAuthorLabel(moment: CreditedMoment): string {
-  if (isCaptureRecoveryOrigin(moment.origin)) return engineMomentSourceLabel(moment);
-  return moment.personAuthorName ?? engineMomentSourceLabel(moment);
+  return engineMomentAuthorName(moment) ?? engineOriginLabel(moment.origin);
+}
+
+/** The name a History row gives whoever made a change, or undefined when the row says only where it came from. */
+export function engineMomentAuthorName(moment: SourcedMoment): string | undefined {
+  return (isCaptureRecoveryOrigin(moment.origin) ? undefined : moment.personAuthorName) ?? sourceName(moment);
 }
 
 // One author in words: an agent and an automation say what they are, so

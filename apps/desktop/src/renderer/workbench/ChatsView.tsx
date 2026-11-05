@@ -4447,6 +4447,7 @@ export function ChatsView(props: {
             className="mx-auto w-full max-w-[640px] px-3 pb-3 pt-3 sm:px-4"
           >
             <ThreadMessages
+              workspaceId={workspaceId}
               nav={nav}
               channelLabel={nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents).label : `#${nav.channel.name}`}
               messages={messages}

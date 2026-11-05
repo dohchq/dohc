@@ -1590,6 +1590,49 @@
                     "minLength": 1,
                     "maxLength": 128
                   },
+                  "datasetPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "description": "Caller-relative dataset.json path, for example equipment/dataset.json. Old paths break after a move; update the reference."
+                  },
+                  "expectedDatasetId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "description": "The datasetId returned by describe. Refuse the request if the path now names another Collection."
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "askToApply"
+                  },
+                  "migrationPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "workspaceId",
+                  "datasetPath",
+                  "action",
+                  "migrationPath"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "workspaceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
                   "action": {
                     "type": "string",
                     "const": "migrationPreviewPage"
@@ -1905,6 +1948,11 @@
                   "approvalDigest": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "changeSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "description": "The changeSha256 of the change you were asked to apply. The host refuses the approval if the prepared change differs."
                   }
                 },
                 "required": [

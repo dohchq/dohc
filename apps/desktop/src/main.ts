@@ -36,7 +36,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { CollectionMoveUnfinishedError, ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
+import { CollectionMoveUnfinishedError, ipcWireError, markDatasetServerNotFound, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
 import { liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
@@ -1480,7 +1480,8 @@ async function relayShareJsonWithCredentials<T>(
     if (options && "retainUnavailable" in options && publicationListUnavailable(response.status, data)) {
       return { kind: "unavailable" };
     }
-    throw liveStopRelayError(data) ?? new Error(relayShareErrorCopy(response.status, data));
+    const failure = liveStopRelayError(data) ?? new Error(relayShareErrorCopy(response.status, data));
+    throw datasetRoute ? markDatasetServerNotFound(failure, response.status, data) : failure;
   }
   if (options && !("retainRestoreConflict" in options)) {
     return { kind: "success", body: data as T };

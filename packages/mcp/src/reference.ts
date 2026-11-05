@@ -72,6 +72,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   approve: ["approved"],
   discard: ["discarded"],
   prepareMigration: ["migration-prepared"],
+  askToApply: ["change-asked"],
   migrationPreviewPage: ["migration-preview-page"],
   prepareSchemaChange: ["migration-prepared"],
   approveMigration: ["migrated"],

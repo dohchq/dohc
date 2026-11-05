@@ -548,6 +548,15 @@ export function liveEditingStoppedPaths(error: unknown): readonly string[] {
 export function isHistoryCatchingUp(error: unknown): boolean {
   return isWorkspaceUpdatingError(error) || parse(error).name === "EngineCaptureNotSettledError";
 }
+/** Main's code for a 404 from a Collection route on the server. The server sends it for a Collection the caller can't change, too. */
+export const DATASET_SERVER_NOT_FOUND = "dataset_not_found";
+export function isDatasetServerNotFound(error: unknown): boolean {
+  return parse(error).code === DATASET_SERVER_NOT_FOUND;
+}
+/** Gives a Collection route's 404 "not found" its code, so a change card can name the server. Its words stay. */
+export function markDatasetServerNotFound(failure: Error, status: number, body: { code?: unknown } | null | undefined): Error {
+  return status === 404 && body?.code === "not_found" ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND }) : failure;
+}
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
 export function isPrivacyDenied(error: unknown): boolean {

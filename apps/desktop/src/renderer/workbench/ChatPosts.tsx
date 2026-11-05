@@ -13,6 +13,8 @@ import type {
   ChatRunRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { bridge } from "../bridge";
+import { COLLECTION_CHANGE_FILE, readCollectionChangeProposal } from "../collections/collectionChangeFlow";
 import { basenameOf } from "../path";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -185,23 +187,54 @@ export function DecisionStatus(props: {
   );
 }
 
+// How a chip names a Collection change file: "Collection change" while it
+// loads, then "Change to <the Collection's current name>". Null for any other
+// file, and for a change file dohc can't read.
+function useCollectionChangeLabel(workspaceId: string, path: string | undefined): string | null {
+  const key = path !== undefined && COLLECTION_CHANGE_FILE.test(path) ? `${workspaceId}\n${path}` : null;
+  const [named, setNamed] = useState<{ key: string; name: string | null } | null>(null);
+  useEffect(() => {
+    if (key === null || path === undefined) return;
+    let current = true;
+    const api = bridge();
+    void (async () => {
+      const proposal = await readCollectionChangeProposal(api, workspaceId, path);
+      if (!proposal) {
+        if (current) setNamed({ key, name: null });
+        return;
+      }
+      const described = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "describe" })
+        .catch(() => null);
+      if (current) setNamed({ key, name: described?.kind === "description" ? described.dataset.name : proposal.name });
+    })();
+    return () => { current = false; };
+  }, [key, workspaceId, path]);
+  if (key === null) return null;
+  if (named?.key !== key) return "Collection change";
+  return named.name === null ? null : `Change to ${named.name}`;
+}
+
 function AttachmentChip(props: {
+  workspaceId: string;
   attachment: ChatAttachmentRecord;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
   const { pathHint, headingAnchor, headingText } = props.attachment;
   const onOpenPath = props.onOpenPath;
+  const changeLabel = useCollectionChangeLabel(props.workspaceId, pathHint);
   // A shared view can hold an attachment whose path it may not read: the
   // chip names it only as an attachment and opens nothing.
   if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
+  // An attachment is named by what it shows: the file and its heading, or
+  // the Collection a change file changes. The tooltip keeps the path.
+  const label = changeLabel
+    ?? `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
   return (
     <Ref
       path={pathHint}
+      title={changeLabel !== null ? label : undefined}
       heading={headingText}
-      // An attachment is named by what it shows, the file and its heading.
-      label={`${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${
-        headingText ? `#${headingText}` : ""
-      }`}
+      label={label}
       testId="chats-attachment-chip"
       onOpen={onOpenPath
         ? () => (headingAnchor ? onOpenPath(pathHint, headingAnchor) : onOpenPath(pathHint))
@@ -407,6 +440,7 @@ export function BookmarkAction(props: {
 // keeps each prop referentially stable across draft and typing renders; the
 // transcript re-renders only when the conversation data itself changes.
 export const ThreadMessages = memo(function ThreadMessages(props: {
+  workspaceId: string;
   nav: Extract<ChatsNav, { level: "thread" }>;
   // The thread's chat as its header names it: an agent's name, or #group.
   channelLabel: string;
@@ -642,6 +676,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {commentAttachments.map((attachment) => (
                 <AttachmentChip
                   key={attachment.attachmentId}
+                  workspaceId={props.workspaceId}
                   attachment={attachment}
                   onOpenPath={props.onOpenPath}
                 />
@@ -822,6 +857,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {openingAttachments.map((attachment) => (
                 <AttachmentChip
                   key={attachment.attachmentId}
+                  workspaceId={props.workspaceId}
                   attachment={attachment}
                   onOpenPath={props.onOpenPath}
                 />

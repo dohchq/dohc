@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
 import { ReactionStoreProvider } from "./reactionStore";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
-import type { WorkspaceActivityEvent } from "../../ipc/bridgeContract";
+import type { SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
+import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
+import { ask, asked, id, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
 
 vi.mock("./chatFileMentions", { spy: true });
 
@@ -679,6 +681,67 @@ describe("ChatLane", () => {
       workspaceId: "workspace-a", threadId: "post-1", body: "Monday",
       resolves: { messageId: "poll", chosenOption: "Monday" },
     }));
+  });
+
+  it("shows a Collection change on the message that attaches it, and Apply answers that message", async () => {
+    const place = world();
+    ask(place);
+    vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, ...place.api });
+    const attachment = { attachmentId: "attachment-1", threadId: "thread-1", messageId: "asks", targetKind: "file" as const, pathHint: proposalPath, createdAtMs: 3_000 };
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "asks", body: "Here's the due date.", authorKind: "agent", authorDisplayName: "Claude Code", createdAtMs: 3_000, attachments: [attachment] }),
+    ] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "asks", state: "open", atMs: 1 }] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "applied", body: "Applied the change to Volunteers." }) });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-change-apply"));
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Applied the change to Volunteers.", resolves: { messageId: "asks" },
+    }));
+    expect(screen.queryByTestId("chats-lane-decision-open")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("attaches the change a review applied to its reply, and the asking message shows that change applied", async () => {
+    const place = world();
+    ask(place);
+    // Ada adds a field after the message, so the review applies another change than the one asked.
+    const phone = structuredClone(asked);
+    phone.tables[0]!.fields.push({ fieldId: id(10), name: "Phone", sqlColumn: "phone", type: "text", required: false, unique: false });
+    place.files["volunteers/dataset.json"] = JSON.stringify(phone, null, 2);
+    place.moments.push(place.moment(5, "volunteers/dataset.json", 3_500, { personAuthorName: "Ada" }, JSON.stringify(phone)));
+    vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, ...place.api });
+    const attachment = (messageId: string, pathHint: string, createdAtMs: number) =>
+      ({ attachmentId: `attachment-${messageId}`, threadId: "thread-1", messageId, targetKind: "file" as const, pathHint, createdAtMs });
+    const asks = message({ id: "asks", body: "Here's the due date.", authorKind: "agent", authorDisplayName: "Claude Code", createdAtMs: 3_000, attachments: [attachment("asks", proposalPath, 3_000)] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [asks] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ threadId: "thread-1", messageId: "asks", state: "open", atMs: 1 }] });
+    bridgeMock.sendChatMessage.mockImplementation(async (input: SendChatMessagePayload) => {
+      const reply = message({ id: "applied", body: input.body, createdAtMs: 4_000, attachments: (input.fileReferences ?? []).map(reference => attachment("applied", reference.path, 4_000)) });
+      const resolved = { threadId: "thread-1", messageId: "asks", state: "resolved" as const, resolvedByMessageId: "applied", atMs: 4_000 };
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [asks, reply] });
+      bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
+      return { message: reply, resolved };
+    });
+    render(lane("agent-dm", "workspace-a", "agent"));
+    fireEvent.click(await screen.findByTestId("chats-lane-change-review-button"));
+    const dialog = await screen.findByTestId("chats-lane-change-review-dialog");
+    const apply = within(dialog).getByTestId("chats-lane-change-review-apply");
+    await waitFor(() => expect((apply as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(apply);
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledOnce());
+    const sent = bridgeMock.sendChatMessage.mock.calls[0]![0];
+    expect(sent.resolves).toEqual({ messageId: "asks" });
+    const recorded = sent.fileReferences?.[0]?.path ?? "";
+    expect(recorded).toMatch(COLLECTION_CHANGE_FILE);
+    expect(recorded).not.toBe(proposalPath);
+    expect(JSON.parse(place.files[recorded]!).revisionSha256).toBe(place.head().revisionSha256);
+    expect(await screen.findByText("Applied")).toBeTruthy();
+    // Ada's part of the applied change names her.
+    expect(within(screen.getByText("Added the field Phone").closest("li")!).getByText(/^Ada · /u)).toBeTruthy();
+    expect(screen.queryByTestId("chats-lane-change-edited")).toBeNull();
+    expect(screen.queryByText("Undone")).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("drops the poll with the draft when the group changes", async () => {

@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { datasetColumnFields, datasetRevisionsPreserveAccess, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
-import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { DatasetSchemaChangeError, generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import { invalidateDatasetAddresses, resolveDatasetAddress } from "./datasetAddress";
+import { CollectionChangeProposal, describeCollectionChangeRow } from "./collectionChange";
 import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
@@ -111,6 +112,31 @@ it("adds a required defaulted field through captured approval and keeps row IDs,
   await f.host.action(call(next.revision, id(7), { id: rows.rows[0]!.id, expectedVersion: 1, values: { [field.fieldId]: "Done" } }, "edit"));
   expect(f.files.get("people/operations.js")).toBe(generateDatasetSources(definition).files[definition.operationsPath]);
   await expect(f.host.query(call(f.revision, id(5)))).rejects.toThrow("The Collection's rules changed. Its owner must approve this access again.");
+});
+
+it("asks to apply an edited dataset.json and migration as a file that lists the change, and keeps no preparation", async () => {
+  const f = await fixture();
+  await f.host.action(call(f.revision, id(6), { values: { [id(4)]: "Camera" } }, "first"));
+  const approved = f.host.approvedArtifacts(id(1));
+  const generated = generateDatasetSchemaChange({ revision: approved.revision, schemaSql: approved.schemaSql, operationSource: approved.operationSource,
+    change: { kind: "addField", tableId: id(2), field: { name: "Due date", type: "date", required: false, unique: false } } });
+  for (const [path, source] of Object.entries(generated.files)) if (path !== generated.descriptorPath) f.files.set(path, source);
+  f.files.set("people/dataset.json", generated.files[generated.descriptorPath]!);
+  const discard = vi.spyOn(f.host, "discardMigrationCandidate");
+  const asked = await f.handler("owner", { action: "askToApply", workspaceId: "w", datasetPath: "people/dataset.json", migrationPath: generated.migrationPath, note: "Adds a due date." });
+  if (asked.kind !== "change-asked") throw new Error("Expected a change file");
+  expect(asked.path).toMatch(/^people\/changes\/[0-9a-f-]{36}\.json$/u);
+  const proposal = CollectionChangeProposal.parse(JSON.parse(f.files.get(asked.path)!));
+  expect(proposal).toMatchObject({ datasetId: id(1), name: "People", datasetPath: "people/dataset.json", migrationPath: generated.migrationPath,
+    base: { revision: 1, revisionSha256: approved.revision.revisionSha256 }, changeSha256: asked.changeSha256, note: "Adds a due date." });
+  expect(proposal.changeSha256).toBe(datasetChangeDigest({ revisionSha256: proposal.revisionSha256, migrationSql: generated.migrationSql }));
+  expect(proposal.files).toEqual(expect.arrayContaining(["people/dataset.json", generated.migrationPath]));
+  expect(proposal.rows.map(row => describeCollectionChangeRow(row, "present").text)).toEqual(["Adds the field Due date", "Runs a migration on 1 existing record"]);
+  expect(describeCollectionChangeRow(proposal.rows[0]!, "present").effect).toBe("1 record starts with an empty Due date");
+  expect(discard).toHaveBeenCalledOnce();
+  expect(f.host.approvedArtifacts(id(1)).revision.revisionSha256).toBe(approved.revision.revisionSha256);
+  await expect(f.handler("owner", { action: "askToApply", workspaceId: "w", datasetPath: "people/dataset.json", migrationPath: generated.migrationPath }))
+    .resolves.toMatchObject({ kind: "change-asked", changeSha256: asked.changeSha256 });
 });
 
 it("adds a button through owner approval without SQL, operation changes, or new access", async () => {

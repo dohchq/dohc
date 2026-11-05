@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
-import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { fixture, limits, pushFile } from "./datasetTestFixture";
@@ -432,6 +432,24 @@ it("migrates through the owner route and removes retained history with dataset a
   }
   expect(f.storage.db.prepare("SELECT stage_id FROM dohc_dataset_checkpoints ORDER BY stage_id").all().map(row => row.stage_id)).toEqual(["pending-other-dataset", "pending-other-workspace"]);
   expect(f.storage.db.prepare("SELECT stage_id FROM dohc_dataset_checkpoint_chunks ORDER BY stage_id").all().map(row => row.stage_id)).toEqual(["pending-other-dataset", "pending-other-workspace"]);
+});
+
+it("refuses an Apply with a stale digest at the server route and leaves the Collection unchanged", async () => {
+  const f = await httpFixture(); await f.activate();
+  const artifacts = await (await f.http(`${f.path}/artifacts`)).json();
+  const nextSchema = `${schemaSql} CREATE INDEX requests_name ON requests(name);`, migrationSql = "CREATE INDEX requests_name ON requests(name);";
+  const next = describeDatasetRevision({definition, revision: 2, schemaSql: nextSchema, operationSource});
+  const candidate = await (await f.http(`${f.path}/prepare-migration`, {revision: next, schemaSql: nextSchema, operationSource, expected: artifacts.cursor, migrationSql})).json();
+  expect(candidate.changeSha256).toBe(datasetChangeDigest({revisionSha256: next.revisionSha256, migrationSql}));
+  // The person was asked to apply the same rules with a different migration.
+  const asked = datasetChangeDigest({revisionSha256: next.revisionSha256, migrationSql: "SELECT 1;"});
+  const approval = {candidateId: candidate.candidateId, checkpointSha256: candidate.checkpointSha256};
+  const refused = await f.http(`${f.path}/approve-migration`, {...approval, changeSha256: asked});
+  expect(refused.status).toBe(409);
+  expect((await (await f.http(`${f.path}/artifacts`)).json()).cursor).toEqual(artifacts.cursor);
+  expect((await f.http(`${f.path}/approve-migration`, {...approval, changeSha256: "not a digest"})).status).toBe(400);
+  expect((await f.http(`${f.path}/approve-migration`, {...approval, changeSha256: candidate.changeSha256})).status).toBe(200);
+  expect((await (await f.http(`${f.path}/artifacts`)).json()).revision.revisionSha256).toBe(next.revisionSha256);
 });
 
 const upload = {authorityRevision: 1, idempotencyKey: "receipt-upload", name: "receipt.png", contentType: "image/png",
