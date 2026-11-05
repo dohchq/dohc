@@ -728,6 +728,7 @@ export function createSyncRelayHandler({
   const respondToHeldDocuments = createHeldDocumentRoutes({storage, host: heldDocumentHost});
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({storage, limits: appPublicationLimits, collectionsEnabled: appCollectionPolicy !== undefined, nowMs});
   const respondToLinkAppPublication = createLinkAppPublicationRoutes({storage, limits: appPublicationLimits, linkKey: linkKey!, publicEditRelease, nowMs,
+    requireCollectionFile: datasetHost?.requireCollectionFile,
     requireLinkRead, capabilityLimiter: linkReadRateLimiter, grantLimiter: linkGrantReadRateLimiter,
     egress: linkGrantEgressRateLimiter, streams: {admitLinkBlobBytes, respondWithLinkBytes}});
   const respondToLinkAppCollection = createLinkAppCollectionRoutes({storage,limits:appPublicationLimits,policy:appCollectionPolicy,linkKey:linkKey!,publicEditRelease,nowMs,
