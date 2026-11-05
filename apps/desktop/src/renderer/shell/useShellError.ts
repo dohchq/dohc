@@ -456,10 +456,11 @@ export function useShellError(workspaceId: string) {
   // report replaces it, keeping its toast unless the report toasts. The wait
   // itself is a warning; a reopen that failed is a failure.
   const reportCollectionsWaiting = useCallback(
-    (notice: { message: string; toast: boolean; failed: boolean }, retry: () => void, openSyncSettings: () => void) =>
+    (notice: { title: string; message: string; toast: boolean; failed: boolean }, retry: () => void, openSyncSettings: () => void) =>
       push(
         {
           ...(notice.failed ? {} : { tone: "warning" as const }),
+          title: notice.title,
           message: notice.message,
           retry,
           action: { label: "Sync settings", run: openSyncSettings },
