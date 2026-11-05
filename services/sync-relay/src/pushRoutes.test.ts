@@ -193,6 +193,22 @@ describe("push subscriptions", () => {
       expect(rows(f.storage)).toEqual([expect.objectContaining({account_user_id: "bob", generation: 2})]);
     });
 
+  it("lets Bob bind a fresh installation and endpoint after the page drops Alice's subscription", async () => {
+    // The browser never reuses a dropped endpoint, so the page mints a new installation id too.
+    const f = await fixture();
+    f.auth.signIn("alice-1", "alice");
+    await f.subscribe("alice-1");
+    f.auth.signIn("bob-1", "bob");
+    const fresh = await f.subscribe("bob-1", {installationId: installation(2), endpoint: endpoint("bob")});
+    expect(fresh.status).toBe(200);
+    expect(await body(fresh)).toMatchObject({enabled: true, fingerprint: fingerprint(endpoint("bob"))});
+    expect(await body(await f.post("status", "bob-1", {installationId: installation(2)}))).toMatchObject({enabled: true});
+    expect(rows(f.storage)).toEqual(expect.arrayContaining([
+      expect.objectContaining({installation_id: installation(1), account_user_id: "alice"}),
+      expect.objectContaining({installation_id: installation(2), account_user_id: "bob"}),
+    ]));
+  });
+
   it("bounds how many installations one account binds", async () => {
     const f = await fixture();
     f.auth.signIn("alice-1", "alice");
