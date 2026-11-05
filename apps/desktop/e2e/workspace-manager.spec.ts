@@ -166,17 +166,21 @@ test("workspace manager refuses a listed workspace inside dohc's state folder an
     const files = () => readdir(rootPath, { recursive: true });
     const before = await files();
     desktop = await launchDesktopApp({ workspace });
-    const manager = desktop.page.getByTestId("workspace-manager");
-    const row = manager.getByTestId("workspace-manager-row");
-    await row.getByRole("button").first().click();
-    await expect(manager.getByRole("alert").filter({ hasText: "holds dohc's own settings" })).toContainText(
-      "notes is inside the folder that holds dohc's own settings, so it cannot be a workspace. Forget it, then choose another folder.",
+    // dohc reopens the listed workspace at startup and refuses it there.
+    await expect(desktop.page.getByTestId("workspace-open-failed")).toContainText(
+      "notes is inside the folder that holds dohc's own settings, so it cannot be a workspace. In Manage workspaces, choose Remove from list on its row.",
     );
-    await expect(row).toHaveCount(1);
     expect(await files()).toEqual(before);
 
+    await desktop.page.getByTestId("workspace-switcher").click();
+    const managerOpened = desktop.app.waitForEvent("window");
+    await desktop.page.getByTestId("workspace-switcher-manage").click();
+    const manager = await managerOpened;
+    const row = manager.getByTestId("workspace-manager-row");
+    await expect(row).toHaveCount(1);
     await row.getByRole("button", { name: /^More for / }).click();
-    await desktop.page.getByRole("menuitem", { name: "Forget", exact: true }).click();
+    // A plain row leaves the list at once, without asking first.
+    await manager.getByRole("menuitem", { name: "Remove from list", exact: true }).click();
     await expect(row).toHaveCount(0);
     expect(await files()).toEqual(before);
   } finally {
