@@ -23,6 +23,7 @@ export class ChatMessageWaiters {
       let finished = false;
       let querying = false;
       let dirty = false;
+      let empty = input.empty;
       let unsubscribe = () => {};
       const finish = (result?: Result, error?: unknown) => {
         if (finished) return;
@@ -35,7 +36,7 @@ export class ChatMessageWaiters {
         else resolve(result!);
       };
       const cancel = () => finish(undefined, new Error("Chat wait cancelled."));
-      const timer = input.timeoutMs === 0 ? undefined : setTimeout(() => finish(input.empty), input.timeoutMs);
+      const timer = input.timeoutMs === 0 ? undefined : setTimeout(() => finish(empty), input.timeoutMs);
       const query = async () => {
         dirty = true;
         if (querying || finished) return;
@@ -45,7 +46,10 @@ export class ChatMessageWaiters {
             dirty = false;
             const result = await input.query();
             if (result.messages.length > 0) finish(result);
-            else if (input.timeoutMs === 0) finish(input.empty);
+            else {
+              empty = result;
+              if (input.timeoutMs === 0) finish(result);
+            }
           }
         } catch (error) { finish(undefined, error); }
         finally { querying = false; }

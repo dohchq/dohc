@@ -134,11 +134,6 @@ function text(structuredContent: Record<string, unknown> | null) {
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
-  const lifetime = new AbortController();
-  const close = server.close.bind(server);
-  server.close = async () => { lifetime.abort(); await close(); };
-  const onclose = server.server.onclose;
-  server.server.onclose = () => { lifetime.abort(); onclose?.(); };
   let waits = 0;
   const level = ctx.shareAccess ?? "owner";
   function register<InputArgs extends z.ZodRawShape>(
@@ -572,7 +567,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   }, async (args, extra) => {
     if (waits >= 4) return text({ ok: false, reason: "Too many chat waits. Finish an existing wait and try again." });
     waits += 1;
-    try { return text(await waitForMessages(ctx, args, AbortSignal.any([lifetime.signal, extra.signal]))); }
+    try { return text(await waitForMessages(ctx, args, extra.signal)); }
     finally { waits -= 1; }
   });
 

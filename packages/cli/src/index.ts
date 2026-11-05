@@ -436,7 +436,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           });
       if (command.verb === "watch" && !command.once && request.verb === "watch") {
         const batch = result as CliResultByVerb["watch"];
-        (options.writeStdout ?? (text => { process.stdout.write(text); }))(`${output}\n`);
+        if (batch.messages.length > 0) (options.writeStdout ?? (text => { process.stdout.write(text); }))(`${output}\n`);
         request.args.cursor = batch.cursor;
         continue;
       }

@@ -4075,6 +4075,7 @@ async function watchMessages(
         (!selectedGroup || thread.thread.channelId === selectedGroup.engine.id) &&
         (!selectedThread || thread.thread.id === selectedThread.thread.id);
       const byId = new Map(threads.filter(admitted).map(thread => [thread.thread.id, thread]));
+      const candidates = new Set<string>();
       const messages = new Map<string, CliResultByVerb["watch"]["messages"][number]>();
       const cache = new Map<string, ChatMessage[]>();
       const read = async (threadId: string) => {
@@ -4086,6 +4087,7 @@ async function watchMessages(
         return rows;
       };
       const add = (thread: LoadedThread, message: ChatMessage) => {
+        candidates.add(message.id);
         if (seenIds.has(message.id)) return;
         messages.set(message.id, {
           threadId: cliThreadId(thread.thread.id), messageId: cliMessageId(message.id),
@@ -4111,7 +4113,7 @@ async function watchMessages(
       }
       const batch = [...messages.entries()].sort(([leftId, left], [rightId, right]) =>
         left.createdAtMs - right.createdAtMs || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0)).slice(0, 100);
-      return { messages: batch.map(([, message]) => message), cursor: encode([...seen, ...batch.map(([id]) => id)]) };
+      return { messages: batch.map(([, message]) => message), cursor: encode([...seen.filter(id => candidates.has(id)), ...batch.map(([id]) => id)]) };
     },
   });
 }

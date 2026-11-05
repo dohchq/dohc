@@ -183,6 +183,16 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("passes the physical attachment signal to the CLI context", async () => {
+    const f = fixture();
+    const signal = await f.authorities.withOperation("workspace", operation => operation.signal);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(context.signal).toBe(signal);
+    expect(context.signal!.aborted).toBe(false);
+    await f.authorities.invalidate("workspace");
+    expect(context.signal!.aborted).toBe(true);
+  });
+
   it("routes Access refresh to the IPC owner for the socket workspace only", async () => {
     const scratch = await createTestScratch("cli-access-refresh-");
     const f = fixture(scratch);

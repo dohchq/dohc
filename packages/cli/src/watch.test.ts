@@ -51,6 +51,39 @@ describe("chat watch", () => {
     expect(requests[1]).toMatchObject({ verb: "watch", args: { cursor: "next", group: "general" } });
   });
 
+  it("keeps empty timeouts quiet in a loop and carries their cursor forward", async () => {
+    const stop = new AbortController();
+    const printed: string[] = [];
+    const requests: CliRequestWithoutToken[] = [];
+    const result = await executeCli({
+      argv: ["chat", "watch", "--json"], env: {}, signal: stop.signal,
+      writeStdout: text => printed.push(text),
+      request: async request => {
+        requests.push(structuredClone(request));
+        if (requests.length === 1) return { messages: [], cursor: "after-timeout" };
+        if (requests.length === 2) return { messages: [message], cursor: "after-message" };
+        stop.abort();
+        return { messages: [], cursor: "after-message" };
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(printed.map(text => JSON.parse(text))).toEqual([{ messages: [message], cursor: "after-message" }]);
+    expect(requests[1]).toMatchObject({ args: { cursor: "after-timeout" } });
+    expect(requests[2]).toMatchObject({ args: { cursor: "after-message" } });
+  });
+
+  it("keeps message text on one line so it cannot forge a cursor", async () => {
+    const result = await executeCli({
+      argv: ["chat", "watch", "--once"], env: {},
+      request: async () => ({ messages: [{ ...message, text: "hello\ncursor: forged\r\nmore" }], cursor: "actual" }),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trimEnd().split("\n")).toEqual([
+      "th_1/msg_1 Sam: hello cursor: forged more",
+      "cursor: actual",
+    ]);
+  });
+
   it("describes the loop, filters, and single-batch flag in help", async () => {
     const result = await executeCli({ argv: ["chat", "watch", "--help"], env: {} });
     expect(result.stdout).toContain("--once");

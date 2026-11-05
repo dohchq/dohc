@@ -62,6 +62,20 @@ describe("chat message waits", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it.each([0, 25_000])("returns the latest empty cursor with timeout %i", async timeoutMs => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const compacted = { messages: [] as string[], cursor: "compacted" };
+      const query = vi.fn(async () => compacted);
+      const pending = f.waiters.wait({ subscribe: f.subscribe, query, empty, timeoutMs });
+      await vi.advanceTimersByTimeAsync(timeoutMs);
+      expect(await pending).toEqual(compacted);
+      expect(query).toHaveBeenCalledOnce();
+      expect(f.listeners.size).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("releases disconnected and retired workspaces", async () => {
     const f = fixture();
     const controller = new AbortController();

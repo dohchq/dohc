@@ -398,7 +398,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderThreads(result as CliResultByVerb["threads"]);
     case "watch": {
       const batch = result as CliResultByVerb["watch"];
-      return [...batch.messages.map(message => `${message.threadId}/${message.messageId} ${lineSafe(message.author.displayName)}: ${message.text}`), `cursor: ${batch.cursor}`].join("\n");
+      return [...batch.messages.map(message => `${message.threadId}/${message.messageId} ${lineSafe(message.author.displayName)}: ${lineSafe(message.text)}`), `cursor: ${batch.cursor}`].join("\n");
     }
     case "inbox":
       return renderInbox(result as CliResultByVerb["inbox"]);

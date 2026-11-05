@@ -403,6 +403,7 @@ import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
+import { signalChatWrite } from "./workspaces/chatWriteSignals";
 import { createMoveAcceptedEditsGuard } from "./workspaces/moveAcceptedEditsGuard";
 import { createRelayLogWait } from "./workspaces/relayLogWait";
 import { awaitCredentialGeneration, chatShareSessionKey, handleRelayUnauthorized, RelaySessionError } from "./mainChatIpcHandlers";
@@ -2432,6 +2433,7 @@ function engineForWorkspace(
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
     afterSuccessfulPull: ({ recovered }) => {
+      signalChatWrite(workspace.workspaceId);
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       refreshShareLabels();

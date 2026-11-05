@@ -9,6 +9,7 @@ import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
+import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
 import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
@@ -41,6 +42,8 @@ import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispat
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
 import * as chatWriteSignals from "../workspaces/chatWriteSignals";
+import { createRelaySyncEngine } from "../workspaces/relaySyncEngine";
+import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import { createLocalAuthorship } from "../workspaces/localAuthorship";
 import { deferred } from "../testing/deferred";
@@ -570,6 +573,39 @@ describe("CLI socket server", () => {
     expect(await invoke("watch", { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor, timeoutMs: 0 })).toEqual({ messages: [], cursor: batch.cursor });
   });
 
+  it("bounds the cursor to unread candidates across many batches", async () => {
+    const first = await post({ group: "general", actor: "human", body: "@agent first" });
+    const thread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(row => cliThreadId(row.id) === first.threadId)!;
+    const [template] = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
+    let candidates: NonNullable<typeof template>[] = [];
+    const messages = vi.spyOn(store!, "listMessages").mockImplementation(async input => input.threadId === thread.id ? candidates : []);
+    const mentions = vi.spyOn(store!, "listMentionsForHandle").mockImplementation(async () => candidates.map(row => ({
+      threadId: thread.id, messageId: row.id, handle: "agent", authorKind: "human" as const, createdAtMs: row.createdAtMs,
+    })));
+    let cursor: string | undefined;
+    const watch = async () => {
+      const response = cliTransportResponseSchema.parse(JSON.parse(await handleCliRequestLine(JSON.stringify({
+        token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { cwd: workspaceRoot, actor: "agent", timeoutMs: 0, cursor },
+      }), token, serverOptions)));
+      if (!response.ok) throw new Error(response.error);
+      const batch = parseCliResult("watch", response.result);
+      cursor = batch.cursor;
+      return batch;
+    };
+    try {
+      for (let batchIndex = 0; batchIndex < 100; batchIndex += 1) {
+        candidates = Array.from({ length: 10 }, (_, index) => ({ ...template!, id: `message-${batchIndex}-${index}` }));
+        expect((await watch()).messages.map(row => row.messageId)).toEqual(candidates.map(row => cliMessageId(row.id)));
+        expect((await watch()).messages).toEqual([]);
+        expect(JSON.parse(Buffer.from(cursor!, "base64url").toString("utf8")).seen).toEqual(candidates.map(row => row.id));
+        expect(cursor!.length).toBeLessThan(1_000);
+      }
+      candidates = [];
+      expect((await watch()).messages).toEqual([]);
+      expect(JSON.parse(Buffer.from(cursor!, "base64url").toString("utf8")).seen).toEqual([]);
+    } finally { messages.mockRestore(); mentions.mockRestore(); }
+  });
+
   it("wakes a wait when a local message arrives", async () => {
     const queried = deferred<void>();
     const list = store!.listMentionsForHandle.bind(store!);
@@ -616,7 +652,7 @@ describe("CLI socket server", () => {
     expect(batch.messages.map(message => message.text)).toEqual(["Later"]);
   });
 
-  it("wakes for a synced message even if its time predates the cursor", async () => {
+  it("wakes after a workspace cloud pull even if the message predates the cursor", async () => {
     const first = await post({ group: "general", actor: "human", body: "@agent first" });
     const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
     const queried = deferred<void>();
@@ -631,17 +667,51 @@ describe("CLI socket server", () => {
       const thread = threads.find(thread => cliThreadId(thread.id) === first.threadId)!;
       const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
       const older = { ...messages[0]!, id: "synced-message", createdAtMs: 0, body: "@agent synced" };
-      const messageSpy = vi.spyOn(store!, "listMessages").mockImplementation(async input => input.threadId === thread.id ? [...messages, older] : []);
-      spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, handle: "agent", authorKind: "human" as const, createdAtMs: 0 }]);
+      const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
+      const start = source.indexOf("    afterSuccessfulPull: ({ recovered }) => {");
+      const end = source.indexOf("\n    // Recorded durably before each pull", start);
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      const dependencies = {
+        workspace: { workspaceId: WORKSPACE_ID },
+        signalChatWrite: chatWriteSignals.signalChatWrite,
+        noticeStore: () => ({ sync: vi.fn() }),
+        shareRosters: { pulled: vi.fn() }, refreshShareLabels: vi.fn(),
+        automationHosts: { relayAnswered: vi.fn() }, collectionAutomationsOf: vi.fn(),
+        withWorkspaceAttachment: vi.fn(),
+        withWorkspaceAttachmentAsync: async (_workspace: unknown, work: () => Promise<void>) => work(),
+        projectPendingChatBookmarks: vi.fn(async () => undefined),
+      };
+      const callback = stripTypeScriptTypes(`({${source.slice(start, end)}})`);
+      const afterSuccessfulPull = new Function("dependencies",
+        `const { ${Object.keys(dependencies).join(", ")} } = dependencies; return ${callback}.afterSuccessfulPull;`,
+      )(dependencies) as NonNullable<Parameters<typeof createRelaySyncEngine>[0]["afterSuccessfulPull"]>;
+      const messageSpy = vi.spyOn(store!, "listMessages");
+      const sync = createRelaySyncEngine({
+        rootDir: workspaceRoot, relay: { baseUrl: "https://relay.test", token: "token" }, onChange: vi.fn(),
+        capture: { runRelaySync: async task => task(async () => undefined) } as WorkspaceEngineCapture,
+        operations: {
+          claim: async () => undefined,
+          push: async () => ({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
+          recoverOrigin: async () => { throw new Error("Unexpected recovery"); },
+          pull: async () => {
+            messageSpy.mockImplementation(async input => input.threadId === thread.id ? [...messages, older] : []);
+            spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, handle: "agent", authorKind: "human" as const, createdAtMs: 0 }]);
+            return { fetched: 1, applied: 1, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: 1, sharingDeclined: [] };
+          },
+        },
+        afterSuccessfulPull,
+      });
       try {
-        chatWriteSignals.signalChatWrite(WORKSPACE_ID);
+        await sync.start();
+        expect(sync.snapshot().syncFailure).toBeNull();
         expect((await pending).messages.map(message => message.text)).toEqual([older.body]);
-      } finally { messageSpy.mockRestore(); }
+      } finally { await sync.stop(); messageSpy.mockRestore(); }
     } finally { spy.mockRestore(); }
   });
 
-  it("removes a socket wait's subscription when its client disconnects", async () => {
-    if (!server) return;
+  it("removes a socket wait's subscription when its client disconnects", async (ctx) => {
+    if (!server) { ctx.skip(); return; }
     const subscribed = deferred<void>();
     const removed = deferred<void>();
     const original = chatWriteSignals.subscribeChatWrites;
