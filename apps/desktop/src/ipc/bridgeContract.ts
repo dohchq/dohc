@@ -1384,6 +1384,8 @@ const SYNC_STATUS_BASE_FIELDS = {
     "not-connected",
     // Signed in, but not as the account that syncs this workspace.
     "account-unconfirmed",
+    // The server stopped accepting this computer's sign-in.
+    "sign-in-expired",
     "update-required",
   ]),
   pendingChangeCount: z.number().int().nonnegative(),

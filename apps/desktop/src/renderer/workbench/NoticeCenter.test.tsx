@@ -42,6 +42,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       onRefreshShareView={props.onRefreshShareView ?? (() => {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
       {...(props.onConnectServer ? { onConnectServer: props.onConnectServer } : {})}
+      {...(props.onSignInAgain ? { onSignInAgain: props.onSignInAgain } : {})}
       {...(props.onConfirmSyncAccount ? { onConfirmSyncAccount: props.onConfirmSyncAccount } : {})}
       {...(props.onOpenSyncSettings ? { onOpenSyncSettings: props.onOpenSyncSettings } : {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
@@ -1113,6 +1114,12 @@ describe("notice center", () => {
       actions: ["Try again", "Sync settings"],
       notTitle: "Not connected to your server",
     },
+    "sign-in-expired": {
+      title: "Your sign-in expired",
+      body: "This workspace isn't syncing until you sign in again. Your changes stay on this computer.",
+      actions: ["Sign in again"],
+      notTitle: "Couldn't confirm this workspace's account",
+    },
   } as const;
   it.each(Object.keys(BLOCKED_ROWS) as Array<keyof typeof BLOCKED_ROWS>)(
     "says why a synced workspace isn't syncing (%s)",
@@ -1120,11 +1127,13 @@ describe("notice center", () => {
       const expected = BLOCKED_ROWS[state];
       const callbacks = {
         onConnectServer: vi.fn(),
+        onSignInAgain: vi.fn(),
         onConfirmSyncAccount: vi.fn(),
         onOpenSyncSettings: vi.fn(),
       };
       const byLabel: Record<string, ReturnType<typeof vi.fn>> = {
         "Connect server": callbacks.onConnectServer,
+        "Sign in again": callbacks.onSignInAgain,
         "Try again": callbacks.onConfirmSyncAccount,
         "Sync settings": callbacks.onOpenSyncSettings,
       };
@@ -1561,6 +1570,7 @@ describe("notice center", () => {
   it.each([
     { label: "nobody is connected", status: { state: "not-connected" as const }, failedSaves: 0 },
     { label: "the account isn't confirmed", status: { state: "account-unconfirmed" as const }, failedSaves: 0 },
+    { label: "the sign-in expired", status: { state: "sign-in-expired" as const }, failedSaves: 0 },
     { label: "a file couldn't save", status: { state: "account-unconfirmed" as const }, failedSaves: 1 },
     { label: "dohc needs an update", status: { ...serverUnreachable, updateRequired: "app" as const }, failedSaves: 0 },
   ])("reports live editing while the title bar says $label", ({ status, failedSaves }) => {

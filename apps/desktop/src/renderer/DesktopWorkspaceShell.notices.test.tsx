@@ -4986,3 +4986,92 @@ it("offers Connect server from Notices while nobody is connected, and pauses not
   expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
   expect(bridge.cloudStopSync).not.toHaveBeenCalled();
 });
+
+// The server stopped accepting the sign-in. Sign in again in Notices starts
+// the same sign-in at that server, with no Disconnect first. Main rebuilds
+// the engine on the new session, so sync resumes with nothing else clicked:
+// no enable, no pause, and no Settings to finish in.
+it("signs in again from Notices, and sync resumes with no enable or pause", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    let status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired" };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(),
+      cloudStopSync: vi.fn(),
+      cloudLogout: vi.fn(),
+      cloudLoginStart: vi.fn(async () => ({ userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device" })),
+      cloudLoginPoll: vi.fn(async () => {
+        status = { ...SYNC_STATUS };
+        return { status: "complete" as const, email: "me@dohc.test" };
+      }),
+    });
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true, workspaceSyncConnected: true,
+    }));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderShell(bridge);
+
+    const title = await screen.findByTestId("sync-status");
+    expect(title.textContent).toBe("Sign in again to sync");
+    expect(title.getAttribute("title")).toBe("Not syncing. Your sign-in expired.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("notice-sign-in-expired");
+    expect(row.textContent).toContain("Your sign-in expired");
+    await user.click(within(row).getByRole("button", { name: "Sign in again" }));
+    await screen.findByTestId("cloud-user-code");
+    expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
+    expect(screen.queryByTestId("cloud-connected")).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    // Main announces the rebuilt engine's status.
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() => expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("synced"));
+    expect(screen.queryByTestId("notice-sign-in-expired")).toBeNull();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
+    expect(bridge.cloudStopSync).not.toHaveBeenCalled();
+    expect(bridge.cloudLogout).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// Settings shows the same expired row: no switch reading on while nothing
+// syncs, and Sign in again in Try again's place.
+it("shows Sign in again in Settings while the sign-in is expired, never the switch", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired" };
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudEnableSync: vi.fn(),
+    cloudStopSync: vi.fn(),
+    cloudLoginStart: vi.fn(async () => ({ userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device" })),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({
+    connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+    workspaceSynced: true, workspaceSyncConnected: true,
+  }));
+  renderShell(bridge);
+  const user = userEvent.setup();
+
+  expect((await screen.findByTestId("sync-status")).textContent).toBe("Sign in again to sync");
+  // Signed in, Connect server opens Settings' Sync and sharing page.
+  await user.keyboard("{Control>}k{/Control}");
+  await user.click(await screen.findByText("Connect server"));
+  const row = within(await screen.findByTestId("settings-row-sync-workspace"));
+  expect(row.queryByRole("switch")).toBeNull();
+  expect(row.getByTestId("cloud-workspace-sign-in-expired").textContent).toBe("This workspace isn't syncing until you sign in again.");
+  expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Sign in again", "Pause sync"]);
+  await user.click(row.getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("cloud-user-code");
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
+  expect(bridge.cloudStopSync).not.toHaveBeenCalled();
+});

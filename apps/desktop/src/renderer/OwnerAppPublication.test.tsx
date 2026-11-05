@@ -1103,10 +1103,10 @@ describe("owner app publication", () => {
       expect(reportError).not.toHaveBeenCalled();
     });
 
-    // The server isn't the cause when nobody is connected or dohc can't
-    // confirm the account, so Share links says what it couldn't read instead
-    // of leaving it to the title bar.
-    it.each(["not-connected", "account-unconfirmed"] as const)(
+    // The server isn't the cause when nobody is connected, dohc can't confirm
+    // the account, or the sign-in expired, so Share links says what it
+    // couldn't read instead of leaving it to the title bar.
+    it.each(["not-connected", "account-unconfirmed", "sign-in-expired"] as const)(
       "keeps Share links with its line while the workspace can't sync (%s)",
       async (state) => {
         const reportError = vi.fn();

@@ -957,7 +957,12 @@ describe("workspaceActivity cloud sync nudge", () => {
     expect(read().state).toBe("account-unconfirmed");
     blocked = undefined;
     authExpired = true;
-    expect(read().state).toBe("account-unconfirmed");
+    expect(read().state).toBe("sign-in-expired");
+    // Main's own reason comes first: a session that no longer matches says
+    // so, whatever the stopped engine last saw.
+    blocked = "not-connected";
+    expect(read().state).toBe("not-connected");
+    blocked = undefined;
     // The account matches and the sign-in is accepted: sync reads normal
     // again, with no pause and the engine never stopped.
     authExpired = false;
@@ -966,6 +971,80 @@ describe("workspaceActivity cloud sync nudge", () => {
     expect(confirmed.syncPause).toBeUndefined();
     expect(stop).not.toHaveBeenCalled();
     await activity.stopAll();
+  });
+
+  // Main's completed sign-in stops every engine and attaches one built from
+  // the new session, as adoptCompletedCloudLoginSession does. Main builds no
+  // engine for a paused workspace, whose pause removed its remote.
+  describe("signing in again after the server stopped accepting the sign-in", () => {
+    const PAUSE = { atMs: 7, author: { kind: "person" as const, personId: "local:person", self: true } };
+    function engineFor(remote: () => boolean) {
+      const built: Array<{ start: ReturnType<typeof vi.fn>; expire: () => void }> = [];
+      const build = () => {
+        if (!remote()) return null;
+        let authExpired = false;
+        const start = vi.fn(async () => {});
+        built.push({ start, expire: () => { authExpired = true; } });
+        return {
+          start, queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
+          retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+          snapshot: () => ({
+            syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
+            conflictCount: 0, authExpired, sharingDeclined: [],
+          }),
+          stop: async () => {},
+        };
+      };
+      return { build, built };
+    }
+
+    it("resumes sync on the new sign-in's engine, with no pause and no enable", async () => {
+      const engines = engineFor(() => true);
+      const service = createPhysicalWorkspaceActivity(() => {}, {
+        observationFor: idleObservation,
+        cloudStateFor: () => ({}),
+        engineFor: engines.build,
+      });
+      const state = new WorkspaceActivityState();
+      await service.open(workspace(), state);
+      engines.built[0]!.expire();
+      expect(service.getStatus(workspace(), state).state).toBe("sign-in-expired");
+
+      await service.stopEngine(state, false);
+      service.reconcileCloud(state, engines.build, false);
+      const status = SyncStatusResult.parse(service.getStatus(workspace(), state));
+      expect(status.state).toBe("synced");
+      expect(status.syncPause).toBeUndefined();
+      expect(engines.built).toHaveLength(2);
+      expect(engines.built[1]!.start).toHaveBeenCalledOnce();
+      await service.stop(state);
+    });
+
+    it("keeps a pause saved before the sign-in expired paused after signing in again", async () => {
+      let remote = true;
+      let pause: typeof PAUSE | undefined;
+      const engines = engineFor(() => remote);
+      const service = createPhysicalWorkspaceActivity(() => {}, {
+        observationFor: idleObservation,
+        cloudStateFor: () => (pause ? { syncPause: pause } : {}),
+        engineFor: engines.build,
+      });
+      const state = new WorkspaceActivityState();
+      await service.open(workspace(), state);
+      // Pause sync: main saves the pause, drops the remote, and stops the
+      // engine. The session then expires with nothing running to see it.
+      pause = PAUSE;
+      remote = false;
+      await service.stopEngine(state, false);
+
+      await service.stopEngine(state, false);
+      service.reconcileCloud(state, engines.build, false);
+      const status = SyncStatusResult.parse(service.getStatus(workspace(), state));
+      expect(status.syncPause).toEqual(PAUSE);
+      expect(status.state).not.toBe("sign-in-expired");
+      expect(engines.built).toHaveLength(1);
+      await service.stop(state);
+    });
   });
 
   it("reads an engine stopped on the relay API version as update-required, naming the side to update", async () => {

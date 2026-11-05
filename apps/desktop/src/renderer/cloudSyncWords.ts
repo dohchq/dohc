@@ -9,3 +9,7 @@ export const SYNC_UNCONFIRMED_ACCOUNT = "dohc couldn't confirm this workspace's 
 // A synced workspace while nobody is connected to a server. Disconnecting is
 // a choice, not a fault, so the words name the way back and blame nothing.
 export const SYNC_NOT_CONNECTED = "This workspace isn't syncing until you connect your server.";
+
+// A synced workspace whose sign-in the server stopped accepting. Sign in
+// again renews it at the same server, with no Disconnect first.
+export const SYNC_SIGN_IN_EXPIRED = "This workspace isn't syncing until you sign in again.";

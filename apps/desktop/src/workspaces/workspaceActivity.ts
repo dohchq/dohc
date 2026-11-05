@@ -287,12 +287,11 @@ export function createWorkspaceActivity(
       // A retry someone asked for shows as syncing until it ends.
       syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
       // An engine stopped on the relay API version names the side to update.
-      // One whose sign-in the server refused stops too, leaving the account
-      // unconfirmed. Neither records a pause, so sync runs again once the
-      // session is confirmed.
+      // One whose sign-in the server refused stops too. Neither records a
+      // pause, so sync runs again once a new sign-in rebuilds the engine.
       syncBlocked: snap?.updateRequired
         ? "update-required"
-        : cloud.syncBlocked ?? (snap?.authExpired ? "account-unconfirmed" : null),
+        : cloud.syncBlocked ?? (snap?.authExpired ? "sign-in-expired" : null),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and

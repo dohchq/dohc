@@ -123,8 +123,8 @@ describe("sync status surface", () => {
   });
 
   // The server isn't the cause, so the title bar never names it. Signed out
-  // is a choice, so it waits on a ring; an account dohc can't confirm needs
-  // the person, so it takes the attention mark. Neither borrows the other's
+  // is a choice, so it waits on a ring; an account dohc can't confirm, or an
+  // expired sign-in, needs the person, so it takes the attention mark. Neither borrows the other's
   // words.
   const BLOCKED_TITLE_BAR = {
     "not-connected": {
@@ -135,6 +135,11 @@ describe("sync status surface", () => {
     "account-unconfirmed": {
       words: "Couldn't confirm account",
       description: "Not syncing. dohc couldn't confirm this workspace's account.",
+      dot: "attention",
+    },
+    "sign-in-expired": {
+      words: "Sign in again to sync",
+      description: "Not syncing. Your sign-in expired.",
       dot: "attention",
     },
   } as const;
@@ -352,6 +357,7 @@ describe("sync status surface", () => {
   it.each([
     { label: "Connect server to sync", status: { state: "not-connected" as const }, failedSaves: 0 },
     { label: "Couldn't confirm account", status: { state: "account-unconfirmed" as const }, failedSaves: 0 },
+    { label: "Sign in again to sync", status: { state: "sign-in-expired" as const }, failedSaves: 0 },
     { label: "Couldn't save 1 file", status: { state: "account-unconfirmed" as const }, failedSaves: 1 },
     { label: "Update dohc to sync", status: { state: "update-required" as const, updateRequired: "app" as const }, failedSaves: 0 },
   ])("keeps live editing beside $label", ({ label, status, failedSaves }) => {
