@@ -4994,7 +4994,7 @@ it("offers Connect server from Notices while nobody is connected, and pauses not
 it("signs in again from Notices, and sync resumes with no enable or pause", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
-    let status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired" };
+    let status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       cloudEnableSync: vi.fn(),
       cloudStopSync: vi.fn(),
@@ -5044,8 +5044,12 @@ it("signs in again from Notices, and sync resumes with no enable or pause", asyn
 
 // Settings shows the same expired row: no switch reading on while nothing
 // syncs, and Sign in again in Try again's place.
-it("shows Sign in again in Settings while the sign-in is expired, never the switch", async () => {
-  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired" };
+it.each([
+  ["the title bar says so", { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true }, "Sign in again to sync"],
+  // A conflict shows first, and the switch still mustn't read on.
+  ["a conflict shows first", { ...SYNC_STATUS, state: "conflict", conflictCount: 1, signInExpired: true }, "Conflict (1)"],
+] as const)("shows Sign in again in Settings while the sign-in is expired, never the switch, when %s", async (_, shown, label) => {
+  const status: SyncStatusResult = shown;
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
     cloudEnableSync: vi.fn(),
     cloudStopSync: vi.fn(),
@@ -5060,7 +5064,7 @@ it("shows Sign in again in Settings while the sign-in is expired, never the swit
   renderShell(bridge);
   const user = userEvent.setup();
 
-  expect((await screen.findByTestId("sync-status")).textContent).toBe("Sign in again to sync");
+  expect((await screen.findByTestId("sync-status")).textContent).toBe(label);
   // Signed in, Connect server opens Settings' Sync and sharing page.
   await user.keyboard("{Control>}k{/Control}");
   await user.click(await screen.findByText("Connect server"));

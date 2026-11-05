@@ -1085,6 +1085,14 @@ describe("owner app publication", () => {
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
         api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "sync-failed", syncFailure: { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 2 } });
       }, () => api.getSyncStatus],
+      ["sync waits for dohc to update", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "update-required", updateRequired: "app" });
+      }, () => api.getSyncStatus],
+      ["sync waits for the server to update", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "update-required", updateRequired: "server" });
+      }, () => api.getSyncStatus],
     ])("hides Share links when %s", async (_, arrange, decider) => {
       const reportError = vi.fn();
       api.publishOwnerApp.mockImplementation(local([localRow]));

@@ -1107,18 +1107,21 @@ describe("notice center", () => {
       body: "This workspace isn't syncing until you connect your server. Your changes stay on this computer.",
       actions: ["Connect server"],
       notTitle: "Couldn't confirm this workspace's account",
+      copied: null,
     },
     "account-unconfirmed": {
       title: "Couldn't confirm this workspace's account",
       body: "dohc couldn't confirm this workspace's account, so it isn't syncing. Your changes stay on this computer.",
       actions: ["Try again", "Sync settings"],
       notTitle: "Not connected to your server",
+      copied: "Couldn't confirm this workspace's account\ndohc couldn't confirm this workspace's account, so it isn't syncing. Your changes stay on this computer.",
     },
     "sign-in-expired": {
       title: "Your sign-in expired",
       body: "This workspace isn't syncing until you sign in again. Your changes stay on this computer.",
       actions: ["Sign in again"],
       notTitle: "Couldn't confirm this workspace's account",
+      copied: "Your sign-in expired\nThis workspace isn't syncing until you sign in again. Your changes stay on this computer.",
     },
   } as const;
   it.each(Object.keys(BLOCKED_ROWS) as Array<keyof typeof BLOCKED_ROWS>)(
@@ -1152,7 +1155,13 @@ describe("notice center", () => {
       expect(row().textContent).toContain(expected.body);
       expect(row().textContent).not.toContain(expected.notTitle);
       expect(row().textContent).not.toMatch(/server unreachable|could not/i);
-      expect(screen.getByTestId(`notice-${state}-copy`)).toBeTruthy();
+      // Copy holds exactly what the row says, and a choice has nothing to report.
+      if (expected.copied === null) {
+        expect(screen.queryByTestId(`notice-${state}-copy`)).toBeNull();
+      } else {
+        await userEvent.click(screen.getByTestId(`notice-${state}-copy`));
+        expect(await navigator.clipboard.readText()).toBe(expected.copied);
+      }
       expect(within(row()).queryByRole("button", { name: /dismiss/i })).toBeNull();
       const actionLabels = within(row())
         .getAllByRole("button")

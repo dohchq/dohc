@@ -503,16 +503,16 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
-// A synced workspace that can't sync on this computer's session. Neither
-// row blames the server, and neither has a dismiss: each stays until sync can
-// run again.
+// A synced workspace that can't sync on this computer's session. No row
+// blames the server, and none has a dismiss: each stays until sync can run
+// again. A failure's copy holds exactly what its row says. Not connected is
+// a choice, with nothing to report.
 function syncBlockedNotice(input: {
   id: string;
   tone: Notice["tone"];
   title: string;
   body: string;
   actions: Array<NoticeAction | null>;
-  workspaceId: string;
   Icon: Notice["Icon"];
 }): Notice {
   const actions = input.actions.filter((action): action is NoticeAction => action !== null);
@@ -522,11 +522,7 @@ function syncBlockedNotice(input: {
     title: input.title,
     body: input.body,
     ...(actions.length > 0 ? { actions } : {}),
-    copyText: errorDetails([
-      ["Notice", input.title],
-      ["Detail", input.body],
-      ["Workspace id", input.workspaceId],
-    ]),
+    ...(input.tone === "danger" ? { copyText: `${input.title}\n${input.body}` } : {}),
     Icon: input.Icon,
   };
 }
@@ -535,7 +531,6 @@ function syncBlockedNotice(input: {
 // offers the way back: the same connect flow as Settings' Connect server.
 const NOT_CONNECTED_TITLE = "Not connected to your server";
 export function notConnectedNotice(input: {
-  workspaceId: string;
   onConnectServer: (() => void) | undefined;
 }): Notice {
   return syncBlockedNotice({
@@ -544,7 +539,6 @@ export function notConnectedNotice(input: {
     title: NOT_CONNECTED_TITLE,
     body: `${SYNC_NOT_CONNECTED} Your changes stay on this computer.`,
     actions: [input.onConnectServer ? { label: "Connect server", onClick: input.onConnectServer } : null],
-    workspaceId: input.workspaceId,
     Icon: CloudOff,
   });
 }
@@ -553,7 +547,6 @@ export function notConnectedNotice(input: {
 // reads the signed-in account's session again, the same enable Settings runs.
 const ACCOUNT_UNCONFIRMED_TITLE = "Couldn't confirm this workspace's account";
 export function accountUnconfirmedNotice(input: {
-  workspaceId: string;
   onTryAgain: (() => void) | undefined;
   onOpenSyncSettings: (() => void) | undefined;
 }): Notice {
@@ -566,7 +559,6 @@ export function accountUnconfirmedNotice(input: {
       input.onTryAgain ? { label: "Try again", onClick: input.onTryAgain } : null,
       input.onOpenSyncSettings ? { label: "Sync settings", onClick: input.onOpenSyncSettings } : null,
     ],
-    workspaceId: input.workspaceId,
     Icon: AlertTriangle,
   });
 }
@@ -575,7 +567,6 @@ export function accountUnconfirmedNotice(input: {
 // renews it at the same server, the same action as Settings' row.
 const SIGN_IN_EXPIRED_TITLE = "Your sign-in expired";
 export function signInExpiredNotice(input: {
-  workspaceId: string;
   onSignInAgain: (() => void) | undefined;
 }): Notice {
   return syncBlockedNotice({
@@ -584,7 +575,6 @@ export function signInExpiredNotice(input: {
     title: SIGN_IN_EXPIRED_TITLE,
     body: `${SYNC_SIGN_IN_EXPIRED} Your changes stay on this computer.`,
     actions: [input.onSignInAgain ? { label: "Sign in again", onClick: input.onSignInAgain } : null],
-    workspaceId: input.workspaceId,
     Icon: AlertTriangle,
   });
 }
@@ -1493,12 +1483,11 @@ export function NoticeCenter(props: {
         Icon: CloudOff,
       });
     } else if (state === "not-connected") {
-      next.push(notConnectedNotice({ workspaceId: props.workspaceId, onConnectServer: props.onConnectServer }));
+      next.push(notConnectedNotice({ onConnectServer: props.onConnectServer }));
     } else if (state === "sign-in-expired") {
-      next.push(signInExpiredNotice({ workspaceId: props.workspaceId, onSignInAgain: props.onSignInAgain }));
+      next.push(signInExpiredNotice({ onSignInAgain: props.onSignInAgain }));
     } else if (state === "account-unconfirmed") {
       next.push(accountUnconfirmedNotice({
-        workspaceId: props.workspaceId,
         onTryAgain: props.onConfirmSyncAccount,
         onOpenSyncSettings: props.onOpenSyncSettings,
       }));

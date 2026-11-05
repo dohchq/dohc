@@ -2129,8 +2129,9 @@ export function DesktopWorkspaceShell(props: {
     setCloudOpen(true);
   }, [closeSettings]);
   // Only the sync status knows the server stopped accepting the sign-in: the
-  // saved session still matches the workspace.
-  const signInExpired = syncStatus?.state === "sign-in-expired";
+  // saved session still matches the workspace. A conflict can take the title
+  // bar meanwhile, and the switch still mustn't read on.
+  const signInExpired = syncStatus?.signInExpired === true;
   const settingsCloud = useMemo<CloudSettings>(
     () => ({ ...cloudSettings, signInExpired, onSignInAgain: signInAgain }),
     [cloudSettings, signInAgain, signInExpired],

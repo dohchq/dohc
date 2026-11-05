@@ -68,7 +68,7 @@ export function CloudLogin(props: {
   // Sign in again to the server of the session already here, for a session
   // the server stopped accepting. The first check starts the same sign-in as
   // Connect server, with no Disconnect first, and its approval replaces the
-  // session. Ahead of handOffSession.
+  // session. Every retry stays at that server. Ahead of handOffSession.
   renew?: boolean;
   // Nested inside another elevated card (join/open-shared/handoff signed-out
   // gates): drop this panel's own frame so cards never stack elevation, drop
@@ -95,6 +95,12 @@ export function CloudLogin(props: {
   const [networkAccess, setNetworkAccess] = useState<"private" | "public" | null>(
     null,
   );
+  // The session's server while signing in again there. A failed or refused
+  // attempt offers Sign in again at it, never an address to change.
+  const [renewOrigin, setRenewOrigin] = useState<string | null>(null);
+  // Set once a renewed sign-in completes, so asking again about the new
+  // session doesn't start another.
+  const renewedRef = useRef(false);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Set only by a Try again on a failed status check, read by the check it
   // starts.
@@ -165,7 +171,8 @@ export function CloudLogin(props: {
       .cloudStatus()
       .then((status) => {
         if (!sessionRef.isCurrent(session)) return;
-        if (props.renew && status.connected && status.serverUrl) {
+        if (props.renew && !renewedRef.current && status.connected && status.serverUrl) {
+          setRenewOrigin(status.serverUrl);
           void connect(status.serverUrl);
           return;
         }
@@ -201,6 +208,7 @@ export function CloudLogin(props: {
           if (!sessionRef.isCurrent(session)) return;
           if (result.status === "pending") return pollUntilDone(session, origin);
           if (result.status === "complete") {
+            renewedRef.current = true;
             void bridge()
               .cloudStatus()
               .then((status) => {
@@ -350,7 +358,34 @@ export function CloudLogin(props: {
         </div>
       ) : null}
 
-      {phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting" ? (
+      {renewOrigin !== null && (phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting") ? (
+        <div data-testid="cloud-renew">
+          {phase.kind === "refused" ? (
+            <p
+              data-testid="cloud-login-refused"
+              role="alert"
+              className="mb-0 mt-2 text-xs text-danger"
+            >
+              {phase.reason}
+            </p>
+          ) : null}
+          <p className="mb-2 mt-3 text-[12px] text-muted">Server address</p>
+          <p
+            data-testid="cloud-renew-server"
+            className="m-0 break-all font-mono text-[13px] text-ink"
+          >
+            {renewOrigin}
+          </p>
+          <PrimaryButton
+            data-testid="cloud-renew-start"
+            onClick={() => void connect(renewOrigin)}
+            disabled={connecting}
+            className="mt-3"
+          >
+            {connecting ? "Connecting…" : "Sign in again"}
+          </PrimaryButton>
+        </div>
+      ) : phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting" ? (
         <>
           {/* The browser's own answer, next to the form that starts over. */}
           {phase.kind === "refused" ? (
