@@ -438,6 +438,23 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
       }
     }
+    // At the sidebar's default width, a Collection change cuts who made it
+    // and what changed before its Collection's name, and no part runs past
+    // its line. The specimen must really cut something, or the check proves
+    // nothing.
+    for (const theme of THEMES) {
+      const shown = await page.getByTestId(`states-history-collections-narrow-${theme}`).evaluate((el) => {
+        const cut = (selector: string) => Array.from(el.querySelectorAll(selector)).filter((node) => node.scrollWidth > node.clientWidth).length;
+        return {
+          names: cut('[data-testid="history-collection-name"]'),
+          lines: cut('[data-testid="history-collection-line"]'),
+          parts: cut('[data-testid="history-collection-title"], [data-testid="history-collection-agent"]'),
+        };
+      });
+      if (shown.names > 0) failures.push(`a Collection's name (${theme}) is cut at the sidebar's default width`);
+      if (shown.lines > 0) failures.push(`a Collection change's parts (${theme}) run past their line`);
+      if (shown.parts === 0) failures.push(`the default-width Collections (${theme}) cut nothing, so the check proves nothing`);
+    }
     // An overflowing strip fades only the edges it can still scroll past,
     // 24px each, and its active tab sits clear of them. Each specimen must
     // really overflow the way its label says, or its capture proves nothing.
