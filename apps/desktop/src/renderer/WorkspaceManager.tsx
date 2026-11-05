@@ -101,6 +101,7 @@ function writeListWidth(width: number): void {
 
 const ROW_MENU_WIDTH = 176;
 const REMOVE_FAILED = "dohc could not remove this workspace from the list.";
+const LIST_REFRESH = "workspace-list:refresh";
 type RemovalDialog = { workspace: Workspace; busy: boolean; error: string | null };
 const ROW_ACTIONS = ["open", "reveal", "remove"] as const;
 type RowAction = (typeof ROW_ACTIONS)[number];
@@ -281,8 +282,6 @@ export function WorkspaceManager(props: {
     const { workspaceId } = workspace;
     try {
       await bridge().forgetWorkspace({ workspaceId });
-      await props.onForgot();
-      clearRow(workspaceId);
     } catch (cause) {
       reportRowError("remove", workspaceId, REMOVE_FAILED, cause, () => {
         const current = workspacesRef.current.find((row) => row.workspaceId === workspaceId);
@@ -293,6 +292,19 @@ export function WorkspaceManager(props: {
         // Blocked by another row's open dialog: false keeps this failure listed.
         return requestRemoval(current) ? undefined : false;
       });
+      return;
+    }
+    clearRow(workspaceId);
+    await refreshAfterRemoval();
+  }
+
+  // The removal already worked, so trying again only refreshes the list.
+  async function refreshAfterRemoval() {
+    try {
+      await props.onForgot();
+      clearIdentity(LIST_REFRESH);
+    } catch (cause) {
+      reportError("Could not refresh the workspace list.", cause, () => void refreshAfterRemoval(), undefined, LIST_REFRESH);
     }
   }
 
@@ -312,12 +324,13 @@ export function WorkspaceManager(props: {
     setRemoving({ workspace, busy: true, error: null });
     try {
       await bridge().forgetWorkspace({ workspaceId: workspace.workspaceId });
-      await props.onForgot();
-      clearRow(workspace.workspaceId);
-      setRemoving(null);
     } catch (cause) {
       setRemoving({ workspace, busy: false, error: ipcErrorMessage(cause, REMOVE_FAILED) });
+      return;
     }
+    clearRow(workspace.workspaceId);
+    setRemoving(null);
+    await refreshAfterRemoval();
   }
 
   const onWorkspaceReady = (workspace: Workspace) => void open(workspace);
