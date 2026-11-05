@@ -290,6 +290,40 @@ describe("refreshing shares added to this workspace", () => {
       expect(within(reopened).queryByText(words, { exact: false })).toBeNull();
     });
   });
+
+  it("says a share's record was set aside when its refresh stops because the session expired", async () => {
+    const setAside =
+      "dohc could not read its record of your files with the same path as a file in alex. " +
+      "A refresh can replace them with the shared version, and dohc keeps no copy of yours.";
+    const expired = "Your server session expired. Sign in again, then refresh shares.";
+    const bridge = makeBridge(Promise.resolve(null));
+    const refresh = vi.fn<() => Promise<RefreshShareMountsResult>>()
+      .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" }] })
+      .mockResolvedValue({
+        results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }],
+        abortMessage: expired,
+      });
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    // The person starts a refresh with Try again on the share's row.
+    await screen.findByTestId("workspace-shell-error");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = within(notices).getByText("dohc did not update alex", { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => {
+      const reopened = screen.getByTestId("notice-center");
+      expect(within(reopened).getByText(`Couldn't refresh shares. ${expired}`)).toBeTruthy();
+      expect(within(reopened).getByText(setAside)).toBeTruthy();
+    });
+  });
 });
 
 describe("adding a share to this workspace", () => {

@@ -5818,6 +5818,9 @@ export type RefreshShareMountsPayload = z.infer<typeof RefreshShareMountsPayload
 
 export const RefreshShareMountsResult = z.object({
   results: z.array(ShareMountStatusRow).max(200),
+  // Why the refresh stopped before every share refreshed, such as an expired
+  // session. The rows say what it did up to then.
+  abortMessage: z.string().min(1).max(500).optional(),
 });
 export type RefreshShareMountsResult = z.infer<typeof RefreshShareMountsResult>;
 
