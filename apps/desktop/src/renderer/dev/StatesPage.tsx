@@ -1123,6 +1123,12 @@ const SHARING_LINK_ABOVE: AccessAnswer = {
       selector: { paths: ["plans/launch-brief.md"], versionId: null } }),
   ],
 };
+// A share dohc cannot read: it stays listed, and can still be ended.
+const SHARING_DAMAGED: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [aboutGrant({ shareId: "share-bad", grantId: "grant-bad", recipientUserId: "kim", recipientEmail: "kim@example.com",
+    subjectName: "budget.csv", selector: null, access: null, status: "damaged" })],
+};
 const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
 const SHARING_ACTIONS: SharingActions = {
   retry: noop, more: noop, reviewChanges: noop, startEnd: noop, cancelEnd: noop, end: noop, mount: noop, unmount: noop,
@@ -2415,6 +2421,9 @@ function Pane(props: { theme: "light" | "dark" }) {
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
             </div>
           </div>
+        </Specimen>
+        <Specimen label="a share dohc cannot read">
+          <SharingSpecimen granted={ready(SHARING_DAMAGED)} received={ready({ ...SHARING_RECEIVED, rows: [] })} mounts={[]} />
         </Specimen>
         <Specimen label="removed shares still on this computer, and skipped changes">
           <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: [] })} received={ready(SHARING_REMOVED)}
