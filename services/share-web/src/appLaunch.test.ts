@@ -215,11 +215,13 @@ it('shows opening and a stopped session as a centered dohc message in both theme
   expect(style).toContain('font:14px/1.5 system-ui,"Segoe UI",sans-serif');
   expect(style).toContain('align-items:center;justify-content:center;gap:16px;padding:24px 16px;text-align:center');
   expect(html).toMatch(/<body data-state="opening"><main id="message"><svg id="mark"[^>]* aria-hidden="true">.*<\/svg><p id="status" role="status">Opening app<\/p><\/main><script>/);
+  expect(style).toContain('#status{max-width:320px;margin:0;color:var(--muted);text-wrap:balance}');
   expect(style).toContain('#mark{display:none;color:var(--danger)}[data-state=stopped] #mark{display:block}');
   expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent='This app session ended. Reopen the share link.';");
   expect(html).toContain("document.body.dataset.state='running';document.getElementById('status').textContent='';");
   // A hidden live region drops out of the accessibility tree and misses the session-ended announcement.
   expect(style).toContain('[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}');
+  expect(style).toContain('[data-state=running]{background:Canvas}');
   expect(style).not.toMatch(/#(message|status)\{display:none/);
   expect(html).not.toMatch(/style="|<link|@import|@font-face|url\(/);
 });

@@ -27,10 +27,12 @@ const PAGE_STYLE = ":root{color-scheme:light dark;--bg:#faf9f5;--ink:#1c1b18;--m
   "@media (prefers-color-scheme:dark){:root{--bg:#131211;--ink:#f6f4ee;--muted:#a9a599;--danger:#e08065}}" +
   "body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,\"Segoe UI\",sans-serif}" +
   "#message{box-sizing:border-box;display:flex;min-height:100vh;min-height:100dvh;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px 16px;text-align:center}" +
-  "#status{max-width:320px;margin:0;color:var(--muted)}#mark{display:none;color:var(--danger)}" +
+  "#status{max-width:320px;margin:0;color:var(--muted);text-wrap:balance}#mark{display:none;color:var(--danger)}" +
   "[data-state=stopped] #mark{display:block}[data-state=stopped] #status{color:var(--ink)}" +
   // While the app runs, the empty status stays in the accessibility tree, so a screen reader announces the session ending.
-  "[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}";
+  "[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}" +
+  // An app without its own background sits on the browser's canvas, white in light, as its author saw it.
+  "[data-state=running]{background:Canvas}";
 /** Lucide's circle-alert, shown once the session stops. */
 const STOPPED_MARK = `<svg id="mark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>`;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
