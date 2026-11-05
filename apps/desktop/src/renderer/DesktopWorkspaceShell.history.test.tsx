@@ -619,6 +619,19 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
     expect(screen.queryByText("No changes yet")).toBeNull();
 
+    // Open goes to the file to fix, and a failure to open it is a toast.
+    const opened = "dohc could not open /w/.dohc/visibility.toml. No application is associated with this file. Open the file in a text editor.";
+    bridge.openWorkspacePolicyFile = vi.fn(async () => {
+      throw new Error(`Error invoking remote method 'desktop:open-workspace-policy-file': Error: ${opened}`);
+    });
+    await user.click(within(hidden).getByRole("button", { name: "Open visibility.toml" }));
+    expect(bridge.openWorkspacePolicyFile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE.workspaceId,
+      file: ".dohc/visibility.toml",
+    });
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(opened);
+    expect(bridge.listHistory).toHaveBeenCalledOnce();
+
     await user.click(within(hidden).getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
     expect(screen.queryByTestId("history-policy-hidden")).toBeNull();

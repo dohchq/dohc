@@ -2201,12 +2201,12 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
-            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onRetry={noop} />
+            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onOpenFile={noop} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="diff: file no longer tracked">
           <div className="flex h-64 w-96 flex-col rounded-lg border border-line bg-bg">
-            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onRetry={noop} />
+            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onOpenFile={noop} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="restore refused">
