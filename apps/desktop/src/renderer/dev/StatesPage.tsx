@@ -3295,7 +3295,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      <Section part="settings-sync" title="Settings: Sync and sharing">
+      <Section part="settings-sync" title="Settings: Sync and sharing" menusAtRest>
         <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
           <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, networkAccess: "private", workspaceSynced: true, workspaceSyncConnected: true })} />
