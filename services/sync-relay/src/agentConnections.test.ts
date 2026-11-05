@@ -3,12 +3,16 @@ import { errorResponse, notFound } from "./errors";
 import { pkceS256Challenge } from "./linkSecurity";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import type { StorageContext } from "./storage/context";
+import { LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES } from "./storage/limits";
 import {
   claimWorkspace,
   closeTestStorage,
   closeTestStorages,
   createShare,
   inspect,
+  inspectDatabase,
   interceptStorage,
   json,
   jsonBody,
@@ -20,6 +24,7 @@ import {
   storagePath,
   testHandler,
   testStorage,
+  type HandlerOverrides,
 } from "./testing";
 
 const OWNER = "owner";
@@ -31,6 +36,13 @@ const REDIRECT = "http://127.0.0.1:43110/callback";
 const OTHER_REDIRECT = "https://agent.example.test/callback";
 const VERIFIER = "agent-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
 const OTHER_VERIFIER = "other-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
+const DELETION_KEY = "agent-connection-deletion-key-at-least-32-bytes";
+const EDIT_RELEASED: HandlerOverrides = {
+  publicEditRelease: { version: 1 },
+  namedBrowserSessionLimits: {
+    maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000,
+  },
+};
 const AGENT_TABLES = [
   "sync_relay_agent_clients",
   "sync_relay_agent_authorizations",
@@ -44,14 +56,14 @@ type Fixture = { storage: SyncRelayStorage; dbPath: string; h: SyncRelayHandler;
 type Link = { shareId: string; grantId: string; secret: string; resource: string };
 type Connected = { clientId: string; code: string; accessToken: string; refreshToken: string; connectionId: string };
 
-function handler(storage: SyncRelayStorage, now: { value: number }): SyncRelayHandler {
-  return testHandler(storage, { nowMs: () => now.value, relayExchangeKey: RELAY_EXCHANGE_KEY });
+function handler(storage: SyncRelayStorage, now: { value: number }, overrides: HandlerOverrides = {}): SyncRelayHandler {
+  return testHandler(storage, { nowMs: () => now.value, relayExchangeKey: RELAY_EXCHANGE_KEY, ...overrides });
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(overrides: HandlerOverrides = {}): Promise<Fixture> {
   const storage = await testStorage();
   const now = { value: 10_000 };
-  const h = handler(storage, now);
+  const h = handler(storage, now, overrides);
   await claimWorkspace(h, OWNER, WORKSPACE);
   return { storage, dbPath: storagePath(storage), h, now };
 }
@@ -72,9 +84,9 @@ async function expectRefused(response: Response): Promise<void> {
     .toEqual({ status: refusal.status, body: await refusal.text() });
 }
 
-async function createLink(f: Fixture, paths: string[] = ["docs"]): Promise<Link> {
+async function createLink(f: Fixture, paths: string[] = ["docs"], access = "view"): Promise<Link> {
   const shareId = await createShare(f.h, OWNER, WORKSPACE, { recipientUserId: "seed-recipient", paths });
-  const link = await ok(await f.h(request(OWNER, `/sync/${WORKSPACE}/shares/${shareId}/links`, jsonBody({ access: "view" }))));
+  const link = await ok(await f.h(request(OWNER, `/sync/${WORKSPACE}/shares/${shareId}/links`, jsonBody({ access }))));
   const secret = linkSecret(link.url);
   return { shareId, grantId: String(link.grantId), secret, resource: resourceFor(secret) };
 }
@@ -170,6 +182,23 @@ function resetLink(f: Fixture, link: Link): Promise<Response> {
 function endLink(f: Fixture, link: Link): Promise<Response> {
   return f.h(request(OWNER, `/sync/shares/${link.shareId}/revoke`,
     jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [], grantId: link.grantId })));
+}
+
+function retuneLink(f: Fixture, link: Link, access: string): Promise<Response> {
+  return f.h(request(OWNER, `/sync/shares/${link.shareId}/links/${link.grantId}/retune`,
+    jsonBody({ workspaceId: WORKSPACE, access, expectedDependentGrantIds: [] })));
+}
+
+function workspaceUsage(dbPath: string): number {
+  return inspect(dbPath, (db) =>
+    Number(db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?").get(WORKSPACE)?.usage_bytes));
+}
+
+function connectionRow(dbPath: string, connectionId: string): { status: unknown; tokens: unknown } {
+  return inspect(dbPath, (db) => ({
+    status: db.prepare("SELECT status FROM sync_relay_agent_connections WHERE connection_id = ?").get(connectionId)?.status,
+    tokens: db.prepare("SELECT COUNT(*) AS count FROM sync_relay_agent_tokens WHERE connection_id = ?").get(connectionId)?.count,
+  }));
 }
 
 function rowCount(dbPath: string, table: (typeof AGENT_TABLES)[number]): number {
@@ -466,6 +495,208 @@ describe("agent sign-in for share links", () => {
       expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
       expect(rowCount(f.dbPath, "sync_relay_agent_tokens")).toBe(0);
       expect(rowCount(f.dbPath, "sync_relay_agent_authorizations")).toBe(0);
+    });
+  });
+
+  it("refuses a code when the agent's principal would pass the workspace quota", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const clientId = await registerClient(f);
+    const code = await authorize(f, link, clientId);
+    const usage = workspaceUsage(f.dbPath);
+    closeTestStorage(f.storage);
+    const full = reopenTestStorage(f.dbPath, { workspaceQuotaBytes: usage + LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES });
+    await expectRefused(await redeem({ ...f, storage: full, h: handler(full, f.now) }, { clientId, code, resource: link.resource }));
+    expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
+    expect(inspect(f.dbPath, (db) => db.prepare("SELECT COUNT(*) AS count FROM sync_relay_link_principals").get()?.count)).toBe(0);
+    expect(workspaceUsage(f.dbPath)).toBe(usage);
+
+    closeTestStorage(full);
+    const roomy = reopenTestStorage(f.dbPath, { workspaceQuotaBytes: usage + LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES + 1_000 });
+    const connected = await connect({ ...f, storage: roomy, h: handler(roomy, f.now) }, link, clientId);
+    expect(connectionRow(f.dbPath, connected.connectionId)).toEqual({ status: "active", tokens: 2 });
+    expect(workspaceUsage(f.dbPath)).toBeGreaterThan(usage);
+  });
+
+  it("checks a metadata-document client id and never lets one replace a registered client", async () => {
+    const f = await fixture();
+    const register = (body: Record<string, unknown>) => internal(f, "agent-clients", { redirectUris: [REDIRECT], ...body });
+    for (const clientId of [
+      "http://agent.example.test/client.json",
+      "https://agent.example.test",
+      "https://Agent.example.test/client.json",
+      "https://agent.example.test/client.json#fragment",
+      "agent.example.test/client.json",
+    ]) {
+      await expectRefused(await register({ registration: "metadata-document", clientId }));
+    }
+    await expectRefused(await register({ registration: "registered", clientId: "https://agent.example.test/client.json" }));
+
+    const documentId = "https://agent.example.test/client.json";
+    expect(await ok(await register({ registration: "metadata-document", clientId: documentId, clientName: "First" })))
+      .toEqual({ ok: true, clientId: documentId });
+    await ok(await register({ registration: "metadata-document", clientId: documentId, clientName: "Renamed" }));
+    expect(f.storage.getAgentClient(documentId)).toMatchObject({ registration: "metadata-document", reportedName: "Renamed" });
+
+    const registered = await registerClient(f);
+    await expectRefused(await register({ registration: "metadata-document", clientId: registered, clientName: "Impostor" }));
+    expect(f.storage.registerAgentClient({
+      clientId: registered, registration: "registered", reportedName: "Impostor", redirectUris: [OTHER_REDIRECT], nowMs: f.now.value,
+    })).toBe(false);
+    expect(f.storage.getAgentClient(registered)).toEqual({
+      clientId: registered, registration: "registered", reportedName: "Test agent", redirectUris: [REDIRECT],
+    });
+  });
+
+  it("begins sign-in only for this share-web origin and a live link secret", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const clientId = await registerClient(f);
+    const unknownSecret = `${link.secret.startsWith("A") ? "B" : "A"}${link.secret.slice(1)}`;
+    for (const resource of [
+      `https://evil.example.test/mcp/s/${link.secret}`,
+      `${SHARE_WEB_ORIGIN}/s/${link.secret}`,
+      `${SHARE_WEB_ORIGIN}/mcp/s/${link.secret}/extra`,
+      `${SHARE_WEB_ORIGIN}/mcp/s/${unknownSecret}`,
+      `${SHARE_WEB_ORIGIN}/mcp/s/`,
+    ]) {
+      await expectRefused(await begin(f, { ...link, resource }, clientId));
+    }
+    const reset = await ok(await resetLink(f, link));
+    await expectRefused(await begin(f, link, clientId));
+    await ok(await begin(f, { ...link, resource: resourceFor(linkSecret(reset.url)) }, clientId));
+    expect(rowCount(f.dbPath, "sync_relay_agent_authorizations")).toBe(1);
+  });
+
+  it("refuses an expired consent request, an expired code, and an expired access token", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const clientId = await registerClient(f);
+    const requestId = await beginRequest(f, link, clientId);
+    f.now.value += 10 * 60 * 1_000;
+    await expectRefused(await internal(f, "agent-authorizations/consent", { requestId }));
+    await expectRefused(await decide(f, requestId));
+
+    const code = await authorize(f, link, clientId);
+    f.now.value += 60 * 1_000;
+    await expectRefused(await redeem(f, { clientId, code, resource: link.resource }));
+    expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
+
+    const agent = await connect(f, link, clientId);
+    f.now.value += 60 * 60 * 1_000;
+    await expectRefused(await introspect(f, agent.accessToken));
+    const refreshed = await ok(await refresh(f, clientId, agent.refreshToken, link.resource));
+    await ok(await introspect(f, String(refreshed.accessToken)));
+  });
+
+  it("retires connections when raising the level mints a new link, and keeps them when it narrows", async () => {
+    const f = await fixture();
+    const link = await createLink(f, ["docs"], "comment");
+    const agent = await connect(f, link);
+    expect(await ok(await introspect(f, agent.accessToken))).toMatchObject({ access: "comment" });
+
+    await ok(await retuneLink(f, link, "view"));
+    expect(await ok(await introspect(f, agent.accessToken))).toMatchObject({ access: "view", connectionId: agent.connectionId });
+    expect(await agentStatuses(f, link)).toEqual({ [agent.connectionId]: "active" });
+
+    const widened = await ok(await retuneLink(f, link, "comment"));
+    expect(typeof widened.url).toBe("string");
+    await expectRefused(await introspect(f, agent.accessToken));
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
+    expect(await agentStatuses(f, link)).toEqual({});
+  });
+
+  it("retires connections when the owner ends the whole share", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const agent = await connect(f, link);
+    await ok(await f.h(request(OWNER, `/sync/shares/${link.shareId}/revoke`, { method: "POST" })));
+    await expectRefused(await introspect(f, agent.accessToken));
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
+  });
+
+  it("retires connections when the owner's account is deleted", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const agent = await connect(f, link);
+    const context = f.storage as StorageContext;
+    initializeAccountDeletion(context, DELETION_KEY);
+    fenceAccount(context, DELETION_KEY, OWNER, `${OWNER}@dohc.test`);
+    await expectRefused(await introspect(f, agent.accessToken));
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
+  });
+
+  it("keeps connections ended after Undo restores an ended link", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const agent = await connect(f, link);
+    const ended = await ok(await endLink(f, link));
+    const undoId = (ended.undo as { undoId: string }).undoId;
+    await ok(await f.h(request(OWNER, `/sync/shares/${link.shareId}/undo`, jsonBody({ undoId }))));
+
+    await expectRefused(await introspect(f, agent.accessToken));
+    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
+    expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
+    expect(await agentStatuses(f, link)).toEqual({});
+    // The restored link signs agents in again; the old connection does not come back.
+    const again = await connect(f, link, agent.clientId);
+    expect(await agentStatuses(f, link)).toEqual({ [again.connectionId]: "active" });
+  });
+
+  // The link's credential stays where it was in both cases, so nothing is
+  // cleaned up. Only the check made inside each step, that the link is still
+  // current and its files still servable, refuses the agent.
+  const unservable: Array<[
+    name: string,
+    overrides: HandlerOverrides,
+    access: string,
+    apply: (f: Fixture) => Fixture,
+  ]> = [
+    ["the owner no longer owns the workspace", {}, "view", (f) => {
+      const db = inspectDatabase(f.dbPath, { foreignKeys: true });
+      db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'new-owner' WHERE workspace_id = ?").run(WORKSPACE);
+      db.close();
+      return f;
+    }],
+    ["the relay stops serving Edit links", EDIT_RELEASED, "edit", (f) => ({ ...f, h: handler(f.storage, f.now) })],
+  ];
+
+  describe.each(unservable)("when %s", (_name, overrides, access, apply) => {
+    it("refuses the consent decision", async () => {
+      const f = await fixture(overrides);
+      const link = await createLink(f, ["docs"], access);
+      const requestId = await beginRequest(f, link, await registerClient(f));
+      await expectRefused(await decide(apply(f), requestId));
+      expect(inspect(f.dbPath, (db) => db.prepare("SELECT status, code_hash FROM sync_relay_agent_authorizations").all()))
+        .toEqual([{ status: "pending", code_hash: null }]);
+    });
+
+    it("refuses the code exchange", async () => {
+      const f = await fixture(overrides);
+      const link = await createLink(f, ["docs"], access);
+      const clientId = await registerClient(f);
+      const code = await authorize(f, link, clientId);
+      await expectRefused(await redeem(apply(f), { clientId, code, resource: link.resource }));
+      expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
+      expect(rowCount(f.dbPath, "sync_relay_agent_tokens")).toBe(0);
+    });
+
+    it("refuses a refresh", async () => {
+      const f = await fixture(overrides);
+      const link = await createLink(f, ["docs"], access);
+      const agent = await connect(f, link);
+      await expectRefused(await refresh(apply(f), agent.clientId, agent.refreshToken, link.resource));
+      expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "active", tokens: 2 });
+    });
+
+    it("refuses introspection", async () => {
+      const f = await fixture(overrides);
+      const link = await createLink(f, ["docs"], access);
+      const agent = await connect(f, link);
+      await expectRefused(await introspect(apply(f), agent.accessToken));
     });
   });
 });

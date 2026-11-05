@@ -4,6 +4,7 @@ import { currentShareGrantSql } from "./currentShareGrant";
 import { linkPrincipalStorageBytes } from "./linkEnrollment";
 import { nullableText } from "./rows";
 import { upsertLinkUsage } from "./shares";
+import { workspaceUsageBytes } from "./workspaces";
 import { constantTimeHashEqual } from "../linkSecurity";
 
 // An agent connection is one agent's MCP sign-in through one share link. It
@@ -467,7 +468,10 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
     }
     const principals = Number(storage.db.prepare(`SELECT COUNT(*) AS count FROM sync_relay_link_principals
       WHERE grant_id = ? AND mint_generation = ?`).get(authorization.grantId, authorization.generation)?.count ?? 0);
-    if (principals >= storage.options.linkDiscussionPrincipalLimit) {
+    // The agent's principal counts against the owner's workspace, as every other link holder's does.
+    const principalBytes = linkPrincipalStorageBytes(input.principalId, authorization.grantId, input.profileTokenHash);
+    if (principals >= storage.options.linkDiscussionPrincipalLimit ||
+        workspaceUsageBytes(storage, authorization.workspaceId) + principalBytes > storage.options.workspaceQuotaBytes) {
       spend();
       return { ok: false };
     }
@@ -475,7 +479,7 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
         principal_id, grant_id, mint_generation, profile_token_hash, display_name, created_at_ms,
         blocked_at_ms, discussion_revision, storage_bytes) VALUES (?, ?, ?, ?, NULL, ?, NULL, 0, ?)`)
       .run(input.principalId, authorization.grantId, authorization.generation, input.profileTokenHash, nowMs,
-        linkPrincipalStorageBytes(input.principalId, authorization.grantId, input.profileTokenHash));
+        principalBytes);
     storage.db.prepare(`INSERT INTO sync_relay_agent_connections (
         connection_id, workspace_id, share_id, grant_id, credential_id, generation, principal_id, client_id,
         reported_name, resource_hash, connected_at_ms, last_action_at_ms, status, ended_at_ms
