@@ -10,8 +10,9 @@ import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.
 import {liveValidation} from "../../../services/sync-relay/src/liveValidation.js";
 import {afterAll} from "vitest";
 import {createHash} from "node:crypto";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import {WORKER_LIVE_VALIDATION_POLICY} from "./liveValidationPolicy.js";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import { policy, hash, cleanupLiveDeliveryFixtures, restore } from "./liveCommittedDeliveryTestSupport.js";
 import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
@@ -43,6 +44,10 @@ import {createReplicaSupervisor} from "../../../services/sync-relay/src/replicaS
 import {closeTestStorages, tempRoot} from "../../../services/sync-relay/src/testing/index.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
+// Proofs normalize in this process with the worker's validator, as `restore` validates. The relay's two shared
+// validation slots are not what these tests check, and a timed-out test still holding them would refuse later proofs.
+const normalizeSettlement = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY);
+beforeEach(() => {vi.spyOn(liveValidation, "normalizeSettlement").mockImplementation(async input => normalizeSettlement(input));});
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
 const ownerOriginDigest = ({binding, cut: c}: Pick<OwnerCutCapture, "binding" | "cut">) => jsonHash([binding,
   c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength, c.baselineMomentRelaySequence,
