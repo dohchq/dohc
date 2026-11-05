@@ -1303,8 +1303,7 @@ impl EngineService {
             guard = open.pending_pull.lock() => guard,
         };
         if let Some(previous) = pending.take() {
-            self.abandon_fetched_pull(&open, &previous.page)
-                .await?;
+            self.abandon_fetched_pull(&open, &previous.page).await?;
         }
         let mut fetched_page = None;
         let answer = async {
