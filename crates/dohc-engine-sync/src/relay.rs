@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
 use dohc_engine_storage::text;
@@ -828,6 +829,7 @@ pub struct PreparedOrdinaryPull {
     repairs: BaseRepairAnswers,
     pull_token: String,
     previous_pull_token: Option<String>,
+    apply_began: AtomicBool,
 }
 
 impl PreparedOrdinaryPull {
@@ -837,6 +839,10 @@ impl PreparedOrdinaryPull {
 
     pub fn previous_pull_token(&self) -> Option<&str> {
         self.previous_pull_token.as_deref()
+    }
+
+    pub fn apply_began(&self) -> bool {
+        self.apply_began.load(Ordering::SeqCst)
     }
 }
 
@@ -2749,6 +2755,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             repairs,
             pull_token,
             previous_pull_token,
+            apply_began: AtomicBool::new(false),
         })
     }
 
@@ -2810,6 +2817,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(error);
             }
         };
+        prepared.apply_began.store(true, Ordering::SeqCst);
         let ops = std::mem::take(&mut *held_ops);
         drop(held_ops);
         let pull_token = prepared.pull_token().to_owned();

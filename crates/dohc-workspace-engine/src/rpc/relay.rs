@@ -1382,11 +1382,10 @@ impl EngineService {
         let fetched = pending.take().expect("validated pull page");
         drop(pending);
         let held_page = Arc::clone(&fetched.page);
-        let mut apply_started = false;
         let answer = self
-            .apply_fetched_pull(ctx, &open, configuration, fetched, &mut apply_started)
+            .apply_fetched_pull(ctx, &open, configuration, fetched)
             .await;
-        if answer.is_err() && !apply_started {
+        if answer.is_err() && !held_page.apply_began() {
             self.abandon_fetched_pull(&open, &held_page).await?;
         }
         answer
@@ -1398,7 +1397,6 @@ impl EngineService {
         open: &Arc<OpenWorkspace>,
         configuration: RelayConfiguration,
         fetched: PendingPull,
-        apply_started: &mut bool,
     ) -> Result<Value, WireError> {
         let PendingPull { handle, page, .. } = fetched;
         // A Collections update already admitted under the gate runs before
@@ -1421,7 +1419,6 @@ impl EngineService {
             page: Arc::clone(&page),
             now_ms: now_ms()?,
         };
-        *apply_started = true;
         let outcome = self
             .relay_execute(ctx, open, configuration, operation, "sync.applyPull")
             .await?;
@@ -4653,6 +4650,65 @@ mod tests {
         );
         assert_eq!(f.edges(), 1);
         f.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_apply_cancelled_before_it_runs_restores_the_previous_pull_token() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let (relay, f) = half_pull_fixture("apply-cancelled-before-running", true).await;
+            assert!(f.service.reconciles_collections_itself(&f.open));
+            let previous = f.pull_token();
+            let waiting = f.collections_waiting().await;
+            relay.release();
+            let fetched = f
+                .service
+                .sync_fetch_pull(
+                    &RequestContext::unbounded(),
+                    Some(f.handle.clone()),
+                    json!({"workspaceId": f.workspace_id}),
+                )
+                .await
+                .expect("fetch page one");
+            let token = f.pull_token().expect("this fetch's token");
+            assert_ne!(Some(&token), previous.as_ref());
+            let hold = f.service.hold_actor(&f.handle).await;
+            let ctx = RequestContext::unbounded();
+            let mut applying = Box::pin(f.service.sync_apply_pull(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id, "pageToken": fetched["pageToken"]}),
+            ));
+            while f.open.pulls_in_flight.load(Ordering::SeqCst) != 1 {
+                tokio::select! {
+                    biased;
+                    answer = &mut applying => panic!("apply answered before cancellation: {answer:?}"),
+                    () = tokio::task::yield_now() => {}
+                }
+            }
+            ctx.cancel.cancel();
+            // Let the request's cancellation reach its operation token.
+            tokio::task::yield_now().await;
+            drop(hold);
+            let refused = applying.await.expect_err("the queued apply is cancelled");
+            assert_eq!(refused.code, ErrorCode::Cancelled);
+            assert_eq!(f.pull_token(), previous);
+            assert_eq!(f.collections_waiting().await, waiting);
+            let applied: i64 = f
+                .engine_db()
+                .query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE origin_id='peer'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count applied envelopes");
+            assert_eq!(applied, 0, "no envelope of the fetched page applied");
+
+            let page_one = pull(&f).await.expect("a fresh fetch and apply succeed");
+            assert_eq!(page_one["hasMore"], json!(true));
+            finish_half_pull(f, page_one).await;
+        })
+        .await
+        .expect("the cancelled apply and its retry finish");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
