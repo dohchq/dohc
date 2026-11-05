@@ -1,5 +1,4 @@
-#[path = "../../tests/common/mod.rs"]
-mod common;
+use crate::rpc::test_common as common;
 
 use super::*;
 use dohc_engine_domain::{

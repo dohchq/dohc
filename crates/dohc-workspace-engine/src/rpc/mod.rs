@@ -30,5 +30,11 @@ pub(super) mod ydoc;
 
 mod owner_activation;
 
+// The RPC tests in this crate share the integration tests' helpers. Load the
+// file once: a second `#[path]` to it fails clippy's duplicate_mod.
+#[cfg(test)]
+#[path = "../../tests/common/mod.rs"]
+mod test_common;
+
 pub(super) mod files;
 pub(super) mod links;
