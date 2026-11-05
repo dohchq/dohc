@@ -212,11 +212,12 @@ describe("desktop workspace windows", () => {
 
   it("opens the workspace that was open when dohc quit, and the first one when that is gone", async () => {
     const home = await createTestScratch("registry-last-opened-");
+    const stateDir = await createTestScratch("registry-last-opened-state-");
     const registryFile = join(home, "state", "workspaces.json");
     const before = createRegistryStore(registryFile);
     for (const workspaceId of ["personal", "ordinary"]) {
       const { workspace: created } = await createWorkspaceFolder({
-        rootPath: join(home, workspaceId), homeDir: home, kind: "personal",
+        rootPath: join(home, workspaceId), homeDir: home, stateDir, kind: "personal",
         computer: { installId: "install-here", label: "This Mac" }, workspaceId,
       });
       before.register(created);
