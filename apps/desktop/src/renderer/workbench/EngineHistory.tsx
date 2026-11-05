@@ -376,17 +376,13 @@ export function collectionListPhrase(names: readonly string[], total: number): s
   return shown.length === 1 ? shown[0]! : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
 }
 
-// What a partial timeline's quiet line shows; its sentences are the tooltip.
+// What a partial timeline's warning row shows; its sentence is the tooltip.
 function missingSourcesShort(
   unavailable: readonly { datasetId: string }[],
-  omitted: number,
   nameOf: (datasetId: string) => string | undefined,
-): { unavailable: string | null; omitted: string | null } {
+): string | null {
   const names = unavailable.flatMap((source) => nameOf(source.datasetId) ?? []);
-  return {
-    unavailable: unavailable.length ? `dohc could not load ${collectionListPhrase(names, unavailable.length)}` : null,
-    omitted: omitted > 0 ? `${countFormat.format(omitted)} Collection${omitted === 1 ? "" : "s"} left out` : null,
-  };
+  return unavailable.length ? `dohc could not load ${collectionListPhrase(names, unavailable.length)}` : null;
 }
 
 // The sentences that say what a partial timeline is missing.
@@ -401,7 +397,7 @@ export function missingSourcesWords(
       ? `dohc could not load changes from ${collectionListPhrase(names, unavailable.length)}.`
       : null,
     omitted: omitted > 0
-      ? `History includes up to ${HISTORY_MAX_SOURCES} Collections. ${omitted} more ${omitted === 1 ? "is" : "are"} left out. To see a Collection's changes, open it and choose History.`
+      ? `History includes ${countFormat.format(HISTORY_MAX_SOURCES)} of ${countFormat.format(HISTORY_MAX_SOURCES + omitted)} Collections. For another Collection, open it and choose History.`
       : null,
   };
 }
@@ -905,27 +901,29 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
 
 // What a partial timeline is missing, above its rows. Collections that did
 // not load take a warning row: its words in ink wrap rather than cut a
-// name, beside Try again. Collections left out by the limit take one quiet
-// line. The full sentence is each one's tooltip and what a screen reader
-// hears. Try again starts a new source chain; a source left out by the
-// limit stays out, so only the Collections that did not load offer it.
+// name, beside Try again; the full sentence is its tooltip and what a
+// screen reader hears. Collections left out by the limit take a filled
+// band, so the limit doesn't read as one more change, and its whole
+// sentence says how to see the rest. Try again starts a new source chain;
+// a source left out by the limit stays out, so only the Collections that
+// did not load offer it. Every mark sits where a row's face does.
 function HistorySourcesNotice(props: {
   words: ReturnType<typeof missingSourcesWords>;
-  short: ReturnType<typeof missingSourcesWords>;
+  short: string | null;
   onRetry: () => void;
 }) {
   const { words, short } = props;
   return (
-    <div data-testid="history-sources-notice" className="flex shrink-0 flex-col px-3">
+    <div data-testid="history-sources-notice" className="flex shrink-0 flex-col gap-1 px-1 pb-1">
       {words.unavailable ? (
-        <p title={words.unavailable} className="m-0 mb-1 flex min-w-0 items-start gap-2 py-1 text-[12px] leading-4 text-ink">
+        <p title={words.unavailable} className="m-0 flex min-w-0 items-start gap-2 px-2 py-1 text-[12px] leading-4 text-ink">
           {/* The mark and the words' first line center on Try again. */}
           <span aria-hidden className="flex h-6 shrink-0 items-center">
             <span className={MARK_BOX}>
               <TriangleAlert size={12} className="text-warning" />
             </span>
           </span>
-          <span aria-hidden data-testid="history-sources-unavailable-words" className="min-w-0 flex-1 break-words py-1">{short.unavailable}</span>
+          <span aria-hidden data-testid="history-sources-unavailable-words" className="min-w-0 flex-1 break-words py-1">{short}</span>
           <span data-testid="history-sources-unavailable" className="sr-only">{words.unavailable}</span>
           <SecondaryButton size="row" data-testid="history-sources-retry" onClick={props.onRetry} className="shrink-0">
             Try again
@@ -933,12 +931,14 @@ function HistorySourcesNotice(props: {
         </p>
       ) : null}
       {words.omitted ? (
-        <p title={words.omitted} className="m-0 flex h-7 min-w-0 items-center gap-2 text-[12px] text-muted">
-          <span aria-hidden className={MARK_BOX}>
-            <Info size={12} className="text-subtle" />
+        <p data-testid="history-sources-limit" className="m-0 flex min-w-0 items-start gap-2 rounded-md bg-panel-2 px-2 py-1.5 text-[12px] leading-4 text-muted">
+          {/* The mark centers on the first line. */}
+          <span aria-hidden className="flex h-4 shrink-0 items-center">
+            <span className={MARK_BOX}>
+              <Info size={12} className="text-subtle" />
+            </span>
           </span>
-          <span aria-hidden className="min-w-0 flex-1 truncate">{short.omitted}</span>
-          <span data-testid="history-sources-omitted" className="sr-only">{words.omitted}</span>
+          <span data-testid="history-sources-omitted" className="min-w-0 flex-1 break-words">{words.omitted}</span>
         </p>
       ) : null}
     </div>
@@ -1003,7 +1003,7 @@ export function EngineHistoryView(props: {
       entries.find((entry): entry is CollectionEntry => entry.kind === "collection" && entry.datasetId === datasetId)?.name;
     const unavailable = props.unavailableSources ?? [];
     const omitted = props.omittedSources ?? 0;
-    return [missingSourcesWords(unavailable, omitted, nameOf), missingSourcesShort(unavailable, omitted, nameOf)];
+    return [missingSourcesWords(unavailable, omitted, nameOf), missingSourcesShort(unavailable, nameOf)] as const;
   }, [props.unavailableSources, props.omittedSources, collections, entries]);
   const retry = props.onRetry ?? (() => undefined);
   const stickyHeaderIndices = useMemo(
@@ -1036,26 +1036,27 @@ export function EngineHistoryView(props: {
   // Neither may a page that is missing Collections, or one read while
   // History is paused: their changes are unknown, not absent.
   if (props.entries.length === 0 && !props.hasMore) {
+    // With no rows, the Collections that did not load are all the page can
+    // show, so it takes History's failed state, as when its rules can't be
+    // read: the danger mark, the words, then Try again. Collections left out
+    // by the limit failed nothing, so alone they take the plain mark and no
+    // button.
     if (partial) {
       return (
-        <div
+        <EmptyState
           data-testid="history-collections-unavailable"
-          className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-xs text-muted"
+          icon={words.unavailable ? TriangleAlert : Info}
+          tone={words.unavailable ? "danger" : "ghost"}
+          title={words.unavailable ?? words.omitted}
+          hint={words.unavailable ? words.omitted ?? undefined : undefined}
         >
           {props.paused ? <HistoryPaused testId="history-paused" /> : null}
-          {words.unavailable ? <span>{words.unavailable}</span> : null}
-          {words.omitted ? <span>{words.omitted}</span> : null}
           {words.unavailable ? (
-            <button
-              type="button"
-              data-testid="history-sources-retry"
-              onClick={retry}
-              className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-            >
+            <SecondaryButton data-testid="history-sources-retry" onClick={retry}>
               Try again
-            </button>
+            </SecondaryButton>
           ) : null}
-        </div>
+        </EmptyState>
       );
     }
     if (props.paused) {

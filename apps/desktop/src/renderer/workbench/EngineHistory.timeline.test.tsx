@@ -427,20 +427,65 @@ describe("History timeline sources", () => {
     expect(screen.getByTestId("history-sources-unavailable").textContent).toBe("dohc could not load changes from Guests.");
   });
 
-  it("counts the Collections the source limit left out, without a retry that cannot help", () => {
+  // A limit, not one more row: a filled band whose whole sentence shows and
+  // wraps, says how many Collections History includes and how to see the
+  // rest, and offers no retry that cannot help.
+  it("shows the Collections the source limit left out as a band with its whole sentence", () => {
     view({ entries: [file("m-1")], omittedSources: 12, hasMore: true });
-    expect(screen.getByTestId("history-sources-omitted").textContent).toBe(
-      "History includes up to 128 Collections. 12 more are left out. To see a Collection's changes, open it and choose History.");
+    const band = screen.getByTestId("history-sources-limit");
+    expect(band.className.split(" ")).toEqual(expect.arrayContaining(["rounded-md", "bg-panel-2", "text-muted"]));
+    expect(band.getAttribute("title")).toBeNull();
+    const words = within(band).getByTestId("history-sources-omitted");
+    expect(words.textContent).toBe(
+      "History includes 128 of 140 Collections. For another Collection, open it and choose History.");
+    expect(words.className).not.toContain("truncate");
+    expect(words.className).not.toContain("sr-only");
+    expect(words.getAttribute("aria-hidden")).toBeNull();
+    expect(band.querySelector(".lucide-info")!.getAttribute("class")).toContain("text-subtle");
     expect(screen.queryByTestId("history-sources-retry")).toBeNull();
   });
 
-  it("shows a Collection that did not load as unavailable, not as empty History", () => {
+  it("puts a Collection that did not load above the limit's band on a page with rows", () => {
+    view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }], omittedSources: 3 });
+    const notice = screen.getByTestId("history-sources-notice");
+    const band = within(notice).getByTestId("history-sources-limit");
+    const warning = within(notice).getByTestId("history-sources-unavailable-words").parentElement!;
+    expect([...notice.children]).toEqual([warning, band]);
+    expect(within(warning).getByTestId("history-sources-retry")).toBeTruthy();
+    expect(within(band).queryByRole("button")).toBeNull();
+    expect(within(band).getByTestId("history-sources-omitted").textContent).toBe(
+      "History includes 128 of 131 Collections. For another Collection, open it and choose History.");
+  });
+
+  it("shows a Collection that did not load as History's failed state, not as empty History", () => {
     const calls = view({ unavailableSources: [{ datasetId: GUESTS }] });
     const state = screen.getByTestId("history-collections-unavailable");
     expect(state.textContent).toContain("dohc could not load changes from Guests.");
+    expect(state.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain("text-danger");
     expect(screen.queryByText("No changes yet")).toBeNull();
-    fireEvent.click(screen.getByTestId("history-sources-retry"));
+    // The standard Try again, not the small one a row uses.
+    const retry = within(state).getByRole("button", { name: "Try again" });
+    expect(retry.dataset.testid).toBe("history-sources-retry");
+    expect(retry.className.split(" ")).toContain("h-8");
+    fireEvent.click(retry);
     expect(calls.retry).toHaveBeenCalledOnce();
+  });
+
+  it("puts the Collections that did not load first and the ones left out under them", () => {
+    view({ unavailableSources: [{ datasetId: GUESTS }], omittedSources: 3 });
+    expect(screen.getByText("dohc could not load changes from Guests.").className).toContain("text-sm");
+    expect(screen.getByText(/History includes 128 of 131 Collections\./).className).toContain("text-subtle");
+    expect(screen.getByTestId("history-sources-retry")).toBeTruthy();
+  });
+
+  it("explains an empty page the limit left Collections out of, with no Try again", () => {
+    view({ omittedSources: 3 });
+    const state = screen.getByTestId("history-collections-unavailable");
+    expect(state.textContent).toContain("History includes 128 of 131 Collections.");
+    expect(state.querySelector(".lucide-info")!.getAttribute("class")).toContain("text-subtle");
+    expect(state.querySelector(".lucide-triangle-alert")).toBeNull();
+    expect(screen.queryByTestId("history-sources-retry")).toBeNull();
+    expect(screen.queryByText("No changes yet")).toBeNull();
   });
 
   it("says History is paused beside the Collections an empty paused page is missing", () => {
