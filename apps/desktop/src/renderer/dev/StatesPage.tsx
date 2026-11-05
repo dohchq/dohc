@@ -633,8 +633,9 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
 // One History timeline across two days: a file change, a version starting,
 // a labelled record change by an automation, a rules change an agent
 // approved that main could not date, the workspace starting, and an
-// unlabelled record change with no date or place. Only a rules change can
-// carry its approving agent. Local times, as above.
+// unlabelled record change with no date or place. Both undated changes
+// list last, under Date unknown. Only a rules change can carry its
+// approving agent. Local times, as above.
 const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
 const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
 const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
