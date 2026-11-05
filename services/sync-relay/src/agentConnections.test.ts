@@ -253,6 +253,28 @@ describe("agent sign-in for share links", () => {
     expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
   });
 
+  it("lets a loopback IP redirect pick its port, and holds everything else exact", async () => {
+    const f = await fixture();
+    const link = await createLink(f);
+    const clientId = await registerClient(f, [REDIRECT, "http://[::1]:43110/callback", "http://localhost:43110/callback"]);
+    for (const redirectUri of ["http://127.0.0.1:51234/callback", "http://127.0.0.1/callback", "http://[::1]:51234/callback"]) {
+      const code = await authorize(f, link, clientId, redirectUri);
+      await ok(await redeem(f, { clientId, code, resource: link.resource, redirectUri }));
+    }
+    for (const redirectUri of [
+      "http://127.0.0.1:51234/other",
+      "http://127.0.0.1:51234/callback/",
+      "http://127.0.0.1:51234/callback?next=1",
+      "http://localhost:51234/callback",
+      "http://[::1]:51234/other",
+    ]) {
+      await expectRefused(await begin(f, link, clientId, redirectUri));
+    }
+    // The code is bound to the port the client asked with, not the registered one.
+    const code = await authorize(f, link, clientId, "http://127.0.0.1:51235/callback");
+    await expectRefused(await redeem(f, { clientId, code, resource: link.resource, redirectUri: REDIRECT }));
+  });
+
   it("spends a code on a PKCE mismatch, so the right verifier fails after it", async () => {
     const f = await fixture();
     const link = await createLink(f);
@@ -282,7 +304,7 @@ describe("agent sign-in for share links", () => {
     await expectRefused(await redeem(f, { clientId: agent.clientId, code: agent.code, resource: link.resource }));
     await expectRefused(await introspect(f, agent.accessToken));
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
-    expect(await agentStatuses(f, link)).toEqual({ [agent.connectionId]: "retired" });
+    expect(await agentStatuses(f, link)).toEqual({});
   });
 
   it("ends the whole token family when a rotated refresh token is reused", async () => {
@@ -298,7 +320,7 @@ describe("agent sign-in for share links", () => {
     await expectRefused(await introspect(f, nextAccess));
     await expectRefused(await introspect(f, agent.accessToken));
     await expectRefused(await refresh(f, agent.clientId, nextRefresh, link.resource));
-    expect(await agentStatuses(f, link)).toEqual({ [agent.connectionId]: "retired" });
+    expect(await agentStatuses(f, link)).toEqual({});
   });
 
   it("keeps a connection to its own workspace, share, and link", async () => {
@@ -351,7 +373,7 @@ describe("agent sign-in for share links", () => {
     f.now.value += 1_000;
     expect(await ok(await disconnect(f, OWNER, link, first.connectionId))).toEqual(ended);
     await expectRefused(await disconnect(f, OWNER, link, "id-missing"));
-    expect(await agentStatuses(f, link)).toEqual({ [first.connectionId]: "disconnected", [second.connectionId]: "active" });
+    expect(await agentStatuses(f, link)).toEqual({ [second.connectionId]: "active" });
   });
 
   it("pages a link's agents newest first", async () => {

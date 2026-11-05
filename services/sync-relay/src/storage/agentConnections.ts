@@ -93,7 +93,7 @@ export function initializeAgentConnectionSchema(db: SqliteDb): void {
         REFERENCES sync_relay_link_principals(principal_id, grant_id) ON DELETE CASCADE
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_sync_relay_agent_connections_grant
-      ON sync_relay_agent_connections(grant_id, connected_at_ms DESC, connection_id DESC);
+      ON sync_relay_agent_connections(grant_id, status, connected_at_ms DESC, connection_id DESC);
     CREATE INDEX IF NOT EXISTS idx_sync_relay_agent_connections_share
       ON sync_relay_agent_connections(share_id, status);
     CREATE INDEX IF NOT EXISTS idx_sync_relay_agent_connections_client
@@ -277,6 +277,31 @@ export function getAgentClient(storage: StorageContext, clientId: string): Agent
   };
 }
 
+const LOOPBACK_IP_HOSTS = new Set(["127.0.0.1", "[::1]"]);
+
+/**
+ * An exact match, except that RFC 8252 section 7.3 lets a native client on a
+ * loopback IP literal pick its port when it asks. `localhost` gets no exception.
+ */
+export function redirectUriMatches(registered: string, presented: string): boolean {
+  if (registered === presented) return true;
+  let want: URL;
+  let got: URL;
+  try {
+    want = new URL(registered);
+    got = new URL(presented);
+  } catch {
+    return false;
+  }
+  if (want.protocol !== "http:" || got.protocol !== "http:" ||
+      !LOOPBACK_IP_HOSTS.has(want.hostname) || got.hostname !== want.hostname) {
+    return false;
+  }
+  want.port = "";
+  got.port = "";
+  return want.href === got.href;
+}
+
 export function beginAgentAuthorization(storage: StorageContext, input: {
   authorizationId: string;
   requestHash: string;
@@ -293,7 +318,7 @@ export function beginAgentAuthorization(storage: StorageContext, input: {
   return storage.tx(() => {
     if (!input.guard() || !linkBindingIsCurrent(storage, input.link)) return false;
     const client = getAgentClient(storage, input.clientId);
-    if (!client || !client.redirectUris.includes(input.redirectUri)) return false;
+    if (!client || !client.redirectUris.some((registered) => redirectUriMatches(registered, input.redirectUri))) return false;
     storage.db.prepare(`DELETE FROM sync_relay_agent_authorizations
       WHERE (status != 'redeemed' AND expires_at_ms <= ?) OR (status = 'redeemed' AND expires_at_ms <= ?)`)
       .run(nowMs, nowMs - AGENT_REDEEMED_AUTHORIZATION_RETENTION_MS);
@@ -536,7 +561,7 @@ export function recordAgentConnectionAction(storage: StorageContext, connectionI
   });
 }
 
-/** Newest first. The caller checks the owner. */
+/** The link's active connections, newest first. The caller checks the owner. */
 export function listAgentConnections(storage: StorageContext, input: {
   workspaceId: string;
   shareId: string;
@@ -544,7 +569,7 @@ export function listAgentConnections(storage: StorageContext, input: {
   cursor?: AgentConnectionCursor;
 }): AgentConnectionPage {
   const rows = storage.db.prepare(`SELECT ${CONNECTION_COLUMNS} FROM sync_relay_agent_connections AS c
-    WHERE c.grant_id = ? AND c.share_id = ? AND c.workspace_id = ?
+    WHERE c.grant_id = ? AND c.status = 'active' AND c.share_id = ? AND c.workspace_id = ?
       ${input.cursor ? "AND (c.connected_at_ms, c.connection_id) < (?, ?)" : ""}
     ORDER BY c.connected_at_ms DESC, c.connection_id DESC
     LIMIT ${AGENT_CONNECTION_PAGE_SIZE + 1}`)
