@@ -564,6 +564,11 @@ export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
 }
 
+/** The code an error carries, read back from the string main's IPC boundary sends. */
+export function refusalCode(error: unknown): string | undefined {
+  return parse(error).code;
+}
+
 /** The engine refuses reads this way while it reads a new workspace's files. */
 export function isWorkspaceUpdatingError(error: unknown): boolean {
   const { name, code, message } = parse(error);

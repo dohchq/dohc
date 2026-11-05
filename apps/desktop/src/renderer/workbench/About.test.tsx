@@ -1105,6 +1105,39 @@ describe("About Links", () => {
     }
   });
 
+  it("shows no count or Show more while it gathers with no links, then both once links arrive, then 0 once none do", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.linksIn
+        // While the index builds, a page can hold only files not yet read in.
+        .mockResolvedValueOnce(linksPage([], { complete: false, indexBuilding: true, unchecked: ["bulk/d0/0.md"], nextCursor: "unread" }))
+        .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { complete: false, indexBuilding: true, nextCursor: "after-alpha" }))
+        .mockResolvedValueOnce(linksPage([]));
+      render(<Links />);
+      await act(async () => {});
+      expect(screen.getByRole("status").textContent).toBe("Gathering links");
+      expect(screen.queryByTestId("about-links-count")).toBeNull();
+      expect(screen.queryByTestId("about-links-more")).toBeNull();
+
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
+      expect(bridgeMock.linksIn.mock.calls[1]![0]).not.toHaveProperty("cursor");
+      expect(linkRows()).toHaveLength(1);
+      expect(screen.getByRole("status").textContent).toBe("Gathering links");
+      expect(screen.getByTestId("about-links-count").textContent).toBe("1+");
+      expect(screen.getByTestId("about-links-more")).toBeTruthy();
+
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      expect(bridgeMock.linksIn).toHaveBeenCalledTimes(3);
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByTestId("about-links-more")).toBeNull();
+      expect(screen.getByTestId("about-links-count").textContent).toBe("0");
+      expect(screen.queryByTestId("about-links-toggle")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reads one page again once the index is built, though sparse pages grew the list while it built", async () => {
     vi.useFakeTimers();
     try {
@@ -1137,7 +1170,7 @@ describe("About Links", () => {
       render(<Links chats />);
       await act(async () => {});
       expect(screen.getByRole("status").textContent).toBe("Gathering links");
-      expect(screen.getByTestId("about-links-count").textContent).toBe("0+");
+      expect(screen.queryByTestId("about-links-count")).toBeNull();
       await act(async () => vi.advanceTimersByTimeAsync(250));
       expect(linkRows()).toHaveLength(1);
       expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(1);

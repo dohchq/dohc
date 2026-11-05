@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MenuCommand, ShareHandoffStatus, UpdateCheckResult, UpdateStateEvent, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
+import { ipcWireError } from "../ipc/errorWords";
+import { RegistryReadError } from "../workspaces/registryReadFailure";
 import { DesktopRoot } from "./DesktopRoot";
 import { COPY_FAILURE } from "./ui/CopyButton";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -668,6 +670,36 @@ describe("startup selection", () => {
 });
 
 describe("registry read failure", () => {
+  it("tells the person to update dohc when a newer dohc wrote the registry", async () => {
+    const file = "C:\dohc\dohc-workspaces.json";
+    const refusal = new RegistryReadError(`Workspace registry version 2 is newer than supported (${file}); refusing to overwrite it.`, file, true);
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      platform: "win32",
+      getWorkspaceRegistry: vi.fn(async () => {
+        throw new Error(`Error invoking remote method 'desktop:get-workspace-registry': ${String(ipcWireError(refusal))}`);
+      }),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
+      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      onAgentColorChanged: vi.fn(() => () => undefined),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+      ...windowBridge(),
+    });
+    render(<DesktopRoot />);
+
+    expect(await screen.findByText("Your files are untouched. A newer version of dohc wrote this registry. Update dohc to open it.")).toBeTruthy();
+    expect(screen.getByText(refusal.message)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("Fix or move");
+  });
+
   it("names the file in technical details a person can copy", async () => {
     const writeText = vi.fn(async (_text: string) => undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -697,6 +729,7 @@ describe("registry read failure", () => {
 
     expect(await screen.findByText("dohc does not have permission to use this file or folder.")).toBeTruthy();
     expect(document.body.textContent).not.toContain("EACCES");
+    expect(screen.getByText("Your files are untouched. Fix or move the registry file named in the technical details, then relaunch dohc.")).toBeTruthy();
     // The window has no OS title bar, so the screen lays the start screen's
     // title bar over its top edge without moving the message.
     const page = screen.getByText("dohc couldn't read its workspace registry").parentElement!;
