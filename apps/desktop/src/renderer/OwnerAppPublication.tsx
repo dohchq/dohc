@@ -171,15 +171,17 @@ function accessOf(capability: Capability, approved: readonly Capability[] | null
   if (capability.kind === "dataset") {
     const same = approved?.find((value): value is AppDatasetCapability => value.kind === "dataset" && value.datasetId === capability.datasetId);
     // Operations with the same words share one line, marked New if any of them is new.
+    // An action's words are only its label, and two actions with one label can do different things, so each keeps its own line.
     const lines = (operations: AppDatasetCapability["operations"]) => {
-      const byText = new Map<string, Reach & { key: string }>();
+      const byWords = new Map<string, Reach & { key: string }>();
       for (const operation of operations) {
         const text = operationWords(operation), added = approved !== null && !same?.operationIds.includes(operation.operationId);
-        const seen = byText.get(text);
+        const group = operation.display?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`;
+        const seen = byWords.get(group);
         if (seen) seen.added ||= added;
-        else byText.set(text, { key: operation.operationId, text, added });
+        else byWords.set(group, { key: operation.operationId, text, added });
       }
-      return [...byText.values()].map(({ key, ...item }): Line => ({ key, items: [item] }));
+      return [...byWords.values()].map(({ key, ...item }): Line => ({ key, items: [item] }));
     };
     return { key: capability.datasetId, name: capability.name,
       reads: lines(capability.operations.filter(operation => operation.readOnly)), changes: lines(capability.operations.filter(operation => !operation.readOnly)) };

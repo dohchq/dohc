@@ -788,6 +788,17 @@ describe("owner app publication", () => {
       expect(lines("Changes")).toEqual(["Deletes records"]);
     });
 
+    it("gives each action its own line, even with the same label, while deletes still share one", async () => {
+      const operation = (n: number, display: Display) => ({ operationId: `00000000-0000-4000-8000-${String(300 + n).padStart(12, "0")}`, name: `op${n}`, access: "helper" as const, readOnly: false, display });
+      const operations = [operation(0, { kind: "action", label: "Archive", fields: [] }), operation(1, { kind: "action", label: "Archive", fields: [] }),
+        operation(2, { kind: "delete", label: "Remove entry", fields: [] }), operation(3, { kind: "delete", label: "Clear entry", fields: [] })];
+      api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: { ...datasetCapability, operationIds: operations.map(value => value.operationId), operations } }]));
+      renderLocal();
+      await openLocal();
+      expect(await stateText()).toBe("Approved on this device");
+      expect(lines("Changes")).toEqual(['Runs "Archive"', 'Runs "Archive"', "Deletes records"]);
+    });
+
     it("marks a shared line New when any of its operations is new", async () => {
       api.publishOwnerApp.mockImplementation(local([{ ...localRow, datasetCapability: pastLimit(1) }], { revision: "e".repeat(64), capabilities: [pastLimit(2)] }));
       renderLocal();
