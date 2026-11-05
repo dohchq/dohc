@@ -145,6 +145,20 @@ async fn wait_for_text(
     }
 }
 
+/// Poll until the driver has started the files layer `count` times. A start
+/// is counted after its settle ends.
+async fn wait_for_layer_starts(probe: &CaptureApplyProbe, count: u64) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while probe.layer_start_count() < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the files layer started {} times, not {count}",
+            probe.layer_start_count()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -689,11 +703,21 @@ tracked = false
 ",
     );
     wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    // The open and the narrowing rebuild.
+    wait_for_layer_starts(&probe, 2).await;
+    let starts = probe.layer_start_count();
 
-    // The widening rebuild's first apply and its three retries all fail, so a
-    // later ordinary pass captures the file.
-    probe.fail_next_applies_before_worker(4);
+    // Every apply fails until the widening rebuild has ended, so the rebuild
+    // never records the file.
+    probe.fail_next_applies_before_worker(u32::MAX);
     write_file(scratch.path(), ".dohc/files.toml", b"");
+    wait_for_layer_starts(&probe, starts + 1).await;
+    probe.fail_next_applies_before_worker(0);
+
+    // After repeated identical failures the file waits for the next change on
+    // disk. An unrelated edit is that change, and a later ordinary pass
+    // records the file under the rebuild's label.
+    write_file(scratch.path(), "notes.md", b"edit");
     wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
 
     transport
