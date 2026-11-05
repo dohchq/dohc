@@ -2353,18 +2353,6 @@ impl RealEnv {
             .clone()
     }
 
-    /// Release what a live pass recorded, carry what a rescan left, and
-    /// remember the rules it read.
-    fn after_pass(&mut self, applied: &ApplyOutcome) {
-        carry_past(&mut self.carried, &applied.recorded);
-        if let Some(left) = &applied.left {
-            take_over(&mut self.carried, left);
-        }
-        if let Some(rules) = &applied.rules {
-            self.rules = Some(rules.clone());
-        }
-    }
-
     /// Context for a live watcher-batch apply: default provenance (per-file
     /// "Updated <basename>" summaries, no correlation id), except for a file
     /// an unfinished first import has not recorded yet, or one a baseline
@@ -2813,7 +2801,7 @@ impl DriverEnv for RealEnv {
             ) => {
                 let applied =
                     apply_run(self.apply_context(), &layer.files.handle(), run, cancel).await;
-                self.after_pass(&applied);
+                after_pass(&mut self.carried, &mut self.rules, &applied);
                 if applied.collection_busy_exhausted {
                     return TickIo::CollectionBusyExhausted;
                 }
@@ -2843,7 +2831,7 @@ impl DriverEnv for RealEnv {
             Ok(run) => {
                 let applied =
                     apply_run(self.apply_context(), &layer.files.handle(), run, cancel).await;
-                self.after_pass(&applied);
+                after_pass(&mut self.carried, &mut self.rules, &applied);
                 if applied.collection_busy_exhausted {
                     return TickIo::CollectionBusyExhausted;
                 }
@@ -3184,6 +3172,23 @@ fn carry(provenance: &CaptureProvenance, left: BTreeSet<String>) -> Option<Arc<C
             paths: left,
         })
     })
+}
+
+/// Release what a live pass recorded, carry what a rescan left, and
+/// remember the rules it read. A tick calls it while it holds the apply
+/// gate, so it takes the two fields it changes.
+fn after_pass(
+    carried: &mut Option<Arc<CarriedPass>>,
+    rules: &mut Option<Arc<PolicyState>>,
+    applied: &ApplyOutcome,
+) {
+    carry_past(carried, &applied.recorded);
+    if let Some(left) = &applied.left {
+        take_over(carried, left);
+    }
+    if let Some(pass_rules) = &applied.rules {
+        *rules = Some(pass_rules.clone());
+    }
 }
 
 /// A live rescan that left paths takes over the carry. The paths the carry

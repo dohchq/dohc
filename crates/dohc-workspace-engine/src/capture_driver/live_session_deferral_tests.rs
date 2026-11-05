@@ -3288,7 +3288,7 @@ async fn started_env(
     .await
     .expect("layer");
     let applied = apply_run(env.apply_context(), &layer.files.handle(), initial, &cancel).await;
-    env.after_pass(&applied);
+    after_pass(&mut env.carried, &mut env.rules, &applied);
     (env, layer)
 }
 
