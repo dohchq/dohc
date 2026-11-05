@@ -37,11 +37,12 @@ const compactSecondaryButtonClass =
   "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50";
 // The primary recipe on the danger fill, for the confirm of an action that
 // removes or revokes something. Paper text on danger clears AA in both
-// themes (tokens.test.ts guards the pair).
+// themes (tokens.test.ts guards the pair). Disabled, it drops the danger
+// fill, so it turns red only once it can be pressed.
 const dangerButtonClass =
-  "h-8 rounded-lg bg-danger px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
+  "h-8 rounded-lg bg-danger px-3 text-[13px] font-medium text-bg transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-hover disabled:text-subtle";
 const compactDangerButtonClass =
-  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-hover disabled:text-subtle";
 // The danger confirm at the secondary row button's height, so a row's
 // confirm takes its place without the row growing.
 const rowDangerButtonClass =
