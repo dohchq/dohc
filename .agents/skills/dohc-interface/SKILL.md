@@ -68,7 +68,7 @@ Every error and empty state needs a Next. A toast usually reports a Change. A st
 - Use sentence case: `New folder`.
 - Leave the period off labels, buttons, and fragments. Full sentences keep theirs.
 - Use numerals for counts a person scans or acts on: `Delete 12 files`. Inside a sentence, a word can read better: `A file changed on two machines`.
-- A count beside a list counts every item the list holds, whatever its state. It includes items in collapsed groups or past **Show more**, but not folder or group rows.
+- A count beside a list counts every item the list holds, whatever its state. It includes items in collapsed groups or past **Show more**. A row that only groups others, such as a folder in Pages, is not an item. If more remain to load, add `+`: `24+`.
 - State the mechanism or say nothing. Cut promises such as `magically`, `just works`, `powered by AI`, `seamless`, `powerful`, and `smart`.
 - Keep sync clearly opt-in. Sync starts off, and signing in alone does not turn it on.
 
