@@ -293,6 +293,8 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
 
+A surface or list whose read failed, so it shows nothing, takes danger. Part of it that didn't load, beside parts that did, takes warning, as does something held back on purpose or paused.
+
 ### Type
 
 | Role | Classes |

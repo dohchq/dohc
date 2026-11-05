@@ -434,13 +434,23 @@ describe("History timeline sources", () => {
     expect(screen.queryByTestId("history-sources-retry")).toBeNull();
   });
 
-  it("shows a Collection that did not load as unavailable, not as empty History", () => {
+  it("shows a Collection that did not load as History's failed state, not as empty History", () => {
     const calls = view({ unavailableSources: [{ datasetId: GUESTS }] });
     const state = screen.getByTestId("history-collections-unavailable");
     expect(state.textContent).toContain("dohc could not load changes from Guests.");
+    expect(state.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain("text-danger");
     expect(screen.queryByText("No changes yet")).toBeNull();
-    fireEvent.click(screen.getByTestId("history-sources-retry"));
+    fireEvent.click(within(state).getByRole("button", { name: "Try again" }));
     expect(calls.retry).toHaveBeenCalledOnce();
+  });
+
+  it("explains an empty page the limit left Collections out of, with no Try again", () => {
+    view({ omittedSources: 3 });
+    const state = screen.getByTestId("history-collections-unavailable");
+    expect(state.textContent).toContain("3 more are left out.");
+    expect(state.querySelector(".lucide-triangle-alert")).toBeNull();
+    expect(screen.queryByTestId("history-sources-retry")).toBeNull();
+    expect(screen.queryByText("No changes yet")).toBeNull();
   });
 
   it("says History is paused beside the Collections an empty paused page is missing", () => {
