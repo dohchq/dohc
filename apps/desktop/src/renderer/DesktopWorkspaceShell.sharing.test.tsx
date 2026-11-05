@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import type { RefreshShareMountsResult } from "../ipc/bridgeContract";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
 import { createAutomationButtons } from "./collections/useAutomationButtons";
@@ -240,17 +241,14 @@ describe("refreshing shares added to this workspace", () => {
       "shared-with-me/alex/.dohc/local/share-refresh/share-collision-record.json. " +
       "It keeps a refresh from replacing your own files.";
     const bridge = makeBridge(Promise.resolve(null));
-    let refreshes = 0;
-    const refresh = vi.fn(async () => {
-      refreshes += 1;
-      return {
-        results: [
-          refreshes > 1
-            ? { shareId: "share-1", label: "alex", status: "unchanged" as const, changedPaths: 0 }
-            : { shareId: "share-1", label: "alex", status: "failed" as const, changedPaths: 0, errorKind: "collision-record" as const },
-        ],
-      };
-    });
+    const retried = deferred<RefreshShareMountsResult>();
+    const responses: Promise<RefreshShareMountsResult>[] = [
+      Promise.resolve({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" }] }),
+      retried.promise,
+    ];
+    const refresh = vi.fn(() =>
+      responses.shift() ?? Promise.resolve<RefreshShareMountsResult>({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0 }] }),
+    );
     Object.assign(bridge, { refreshShareMounts: refresh });
     renderShell(bridge, {
       ...WORKSPACE,
@@ -264,9 +262,27 @@ describe("refreshing shares added to this workspace", () => {
     const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
 
-    // Try again closes Notices and runs the refresh. The refresh that completes ends the row.
+    // Try again closes Notices and runs the refresh. The row stays while it runs.
+    const refusalRow = () =>
+      within(screen.getByTestId("notice-center")).queryByText(words, { exact: false })?.closest<HTMLElement>("[data-notice-row]") ?? null;
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(refusalRow()).not.toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+
+    // A refresh that fails for another reason has not refreshed that share, so the row stays.
+    await act(async () => {
+      retried.resolve({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0 }] });
+    });
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => expect(screen.getByTestId("notice-center").textContent).toContain("dohc could not refresh 1 share."));
+    const keptRow = refusalRow();
+    expect(keptRow).not.toBeNull();
+
+    // The refresh that completes ends the row.
+    fireEvent.click(within(keptRow!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(3));
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     await waitFor(() => {
       const reopened = screen.getByTestId("notice-center");
