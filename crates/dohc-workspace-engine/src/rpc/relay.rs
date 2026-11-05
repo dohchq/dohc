@@ -1387,6 +1387,7 @@ impl EngineService {
         let page = pending.take().expect("validated pull page").page;
         drop(pending);
         let held_page = Arc::clone(&page);
+        let mut apply_started = false;
         let answer = async {
         // A Collections update already admitted under the gate runs before
         // this pull places a page, and none is admitted until the pull is
@@ -1403,16 +1404,18 @@ impl EngineService {
         } else {
             None
         };
+        let operation = RelayOperation::ApplyPull {
+            workspace_id: open.workspace_id.clone(),
+            page,
+            now_ms: now_ms()?,
+        };
+        apply_started = true;
         let outcome = self
             .relay_execute(
                 ctx,
                 &open,
                 configuration,
-                RelayOperation::ApplyPull {
-                    workspace_id: open.workspace_id.clone(),
-                    page,
-                    now_ms: now_ms()?,
-                },
+                operation,
                 "sync.applyPull",
             )
             .await?;
@@ -1506,7 +1509,7 @@ impl EngineService {
         }
         Ok(result)
         }.await;
-        if answer.is_err() {
+        if answer.is_err() && !apply_started {
             self.abandon_fetched_pull(&open, &held_page).await?;
         }
         answer
@@ -4616,6 +4619,70 @@ mod tests {
             "no cleanup wrote a removal"
         );
         assert_eq!(f.edges(), 1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_rpc_apply_error_keeps_partly_applied_progress_and_collections_owed() {
+        let (relay, f) = half_pull_fixture("partial-apply-error", true).await;
+        relay.release();
+        let fetched = f
+            .service
+            .sync_fetch_pull(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id}),
+            )
+            .await
+            .expect("fetch page one");
+        let token = f.pull_token().expect("this fetch's token");
+        let conn = f.engine_db();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_second_pull_envelope BEFORE INSERT ON replication_log \
+             WHEN NEW.origin_id='peer' AND NEW.origin_seq=1 \
+             BEGIN SELECT RAISE(ABORT, 'stop the second envelope'); END;",
+        )
+        .unwrap();
+        let answer = f
+            .service
+            .sync_apply_pull(
+                &RequestContext::unbounded(),
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id, "pageToken": fetched["pageToken"]}),
+            )
+            .await;
+        assert!(answer.is_err());
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE origin_id='peer' AND origin_seq=0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1, "the first envelope committed before the error");
+        assert!(
+            f.open
+                .actor
+                .versioned_text_read(
+                    f.workspace_id.into(),
+                    "main".into(),
+                    "tasks/target.md".into(),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(f.pull_token().as_ref(), Some(&token));
+        assert!(f.collections_waiting().await);
+        assert!(f.owed());
+        assert!(f.source_relates_to_target());
+        conn.execute_batch("DROP TRIGGER fail_second_pull_envelope;")
+            .unwrap();
+        let f = f.restart().await;
+        assert_eq!(f.pull_token(), Some(token));
+        assert!(f.collections_waiting().await);
+        assert!(f.source_relates_to_target());
         f.close().await;
     }
 

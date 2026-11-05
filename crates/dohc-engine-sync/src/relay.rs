@@ -2861,7 +2861,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         {
             let (fetch, progress) =
                 match self.begin_prepared_pull(store, workspace_id, prepared, faults) {
-                    Err(RelayError::RepairPending) => {
+                    Err(error) => {
                         replace_ordinary_pull_token(
                             store,
                             workspace_id,
@@ -2869,9 +2869,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             prepared.previous_pull_token(),
                             faults,
                         )?;
-                        return Err(RelayError::RepairPending);
+                        return Err(error);
                     }
-                    answer => answer?,
+                    Ok(answer) => answer,
                 };
             self.continuation
                 .keep(workspace_id, Fetched::Ordinary(fetch), progress);
