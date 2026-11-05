@@ -812,6 +812,21 @@ describe("CloudSyncSettings", () => {
     expect(document.activeElement).toBe(syncSwitch());
   });
 
+  // A sign-in rereads the status, so the row shows its loading state between
+  // the unconfirmed account and the confirmed one.
+  it("moves focus to the switch when the account is confirmed after the status reloads", () => {
+    const { rerender } = render(
+      <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSyncConnected: false })} />,
+    );
+    screen.getByTestId("cloud-relink-workspace").focus();
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(null)} />);
+    expect(document.activeElement).toBe(document.body);
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
+    expect(document.activeElement).toBe(syncSwitch());
+  });
+
   // A failed Try again keeps its buttons. A confirmation that arrives later
   // moves focus only while one of them still has it.
   it("moves focus to the switch when the account is confirmed after a failed Try again", async () => {

@@ -111,6 +111,8 @@ export function CloudSyncSettings(props: {
   // its own. Focus they held moves to the switch that takes their place once
   // it can be used, or to Connect server while signed out, where the switch
   // can't turn on. Focus the person moved to another control stays there.
+  // A busy switch or a status still loading has nothing to focus yet, so the
+  // move waits for the next answer.
   const syncSwitch = useRef<HTMLButtonElement | null>(null);
   const connectButton = useRef<HTMLButtonElement | null>(null);
   const actionHeldFocus = useRef(false);
@@ -120,7 +122,7 @@ export function CloudSyncSettings(props: {
     if (!target) return;
     actionHeldFocus.current = false;
     if (document.activeElement === document.body) target.focus();
-  }, [unconfirmed, syncBusy]);
+  }, [unconfirmed, syncBusy, status]);
   const holdsFocus = {
     onFocus: () => {
       actionHeldFocus.current = true;
