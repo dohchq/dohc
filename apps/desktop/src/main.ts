@@ -715,7 +715,7 @@ function recordCrash(event: CrashEvent): void {
   crashReports.record(event);
   telemetry.reportError({ kind: "crash", event });
 }
-installCrashCapture({
+installCrashCapture<WebContents>({
   process,
   app,
   isWindowPage: (contents: WebContents) => BrowserWindow.fromWebContents(contents)?.webContents === contents,
