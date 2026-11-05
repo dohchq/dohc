@@ -600,20 +600,34 @@ it("keeps an app working when its Collection moves, or when its dataset.json com
   await f.invoke(link, id(5), {name: "Late"}, publicationId, "late");
 });
 
-it("keeps an app working when another Collection takes its moved Collection's old folder (#3186)", async () => {
-  const f = await fixture(); await f.activate(); pushFile(f.storage, "dataset", null, collectionFile());
-  const publicationId = f.publish(), link = f.link("friend");
+it("keeps an app working, on its own records only, when another Collection takes its moved Collection's old folder (#3186)", async () => {
+  const f = await fixture(); await f.activate(); f.addHelper(); pushFile(f.storage, "dataset", null, collectionFile());
+  const other = {workspaceId: "w", datasetId: id(9)};
+  const otherRevision = describeDatasetRevision({definition: {...definition, datasetId: id(9), name: "Other"}, revision: 1, schemaSql, operationSource});
+  const invokeOther = (auth: AppBackendAuth, operationId: string, input: Record<string, string>, key: string, appId?: string) => f.host.invoke(auth, {...other,
+    revision: 1, revisionSha256: otherRevision.revisionSha256, operationId, input, idempotencyKey: key, ...(appId ? {access: {kind: "app" as const, appId}} : {})});
+  await f.host.activate(owner, {...other, revision: otherRevision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
+  await invokeOther(owner, id(5), {name: "Other record"}, "other");
+  const publicationId = f.publish([id(5), id(6)]), link = f.link("friend");
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
   pushFile(f.storage, "dataset", collectionFile(), collectionFile("archive/registrations/dataset.json"));
   pushFile(f.storage, "other", null, {path: "registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
   await f.invoke(link, id(5), {name: "Moved"}, publicationId, "moved");
   f.advance(120_000);
   await f.invoke(link, id(5), {name: "Still moved"}, publicationId, "still-moved");
-  // The other Collection's file at the old folder never stands in for this one.
-  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), null);
-  await f.invoke(link, id(5), {name: "Deleted"}, publicationId, "deleted");
+  const names = (result: unknown) => (result as {name: string}[]).map(row => row.name).sort();
+  expect(names((await f.invoke(helper, id(6), {}, publicationId, "read")).result)).toEqual(["Moved", "Still moved"]);
+  // The app can't reach the Collection that took its old folder.
+  await expect(invokeOther(link, id(5), {name: "Leaked"}, "leaked", publicationId)).rejects.toMatchObject({statusCode: 404});
+  await expect(invokeOther(helper, id(6), {}, "leaked-read", publicationId)).rejects.toMatchObject({statusCode: 404});
+  expect(names((await invokeOther(owner, id(6), {}, "other-read")).result)).toEqual(["Other record"]);
+  // A file that names the other Collection never stands in for this one, at the old folder or where the moved file went.
+  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), {path: "archive/registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
+  await f.invoke(link, id(5), {name: "Renamed"}, publicationId, "renamed");
   f.advance(120_000);
   await expect(f.invoke(link, id(5), {name: "Refused"}, publicationId, "refused")).rejects.toMatchObject(collectionMissing);
-  expect((await f.invoke(owner, id(6))).result).toHaveLength(3);
+  await expect(f.invoke(helper, id(6), {}, publicationId, "read-refused")).rejects.toMatchObject(collectionMissing);
+  expect(names((await f.invoke(owner, id(6))).result)).toEqual(["Moved", "Renamed", "Still moved"]);
 });
 
 it("looks for a root Collection's dataset.json at the workspace root", async () => {
