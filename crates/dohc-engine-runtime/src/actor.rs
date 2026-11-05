@@ -39,6 +39,7 @@ mod link_documents;
 mod link_rewrites;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
 pub use link_documents::{DocumentIsOpen, DocumentResync};
+pub use link_rewrites::RewriteStop;
 mod journal;
 mod live_application;
 mod markdown_recovery;
