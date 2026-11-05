@@ -122,18 +122,37 @@ describe("sync status surface", () => {
     expect(worded()).toBe(false);
   });
 
-  // The server isn't the cause, so the title bar names the account, with the
-  // attention mark, whichever reason main gives.
-  it.each(["signed-out", "other-account", "sign-in-expired"] as const)(
-    "names an account dohc can't confirm (%s), and reads saved again once it can",
-    (accountUnconfirmed) => {
-      const { rerender } = renderStatus({ syncStatus: { ...syncState("account-unconfirmed"), accountUnconfirmed } });
-      const status = screen.getByRole("status", { name: "Not syncing. dohc could not confirm this workspace's account." });
-      expect(status.getAttribute("data-state")).toBe("account-unconfirmed");
-      expect(status.textContent).toBe("Couldn't confirm account");
-      expect(status.getAttribute("title")).toBe("Not syncing. dohc could not confirm this workspace's account.");
-      expect(status.textContent).not.toMatch(/server/i);
-      expect(dotOf()).toBe("attention");
+  // The server isn't the cause, so the title bar never names it. Signed out
+  // is a choice, so it waits on a ring; an account dohc can't confirm needs
+  // the person, so it takes the attention mark. Neither borrows the other's
+  // words.
+  const BLOCKED_TITLE_BAR = {
+    "not-connected": {
+      words: "Connect server to sync",
+      description: "Not syncing. Connect your server to sync this workspace.",
+      dot: "waiting",
+    },
+    "account-unconfirmed": {
+      words: "Couldn't confirm account",
+      description: "Not syncing. dohc couldn't confirm this workspace's account.",
+      dot: "attention",
+    },
+  } as const;
+  it.each(Object.keys(BLOCKED_TITLE_BAR) as Array<keyof typeof BLOCKED_TITLE_BAR>)(
+    "says why a synced workspace isn't syncing (%s), and reads saved again once it can",
+    (state) => {
+      const expected = BLOCKED_TITLE_BAR[state];
+      const { rerender } = renderStatus({ syncStatus: syncState(state) });
+      const status = screen.getByRole("status", { name: expected.description });
+      expect(status.getAttribute("data-state")).toBe(state);
+      expect(status.textContent).toBe(expected.words);
+      expect(status.getAttribute("title")).toBe(expected.description);
+      expect(status.textContent).not.toMatch(/server unreachable/i);
+      expect(`${status.textContent} ${status.getAttribute("title")}`).not.toMatch(/could not/);
+      for (const other of Object.values(BLOCKED_TITLE_BAR)) {
+        if (other !== expected) expect(status.textContent).not.toBe(other.words);
+      }
+      expect(dotOf()).toBe(expected.dot);
       expect(worded()).toBe(true);
 
       rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
@@ -328,11 +347,11 @@ describe("sync status surface", () => {
   });
 
   // The title bar doesn't name the server, so live editing shows beside its
-  // words: an account dohc can't confirm, a failed save, or a required update.
+  // words: no server connection, an account dohc can't confirm, a failed save,
+  // or a required update.
   it.each([
-    ...(["signed-out", "other-account", "sign-in-expired"] as const).map((accountUnconfirmed) => ({
-      label: "Couldn't confirm account", status: { state: "account-unconfirmed" as const, accountUnconfirmed }, failedSaves: 0,
-    })),
+    { label: "Connect server to sync", status: { state: "not-connected" as const }, failedSaves: 0 },
+    { label: "Couldn't confirm account", status: { state: "account-unconfirmed" as const }, failedSaves: 0 },
     { label: "Couldn't save 1 file", status: { state: "account-unconfirmed" as const }, failedSaves: 1 },
     { label: "Update dohc to sync", status: { state: "update-required" as const, updateRequired: "app" as const }, failedSaves: 0 },
   ])("keeps live editing beside $label", ({ label, status, failedSaves }) => {

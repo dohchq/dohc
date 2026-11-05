@@ -721,7 +721,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       const atOpen = Promise.resolve(input.atOpen);
       const service = createPhysicalWorkspaceActivity(() => {}, {
         observationFor: idleObservation,
-        cloudStateFor: () => (signedIn ? {} : { accountUnconfirmed: "signed-out" }),
+        cloudStateFor: () => (signedIn ? {} : { syncBlocked: "not-connected" }),
         engineFor: () => (signedIn ? syncEngine() : null),
         collectionsWaitingFor: () => atOpen,
       });
@@ -855,7 +855,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const reads: Promise<boolean>[] = [];
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => null,
-      cloudStateFor: () => ({ accountUnconfirmed: "signed-out" }),
+      cloudStateFor: () => ({ syncBlocked: "not-connected" }),
       // The same promise the test awaits, so the activity's answer lands first.
       collectionsWaitingFor: () => {
         const read = Promise.resolve(pullUnfinished);
@@ -933,8 +933,8 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
-  it("says why it can't confirm the account, and syncs again once it can, stopping nothing", async () => {
-    let account: "signed-out" | "other-account" | undefined = "signed-out";
+  it("says why it can't sync on this session, and syncs again once it can, stopping nothing", async () => {
+    let blocked: "not-connected" | "account-unconfirmed" | undefined = "not-connected";
     let authExpired = false;
     const stop = vi.fn(async () => {});
     const engine = {
@@ -948,22 +948,21 @@ describe("workspaceActivity cloud sync nudge", () => {
     };
     const activity = createWorkspaceActivity(() => {}, {
       engineFor: () => engine,
-      cloudStateFor: () => (account ? { accountUnconfirmed: account } : {}),
+      cloudStateFor: () => (blocked ? { syncBlocked: blocked } : {}),
     });
     await activity.open(workspace());
     const read = () => SyncStatusResult.parse(activity.getStatus("activity-test"));
-    expect(read()).toMatchObject({ state: "account-unconfirmed", accountUnconfirmed: "signed-out" });
-    account = "other-account";
-    expect(read()).toMatchObject({ state: "account-unconfirmed", accountUnconfirmed: "other-account" });
-    account = undefined;
+    expect(read().state).toBe("not-connected");
+    blocked = "account-unconfirmed";
+    expect(read().state).toBe("account-unconfirmed");
+    blocked = undefined;
     authExpired = true;
-    expect(read()).toMatchObject({ state: "account-unconfirmed", accountUnconfirmed: "sign-in-expired" });
+    expect(read().state).toBe("account-unconfirmed");
     // The account matches and the sign-in is accepted: sync reads normal
     // again, with no pause and the engine never stopped.
     authExpired = false;
     const confirmed = read();
     expect(confirmed.state).toBe("synced");
-    expect(confirmed.accountUnconfirmed).toBeUndefined();
     expect(confirmed.syncPause).toBeUndefined();
     expect(stop).not.toHaveBeenCalled();
     await activity.stopAll();

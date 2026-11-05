@@ -80,7 +80,7 @@ import { EditorTabs } from "../workbench/EditorTabs";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
-import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice } from "../workbench/NoticeCenter";
+import { LocalNoticeRow, WorkspaceErrorToast, accountUnconfirmedNotice, notConnectedNotice } from "../workbench/NoticeCenter";
 import { EngineHistoryView, HistoryRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
@@ -1950,21 +1950,22 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={MERGE_BLOCKED_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            {/* The account dohc can't confirm: signed in to another account,
-                then signed out, where Try again can't help. */}
-            {(["other-account", "signed-out"] as const).map((reason) => (
-              <LocalNoticeRow
-                key={reason}
-                notice={{
-                  ...accountUnconfirmedNotice({ workspaceId: "ws-trip", reason, onTryAgain: noop, onOpenSyncSettings: noop }),
-                  id: `account-unconfirmed-${reason}`,
-                }}
-                unread
-                onKeyDown={noop}
-                onAction={noop}
-                onDismiss={noop}
-              />
-            ))}
+            {/* Signed in to an account dohc can't confirm, then signed out,
+                which is a choice rather than a fault. */}
+            <LocalNoticeRow
+              notice={accountUnconfirmedNotice({ workspaceId: "ws-trip", onTryAgain: noop, onOpenSyncSettings: noop })}
+              unread
+              onKeyDown={noop}
+              onAction={noop}
+              onDismiss={noop}
+            />
+            <LocalNoticeRow
+              notice={notConnectedNotice({ workspaceId: "ws-trip", onConnectServer: noop })}
+              unread
+              onKeyDown={noop}
+              onAction={noop}
+              onDismiss={noop}
+            />
           </ul>
         </div>
       </Section>
@@ -3217,6 +3218,14 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
           </div>
         </Specimen>
+        <Specimen label="not connected: not syncing, with Connect server and Pause sync">
+          <div className="w-[640px]">
+            <CloudSyncSettings
+              workspaceId="ws-trip"
+              cloud={settingsCloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: true })}
+            />
+          </div>
+        </Specimen>
         <Specimen label="protected files: the passphrase field and its error">
           <div className="w-[640px]">
             <ProtectedFilesRow
@@ -3851,10 +3860,11 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "syncing", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 0 },
   { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
-  { label: "account unconfirmed", syncStatus: { ...SYNCED_STATUS, state: "account-unconfirmed", accountUnconfirmed: "other-account" }, failedSaves: 0 },
+  { label: "account unconfirmed", syncStatus: { ...SYNCED_STATUS, state: "account-unconfirmed" }, failedSaves: 0 },
+  { label: "not connected", syncStatus: { ...SYNCED_STATUS, state: "not-connected" }, failedSaves: 0 },
   {
-    label: "account unconfirmed: live editing shows beside it",
-    syncStatus: { ...SYNCED_STATUS, state: "account-unconfirmed", accountUnconfirmed: "signed-out", ownerLiveDelivery: "retrying" },
+    label: "not connected: live editing shows beside it",
+    syncStatus: { ...SYNCED_STATUS, state: "not-connected", ownerLiveDelivery: "retrying" },
     failedSaves: 0,
   },
   // Live editing beside the save state. It adds nothing while the server is

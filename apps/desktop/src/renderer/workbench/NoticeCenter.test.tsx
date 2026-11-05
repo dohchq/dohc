@@ -41,6 +41,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
       onRefreshShareView={props.onRefreshShareView ?? (() => {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
+      {...(props.onConnectServer ? { onConnectServer: props.onConnectServer } : {})}
       {...(props.onConfirmSyncAccount ? { onConfirmSyncAccount: props.onConfirmSyncAccount } : {})}
       {...(props.onOpenSyncSettings ? { onOpenSyncSettings: props.onOpenSyncSettings } : {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
@@ -1095,50 +1096,74 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
   });
 
-  // The server isn't the cause, so the row names the account. Try again
-  // reads the account again, which needs someone signed in; Sync settings
-  // always shows. The row has no dismiss, and goes once the account is
-  // confirmed.
-  it.each([
-    { accountUnconfirmed: "signed-out" as const, tryAgain: false },
-    { accountUnconfirmed: "other-account" as const, tryAgain: true },
-    { accountUnconfirmed: "sign-in-expired" as const, tryAgain: true },
-  ])("names an account dohc can't confirm ($accountUnconfirmed)", async ({ accountUnconfirmed, tryAgain }) => {
-    const onConfirmSyncAccount = vi.fn();
-    const onOpenSyncSettings = vi.fn();
-    const status = (state: SyncStatusResult["state"]): SyncStatusResult => ({
-      state,
-      ...(state === "account-unconfirmed" ? { accountUnconfirmed } : {}),
-      pendingChangeCount: 0,
-      lastSyncedAtMs: null,
-      liveSessionsGeneration: 0,
-      historyRecordingUnavailable: false,
-      historyShareView: false,
-    });
-    const { rerender } = renderNotices({ syncStatus: status("account-unconfirmed"), onConfirmSyncAccount, onOpenSyncSettings });
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const notice = screen.getByTestId("notice-account-unconfirmed");
-    expect(notice.textContent).toContain("Couldn't confirm this workspace's account");
-    expect(notice.textContent).toContain(
-      "dohc could not confirm this workspace's account, so it isn't syncing. Your changes stay on this computer.",
-    );
-    expect(notice.textContent).not.toMatch(/server/i);
-    expect(screen.getByTestId("notice-account-unconfirmed-copy")).toBeTruthy();
-    expect(within(notice).queryByRole("button", { name: /dismiss/i })).toBeNull();
-    const retry = within(notice).queryByRole("button", { name: "Try again" });
-    expect(retry !== null).toBe(tryAgain);
-    await userEvent.click(within(notice).getByRole("button", { name: "Sync settings" }));
-    expect(onOpenSyncSettings).toHaveBeenCalledTimes(1);
-    if (retry) {
-      // An action closes Notices, so open it again.
-      if (!screen.queryByTestId("notice-account-unconfirmed")) await userEvent.click(screen.getByTestId("notice-center-toggle"));
-      await userEvent.click(within(screen.getByTestId("notice-account-unconfirmed")).getByRole("button", { name: "Try again" }));
-      expect(onConfirmSyncAccount).toHaveBeenCalledTimes(1);
-    }
+  // A synced workspace that can't sync on this session. The server isn't the
+  // cause, so no row names it, and neither borrows the other's words. Each
+  // action runs its own callback. The row has no dismiss, and goes once sync
+  // can run.
+  const BLOCKED_ROWS = {
+    "not-connected": {
+      title: "Not connected to your server",
+      body: "This workspace isn't syncing until you connect your server. Your changes stay on this computer.",
+      actions: ["Connect server"],
+      notTitle: "Couldn't confirm this workspace's account",
+    },
+    "account-unconfirmed": {
+      title: "Couldn't confirm this workspace's account",
+      body: "dohc couldn't confirm this workspace's account, so it isn't syncing. Your changes stay on this computer.",
+      actions: ["Try again", "Sync settings"],
+      notTitle: "Not connected to your server",
+    },
+  } as const;
+  it.each(Object.keys(BLOCKED_ROWS) as Array<keyof typeof BLOCKED_ROWS>)(
+    "says why a synced workspace isn't syncing (%s)",
+    async (state) => {
+      const expected = BLOCKED_ROWS[state];
+      const callbacks = {
+        onConnectServer: vi.fn(),
+        onConfirmSyncAccount: vi.fn(),
+        onOpenSyncSettings: vi.fn(),
+      };
+      const byLabel: Record<string, ReturnType<typeof vi.fn>> = {
+        "Connect server": callbacks.onConnectServer,
+        "Try again": callbacks.onConfirmSyncAccount,
+        "Sync settings": callbacks.onOpenSyncSettings,
+      };
+      const status = (shown: SyncStatusResult["state"]): SyncStatusResult => ({
+        state: shown,
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+      });
+      const { rerender } = renderNotices({ syncStatus: status(state), ...callbacks });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      const row = () => screen.getByTestId(`notice-${state}`);
+      expect(row().textContent).toContain(expected.title);
+      expect(row().textContent).toContain(expected.body);
+      expect(row().textContent).not.toContain(expected.notTitle);
+      expect(row().textContent).not.toMatch(/server unreachable|could not/i);
+      expect(screen.getByTestId(`notice-${state}-copy`)).toBeTruthy();
+      expect(within(row()).queryByRole("button", { name: /dismiss/i })).toBeNull();
+      const actionLabels = within(row())
+        .getAllByRole("button")
+        .map((button) => button.textContent)
+        .filter((label) => label !== null && label in byLabel);
+      expect(actionLabels).toEqual(expected.actions);
+      for (const label of expected.actions) {
+        // An action closes Notices, so open it again.
+        if (!screen.queryByTestId(`notice-${state}`)) await userEvent.click(screen.getByTestId("notice-center-toggle"));
+        await userEvent.click(within(row()).getByRole("button", { name: label }));
+        expect(byLabel[label]).toHaveBeenCalledTimes(1);
+      }
+      for (const [label, callback] of Object.entries(byLabel)) {
+        if (!(expected.actions as readonly string[]).includes(label)) expect(callback).not.toHaveBeenCalled();
+      }
 
-    rerender(noticeElement({ syncStatus: status("synced"), onConfirmSyncAccount, onOpenSyncSettings }));
-    expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
-  });
+      rerender(noticeElement({ syncStatus: status("synced"), ...callbacks }));
+      expect(screen.queryByTestId(`notice-${state}`)).toBeNull();
+    },
+  );
 
   // A shared view records no history by design, a capability, not a
   // failure. The share banner speaks and this surface stays quiet.
@@ -1531,13 +1556,11 @@ describe("notice center", () => {
   });
 
   // The title bar doesn't name the server, so live editing reports its own
-  // state: an account dohc can't confirm, a failed save, or a required update.
+  // state: no server connection, an account dohc can't confirm, a failed
+  // save, or a required update.
   it.each([
-    ...(["signed-out", "other-account", "sign-in-expired"] as const).map((accountUnconfirmed) => ({
-      label: `the account isn't confirmed (${accountUnconfirmed})`,
-      status: { state: "account-unconfirmed" as const, accountUnconfirmed },
-      failedSaves: 0,
-    })),
+    { label: "nobody is connected", status: { state: "not-connected" as const }, failedSaves: 0 },
+    { label: "the account isn't confirmed", status: { state: "account-unconfirmed" as const }, failedSaves: 0 },
     { label: "a file couldn't save", status: { state: "account-unconfirmed" as const }, failedSaves: 1 },
     { label: "dohc needs an update", status: { ...serverUnreachable, updateRequired: "app" as const }, failedSaves: 0 },
   ])("reports live editing while the title bar says $label", ({ status, failedSaves }) => {

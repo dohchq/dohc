@@ -1103,14 +1103,15 @@ describe("owner app publication", () => {
       expect(reportError).not.toHaveBeenCalled();
     });
 
-    // The server isn't the cause of an account dohc can't confirm, so Share
-    // links says what it couldn't read instead of leaving it to the title bar.
-    it.each(["other-account", "sign-in-expired"] as const)(
-      "keeps Share links with its line while the account isn't confirmed (%s)",
-      async (accountUnconfirmed) => {
+    // The server isn't the cause when nobody is connected or dohc can't
+    // confirm the account, so Share links says what it couldn't read instead
+    // of leaving it to the title bar.
+    it.each(["not-connected", "account-unconfirmed"] as const)(
+      "keeps Share links with its line while the workspace can't sync (%s)",
+      async (state) => {
         const reportError = vi.fn();
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
-        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "account-unconfirmed", accountUnconfirmed });
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state });
         renderLocal({ reportError });
         await openLocal();
         const line = await screen.findByText(linksLine);

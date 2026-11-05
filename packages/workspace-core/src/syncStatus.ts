@@ -7,8 +7,11 @@ type SyncState =
   | "local-changes"
   | "conflict"
   | "sync-failed"
+  | "not-connected"
   | "account-unconfirmed"
   | "update-required";
+
+type SyncBlocked = "not-connected" | "account-unconfirmed" | "update-required";
 
 interface SyncStatus {
   state: SyncState;
@@ -22,10 +25,10 @@ interface SyncStatusInput {
   hasConflict: boolean;
   // The last sync pass failed and none has succeeded since.
   syncFailed: boolean;
-  // Sync is on but can't run until someone acts: dohc can't confirm the
-  // account that syncs the workspace, or one side must update. Null while
-  // sync can run, and for a local-only workspace.
-  syncBlocked: "account-unconfirmed" | "update-required" | null;
+  // Sync is on but can't run until someone acts: nobody is connected to a
+  // server, dohc can't confirm the account that syncs the workspace, or one
+  // side must update. Null while sync can run, and for a local-only workspace.
+  syncBlocked: SyncBlocked | null;
   lastSyncedAtMs: number | null;
 }
 

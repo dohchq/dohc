@@ -24,7 +24,7 @@ import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
-import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 
 export type NoticeAction = {
   label: string;
@@ -503,36 +503,72 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
-// The account isn't confirmed, whichever reason main gives, and the server
-// isn't the cause. Try again reads the signed-in account's session again, so
-// it needs someone signed in. The row has no dismiss: it stays until the
-// account is confirmed.
+// A synced workspace that can't sync on this computer's session. Neither
+// row blames the server, and neither has a dismiss: each stays until sync can
+// run again.
+function syncBlockedNotice(input: {
+  id: string;
+  tone: Notice["tone"];
+  title: string;
+  body: string;
+  actions: Array<NoticeAction | null>;
+  workspaceId: string;
+  Icon: Notice["Icon"];
+}): Notice {
+  const actions = input.actions.filter((action): action is NoticeAction => action !== null);
+  return {
+    id: input.id,
+    tone: input.tone,
+    title: input.title,
+    body: input.body,
+    ...(actions.length > 0 ? { actions } : {}),
+    copyText: errorDetails([
+      ["Notice", input.title],
+      ["Detail", input.body],
+      ["Workspace id", input.workspaceId],
+    ]),
+    Icon: input.Icon,
+  };
+}
+
+// Nobody is connected. Disconnecting is a choice, so the row is neutral and
+// offers the way back: the same connect flow as Settings' Connect server.
+const NOT_CONNECTED_TITLE = "Not connected to your server";
+export function notConnectedNotice(input: {
+  workspaceId: string;
+  onConnectServer: (() => void) | undefined;
+}): Notice {
+  return syncBlockedNotice({
+    id: "not-connected",
+    tone: "neutral",
+    title: NOT_CONNECTED_TITLE,
+    body: `${SYNC_NOT_CONNECTED} Your changes stay on this computer.`,
+    actions: [input.onConnectServer ? { label: "Connect server", onClick: input.onConnectServer } : null],
+    workspaceId: input.workspaceId,
+    Icon: CloudOff,
+  });
+}
+
+// Signed in, but not as the account that syncs this workspace. Try again
+// reads the signed-in account's session again, the same enable Settings runs.
 const ACCOUNT_UNCONFIRMED_TITLE = "Couldn't confirm this workspace's account";
-const ACCOUNT_UNCONFIRMED_BODY = `${SYNC_UNCONFIRMED_ACCOUNT} Your changes stay on this computer.`;
 export function accountUnconfirmedNotice(input: {
   workspaceId: string;
-  reason: SyncStatusResult["accountUnconfirmed"];
   onTryAgain: (() => void) | undefined;
   onOpenSyncSettings: (() => void) | undefined;
 }): Notice {
-  const actions: NoticeAction[] = [
-    ...(input.reason !== "signed-out" && input.onTryAgain ? [{ label: "Try again", onClick: input.onTryAgain }] : []),
-    ...(input.onOpenSyncSettings ? [{ label: "Sync settings", onClick: input.onOpenSyncSettings }] : []),
-  ];
-  return {
+  return syncBlockedNotice({
     id: "account-unconfirmed",
     tone: "danger",
     title: ACCOUNT_UNCONFIRMED_TITLE,
-    body: ACCOUNT_UNCONFIRMED_BODY,
-    ...(actions.length > 0 ? { actions } : {}),
-    copyText: errorDetails([
-      ["Notice", ACCOUNT_UNCONFIRMED_TITLE],
-      ["Detail", ACCOUNT_UNCONFIRMED_BODY],
-      ["Reason", input.reason],
-      ["Workspace id", input.workspaceId],
-    ]),
+    body: `${SYNC_UNCONFIRMED_ACCOUNT} Your changes stay on this computer.`,
+    actions: [
+      input.onTryAgain ? { label: "Try again", onClick: input.onTryAgain } : null,
+      input.onOpenSyncSettings ? { label: "Sync settings", onClick: input.onOpenSyncSettings } : null,
+    ],
+    workspaceId: input.workspaceId,
     Icon: AlertTriangle,
-  };
+  });
 }
 
 // An oversized unclaimed lineage shares its latest saved file at each push,
@@ -865,6 +901,8 @@ export function NoticeCenter(props: {
   conflictSummaries: string[];
   onOpenHistory: () => void;
   onOpenSettings: () => void;
+  // While nobody is connected: Settings' connect flow.
+  onConnectServer?: () => void;
   // While dohc can't confirm the workspace's account: Try again reads the
   // account again, the way Settings' Try again does, and Sync settings opens
   // Settings at the workspace's sync row.
@@ -1433,10 +1471,11 @@ export function NoticeCenter(props: {
         } Your changes stay on this computer.`,
         Icon: CloudOff,
       });
+    } else if (state === "not-connected") {
+      next.push(notConnectedNotice({ workspaceId: props.workspaceId, onConnectServer: props.onConnectServer }));
     } else if (state === "account-unconfirmed") {
       next.push(accountUnconfirmedNotice({
         workspaceId: props.workspaceId,
-        reason: props.syncStatus?.accountUnconfirmed,
         onTryAgain: props.onConfirmSyncAccount,
         onOpenSyncSettings: props.onOpenSyncSettings,
       }));
@@ -1565,6 +1604,7 @@ export function NoticeCenter(props: {
     props.onOpenHistory,
     props.onRefreshShareView,
     props.onOpenSettings,
+    props.onConnectServer,
     props.onConfirmSyncAccount,
     props.onOpenSyncSettings,
     props.onRebuildEngineStore,

@@ -6247,6 +6247,7 @@ export function DesktopWorkspaceShell(props: {
               shareChangeNotices={shareChangeNotices}
               onReviewShareChanges={setReviewProposalId}
               onOpenSettings={() => openSettings()}
+              onConnectServer={cloudSettings.onConnect}
               onConfirmSyncAccount={confirmSyncAccount}
               onOpenSyncSettings={openSyncSettings}
               onRebuildEngineStore={(returnFocus) => {
