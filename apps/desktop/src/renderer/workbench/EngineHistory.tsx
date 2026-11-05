@@ -874,7 +874,7 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
       <span className={`${MARK_BOX} text-subtle`}>
         <Database size={14} aria-hidden />
       </span>
-      <span className={LINE_TWO}>
+      <span className={`${LINE_TWO} flex-1`}>
         <span data-testid="history-collection-title" className="min-w-0 max-w-[60%] shrink-0 truncate">
           {collectionChangeTitle(props.entry, props.label)}
         </span>
