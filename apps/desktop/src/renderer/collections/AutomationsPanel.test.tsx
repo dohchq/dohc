@@ -372,6 +372,20 @@ describe("the ⚡ panel", () => {
     expect(bridge.writeCollectionAutomations).not.toHaveBeenCalled();
   });
 
+  it("marks a file it cannot read as it marks an automation it cannot read, and offers the file", async () => {
+    makeBridge({ status: "unreadable", diagnostic: { code: "invalid-yaml", path: "", line: 3 } });
+    const onOpenFile = vi.fn();
+    render(<Panel onOpenFile={onOpenFile} />);
+    const words = await screen.findByText("dohc cannot read automations.yaml. Fix the file to edit automations here.");
+    const mark = screen.getByLabelText("Cannot read");
+    expect(mark.getAttribute("class")).toContain("text-danger");
+    const line = mark.parentElement!;
+    expect(line.contains(words)).toBe(true);
+    expect(within(line).getByText("invalid-yaml on line 3")).toBeTruthy();
+    await userEvent.click(within(line).getByRole("button", { name: "Open file" }));
+    expect(onOpenFile).toHaveBeenCalledWith("Tasks/automations.yaml");
+  });
+
   it("drops an Open folder failure that answers after the workspace changed", async () => {
     const { bridge } = makeBridge(read([summary(stamp)]), [], { holdsUnreadable: true });
     let fail: (error: unknown) => void = () => undefined;
