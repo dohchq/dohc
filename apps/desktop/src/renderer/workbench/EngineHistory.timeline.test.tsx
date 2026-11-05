@@ -440,14 +440,26 @@ describe("History timeline sources", () => {
     expect(state.textContent).toContain("dohc could not load changes from Guests.");
     expect(state.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain("text-danger");
     expect(screen.queryByText("No changes yet")).toBeNull();
-    fireEvent.click(within(state).getByRole("button", { name: "Try again" }));
+    // The standard Try again, not the small one a row uses.
+    const retry = within(state).getByRole("button", { name: "Try again" });
+    expect(retry.dataset.testid).toBe("history-sources-retry");
+    expect(retry.className.split(" ")).toContain("h-8");
+    fireEvent.click(retry);
     expect(calls.retry).toHaveBeenCalledOnce();
+  });
+
+  it("puts the Collections that did not load first and the ones left out under them", () => {
+    view({ unavailableSources: [{ datasetId: GUESTS }], omittedSources: 3 });
+    expect(screen.getByText("dohc could not load changes from Guests.").className).toContain("text-sm");
+    expect(screen.getByText(/3 more are left out\./).className).toContain("text-subtle");
+    expect(screen.getByTestId("history-sources-retry")).toBeTruthy();
   });
 
   it("explains an empty page the limit left Collections out of, with no Try again", () => {
     view({ omittedSources: 3 });
     const state = screen.getByTestId("history-collections-unavailable");
     expect(state.textContent).toContain("3 more are left out.");
+    expect(state.querySelector(".lucide-info")!.getAttribute("class")).toContain("text-subtle");
     expect(state.querySelector(".lucide-triangle-alert")).toBeNull();
     expect(screen.queryByTestId("history-sources-retry")).toBeNull();
     expect(screen.queryByText("No changes yet")).toBeNull();
