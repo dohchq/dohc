@@ -1789,6 +1789,36 @@ describe("ui-state merge-on-load", () => {
     expect(within(row).getByRole("button", { name: "Dismiss notice" })).toBeTruthy();
   });
 
+  it("warns that a refresh set the share collision record aside when that refresh then fails", async () => {
+    const risk = "A refresh can replace them with the shared version, and dohc keeps no copy of yours.";
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    bridge.refreshSharedView = vi.fn(async (): Promise<RefreshSharedViewResult> => ({
+      ok: false,
+      changedPaths: 0,
+      errorMessage: "Sign in to your server first.",
+      collisionRecordQuarantined: true,
+      takesLocalWrites: false,
+    }));
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
+    });
+
+    await screen.findByTestId("workspace-shell-error");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(
+      within(notices).getByText(
+        `dohc could not read this share's record of your files with the same path as a shared file. ${risk}`,
+        { exact: false },
+      ),
+    ).toBeTruthy();
+  });
+
   it("keeps a refresh that can't read the share collision record in Notices until a refresh completes", async () => {
     const words =
       "dohc did not update these shared files because it could not read .dohc/local/share-refresh/share-collision-record.json. " +

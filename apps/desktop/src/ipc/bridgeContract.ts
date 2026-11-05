@@ -5704,6 +5704,10 @@ const RefreshSharedViewFailureResult = z.object({
   // For a collision-record refusal: what kept dohc from reading or setting
   // aside the record, for Details.
   errorCause: z.string().optional(),
+  // This refresh set the record aside before it failed, so the person hears
+  // of it all the same.
+  collisionRecordQuarantined: z.boolean().optional(),
+  takesLocalWrites: z.boolean().optional(),
 });
 
 export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
