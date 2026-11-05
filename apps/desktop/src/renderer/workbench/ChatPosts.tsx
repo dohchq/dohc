@@ -187,25 +187,31 @@ export function DecisionStatus(props: {
   );
 }
 
-// The current name of the Collection a change file changes. Null while it
-// loads, and for any other file.
-function useCollectionChangeName(workspaceId: string, path: string | undefined): string | null {
+// How a chip names a Collection change file: "Collection change" while it
+// loads, then "Change to <the Collection's current name>". Null for any other
+// file, and for a change file dohc can't read.
+function useCollectionChangeLabel(workspaceId: string, path: string | undefined): string | null {
   const key = path !== undefined && COLLECTION_CHANGE_FILE.test(path) ? `${workspaceId}\n${path}` : null;
-  const [named, setNamed] = useState<{ key: string; name: string } | null>(null);
+  const [named, setNamed] = useState<{ key: string; name: string | null } | null>(null);
   useEffect(() => {
     if (key === null || path === undefined) return;
     let current = true;
     const api = bridge();
     void (async () => {
       const proposal = await readCollectionChangeProposal(api, workspaceId, path);
-      if (!proposal) return;
+      if (!proposal) {
+        if (current) setNamed({ key, name: null });
+        return;
+      }
       const described = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "describe" })
         .catch(() => null);
       if (current) setNamed({ key, name: described?.kind === "description" ? described.dataset.name : proposal.name });
     })();
     return () => { current = false; };
   }, [key, workspaceId, path]);
-  return key !== null && named?.key === key ? named.name : null;
+  if (key === null) return null;
+  if (named?.key !== key) return "Collection change";
+  return named.name === null ? null : `Change to ${named.name}`;
 }
 
 function AttachmentChip(props: {
@@ -215,19 +221,18 @@ function AttachmentChip(props: {
 }) {
   const { pathHint, headingAnchor, headingText } = props.attachment;
   const onOpenPath = props.onOpenPath;
-  const changeName = useCollectionChangeName(props.workspaceId, pathHint);
+  const changeLabel = useCollectionChangeLabel(props.workspaceId, pathHint);
   // A shared view can hold an attachment whose path it may not read: the
   // chip names it only as an attachment and opens nothing.
   if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
   // An attachment is named by what it shows: the file and its heading, or
   // the Collection a change file changes. The tooltip keeps the path.
-  const label = changeName !== null
-    ? `Change to ${changeName}`
-    : `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
+  const label = changeLabel
+    ?? `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
   return (
     <Ref
       path={pathHint}
-      title={changeName !== null ? label : undefined}
+      title={changeLabel !== null ? label : undefined}
       heading={headingText}
       label={label}
       testId="chats-attachment-chip"
