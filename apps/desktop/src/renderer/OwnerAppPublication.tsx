@@ -727,13 +727,15 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <footer className="flex items-center gap-2">
             {approval ? <SecondaryButton disabled={!!busy || responsesBusy} aria-busy={busy === "withdraw" && busyPublicationId === approval.publicationId} onClick={() => void withdraw(approval, true)}>Remove approval</SecondaryButton> : null}
             <span className="flex-1" />
-            {approval && review ? null : <SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>}
             {approval && !changed ? <>
               {/* An inactive approval can only fail to open, and the state line already says it is inactive. */}
               {approval.active ? <SecondaryButton disabled={!!busy || responsesBusy} aria-busy={busy === "open"} onClick={() => void openInBrowser(approval.publicationId)}>Open in browser</SecondaryButton> : null}
               <PrimaryButton disabled={committing} onClick={props.onClose}>Done</PrimaryButton>
-            </> : <PrimaryButton data-testid="app-publication-approve" aria-busy={localReview.status === "loading" || approving} disabled={!review || !canApprove} onClick={() => void approveLocal()}>
-              {approval ? "Approve changes" : "Approve and open"}</PrimaryButton>}
+            </> : <>
+              <SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>
+              <PrimaryButton data-testid="app-publication-approve" aria-busy={localReview.status === "loading" || approving} disabled={!review || !canApprove} onClick={() => void approveLocal()}>
+                {approval ? "Approve changes" : "Approve and open"}</PrimaryButton>
+            </>}
           </footer>
         </div>
       </> : prepared ? <>
