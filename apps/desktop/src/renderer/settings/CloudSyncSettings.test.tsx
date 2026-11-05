@@ -161,21 +161,49 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
   });
 
-  it("offers Delete account beside Disconnect, for the account the row shows", async () => {
+  it("offers Delete account in More actions beside Disconnect, for the account the row shows", async () => {
     const logout = deferred<void>();
     bridgeMock.cloudLogout.mockReturnValueOnce(logout.promise);
     const settings = cloud({ ...SIGNED_IN, serverUrl: "https://dohc.hollis.studio/" });
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
-    const remove = within(screen.getByTestId("settings-row-account")).getByTestId("cloud-delete-account") as HTMLButtonElement;
-    expect(remove.textContent).toBe("Delete account…");
+    const row = within(screen.getByTestId("settings-row-account"));
+    expect(row.getByTestId("cloud-disconnect")).toBeTruthy();
+    expect(row.queryByTestId("cloud-delete-account")).toBeNull();
+    const more = row.getByRole("button", { name: "More actions" }) as HTMLButtonElement;
+    expect(more.title).toBe("More actions");
+    fireEvent.click(more);
+    const remove = screen.getByRole("menuitem", { name: "Delete account…" });
+    expect(remove.className).toContain("text-danger");
     fireEvent.click(remove);
     expect(settings.onDeleteAccount).toHaveBeenCalledWith({ email: "sam@hollis.studio", server: "https://dohc.hollis.studio" });
+    expect(screen.queryByRole("menu")).toBeNull();
 
     // Not while Disconnect is ending the same session.
     fireEvent.click(screen.getByTestId("cloud-disconnect"));
-    expect(remove.disabled).toBe(true);
+    expect(more.disabled).toBe(true);
     await act(async () => logout.resolve());
+  });
+
+  it("opens More actions from the keyboard, and Escape closes it back to the button", async () => {
+    const user = userEvent.setup();
+    const settings = cloud(SIGNED_IN);
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    const more = screen.getByRole("button", { name: "More actions" });
+    more.focus();
+    await user.keyboard("{Enter}");
+    const remove = screen.getByRole("menuitem", { name: "Delete account…" });
+    expect(document.activeElement).toBe(remove);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(more);
+
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Delete account…" }));
+    await user.keyboard("{Enter}");
+    expect(settings.onDeleteAccount).toHaveBeenCalledOnce();
   });
 
   // The words a mark cannot carry reach the keyboard and a screen reader, not
@@ -277,6 +305,9 @@ describe("CloudSyncSettings", () => {
     expect(control.getAttribute("aria-checked")).toBe("false");
     expect(control.getAttribute("aria-busy")).toBe("true");
     expect(control.disabled).toBe(true);
+    const spinner = within(screen.getByTestId("settings-row-sync-workspace")).getByTestId("switch-busy");
+    expect(spinner.getAttribute("class")).toContain("animate-spin");
+    expect(spinner.getAttribute("aria-hidden")).toBe("true");
     fireEvent.click(control);
     expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce();
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
@@ -287,6 +318,7 @@ describe("CloudSyncSettings", () => {
 
     expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
     expect(syncSwitch().getAttribute("aria-busy")).toBeNull();
+    expect(screen.queryByTestId("switch-busy")).toBeNull();
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
     expect(screen.queryByTestId("cloud-sync-needs-server")).toBeNull();
@@ -452,6 +484,10 @@ describe("CloudSyncSettings", () => {
     const { unmount } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
     fireEvent.click(syncSwitch());
     await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalled());
+    // Turning on waits for main the same way: busy, with the spinner beside it.
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(syncSwitch().getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByTestId("switch-busy")).toBeTruthy();
 
     unmount();
     await act(async () => {
