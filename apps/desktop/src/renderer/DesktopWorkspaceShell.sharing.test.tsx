@@ -264,10 +264,15 @@ describe("refreshing shares added to this workspace", () => {
     const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
 
+    // Try again closes Notices and runs the refresh. The refresh that completes ends the row.
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(within(notices).queryByText(words, { exact: false })).toBeNull());
-    expect(notices.textContent).toContain("Shares refreshed — 0 files updated.");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => {
+      const reopened = screen.getByTestId("notice-center");
+      expect(reopened.textContent).toContain("Shares refreshed — 0 files updated.");
+      expect(within(reopened).queryByText(words, { exact: false })).toBeNull();
+    });
   });
 });
 
