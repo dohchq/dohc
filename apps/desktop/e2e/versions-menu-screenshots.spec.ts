@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { editorTabTestId } from "../src/testPins";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -18,10 +19,10 @@ import {
 // a notice with Try again, and a failed merge in its dialog, with Details; each
 // merge stage, with and without the protected files a merge replaced; a merge
 // whose dialog closed while it ran, answering as a toast and a Notices row; the
-// save-first
-// confirm; and keyboard focus on the disabled Merge row. Light and dark. Not a
-// regression test; it runs only when a shot directory is set, the way
-// ui-audit-screenshots.spec.ts does.
+// Versions page with a conflict waiting, at rest and under the pointer; the
+// save-first confirm; and keyboard focus on the disabled Merge row. Light and
+// dark. Not a regression test; it runs only when a shot directory is set, the
+// way ui-audit-screenshots.spec.ts does.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture versions menu screenshots");
 
@@ -315,7 +316,9 @@ test("@ui-audit the versions menu and what it opens", async () => {
       await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
       await releaseHeld(app);
     };
-    await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nThird draft.\n");
+    // Each clean merge below changes a file the earlier merges left alone. A
+    // second merge of plan.md would ask which copy to keep (#3211).
+    await writeCaptured(page, temp.rootPath, "Draft", "ideas.md", "# Ideas\n");
     await closeWhileMerging("hold", "merge-running-close");
     const mergedAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merged 1 file from Draft into Main" });
     await expect(mergedAway).toBeVisible({ timeout: 30_000 });
@@ -325,7 +328,7 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.mouse.move(0, 0);
     await expect(mergedAway).toHaveCount(0, { timeout: 30_000 });
 
-    await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nFourth draft.\n");
+    await writeCaptured(page, temp.rootPath, "Draft", "todo.md", "# To do\n");
     await closeWhileMerging("hold-then-fail");
     const failedAway = errorToast(page, "dohc could not merge Draft into Main");
     await expect(failedAway).toBeVisible({ timeout: 30_000 });
@@ -359,6 +362,28 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(decideRow).toBeVisible();
     await shootWindow(page, "merge-closed-decide-notices");
     await page.getByTestId("notice-center-toggle").click();
+
+    // The Versions page with the conflict waiting, then its "1 to decide"
+    // under the pointer. The tab closes again, so the shots after it match.
+    await openMenu(page);
+    await page.getByTestId("version-all").click();
+    const toDecide = page
+      .getByTestId("versions-page-row")
+      .filter({ has: page.getByTestId("versions-page-name").getByText("Draft", { exact: true }) })
+      .getByTestId("versions-page-conflicts");
+    await expect(toDecide).toHaveText("1 to decide", { timeout: 30_000 });
+    await expect(toDecide).toHaveAttribute("title", "Open the conflicts");
+    await page.mouse.move(4, 400);
+    await shootWindow(page, "versions-page-conflicts");
+    // The button under the pointer. Its native tooltip never shows here,
+    // because e2e windows take no OS mouse input.
+    await toDecide.hover();
+    await shootWindow(page, "versions-page-conflicts-hover");
+    await page.mouse.move(4, 400);
+    const versionsTab = page.getByTestId(editorTabTestId("tab://versions"));
+    await versionsTab.hover();
+    await versionsTab.getByRole("button", { name: /^Close / }).click();
+    await expect(versionsTab).toHaveCount(0);
     await decideAway.getByTestId("workspace-shell-error-action").click();
     await page.getByTestId("version-conflict-keep-incoming").click();
     await page.getByTestId("conflict-review-done").click();

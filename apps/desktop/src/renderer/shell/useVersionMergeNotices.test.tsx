@@ -14,12 +14,12 @@ function mount(conflictPages: unknown[] = []) {
   const listWorkspaceVersionConflicts = vi.fn(async () => conflictPages.shift() ?? { conflicts: [], nextAfterConflictId: null });
   window.dohcDesktop = { listWorkspaceVersionConflicts } as unknown as typeof window.dohcDesktop;
   const openHistory = vi.fn(), openConflictReview = vi.fn();
-  const view = renderHook(({ menuShown }: { menuShown: boolean }) => {
+  const view = renderHook(({ captureOn }: { captureOn: boolean }) => {
     const shell = useShellError("ws-1");
-    const merges = useVersionMergeNotices({ workspaceId: "ws-1", menuShown, reportShellFailure: shell.reportShellFailure,
+    const merges = useVersionMergeNotices({ workspaceId: "ws-1", captureOn, reportShellFailure: shell.reportShellFailure,
       clearIdentity: shell.clearIdentity, openHistory, openConflictReview });
     return { shell, merges };
-  }, { initialProps: { menuShown: true } });
+  }, { initialProps: { captureOn: true } });
   const row = () => view.result.current.shell.shellErrors.find((error) => error.identity === IDENTITY);
   return { ...view, row, openHistory, openConflictReview, listWorkspaceVersionConflicts };
 }
@@ -60,13 +60,13 @@ it("puts Open History after Try again on a merge that stopped partway", () => {
   expect(f.openHistory).toHaveBeenCalledOnce();
 });
 
-it("says why a merge row's Try again waits, while a merge dialog is open or the menu is gone", () => {
+it("says why a merge row's Try again waits, while a merge dialog is open or capture is off", () => {
   const f = mount();
   expect(f.result.current.merges.retryBlocked).toBeUndefined();
   act(() => f.result.current.merges.onMergeOpenChange(true));
   expect(f.result.current.merges.retryBlocked).toBe(MERGE_RETRY_AFTER_CLOSE);
   act(() => f.result.current.merges.onMergeOpenChange(false));
   expect(f.result.current.merges.retryBlocked).toBeUndefined();
-  f.rerender({ menuShown: false });
+  f.rerender({ captureOn: false });
   expect(f.result.current.merges.retryBlocked).toBe(MERGE_RETRY_AFTER_STORE);
 });

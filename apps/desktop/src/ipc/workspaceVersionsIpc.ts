@@ -11,6 +11,7 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "createVersion"
   | "switchVersion"
   | "compareVersions"
+  | "compareVersionsChangedCount"
   | "mergeVersionIntoMain"
   | "listOpenConflictsPage"
   | "resolveConflict"
@@ -20,7 +21,8 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "deleteRetainedCopies"
 >;
 
-// A version as the versions menu and the CLI show it.
+// A version as the versions menu and the CLI show it. The CLI's rows leave
+// out what the version was made from.
 export function workspaceVersionForIpc(version: {
   id: string;
   name: string;
@@ -35,6 +37,7 @@ export function workspaceVersionForIpc(version: {
     createdAtMs: version.createdAtMs,
     canMergeIntoMain:
       version.kind === "named" && version.forkPoint?.versionId === "main",
+    ...(version.forkPoint ? { madeFromVersionId: version.forkPoint.versionId } : {}),
   };
 }
 
@@ -86,6 +89,11 @@ export function workspaceVersionHandlers(dependencies: {
       return await capture.compareVersions(input.versionId, {
         ...(input.afterPath !== undefined ? { afterPath: input.afterPath } : {}),
       });
+    },
+
+    async countWorkspaceVersionChanges(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return { count: await capture.compareVersionsChangedCount(input.versionId) };
     },
 
     async mergeWorkspaceVersion(input) {

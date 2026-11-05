@@ -6,7 +6,6 @@ import { SyncedDeletionRevivalError, SyncedDeletionStaleError } from "../../work
 import { ChevronDown, ChevronsUpDown, CircleAlert, Diff, FileArchive, FileText, Layers, Lock, Merge, Plus, RefreshCw, Share2 } from "lucide-react";
 import {
   type ReactNode,
-  type RefObject,
   useCallback,
   useEffect,
   useId,
@@ -20,6 +19,10 @@ import type {
   WorkspaceVersionFileChange,
   WorkspaceVersionRecord,
 } from "../../ipc/bridgeContract";
+import {
+  MAX_ENGINE_CAPTURE_BINARY_BYTES,
+  MAX_ENGINE_CAPTURE_TEXT_BYTES,
+} from "../../workspaces/workspaceEngineCaptureLimits";
 import {
   exceedsUtf8Bytes,
   utf8ByteLength,
@@ -38,6 +41,7 @@ import {
   conflictPreview,
 } from "./conflictPane";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
+import { versionDotClass } from "./versionHue";
 
 // Named versions surface. Product vocabulary only: Version, Main, compare,
 // merge, keep — never git terms. The shell mounts it only for a workspace
@@ -63,8 +67,7 @@ function versionName(
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
 
-// The version breadcrumb in the titlebar: shows the active version, switches
-// on click, creates inline, and opens compare / merge.
+// A version's merge notice, so a later merge of the same version takes it back.
 function mergeIdentity(workspaceId: string, versionId: string): string {
   return `version-merge:${workspaceId}:${versionId}`;
 }
@@ -100,10 +103,6 @@ export interface VersionMergeNotice {
   offersHistory?: true;
 }
 
-// Opens the merge dialog merging this version. False while it can't, such
-// as while another merge dialog is open.
-export type MergeRetry = (version: WorkspaceVersionRecord) => boolean;
-
 // Whether a merge from this version still has files to decide. It reads the
 // open conflicts page by page and stops at the first one.
 export async function mergeFilesWait(workspaceId: string, sourceVersionId: string): Promise<boolean> {
@@ -126,8 +125,8 @@ function protectedCopyWords(paths: readonly string[], sourceName: string): strin
 const AFTER_STORE_FIX = "Fix the data store problem in Notices, then merge again.";
 
 // The notice for a merge that answered after its dialog closed. A null
-// retry means the menu went with capture. That happens when the data store
-// was refused, and its own notice says how to fix it.
+// retry means capture stopped. That happens when the data store was
+// refused, and its own notice says how to fix it.
 function mergeNotice(
   identity: string,
   source: WorkspaceVersionRecord,
@@ -173,10 +172,10 @@ function mergeNotice(
   };
 }
 
-export function VersionMenu(props: {
+export interface WorkspaceVersionsOptions {
   workspaceId: string;
-  // The workspace is not ready for a version change.
-  disabled?: boolean;
+  // False while the workspace has no capture: nothing loads and no dialog shows.
+  enabled: boolean;
   activeTabDirty: boolean;
   // Settles drafts and queued collection writes, and pauses new cell edits
   // until the returned release runs. Each operation holds the release across
@@ -184,7 +183,6 @@ export function VersionMenu(props: {
   // lineage change; a rejection means an unresolved write refused the
   // operation, with the user-facing line as the error message.
   beginLineageOperation: () => Promise<() => void>;
-  onOpenCompare: (versionId: string) => void;
   // Fired after any operation that may have changed disk or history state so
   // the shell refreshes files/history and reloads open editors.
   // Pass the version that is active now when this operation set it. The
@@ -201,28 +199,46 @@ export function VersionMenu(props: {
   onMergeNotice: (notice: VersionMergeNotice) => void;
   // Whether a merge dialog is open, so a merge notice's Try again waits.
   onMergeOpenChange?: (open: boolean) => void;
-  // Where a merge notice's Try again finds the menu mounted now. The shell
-  // keeps it, so a notice from before the menu went and came back with
-  // capture still merges.
-  mergeRetry?: RefObject<MergeRetry | null>;
   // A merge that stopped partway offers History, which shows what is in Main.
   onOpenHistory?: () => void;
   // A conflict choice in the merge dialog reports a fallback and the error,
   // so a refusal can show its own title and instructions.
   onConflictError: (fallback: string, error: unknown) => void;
-  // Bumped by the shell when version state changed outside this menu, so the
-  // selector re-reads the active version instead of showing a stale name.
+  // Bumped by the shell when version state changed outside these controls,
+  // so they re-read the active version instead of showing a stale name.
   refreshKey?: number;
-  // "Share this version…": present only when the shell can open the
-  // share dialog (synced, non-shared-view workspaces).
-  onShareVersion?: (version: { id: string; name: string }) => void;
-}) {
-  const { workspaceId } = props;
+}
+
+// How the name field that started a create hears how it went.
+export interface VersionNameField {
+  // dohc can't use the name. The field keeps it and shows why.
+  refuse(reason: ReactNode): void;
+  created(): void;
+  // A failure notice's Try again opens the field again with the name, then creates.
+  reopen(name: string): void;
+}
+
+// The workspace's versions and what changes them, shared by the titlebar menu
+// and the Versions page, so a switch, create or merge runs once whichever
+// surface started it, and both show it.
+export interface WorkspaceVersions {
+  snapshot: WorkspaceVersionsSnapshot | null;
+  active: WorkspaceVersionRecord | null;
+  onMain: boolean;
+  busy: "switch" | "create" | null;
+  // Every load attempt failed, and reload tries again.
+  loadFailed: boolean;
+  reload(): void;
+  requestSwitch(versionId: string): void;
+  create(name: string, field: VersionNameField): void;
+  openMerge(version: WorkspaceVersionRecord): void;
+  // The save-first prompt and the merge dialog. The shell renders them once.
+  dialogs: ReactNode;
+}
+
+export function useWorkspaceVersions(props: WorkspaceVersionsOptions): WorkspaceVersions {
+  const { workspaceId, enabled } = props;
   const [snapshot, setSnapshot] = useState<WorkspaceVersionsSnapshot | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [newName, setNewName] = useState<string | null>(null);
-  // Why the field or the engine refused the name being typed.
-  const [nameError, setNameError] = useState<ReactNode>(null);
   const [busy, setBusy] = useState<"switch" | "create" | null>(null);
   // Dirty-editor guard: the version id waiting on "Save and switch".
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null);
@@ -239,42 +255,43 @@ export function VersionMenu(props: {
     onMergeOpenChange?.(true);
     return () => onMergeOpenChange?.(false);
   }, [mergeIsOpen, onMergeOpenChange]);
-  const mounted = useRef(false);
+  // Whether capture is still on, so a merge notice's Try again can open the
+  // dialog again.
+  const captureLive = useRef(false);
   useEffect(() => {
-    mounted.current = true;
+    captureLive.current = enabled;
     return () => {
-      mounted.current = false;
+      captureLive.current = false;
     };
-  }, []);
-  const ownRetry = useRef<MergeRetry | null>(null);
-  const retryTo = props.mergeRetry ?? ownRetry;
-  useEffect(() => {
-    retryTo.current = (version) => {
-      if (mergeOpen.current) return false;
-      setMerge({ source: version, runOnOpen: true });
-      return true;
-    };
-    return () => {
-      retryTo.current = null;
-    };
-  }, [retryTo]);
+  }, [enabled]);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   // Two questions, and they are not the same one.
   //
   // May this read still write the snapshot? A newer read answers no — from a
   // re-key, an unmount, or a mutation about to change what the read describes.
   const snapshotToken = useRef(0);
-  // Is this mutation still the one running? Only another mutation or an
-  // unmount answers no. A re-key must not: the announcement that a switch
-  // succeeded is itself what re-keys this component, so a shared counter let
-  // the switch invalidate its own token — its finally then skipped, and the
-  // selector sat disabled on "Switching…" for the rest of the session.
-  const operationToken = useRequestSequence();
+  // Is this mutation still the one running? Only another mutation, an
+  // unmount, or losing the capture answers no. A re-key must not: the
+  // announcement that a switch succeeded is itself what re-keys the reads, so
+  // a shared counter let the switch invalidate its own token — its finally
+  // then skipped, and the selector sat disabled on "Switching…" for the rest
+  // of the session.
+  const operationToken = useRequestSequence([workspaceId, enabled]);
   // A mutation supersedes both: it is the running operation now, and any read
   // issued before it describes the world it is about to change.
   const beginOperation = useCallback(() => {
     snapshotToken.current += 1;
     return operationToken.next();
   }, []);
+  // One switch or create at a time, whichever surface asks. A second would
+  // take the first's token, so the first could neither finish its update nor
+  // clear its busy state.
+  const runningOperation = useRef<number | null>(null);
+  const operationRunning = useCallback(
+    () => runningOperation.current !== null && operationToken.isCurrent(runningOperation.current),
+    [],
+  );
 
   const refresh = useCallback(async () => {
     const token = snapshotToken.current;
@@ -285,6 +302,15 @@ export function VersionMenu(props: {
   }, [workspaceId]);
 
   useEffect(() => {
+    if (!enabled) {
+      // Losing the capture ends whatever was running, as unmounting the menu did.
+      setSnapshot(null);
+      setBusy(null);
+      setPendingSwitch(null);
+      setMerge(null);
+      setLoadFailed(false);
+      return;
+    }
     let cancelled = false;
     // The first load can race the workspace open. A large fresh import has an
     // engine-owned bound but may take much longer than a renderer retry
@@ -296,6 +322,7 @@ export function VersionMenu(props: {
       while (!cancelled) {
         try {
           await refresh();
+          if (!cancelled) setLoadFailed(false);
           return;
         } catch (error) {
           lastError = error;
@@ -314,6 +341,7 @@ export function VersionMenu(props: {
       // Every attempt failed: say so instead of silently dropping the whole
       // versions surface for the session.
       if (!cancelled) {
+        setLoadFailed(true);
         props.onError(
           ipcErrorMessage(lastError, "dohc could not load this workspace's versions."),
           lastError,
@@ -324,7 +352,8 @@ export function VersionMenu(props: {
       cancelled = true;
       snapshotToken.current += 1;
     };
-  }, [refresh, props.refreshKey]);
+  }, [enabled, refresh, props.refreshKey, loadAttempt]);
+  const reload = useCallback(() => setLoadAttempt((attempt) => attempt + 1), []);
 
   const active = useMemo(
     () =>
@@ -340,17 +369,11 @@ export function VersionMenu(props: {
   const activeVersionIdRef = useRef<string | null>(null);
   activeVersionIdRef.current = snapshot?.activeVersionId ?? null;
 
-  // Every way the menu closes drops the name being typed and its error.
-  const setMenu = useCallback((open: boolean) => {
-    setMenuOpen(open);
-    if (open) return;
-    setNewName(null);
-    setNameError(null);
-  }, []);
-
   const performSwitch = useCallback(
     async (versionId: string) => {
+      if (operationRunning()) return;
       const token = beginOperation();
+      runningOperation.current = token;
       const before = activeVersionIdRef.current;
       // Did the switch IPC start? The failure path below keys on this, not
       // on whether the version moved: main settles and closes live Y.Doc
@@ -416,15 +439,15 @@ export function VersionMenu(props: {
         );
       } finally {
         releaseOperation?.();
+        if (runningOperation.current === token) runningOperation.current = null;
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, refresh, workspaceId],
+    [beginOperation, operationRunning, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, refresh, workspaceId],
   );
 
   const requestSwitch = useCallback(
     (versionId: string) => {
-      setMenu(false);
       if (versionId === snapshot?.activeVersionId) return;
       if (props.activeTabDirty) {
         // Save-first prompt: switching always saves into the current version
@@ -434,22 +457,23 @@ export function VersionMenu(props: {
       }
       void performSwitch(versionId);
     },
-    [setMenu, performSwitch, props.activeTabDirty, snapshot?.activeVersionId],
+    [performSwitch, props.activeTabDirty, snapshot?.activeVersionId],
   );
 
   // A refused name stays in the field with its reason. Any other failure is
   // a notice whose Try again reopens the field with the name and creates.
   const performCreate = useCallback(
-    async (name: string) => {
+    async (name: string, field: VersionNameField) => {
       const trimmed = name.trim();
       if (trimmed.length === 0) {
-        setNameError("Enter a name for the version.");
+        field.refuse("Enter a name for the version.");
         return;
       }
+      if (operationRunning()) return;
       const identity = `version-create:${workspaceId}:${trimmed}`;
       const token = beginOperation();
+      runningOperation.current = token;
       setBusy("create");
-      setNameError(null);
       let releaseOperation: (() => void) | null = null;
       try {
         releaseOperation = await props.beginLineageOperation();
@@ -463,163 +487,50 @@ export function VersionMenu(props: {
         // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
         props.clearError(identity);
-        setMenu(false);
+        field.created();
       } catch (error) {
         if (!operationToken.isCurrent(token)) return;
         const refusal = versionNameRefusal(error);
         if (refusal !== null) {
-          setNameError(refusal === "taken"
+          field.refuse(refusal === "taken"
             ? <>Another version is called <span className="font-medium">{trimmed}</span>. Choose another name.</>
             : "dohc can't use that name. Choose another name.");
           return;
         }
         props.onError(ipcErrorMessage(error, `dohc could not create the version ${trimmed}.`), error, () => {
-          setMenuOpen(true);
-          setNewName(trimmed);
-          void performCreate(trimmed);
+          field.reopen(trimmed);
+          void performCreate(trimmed, field);
         }, identity);
       } finally {
         releaseOperation?.();
+        if (runningOperation.current === token) runningOperation.current = null;
         if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, setMenu, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
+    [beginOperation, operationRunning, props.beginLineageOperation, props.clearError, props.onError, props.onWorkspaceStateChanged, workspaceId],
   );
+  const create = useCallback((name: string, field: VersionNameField) => void performCreate(name, field), [performCreate]);
 
   // The dialog shows a merge's answer while it is open. Closed first, by the
-  // person or because this menu went with capture, the merge keeps going and
-  // its answer is a notice. A failure's Try again opens the dialog and merges
-  // again, in whichever menu is mounted then.
+  // person or because capture stopped, the merge keeps going and its answer
+  // is a notice. This hook stays with the shell while capture comes and goes,
+  // so a failure's Try again opens the dialog and merges again whenever
+  // capture is on to do it.
   const answerMergeAway = useCallback(
     (version: WorkspaceVersionRecord, answer: MergeAnswer) => {
-      const retry = () => (retryTo.current?.(version) ? undefined : false);
-      props.onMergeNotice(mergeNotice(mergeIdentity(workspaceId, version.id), version, answer, mounted.current ? retry : null));
+      const retry = () => {
+        if (!captureLive.current || mergeOpen.current) return false;
+        setMerge({ source: version, runOnOpen: true });
+      };
+      props.onMergeNotice(mergeNotice(mergeIdentity(workspaceId, version.id), version, answer, captureLive.current ? retry : null));
     },
-    [props.onMergeNotice, retryTo, workspaceId],
+    [props.onMergeNotice, workspaceId],
   );
-
-  if (!snapshot) return null;
+  const openMerge = useCallback((version: WorkspaceVersionRecord) => setMerge({ source: version, runOnOpen: false }), []);
 
   const activeName = active?.name ?? "Main";
-  const items: MenuEntry[] = [
-    ...snapshot.versions.map((version) => ({
-      id: `version:${version.id}`,
-      label: version.name,
-      checked: version.id === snapshot.activeVersionId,
-      testId: "version-item",
-      data: { "data-version-id": version.id, "data-version-name": version.name },
-      onSelect: () => requestSwitch(version.id),
-    })),
-    newName === null
-      ? {
-          id: "new",
-          label: "New version…",
-          icon: <Plus size={14} aria-hidden />,
-          testId: "version-new",
-          onSelect: () => {
-            setNameError(null);
-            setNewName("");
-          },
-        }
-      : {
-          id: "new",
-          field: {
-            label: "New version name",
-            value: newName,
-            onChange: (value) => {
-              setNewName(value);
-              setNameError(null);
-            },
-            onSubmit: () => void performCreate(newName),
-            onCancel: () => {
-              setNewName(null);
-              setNameError(null);
-            },
-            maxLength: 80,
-            busy: busy === "create",
-            error: nameError,
-            errorTestId: "version-menu-error",
-            hint: busy === "create"
-              ? "Creating…"
-              : onMain
-                ? "Starts from Main"
-                : <>Starts from <span className="font-medium">{activeName}</span>, so it can't merge into Main.</>,
-            testId: "version-new-input",
-          },
-        },
-  ];
-  const actions: MenuEntry[] = [];
-  if (!onMain && active) {
-    actions.push(
-      {
-        id: "compare",
-        label: "Compare with Main",
-        icon: <Diff size={14} aria-hidden />,
-        testId: "version-compare",
-        onSelect: () => {
-          setMenu(false);
-          props.onOpenCompare(active.id);
-        },
-      },
-      {
-        id: "merge",
-        label: "Merge into Main…",
-        icon: <Merge size={14} aria-hidden />,
-        testId: "version-merge",
-        disabled: !active.canMergeIntoMain,
-        description: active.canMergeIntoMain ? undefined : "Only versions made from Main can merge into Main.",
-        onSelect: () => {
-          setMenu(false);
-          setMerge({ source: active, runOnOpen: false });
-        },
-      },
-    );
-  }
-  if (props.onShareVersion) {
-    const share = props.onShareVersion;
-    actions.push({
-      id: "share",
-      label: "Share this version…",
-      icon: <Share2 size={14} aria-hidden />,
-      testId: "version-share",
-      onSelect: () => {
-        setMenu(false);
-        share({ id: active?.id ?? "main", name: activeName });
-      },
-    });
-  }
-  if (actions.length > 0) items.push(MENU_SEPARATOR, ...actions);
-
-  return (
-    <div className="relative flex min-w-0 items-center">
-      {/* Every row but New version answers by closing the menu itself. */}
-      <Menu
-        label="Versions"
-        menuTestId="version-menu"
-        open={menuOpen}
-        onOpenChange={setMenu}
-        width={256}
-        closeOnPick={false}
-        items={items}
-        trigger={(trigger) => (
-          <button
-            {...trigger}
-            type="button"
-            data-testid="version-menu-button"
-            aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
-            title={`You're working in the ${activeName} version`}
-            disabled={busy !== null || props.disabled}
-            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
-          >
-            <Layers size={12} aria-hidden className="shrink-0" />
-            <span data-testid="version-menu-active" className="min-w-0 truncate">
-              {busy === "switch" ? "Switching…" : activeName}
-            </span>
-            <ChevronsUpDown size={12} aria-hidden className="shrink-0 text-subtle" />
-          </button>
-        )}
-      />
-
+  const dialogs = !enabled || snapshot === null ? null : (
+    <>
       {pendingSwitch !== null ? (
         // The panel holds focus, so a screen reader reads the title and body
         // before Tab reaches Cancel.
@@ -659,10 +570,228 @@ export function VersionMenu(props: {
           }}
         />
       ) : null}
+    </>
+  );
 
+  return { snapshot, active, onMain, busy, loadFailed, reload, requestSwitch, create, openMerge, dialogs };
+}
+
+// The version breadcrumb in the titlebar: shows the active version, switches
+// on click, creates inline, and opens compare, merge and the Versions page.
+export function VersionMenu(props: {
+  versions: WorkspaceVersions;
+  // The workspace is not ready for a version change.
+  disabled?: boolean;
+  onOpenCompare: (versionId: string) => void;
+  onOpenAllVersions?: () => void;
+  // "Share this version…": present only when the shell can open the
+  // share dialog (synced, non-shared-view workspaces).
+  onShareVersion?: (version: { id: string; name: string }) => void;
+}) {
+  const { snapshot, active, onMain, busy } = props.versions;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [newName, setNewName] = useState<string | null>(null);
+  // Why the field or the engine refused the name being typed.
+  const [nameError, setNameError] = useState<ReactNode>(null);
+
+  // Every way the menu closes drops the name being typed and its error.
+  const setMenu = useCallback((open: boolean) => {
+    setMenuOpen(open);
+    if (open) return;
+    setNewName(null);
+    setNameError(null);
+  }, []);
+  const field = useMemo<VersionNameField>(() => ({
+    refuse: setNameError,
+    created: () => setMenu(false),
+    reopen: (name) => {
+      setMenuOpen(true);
+      setNewName(name);
+      setNameError(null);
+    },
+  }), [setMenu]);
+
+  if (!snapshot) return null;
+
+  const activeName = active?.name ?? "Main";
+  const items: MenuEntry[] = [
+    ...snapshot.versions.map((version) => ({
+      id: `version:${version.id}`,
+      // The chip's dot, so a person matches the chip to its row. Main keeps
+      // the dot's space, so every name starts at the same place.
+      label: (
+        <>
+          <span
+            data-testid="version-item-dot"
+            aria-hidden
+            className={`mr-2 inline-block size-1.5 rounded-full align-middle ${version.kind === "main" ? "" : versionDotClass(version.id)}`}
+          />
+          {version.name}
+        </>
+      ),
+      checked: version.id === snapshot.activeVersionId,
+      // With only Main, one line under it says what a version is for.
+      ...(snapshot.versions.length === 1 ? { description: "Try changes without touching Main." } : {}),
+      testId: "version-item",
+      data: { "data-version-id": version.id, "data-version-name": version.name },
+      onSelect: () => {
+        setMenu(false);
+        props.versions.requestSwitch(version.id);
+      },
+    })),
+    newName === null
+      ? {
+          id: "new",
+          // No ellipsis: it opens a field in place, not a dialog.
+          label: "New version",
+          icon: <Plus size={14} aria-hidden />,
+          testId: "version-new",
+          onSelect: () => {
+            setNameError(null);
+            setNewName("");
+          },
+        }
+      : {
+          id: "new",
+          field: {
+            label: "New version name",
+            value: newName,
+            onChange: (value) => {
+              setNewName(value);
+              setNameError(null);
+            },
+            onSubmit: () => {
+              setNameError(null);
+              props.versions.create(newName, field);
+            },
+            onCancel: () => {
+              setNewName(null);
+              setNameError(null);
+            },
+            maxLength: 80,
+            busy: busy === "create",
+            error: nameError,
+            errorTestId: "version-menu-error",
+            hint: busy === "create" ? "Creating…" : <NewVersionHint versions={props.versions} first={snapshot.versions.length === 1} />,
+            testId: "version-new-input",
+          },
+        },
+  ];
+  const actions: MenuEntry[] = [];
+  if (!onMain && active) {
+    actions.push(
+      {
+        id: "compare",
+        label: "Compare with Main",
+        icon: <Diff size={14} aria-hidden />,
+        testId: "version-compare",
+        onSelect: () => {
+          setMenu(false);
+          props.onOpenCompare(active.id);
+        },
+      },
+      {
+        id: "merge",
+        label: "Merge into Main…",
+        icon: <Merge size={14} aria-hidden />,
+        testId: "version-merge",
+        disabled: !active.canMergeIntoMain,
+        description: active.canMergeIntoMain ? undefined : "Only versions made from Main can merge into Main.",
+        onSelect: () => {
+          setMenu(false);
+          props.versions.openMerge(active);
+        },
+      },
+    );
+  }
+  if (props.onShareVersion) {
+    const share = props.onShareVersion;
+    actions.push({
+      id: "share",
+      label: "Share this version…",
+      icon: <Share2 size={14} aria-hidden />,
+      testId: "version-share",
+      onSelect: () => {
+        setMenu(false);
+        share({ id: active?.id ?? "main", name: activeName });
+      },
+    });
+  }
+  if (actions.length > 0) items.push(MENU_SEPARATOR, ...actions);
+  if (props.onOpenAllVersions) {
+    const openAll = props.onOpenAllVersions;
+    items.push(MENU_SEPARATOR, {
+      id: "all",
+      label: "All versions",
+      icon: <Layers size={14} aria-hidden />,
+      testId: "version-all",
+      onSelect: () => {
+        setMenu(false);
+        openAll();
+      },
+    });
+  }
+
+  return (
+    <div className="relative flex min-w-0 items-center">
+      {/* Every row but New version answers by closing the menu itself. */}
+      <Menu
+        label="Versions"
+        menuTestId="version-menu"
+        open={menuOpen}
+        onOpenChange={setMenu}
+        width={256}
+        closeOnPick={false}
+        items={items}
+        trigger={(trigger) => (
+          <button
+            {...trigger}
+            type="button"
+            data-testid="version-menu-button"
+            aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
+            title={`You're working in the ${activeName} version`}
+            disabled={busy !== null || props.disabled}
+            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
+          >
+            <Layers size={12} aria-hidden className="shrink-0" />
+            {active !== null && !onMain ? (
+              <span data-testid="version-menu-dot" aria-hidden className={`size-1.5 shrink-0 rounded-full ${versionDotClass(active.id)}`} />
+            ) : null}
+            <span data-testid="version-menu-active" className="min-w-0 truncate">
+              {busy === "switch" ? "Switching…" : activeName}
+            </span>
+            <ChevronsUpDown size={12} aria-hidden className="shrink-0 text-subtle" />
+          </button>
+        )}
+      />
     </div>
   );
 }
+
+// A no-break space keeps each number on the same line as its unit.
+const megabytes = (bytes: number) => `${bytes / (1024 * 1024)}\u00a0MB`;
+// What a version leaves alone. The sizes are the engine's capture caps:
+// larger files stay as they are on disk.
+export const SAME_IN_EVERY_VERSION =
+  `Chats, text files over ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)}, other files over ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} and files History doesn't track stay the same in every version.`;
+
+// Where a new version starts: it forks from the version you're in. Before the
+// first version, a second line says what every version leaves alone.
+export function NewVersionHint(props: { versions: Pick<WorkspaceVersions, "active" | "onMain">; first?: boolean }) {
+  if (!props.versions.onMain) {
+    return <>Starts from <span className="font-medium">{props.versions.active?.name ?? "Main"}</span>, so it can't merge into Main.</>;
+  }
+  if (!props.first) return <>Starts from Main</>;
+  // A screen reader reads the hint as one run, so a hidden full stop ends the
+  // first line's sentence.
+  return (
+    <>
+      Starts from Main<span className="sr-only">.</span>{" "}
+      <span data-testid="version-new-same" className="block text-muted">{SAME_IN_EVERY_VERSION}</span>
+    </>
+  );
+}
+
 
 type MergeStage =
   // A failure stays in the dialog, above the button that merges again.
@@ -1811,18 +1940,19 @@ export function VersionComparePage(props: {
       data-testid="version-compare-page"
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg"
     >
-      {/* The tab says Compare with Main, so the header names the version
-          and counts the files that differ; the empty state says when none do. */}
+      {/* The tab says Compare with Main, so the header names the version and
+          what the list is, the words the Versions page counts, and counts the
+          files that differ. The empty state says when none do. */}
       <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-2">
         <Layers size={14} aria-hidden className="shrink-0 text-subtle" />
-        <h2 className="m-0 min-w-0 truncate text-[14px] font-semibold text-ink">
+        <h2 className="m-0 flex min-w-0 items-baseline gap-2 text-[14px] font-semibold text-ink">
           {state.status === "ready" ? (
             <>
-              {state.versionName}{" "}
-              <span className="sr-only">compared with Main</span>
+              <span className="min-w-0 truncate">{state.versionName}</span>{" "}
+              <span data-testid="version-compare-subject" className="shrink-0 text-[12px] font-normal text-muted">Differences with Main</span>
             </>
           ) : (
-            "Comparing with Main"
+            <span className="min-w-0 truncate">Comparing with Main</span>
           )}
         </h2>
         {state.status === "ready" && state.files.length > 0 ? (

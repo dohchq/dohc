@@ -8,6 +8,7 @@ import {
   CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  VERSIONS_TAB_PATH,
   chatTabPath,
   collectionTabPath,
   momentDiffTabPath,
@@ -56,6 +57,9 @@ vi.mock("./workbench/WorkspaceVersions", async (importOriginal) => ({
   ...await importOriginal<typeof import("./workbench/WorkspaceVersions")>(),
   VersionComparePage: (props: { versionId: string }) => <div data-testid="version-compare-page" data-version={props.versionId} />,
 }));
+vi.mock("./workbench/VersionsPage", () => ({
+  VersionsPage: () => <div data-testid="versions-page" />,
+}));
 vi.mock("./workbench/EngineMomentDiffPage", () => ({
   EngineMomentDiffPage: (props: { tabPath: string }) => <div data-testid="engine-moment-diff-page" data-path={props.tabPath} />,
 }));
@@ -76,6 +80,7 @@ const cases = [
   { name: "file", path: "notes.txt", surface: "file-inspector", attributes: { "data-path": "notes.txt" } },
   { name: "graph", path: GRAPH_TAB_PATH, surface: "graph-view" },
   { name: "history", path: HISTORY_TAB_PATH, surface: "history-page" },
+  { name: "versions", path: VERSIONS_TAB_PATH, surface: "versions-page" },
   ...[
     CHATS_TAB_PATH,
     chatTabPath({ kind: "new" }),

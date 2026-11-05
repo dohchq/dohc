@@ -127,6 +127,8 @@ const INTERNAL_TAB_SCHEME = "tab://";
 const V2_TAB_SCHEME = "dohc://";
 export const GRAPH_TAB_PATH = "tab://graph";
 export const HISTORY_TAB_PATH = "tab://history";
+// Every version in the workspace, one tab per workspace.
+export const VERSIONS_TAB_PATH = "tab://versions";
 // Home and each conversation have their own workspace-scoped tab identity.
 export const CHATS_TAB_PATH = "tab://chats";
 const APP_TAB_PREFIX = "tab://app/";
@@ -189,6 +191,7 @@ export type ParsedTab = { path: string } & (
   | { kind: "removed" }
   | { kind: "graph" }
   | { kind: "history" }
+  | { kind: "versions" }
   | { kind: "chat"; target: ChatTabTarget }
   | { kind: "site"; siteRoot: string | null }
   | { kind: "momentDiff"; momentId: string | null }
@@ -214,6 +217,7 @@ export function parseTab(path: string | null): ParsedTab | null {
   }
   if (path === GRAPH_TAB_PATH) return { kind: "graph", path };
   if (path === HISTORY_TAB_PATH) return { kind: "history", path };
+  if (path === VERSIONS_TAB_PATH) return { kind: "versions", path };
   if (path === CHATS_TAB_PATH) return { kind: "chat", path, target: { kind: "home" } };
   if (path === CHATS_TAB_PATH + "/new") return { kind: "chat", path, target: { kind: "new" } };
   if (path.startsWith(CHATS_TAB_PATH + "/")) {
@@ -252,6 +256,7 @@ export function tabPath(tab: ParsedTab): string {
     case "transactionalCollection": return transactionalCollectionTabPath(tab.datasetPath, tab.tableId);
     case "graph": return GRAPH_TAB_PATH;
     case "history": return HISTORY_TAB_PATH;
+    case "versions": return VERSIONS_TAB_PATH;
     case "file": case "removed": case "newPage": return tab.path;
   }
 }
@@ -308,6 +313,15 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     tooltip: () => "Workspace history",
     explorerTitle: () => "History",
     glyph: () => "history",
+  },
+  versions: {
+    virtual: true,
+    singleton: false,
+    title: () => "Versions",
+    tooltip: () => "Every version in this workspace",
+    explorerTitle: () => "Versions",
+    // The Layers glyph, as the versions menu draws it.
+    glyph: () => "compare",
   },
   chat: {
     virtual: true,
@@ -640,6 +654,22 @@ export function focusEditorGroup(
     return state;
   }
   return { ...state, activeEditorGroup: groupId };
+}
+
+// Open a tab whose second copy shows nothing new, such as Versions. A copy open
+// in any group takes focus, and only a missing one opens in the requested
+// group. A split still makes a copy, because the person asked for one.
+export function openTabOnce(
+  state: WorkbenchState,
+  path: string,
+  targetGroupId: string = state.activeEditorGroup,
+): WorkbenchState {
+  const holds = (group: EditorGroup) => group.tabs.some((tab) => tab.path === path);
+  if (state.editorGroups.some((group) => group.id === targetGroupId && holds(group))) {
+    return openTab(state, path, targetGroupId);
+  }
+  const open = state.editorGroups.find(holds);
+  return open ? activateTab(state, open.id, path) : openTab(state, path, targetGroupId);
 }
 
 // Open or reactivate a tab in the requested group, or in the focused group.

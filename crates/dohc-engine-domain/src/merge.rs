@@ -507,18 +507,7 @@ impl VersionedTextStore<'_> {
         self.store.read_with(|conn| {
             validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)?;
             let mut stmt = conn
-                .prepare_cached(
-                    "SELECT t.path, t.content_kind, t.blob_sha256, t.binary_sha256, \
-                            s.path, s.content_kind, s.blob_sha256, s.binary_sha256 \
-                     FROM (SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
-                           WHERE workspace_id = ?1 AND version_id = ?2) AS t \
-                     FULL OUTER JOIN \
-                          (SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
-                           WHERE workspace_id = ?1 AND version_id = ?3) AS s \
-                       ON t.path = s.path \
-                     WHERE COALESCE(t.path, s.path) > ?4 \
-                     ORDER BY COALESCE(t.path, s.path) LIMIT ?5",
-                )
+                .prepare_cached(COMPARE_VERSION_FILES_PAGE_SQL)
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
@@ -602,6 +591,30 @@ impl VersionedTextStore<'_> {
         })
     }
 }
+
+/// One page of a version comparison: each target row with the source row at
+/// its path, then the source rows with no target row, in path order. No index
+/// covers `snapshots.path`, so each side is materialized first and SQLite
+/// builds an automatic index on path for the join and the `NOT IN`. A
+/// `FULL OUTER JOIN` of the two sides compared every pair of rows on each
+/// page, about a second a page at 5,000 files.
+const COMPARE_VERSION_FILES_PAGE_SQL: &str = "WITH t AS MATERIALIZED ( \
+        SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
+        WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?4), \
+     s AS MATERIALIZED ( \
+        SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
+        WHERE workspace_id = ?1 AND version_id = ?3 AND path > ?4) \
+     SELECT t_path, t_kind, t_blob, t_bin, s_path, s_kind, s_blob, s_bin FROM ( \
+        SELECT t.path AS k, t.path AS t_path, t.content_kind AS t_kind, \
+               t.blob_sha256 AS t_blob, t.binary_sha256 AS t_bin, \
+               s.path AS s_path, s.content_kind AS s_kind, \
+               s.blob_sha256 AS s_blob, s.binary_sha256 AS s_bin \
+        FROM t LEFT JOIN s ON s.path = t.path \
+        UNION ALL \
+        SELECT s.path, NULL, NULL, NULL, NULL, \
+               s.path, s.content_kind, s.blob_sha256, s.binary_sha256 \
+        FROM s WHERE s.path NOT IN (SELECT path FROM t)) \
+     ORDER BY k LIMIT ?5";
 
 fn validate_compare_versions(
     conn: &Connection,
@@ -1257,5 +1270,135 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "line cap must return before allocating the O(n*m) LCS table"
         );
+    }
+
+    /// Two versions of 5,000 files: `feat` changes 3, deletes 1 and adds 1.
+    const LARGE_VERSIONS_SQL: &str = "
+        INSERT INTO blobs (sha256, byte_length, text) VALUES ('same', 4, 'same'), ('changed', 7, 'changed');
+        WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 4999)
+        INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+            SELECT 'ws', 'object-' || i, 1 FROM n;
+        INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws', 'object-added', 1);
+        INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms, fork_version_id)
+            VALUES ('ws', 'feat', 'named', 'feat', 2, 'main');
+        WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 4999)
+        INSERT INTO snapshots (workspace_id, version_id, object_id, path, blob_sha256,
+                               updated_at_ms, latest_moment_id, metadata_origin)
+            SELECT 'ws', v.id, 'object-' || n.i, printf('docs/d%02d/f%03d.md', n.i / 100, n.i % 100),
+                   iif(v.id = 'feat' AND n.i IN (1000, 2500, 4999), 'changed', 'same'), 1, 'moment', 'user'
+            FROM n CROSS JOIN (SELECT 'main' AS id UNION ALL SELECT 'feat') AS v
+            WHERE NOT (v.id = 'feat' AND n.i = 7);
+        INSERT INTO snapshots (workspace_id, version_id, object_id, path, blob_sha256,
+                               updated_at_ms, latest_moment_id, metadata_origin)
+            VALUES ('ws', 'feat', 'object-added', 'docs/added.md', 'same', 1, 'moment', 'user');";
+
+    fn compare_walk(
+        vt: &VersionedTextStore<'_>,
+        limit: usize,
+    ) -> (Vec<(String, VersionFileChangeStatus)>, usize) {
+        let mut changes = Vec::new();
+        let mut pages = 0;
+        let mut after: Option<String> = None;
+        loop {
+            let page = vt
+                .compare_version_files_page("ws", "feat", "main", after.as_deref(), limit)
+                .expect("compare page");
+            pages += 1;
+            changes.extend(
+                page.entries
+                    .into_iter()
+                    .map(|entry| (entry.path, entry.status)),
+            );
+            match page.next_after_path {
+                Some(next) => after = Some(next),
+                None => return (changes, pages),
+            }
+        }
+    }
+
+    /// The full outer join this query replaced compared every pair of files on
+    /// each page: about 18 s for these two versions on a desktop. With and
+    /// without statistics, the whole walk now stays within a budget, pages of
+    /// 200 find the same changes as one page, and the join uses an automatic
+    /// index on path.
+    #[test]
+    fn comparing_two_large_versions_stays_fast_and_exact() {
+        use dohc_engine_storage::{EngineStore, NoFaults};
+        use dohc_engine_testkit::{ScratchDir, engine_db_path};
+        const BUDGET: Duration = Duration::from_secs(3);
+
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store =
+            EngineStore::open(&engine_db_path(&scratch).expect("database path"), 1).expect("store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("main");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(LARGE_VERSIONS_SQL)
+                    .map_err(DomainError::sql_persist)
+            })
+            .expect("large versions");
+        let expected = [
+            ("docs/added.md", VersionFileChangeStatus::Added),
+            ("docs/d00/f007.md", VersionFileChangeStatus::Deleted),
+            ("docs/d10/f000.md", VersionFileChangeStatus::Modified),
+            ("docs/d25/f000.md", VersionFileChangeStatus::Modified),
+            ("docs/d49/f099.md", VersionFileChangeStatus::Modified),
+        ]
+        .map(|(path, status)| (path.to_owned(), status))
+        .to_vec();
+
+        for statistics in ["", "ANALYZE"] {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch(statistics)
+                        .map_err(DomainError::sql_persist)
+                })
+                .expect("statistics");
+            let vt = VersionedTextStore::new(&mut store);
+            let started = Instant::now();
+            let (paged, pages) = compare_walk(&vt, 200);
+            let elapsed = started.elapsed();
+            eprintln!("comparing two 5,000-file versions ({statistics:?}): {elapsed:?}");
+            assert_eq!(paged, expected, "{statistics}");
+            assert_eq!(pages, 26, "5,001 paths in pages of 200 ({statistics})");
+            assert!(
+                elapsed <= BUDGET,
+                "comparing two 5,000-file versions took {elapsed:?}; budget {BUDGET:?} ({statistics})"
+            );
+            assert_eq!(
+                compare_walk(&vt, 10_000),
+                (expected.clone(), 1),
+                "{statistics}"
+            );
+
+            let plan = store
+                .read_with(|conn| {
+                    conn.prepare(&format!(
+                        "EXPLAIN QUERY PLAN {COMPARE_VERSION_FILES_PAGE_SQL}"
+                    ))?
+                    .query_map(params!["ws", "main", "feat", "", 200], |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .expect("query plan");
+            assert!(
+                plan.iter().any(
+                    |step| step == "SEARCH s USING AUTOMATIC COVERING INDEX (path=?) LEFT-JOIN"
+                ),
+                "{statistics}: {plan:?}"
+            );
+            // Each side may be read by a scan or by the key, as statistics
+            // suggest. The join must never scan one side for each row of the
+            // other, as the full outer join did.
+            assert!(
+                !plan
+                    .iter()
+                    .any(|step| step.contains("RIGHT-JOIN") || step == "SCAN s LEFT-JOIN"),
+                "{statistics}: {plan:?}"
+            );
+        }
     }
 }

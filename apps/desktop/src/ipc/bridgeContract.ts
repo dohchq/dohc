@@ -1871,11 +1871,28 @@ export const ListHistoryPage = z.object({
 }).strict();
 export const ListHistoryResult = z.union([ListHistoryPage, ListEngineMomentsUpdatingResult, HistoryPolicyUnreadableResult]);
 export type ListHistoryResult = z.infer<typeof ListHistoryResult>;
+// Each version's latest change of its own, for the Versions page. A version
+// with none since it was made has a null change. `personName` names one
+// person who made the change, never an agent, an automation or a link.
+export const ListVersionLastChangesPayload = z.object({ workspaceId: WORKSPACE_ID }).strict();
+export const ListVersionLastChangesResult = z.object({
+  versions: z.array(z.object({
+    versionId: OPAQUE_ID,
+    lastChange: z.object({ atMs: z.number(), personName: z.string().min(1).max(500).optional() }).nullable(),
+  })),
+});
+export type ListVersionLastChangesResult = z.infer<typeof ListVersionLastChangesResult>;
+
 export const historyOperations = {
   listHistory: {
     capabilityId: "history.list", channel: "desktop:list-history", guard: "active-workspace", scope: "workspace",
     inactiveMessage: "History stopped loading because this window changed workspaces.",
     payload: ListHistoryPayload, result: ListHistoryResult,
+  },
+  listVersionLastChanges: {
+    capabilityId: "history.list", channel: "desktop:list-version-last-changes", guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "History stopped loading because this window changed workspaces.",
+    payload: ListVersionLastChangesPayload, result: ListVersionLastChangesResult,
   },
 } as const satisfies OperationTable;
 
@@ -2894,6 +2911,8 @@ export const WorkspaceVersionRecord = z.object({
   // False for versions created from another named version — the alpha merge
   // surface only combines a version with the Main it was created from.
   canMergeIntoMain: z.boolean(),
+  // The version this one was made from. Main has none.
+  madeFromVersionId: OPAQUE_ID.optional(),
 });
 export type WorkspaceVersionRecord = z.infer<typeof WorkspaceVersionRecord>;
 
@@ -2965,6 +2984,16 @@ export const CompareWorkspaceVersionsResult = z.object({
 export type CompareWorkspaceVersionsResult = z.infer<
   typeof CompareWorkspaceVersionsResult
 >;
+
+// How many files differ between a version and Main, protected files
+// included: the number the compare page would list, without the rows.
+export const CountWorkspaceVersionChangesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  versionId: OPAQUE_ID,
+});
+export const CountWorkspaceVersionChangesResult = z.object({
+  count: z.number().int().nonnegative(),
+});
 
 export const WorkspaceVersionConflict = z.object({
   conflictId: OPAQUE_ID,
@@ -3157,6 +3186,11 @@ export const workspaceVersionOperations = {
     capabilityId: "version.compare",
     channel: "desktop:compare-workspace-versions",
     payload: CompareWorkspaceVersionsPayload, result: CompareWorkspaceVersionsResult, ...versionGuard,
+  },
+  countWorkspaceVersionChanges: {
+    capabilityId: "version.compare",
+    channel: "desktop:count-workspace-version-changes",
+    payload: CountWorkspaceVersionChangesPayload, result: CountWorkspaceVersionChangesResult, ...versionGuard,
   },
   mergeWorkspaceVersion: {
     capabilityId: "version.merge",

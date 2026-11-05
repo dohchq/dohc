@@ -420,3 +420,55 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+// Known M4 (#3211). A merge leaves the merge base where the version started,
+// so a second merge of lines the version changed again asks which copy to
+// keep, though both copies are the person's own. The test expects the clean
+// result, and is marked as failing only once the second merge answers, so a
+// failure before that still fails the run. When the fix lands it passes, and
+// Playwright reports that until the mark goes.
+test("a version merges cleanly a second time after it changes the same lines again", async () => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "first\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await expectActiveVersion(page, "Main");
+    await expect
+      .poll(() => engineSnapshotText(temp.rootPath, "main", "plan.md"), { timeout: 30_000 })
+      .toBe("first\n");
+    await createVersionViaMenu(page, "Draft");
+    const draftId = engineVersionIdByName(temp.rootPath, "Draft");
+    if (draftId === null) throw new Error("the engine has no version named Draft");
+
+    const editAndMerge = async (contents: string) => {
+      await writeWorkspaceFiles(temp, [{ path: "plan.md", contents }]);
+      await expect
+        .poll(() => engineSnapshotText(temp.rootPath, draftId, "plan.md"), { timeout: 30_000 })
+        .toBe(contents);
+      await openVersionMenu(page);
+      await page.getByTestId("version-merge").click();
+      await page.getByTestId("version-merge-confirm").click();
+      // The merge has answered, with a result or with files to decide.
+      await expect(page.getByTestId("version-merge-status")).toBeVisible({ timeout: 30_000 });
+    };
+
+    await editAndMerge("second\n");
+    await expect(page.getByTestId("version-merge-status")).toHaveText(/^Merged 1 file into Main$/);
+    await page.getByTestId("version-merge-done").click();
+    expect(engineSnapshotText(temp.rootPath, "main", "plan.md")).toBe("second\n");
+
+    await editAndMerge("third\n");
+    test.fail(true, "Known M4 (#3211): the second merge asks which copy to keep");
+    await expect(page.getByTestId("version-conflict")).toHaveCount(0, { timeout: 5_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText(/^Merged 1 file into Main$/, { timeout: 5_000 });
+    await page.getByTestId("version-merge-done").click();
+    expect(engineSnapshotText(temp.rootPath, "main", "plan.md")).toBe("third\n");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
