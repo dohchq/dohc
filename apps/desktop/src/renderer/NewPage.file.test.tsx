@@ -106,6 +106,7 @@ it("keeps a renamed title through blur while its save is still on the way", asyn
   await user.keyboard("Lisbon{Enter}Day one");
   fileExists();
   await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
+  await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled(), { timeout: 3_000 });
 
   const title = screen.getByLabelText("Page title") as HTMLTextAreaElement;
   await user.click(title);
