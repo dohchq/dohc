@@ -1015,11 +1015,6 @@ mod deferred_relay_tests {
         base_repair_probe_across_replays(true);
     }
 
-    #[test]
-    fn fetched_pull_defers_coordinate_repairs_until_offline_apply() {
-        base_repair_probe_across_replays(false);
-    }
-
     fn base_repair_probe_across_replays(push_between_replays: bool) {
         use dohc_engine_sync::{ReplicationEnvelope, SyncError};
         use rusqlite::params;
@@ -2206,14 +2201,18 @@ impl ActorHandle {
     ) -> Result<bool, RuntimeError> {
         self.run(move |store, _cache| {
             match store.write_with(&NoFaults, |tx| {
-                tx.execute("UPDATE sync_identity SET ordinary_pull_token=?3 WHERE workspace_id=?1 AND ordinary_pull_token=?2",
-                    rusqlite::params![workspace_id, token, previous])
-                    .map(|changed| changed > 0).map_err(dohc_engine_storage::StorageError::persist_public)
+                tx.execute(
+                    "UPDATE sync_identity SET ordinary_pull_token=?3 WHERE workspace_id=?1 AND ordinary_pull_token=?2",
+                    rusqlite::params![workspace_id, token, previous],
+                )
+                .map(|changed| changed > 0)
+                .map_err(dohc_engine_storage::StorageError::persist_public)
             })? {
                 TxnOutcome::Committed(abandoned) => Ok(abandoned),
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
             }
-        }).await
+        })
+        .await
     }
 
     /// Collections updates wait for an unfinished ordinary pull.

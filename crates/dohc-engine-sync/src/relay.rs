@@ -1565,11 +1565,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         deferred.sort_by_key(|repair| !touched.contains(&repair.object_id));
         let mut chunks = Vec::new();
         let mut chunk = BaseRelayRepairChunk::default();
+        let mut append_deferred =
+            |chunk: &mut BaseRelayRepairChunk, chunks: &mut Vec<BaseRelayRepairChunk>| {
+                for repair in deferred.drain(..) {
+                    if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                        chunks.push(std::mem::take(chunk));
+                    }
+                    chunk.deferred.push(repair);
+                }
+            };
         // Finish page dependencies before unrelated repair work.
-        let (priority, other): (Vec<_>, Vec<_>) = groups
-            .into_iter()
-            .partition(|group| touched.contains(&group[0].key.object_id));
-        for group in priority {
+        for group in groups {
+            if !touched.contains(&group[0].key.object_id) {
+                append_deferred(&mut chunk, &mut chunks);
+            }
             if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
                 chunks.push(std::mem::take(&mut chunk));
             }
@@ -1578,21 +1587,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 chunks.push(std::mem::take(&mut chunk));
             }
         }
-        for repair in deferred {
-            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
-                chunks.push(std::mem::take(&mut chunk));
-            }
-            chunk.deferred.push(repair);
-        }
-        for group in other {
-            if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
-                chunks.push(std::mem::take(&mut chunk));
-            }
-            chunk.repairs.extend(group);
-            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
-                chunks.push(std::mem::take(&mut chunk));
-            }
-        }
+        append_deferred(&mut chunk, &mut chunks);
         if chunk.len() > 0 {
             chunks.push(chunk);
         }

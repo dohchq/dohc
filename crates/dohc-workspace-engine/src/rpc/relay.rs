@@ -835,11 +835,11 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "morePending": outcome.more_pending,
         }),
         RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
-        RelayOperationOutcome::PullRetry => json!({ "status": "retry" }),
         // Only `sync.pullHosted` answers a pass, and `sync.commitCursor` a
         // hosted commit, each fit to its budget.
         RelayOperationOutcome::HostedPass { .. }
         | RelayOperationOutcome::PullFetched(_)
+        | RelayOperationOutcome::PullRetry
         | RelayOperationOutcome::HostedCursorCommitted { .. } => {
             return Err(WireError::new(
                 ErrorCode::Internal,
@@ -1128,17 +1128,13 @@ impl EngineService {
         open: &OpenWorkspace,
         page: &dohc_engine_sync::PreparedOrdinaryPull,
     ) -> Result<(), WireError> {
-        let held = open
-            .actor
-            .ordinary_pull_unfinished(open.workspace_id.clone())
-            .await
-            .unwrap_or(true);
-        let answer = self
-            .wake_after_abandoned_pull(&RequestContext::unbounded(), open, async {
-                Self::release_fetched_pull(open, page).await
-            })
-            .await;
-        if !held {
+        let answer = Self::release_fetched_pull(open, page).await;
+        if matches!(
+            open.actor
+                .ordinary_pull_unfinished(open.workspace_id.clone())
+                .await,
+            Ok(false)
+        ) {
             self.collections_changed(&RequestContext::unbounded(), open)
                 .await;
         }
@@ -1384,15 +1380,32 @@ impl EngineService {
                 "pull page token is stale or foreign",
             ));
         }
-        let page = pending.take().expect("validated pull page").page;
+        let fetched = pending.take().expect("validated pull page");
         drop(pending);
-        let held_page = Arc::clone(&page);
+        let held_page = Arc::clone(&fetched.page);
         let mut apply_started = false;
-        let answer = async {
+        let answer = self
+            .apply_fetched_pull(ctx, &open, configuration, fetched, &mut apply_started)
+            .await;
+        if answer.is_err() && !apply_started {
+            self.abandon_fetched_pull(&open, &held_page).await?;
+        }
+        answer
+    }
+
+    async fn apply_fetched_pull(
+        &self,
+        ctx: &RequestContext,
+        open: &Arc<OpenWorkspace>,
+        configuration: RelayConfiguration,
+        fetched: PendingPull,
+        apply_started: &mut bool,
+    ) -> Result<Value, WireError> {
+        let PendingPull { handle, page, .. } = fetched;
         // A Collections update already admitted under the gate runs before
         // this pull places a page, and none is admitted until the pull is
         // between pages or done. Fetching does not enter this gate.
-        let pulling = if self.reconciles_collections_itself(&open) {
+        let pulling = if self.reconciles_collections_itself(open) {
             let cancellation = OperationCancellation::new(ctx);
             let _apply = tokio::select! {
                 biased;
@@ -1406,23 +1419,17 @@ impl EngineService {
         };
         let operation = RelayOperation::ApplyPull {
             workspace_id: open.workspace_id.clone(),
-            page,
+            page: Arc::clone(&page),
             now_ms: now_ms()?,
         };
-        apply_started = true;
+        *apply_started = true;
         let outcome = self
-            .relay_execute(
-                ctx,
-                &open,
-                configuration,
-                operation,
-                "sync.applyPull",
-            )
+            .relay_execute(ctx, open, configuration, operation, "sync.applyPull")
             .await?;
         if matches!(&outcome, RelayOperationOutcome::PullRetry) {
             drop(pulling);
             open.pull_repair_retries.fetch_add(1, Ordering::SeqCst);
-            self.abandon_fetched_pull(&open, &held_page).await?;
+            self.abandon_fetched_pull(open, &page).await?;
             eprintln!("engine: sync pull retry: waiting for repairs");
             return Ok(json!({"status": "retry"}));
         }
@@ -1468,7 +1475,7 @@ impl EngineService {
                 })
             )
         {
-            self.notify_editors_behind(ctx, &open).await;
+            self.notify_editors_behind(ctx, open).await;
         }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
@@ -1490,7 +1497,7 @@ impl EngineService {
         };
         let mut result = relay_outcome_json(outcome)?;
         if let Some(cursor) = pending {
-            let issued = self.issue_pending_cursor(bound_handle, &open, cursor)?;
+            let issued = self.issue_pending_cursor(&handle, open, cursor)?;
             let token = issued["token"]
                 .as_str()
                 .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
@@ -1505,14 +1512,9 @@ impl EngineService {
             result["pendingCursor"] = issued;
         } else if reconcile_at_commit {
             // Nothing to materialize or commit: the page's changes are in place.
-            self.collections_changed(ctx, &open).await;
+            self.collections_changed(ctx, open).await;
         }
         Ok(result)
-        }.await;
-        if answer.is_err() && !apply_started {
-            self.abandon_fetched_pull(&open, &held_page).await?;
-        }
-        answer
     }
 
     /// A pull parks every Y.Doc update for a document an editor holds open,
@@ -4422,9 +4424,7 @@ mod tests {
         state
     }
 
-    async fn held_second_page(
-        workspace_id: &'static str,
-    ) -> (PagedRelay, CursorFixture, String) {
+    async fn held_second_page(workspace_id: &'static str) -> (PagedRelay, CursorFixture, String) {
         let (relay, f) = half_pull_fixture(workspace_id, true).await;
         relay.release();
         let first = pull(&f).await.expect("page one");
@@ -4464,9 +4464,11 @@ mod tests {
     async fn refusing_page_two_restores_the_token_for_the_next_fetch() {
         let (_relay, f, earlier) = held_second_page("refuse-held-page-two").await;
         let conn = f.engine_db();
-        let claim = dohc_engine_storage::hex_sha256(
+        let claim = dohc_engine_storage::put_binary_blob(
+            &conn,
             &dohc_engine_collab::Ydoc::wire().encode_full_state(),
-        );
+        )
+        .unwrap();
         let payload = json!({
             "versionId": "main", "objectId": "moved", "path": "tasks/moved.md",
             "contentKind": "plaintext", "lineageClaimId": claim,
