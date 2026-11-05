@@ -68,6 +68,7 @@ describe("history diff page", () => {
       tabPath: momentDiffTabPath(moment.id),
       onBeforeRestore: async () => () => {},
       onOpenFile: () => {},
+      onOpenRulesFile: () => {},
       onPathResolved: noop,
       registerActiveUndo,
       onRestored: () => {},
@@ -98,6 +99,7 @@ describe("history diff page", () => {
         tabPath={momentDiffTabPath("m-1")}
         onBeforeRestore={async () => () => { order.push("release"); }}
         onOpenFile={noop}
+        onOpenRulesFile={noop}
         onPathResolved={noop}
         registerActiveUndo={noop}
         onRestored={() => { order.push("restored"); }}
@@ -194,6 +196,7 @@ describe("history diff page", () => {
         tabPath={momentDiffTabPath("m-1")}
         onBeforeRestore={async () => () => {}}
         onOpenFile={() => {}}
+        onOpenRulesFile={() => {}}
         onPathResolved={noop}
         registerActiveUndo={() => {}}
         onRestored={() => {}}

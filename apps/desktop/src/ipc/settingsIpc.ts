@@ -24,6 +24,7 @@ import {
   workspaceSettingsPath,
 } from "../workspaces/workspaceSettingsFile";
 import { readUiStateFile, writeUiStateFile } from "../workspaces/workspaceUiState";
+import { workspacePolicyFilePath } from "../workspaces/workspaceEnginePolicyFile";
 import { nextZoomLevel } from "../window/windowZoom";
 
 // Long enough for an editor to finish a save, which is often a write, a
@@ -251,6 +252,18 @@ export function createSettingsIpc<
         input.workspaceId,
         "Workspace settings stopped opening because this window changed workspaces.",
         (operation) => workspaceSettingsPath(operation.workspace.rootPath),
+      );
+      await openSettingsFile(path);
+    },
+
+    // History's rules files, in the person's editor for the same reason. The
+    // renderer names one of the two files; main finds it in this workspace.
+    openWorkspacePolicyFile: async (input, { event }) => {
+      const path = await withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "History's rules file stopped opening because this window changed workspaces.",
+        (operation) => workspacePolicyFilePath(operation.workspace.rootPath, input.file),
       );
       await openSettingsFile(path);
     },
