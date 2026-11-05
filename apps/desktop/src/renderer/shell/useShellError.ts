@@ -337,19 +337,18 @@ export function useShellError(workspaceId: string) {
       retry: (() => void) | null = null,
       kind?: ShellErrorKind,
       identity?: string,
-      // `quiet` changes the row of its identity where it stands, with no new
-      // toast. `details` take the place of the error's own lines.
-      options: { quiet?: boolean; details?: ReadonlyArray<ErrorDetailField> } = {},
+      // Changes the row of its identity where it stands, with no new toast.
+      quiet = false,
     ) => {
       const { cause, title, words, canRetry, details: explanation } = readError(error);
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
-      const details: ReadonlyArray<ErrorDetailField> = options.details ?? (partial ? [
+      const details: ReadonlyArray<ErrorDetailField> = partial ? [
         ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
         ["Stage", partial.failedStage],
         ["Record ID", partial.retry.recordId],
         ["Reason", partial.reason, partial.reason.length],
         ["Next", partial.retry.instruction, partial.retry.instruction.length],
-      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause ? [["Cause", cause] as const] : [])]);
+      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause ? [["Cause", cause] as const] : [])];
       // The request that ran a Collection's move reports its stop with the toast. One that only waited for it files a row.
       push({
         ...(title ? { title } : {}),
@@ -363,17 +362,17 @@ export function useShellError(workspaceId: string) {
           : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
         ...(kind ? { kind } : {}),
-      }, options.quiet || waitedForCollectionMove(error) ? "quiet" : false);
+      }, quiet || waitedForCollectionMove(error) ? "quiet" : false);
     },
     [push, privacySettingsAction, keepCollectionsHere],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed. A part that keeps one row
-  // for several failures, such as the Versions page, passes options too.
+  // for several failures, such as the Versions page, passes `quiet` to change
+  // that row where it stands.
   const reportButtonError = useCallback(
-    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string,
-      options?: { quiet?: boolean; details?: ReadonlyArray<ErrorDetailField> }) =>
-      reportShellError(fallback, error, retry, undefined, identity, options),
+    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean) =>
+      reportShellError(fallback, error, retry, undefined, identity, quiet),
     [reportShellError],
   );
   // A failure already worded for the person. Report facts, such as a raw
