@@ -5042,6 +5042,41 @@ it("signs in again from Notices, and sync resumes with no enable or pause", asyn
   }
 });
 
+// The dialog closed after a renewal failed. The notice's Try again still
+// signs in again at that server: the expired session is saved, and a plain
+// dialog would hand it to Settings and start nothing.
+it("signs in again at the same server from a failed renewal's notice after the dialog closes", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true };
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudLoginStart: vi.fn(async (_payload: { serverUrl: string }) => {
+      throw new Error("dohc couldn't reach this server.");
+    }),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({
+    connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test",
+    workspaceSynced: true, workspaceSyncConnected: true,
+  }));
+  const user = userEvent.setup();
+  renderShell(bridge);
+
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const row = await screen.findByTestId("notice-sign-in-expired");
+  await user.click(within(row).getByRole("button", { name: "Sign in again" }));
+  await screen.findByTestId("workspace-shell-error");
+  expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(1);
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+  await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+  await waitFor(() => expect(bridge.cloudLoginStart).toHaveBeenCalledTimes(2));
+  expect(bridge.cloudLoginStart).toHaveBeenLastCalledWith({ serverUrl: "https://cloud.dohc.test" });
+  expect(await screen.findByTestId("cloud-renew")).toBeTruthy();
+  expect(screen.queryByTestId("settings-dialog")).toBeNull();
+});
+
 // Settings shows the same expired row: no switch reading on while nothing
 // syncs, and Sign in again in Try again's place.
 it.each([
