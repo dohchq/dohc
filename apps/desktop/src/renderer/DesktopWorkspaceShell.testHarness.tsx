@@ -473,6 +473,7 @@ function makeBaseBridge(
     })),
     getUserSettingsFilePath: vi.fn(async () => "/state/dohc-settings.json"),
     openUserSettingsFile: vi.fn(async () => undefined),
+    openWorkspacePolicyFile: vi.fn(async () => undefined),
     getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
