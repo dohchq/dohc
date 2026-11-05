@@ -191,6 +191,20 @@ it('keeps revoked bootstrap cookies opaque when their local request budget is ex
   expect(unknown.status).toBe(404);expect(await unknown.json()).toEqual({ok:false,error:'not found'});
 });
 
+it('shows a reload of an ended session the stopped page, the same for every refusal',async()=>{
+  const reload=(f:ReturnType<typeof fixture>,origin:string,cookie='')=>f.handler.handle(new Request(origin+'/bootstrap',{headers:{host:new URL(origin).host,cookie,'sec-fetch-mode':'navigate'}}));
+  const revoked=fixture(),expired=fixture(),live=fixture(),a=await launch(revoked),b=await launch(expired),c=await launch(live);
+  revoked.revoke();expired.advance(600000);
+  const responses=[await reload(revoked,a.origin,a.cookie),await reload(expired,b.origin,b.cookie),await reload(live,c.origin,'__Host-dohc-app='+'Z'.repeat(43)),
+    await reload(live,c.origin),await reload(live,'https://'+'b'.repeat(48)+'.example.net',c.cookie)];
+  const page=await responses[0]!.text();
+  for(const response of responses.slice(1)){expect(Object.fromEntries(response.headers)).toEqual(Object.fromEntries(responses[0]!.headers));expect(await response.text()).toBe(page);}
+  expect(responses.map(response=>response.status)).toEqual([404,404,404,404,404]);
+  expect(responses[0]!.headers.get('content-type')).toBe('text/html; charset=utf-8');expect(responses[0]!.headers.get('content-security-policy')).not.toContain('script');
+  expect(page).toContain('<body data-state="stopped">');expect(page).toContain('<p id="status" role="status">This app session ended. Reopen the share link.</p>');
+  for(const named of ['<script',publicationId,...[a,b,c].map(app=>new URL(app.origin).hostname.split('.')[0]!)])expect(page).not.toContain(named);
+});
+
 it("drops a publication's launch and staged document when its owner is deleted", async () => {
   const f = fixture(), app = await launch(f);
   f.handler.deleteAccount("deleted-owner", [], [publicationId]);

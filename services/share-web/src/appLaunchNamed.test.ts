@@ -96,8 +96,12 @@ it("gives a signed-in person a missing Collection's words on Open app, in an ope
   const status = await app.call("/status");
   expect(status.status).toBe(410); expect(await status.json()).toEqual(linkRefusalBody("app_collection_missing"));
   expect(app.html).toContain("if(r.status===410){gone();return;}");
-  const reload = await f.handler.handle(new Request(`${app.origin}/bootstrap`, { headers: { host: new URL(app.origin).host, cookie: app.cookie } }));
-  expect(reload.status).toBe(410); expect(await reload.text()).toBe(LINK_REFUSALS.app_collection_missing.error);
+  const reload = (extra: Record<string, string> = {}) => f.handler.handle(new Request(`${app.origin}/bootstrap`, { headers: { host: new URL(app.origin).host, cookie: app.cookie, ...extra } }));
+  const page = await reload({ "sec-fetch-mode": "navigate" });
+  expect(page.status).toBe(410); expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  expect(await page.text()).toContain(`<p id="status" role="status">${LINK_REFUSALS.app_collection_missing.error}</p>`);
+  const fetched = await reload();
+  expect(fetched.status).toBe(410); expect(await fetched.json()).toEqual(linkRefusalBody("app_collection_missing"));
   const issued = await f.issue();
   expect(issued.status).toBe(410); expect(await issued.json()).toEqual(linkRefusalBody("app_collection_missing"));
 });
