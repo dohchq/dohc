@@ -190,7 +190,8 @@ describe("usage record in Privacy", () => {
     render(<UsageRecordSettings />);
     fireEvent.click(await screen.findByTestId("usage-record-clear"));
     const confirm = screen.getByTestId("usage-record-clear-confirm");
-    expect(confirm.getAttribute("role")).toBe("dialog");
+    // The panel that holds the card is the dialog, named by its title.
+    expect(screen.getByRole("dialog", { name: "Clear the usage record?" }).contains(confirm)).toBe(true);
     expect(confirm.textContent).toContain("Clear the usage record?");
     expect(confirm.textContent).toContain("dohc cannot restore them.");
     fireEvent.click(within(confirm).getByTestId("usage-record-clear-copy"));
