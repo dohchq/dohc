@@ -176,8 +176,12 @@ A person using a share link without a server account. Known by a link principal 
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
-The server-minted identity for one browser holding one share link. It carries provenance on everything the link holder does; it never carries authority beyond the grant.
+The server-minted identity for one browser or one agent connection holding one share link. It carries provenance on everything the link holder does; it never carries authority beyond the grant.
 _Avoid_: anonymous id, device id
+
+**Agent connection**:
+One agent signed in through MCP with a share link, after a person allowed it on the consent page. It acts with the link's access under its own link principal. The owner sees it in the link's Agents list and can disconnect it alone. Reset link and End link end every connection on the link.
+_Avoid_: agent session, OAuth client
 
 **Received share**:
 The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server.

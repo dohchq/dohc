@@ -1,3 +1,4 @@
+import type {AgentConnectionRoute} from "./agentConnectionRoutes";
 import type {AppBackendRoute} from "./appBackendRoutes";
 import type {DatasetRoute} from "./datasetRoutes";
 import type {DatasetReplicaRoute} from "./datasetReplicaRoutes";
@@ -26,6 +27,7 @@ import {MAX_ORIGIN_ID_CHARS} from "./wireLimits";
 import {MAX_SHARE_PROPOSAL_OPS} from "@dohc/security-contract/share-proposal-bound";
 
 type SyncRelayRoute =
+  | AgentConnectionRoute
   | AppBackendRoute
   | DatasetRoute
   | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" | "press" }
@@ -95,7 +97,17 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-redeem") {
     return { route: "link-redeem" };
   }
+  if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "agent-authorizations") {
+    if (parts.length === 3) return { route: "agent-authorizations", action: "begin" };
+    if (parts.length === 4 && (parts[3] === "consent" || parts[3] === "decision")) {
+      return { route: "agent-authorizations", action: parts[3] };
+    }
+    throw notFound();
+  }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {
+    if (parts[2] === "agent-clients") return { route: "agent-clients" };
+    if (parts[2] === "agent-token") return { route: "agent-token" };
+    if (parts[2] === "agent-introspect") return { route: "agent-introspect" };
     if (parts[2] === "share") return { route: "link-share" };
     if (parts[2] === "current") return { route: "link-current" };
     if (parts[2] === "log") return { route: "link-log" };
@@ -316,6 +328,18 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "keys") {
     return { route: "keys", workspaceId };
+  }
+  if (parts.length === 7 && parts[2] === "shares" && parts[4] === "links" && parts[6] === "agents") {
+    return { route: "share-link-agents", workspaceId, shareId: parseShareId(parts[3]), grantId: parseShareId(parts[5]) };
+  }
+  if (parts.length === 9 && parts[2] === "shares" && parts[4] === "links" && parts[6] === "agents" && parts[8] === "disconnect") {
+    return {
+      route: "share-link-agent-disconnect",
+      workspaceId,
+      shareId: parseShareId(parts[3]),
+      grantId: parseShareId(parts[5]),
+      connectionId: parseShareId(parts[7]),
+    };
   }
   if (parts.length === 7 && parts[2] === "shares" && parts[4] === "grants" && parts[6] === "copy") {
     return { route: "share-copy", workspaceId, shareId: parseShareId(parts[3]), grantId: parseShareId(parts[5]) };
