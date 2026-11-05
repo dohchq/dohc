@@ -291,8 +291,9 @@ describe("History timeline changes", () => {
   // loaded row may continue on the next page, so it counts what has loaded as
   // a lower bound, and only it does.
   it("counts the oldest loaded pass or run as a lower bound while earlier changes remain", () => {
-    const pass = (id: string) => file(id, { correlationId: "import", path: `notes/${id}.md` });
-    view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5), pass("p-2"), pass("p-1")], hasMore: true });
+    // Main sends changes newest first, so a pass listed after the run is older.
+    const pass = (id: string, minutes = 0) => file(id, { correlationId: "import", path: `notes/${id}.md`, recordedAtMs: DAY - minutes * 60_000 });
+    view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5), pass("p-2", 10), pass("p-1", 10)], hasMore: true });
     expect(screen.getByTestId("engine-moment-run-toggle").textContent).toBe("2 changes");
     const count = screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!;
     expect(count.querySelector("[aria-hidden]")?.textContent).toBe("2+ files");
