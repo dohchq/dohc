@@ -1217,11 +1217,11 @@ async function mountOnDisk(
 // the refresh loop. Before, the row said "unchanged".
 it("reports a mount refresh that can't read its collision record as that refusal", async () => {
   const h = harness();
-  await mountOnDisk(h, (record, mountRoot) => ({
+  const { record } = await mountOnDisk(h, (recordPath, mountRoot) => ({
     pull: async (_target, _relay, input) => {
       await mkdir(join(mountRoot, "docs"), { recursive: true });
       await writeFile(join(mountRoot, "docs", "a.md"), "my own file");
-      await writeFile(record, "not json");
+      await writeFile(recordPath, "not json");
       await input.recordCollisions?.(["docs/a.md"]);
       throw new Error("The pull went on past an unreadable collision record.");
     },
