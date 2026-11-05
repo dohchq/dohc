@@ -11,9 +11,14 @@ interface InputProps {
   field: TransactionalField;
   value: AppBackendJson;
   disabled: boolean;
+  /** The id of this field's error, while its value is wrong. */
+  describedBy?: string;
   onChange(value: AppBackendJson): void;
   onError: CollectionResourceError;
 }
+
+/** Marks a field whose value is wrong and points it at its error. */
+export const invalidField = (describedBy: string | undefined) => describedBy === undefined ? {} : { "aria-invalid": true, "aria-describedby": describedBy } as const;
 
 export function CollectionAttachmentInput(props: InputProps & { upload: NonNullable<CollectionResources["uploadFile"]>; onBusy(busy: boolean): void }) {
   const [file, setFile] = useState<AppBackendFile | null>(null), [pending, setPending] = useState(false), [invalid, setInvalid] = useState<string | null>(null);
@@ -33,7 +38,7 @@ export function CollectionAttachmentInput(props: InputProps & { upload: NonNulla
     } finally { if (alive.current) { locked.current = false; setPending(false); props.onBusy(false); } }
   }
   return <div className="flex flex-col gap-2">
-    <input type="file" aria-label={props.field.name} disabled={props.disabled || pending} className={inputClass} onChange={event => {
+    <input type="file" aria-label={props.field.name} {...invalidField(props.describedBy)} disabled={props.disabled || pending} className={inputClass} onChange={event => {
       const selected = event.target.files?.[0]; event.target.value = ""; if (!selected) return;
       if (selected.size < 1 || selected.size > APP_BACKEND_UPLOAD_BYTES) { setInvalid("Choose a nonempty file up to 5 MB."); return; }
       void upload({ ...props.scope, fieldId: props.field.fieldId, file: selected, idempotencyKey: crypto.randomUUID() });
@@ -75,7 +80,7 @@ export function CollectionRelationInput(props: InputProps & { resolve: NonNullab
   }
   useEffect(() => { void load(""); }, []);
   return <fieldset aria-label={props.field.name} disabled={props.disabled} className="m-0 flex flex-col gap-2 border-0 p-0">
-    <div className="flex gap-2"><input aria-label={`Search ${props.field.name}`} type="search" maxLength={200} value={search} className={inputClass} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !isComposingKey(event)) { event.preventDefault(); void load(search); } }} /><SecondaryButton onClick={() => void load(search)}>Find records</SecondaryButton></div>
+    <div className="flex gap-2"><input aria-label={`Search ${props.field.name}`} {...invalidField(props.describedBy)} type="search" maxLength={200} value={search} className={inputClass} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !isComposingKey(event)) { event.preventDefault(); void load(search); } }} /><SecondaryButton onClick={() => void load(search)}>Find records</SecondaryButton></div>
     {values.map(value => <div key={JSON.stringify(value)} className="flex items-center gap-2 text-[12px] text-ink"><span>{options.find(option => option.value === value)?.label ?? String(value)}</span><SecondaryButton aria-label={`Remove ${String(value)} from ${props.field.name}`} onClick={() => { setInvalid(null); props.onChange(props.field.relation?.many ? values.filter(entry => entry !== value) : null); }}>Remove</SecondaryButton></div>)}
     {pending ? <span role="status" className="text-[12px] text-muted">Finding records…</span> : <div className="flex max-h-40 flex-col gap-1 overflow-auto">{options.filter(option => !values.includes(option.value)).map(option => <SecondaryButton key={JSON.stringify(option.value)} onClick={() => {
       if (props.field.relation?.many && values.length >= 100) { setInvalid("Choose up to 100 related records."); return; }
