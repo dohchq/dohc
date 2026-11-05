@@ -1053,7 +1053,7 @@ describe("engine markdown source view", () => {
     expect(notice.textContent).toContain(
       "dohc could not open this document for editing.",
     );
-    expect(notice.textContent).toContain("It is read-only for now.");
+    expect(notice.textContent).toContain("You can still read it.");
     // The content still renders — read-only, not replaced.
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(

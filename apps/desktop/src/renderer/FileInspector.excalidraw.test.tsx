@@ -1117,7 +1117,7 @@ describe("FileInspector Excalidraw view", () => {
     expect(notice.textContent).toContain(
       "dohc could not open this document for editing.",
     );
-    expect(notice.textContent).toContain("It is read-only for now.");
+    expect(notice.textContent).toContain("You can still read it.");
     expect(screen.getByTestId("mock-excalidraw-canvas").dataset.readOnly).toBe(
       "true",
     );
