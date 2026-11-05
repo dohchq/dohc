@@ -48,12 +48,16 @@ afterEach(() => {
 
 function deferred<T>() {
   let resolve: (value: T) => void = () => {};
-  const promise = new Promise<T>((settle) => { resolve = settle; });
-  return { promise, resolve };
+  let reject: (error: unknown) => void = () => {};
+  const promise = new Promise<T>((settle, fail) => { resolve = settle; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function Page(props: {
   historyKey?: string;
+  versionKey?: number;
+  // Reads the versions again, as a change from another computer would.
+  refreshKey?: number;
   dirty?: boolean;
   onOpenCompare?: (versionId: string) => void;
   onReviewConflicts?: () => void;
@@ -63,6 +67,7 @@ function Page(props: {
   const versions = useWorkspaceVersions({
     workspaceId: "ws-1",
     enabled: true,
+    ...(props.refreshKey === undefined ? {} : { refreshKey: props.refreshKey }),
     activeTabDirty: props.dirty ?? false,
     beginLineageOperation: async () => () => {},
     onWorkspaceStateChanged: () => {},
@@ -77,7 +82,7 @@ function Page(props: {
         workspaceId="ws-1"
         versions={versions}
         historyKey={props.historyKey ?? "0"}
-        versionKey={0}
+        versionKey={props.versionKey ?? 0}
         onOpenCompare={props.onOpenCompare ?? (() => {})}
         onReviewConflicts={props.onReviewConflicts ?? (() => {})}
         onError={props.onError ?? (() => {})}
@@ -102,6 +107,9 @@ function filedRetry(onError: { mock: { calls: unknown[][] } }, call = 0): () => 
   if (typeof retry !== "function") throw new Error("no Try again filed");
   return () => { retry(); };
 }
+
+// The identity a failure filed its row under.
+const filedIdentity = (onError: { mock: { calls: unknown[][] } }, call = 0) => onError.mock.calls[call]?.[3];
 
 describe("VersionsPage", () => {
   it("lists Main first, then by last change, with a version that has none sorted by when it was made", async () => {
@@ -284,7 +292,7 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(within(row("fresh")).queryByTestId("versions-page-count-retry")).not.toBeNull());
     expect(within(row("nested")).getByTestId("versions-page-count-retry")).toBeTruthy();
     expect(onError).toHaveBeenCalledExactlyOnceWith(
-      "dohc could not count the differences from Main.", expect.any(Error), expect.any(Function), "versions-counts");
+      "dohc could not count the differences from Main.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-counts:/));
     bridgeMock.countWorkspaceVersionChanges.mockClear();
     bridgeMock.countWorkspaceVersionChanges.mockResolvedValue({ count: 4 });
     act(filedRetry(onError));
@@ -305,9 +313,44 @@ describe("VersionsPage", () => {
     const user = userEvent.setup();
     render(<Page onError={onError} onSettled={onSettled} />);
     await user.click(await waitFor(() => within(row("nested")).getByTestId("versions-page-count-retry")));
-    expect(onSettled).toHaveBeenCalledExactlyOnceWith("versions-counts");
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError));
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
-    expect(onError.mock.calls[1]?.[3]).toBe("versions-counts");
+    expect(filedIdentity(onError, 1)).toBe(filedIdentity(onError));
+  });
+
+  it("takes back the counts' row once a later count works", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT, NESTED, FRESH], activeVersionId: "main" });
+    bridgeMock.countWorkspaceVersionChanges.mockImplementation(async ({ versionId }: { versionId: string }) => {
+      if (versionId === "nested") throw new Error("count failed");
+      return { count: 2 };
+    });
+    const onError = vi.fn();
+    const onSettled = vi.fn();
+    const { rerender } = render(<Page onError={onError} onSettled={onSettled} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    bridgeMock.countWorkspaceVersionChanges.mockResolvedValue({ count: 7 });
+    // Main's history grew, so every version counts again.
+    rerender(<Page onError={onError} onSettled={onSettled} historyKey="1" />);
+    await waitFor(() => expect(details("nested")).toContain("7 files differ from Main"));
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError));
+  });
+
+  it("files nothing for a count that fails after its version has gone", async () => {
+    const nestedCount = deferred<{ count: number }>();
+    bridgeMock.countWorkspaceVersionChanges.mockImplementation(({ versionId }: { versionId: string }) =>
+      versionId === "nested" ? nestedCount.promise : Promise.resolve({ count: 2 }));
+    const onError = vi.fn();
+    const { rerender } = render(<Page onError={onError} />);
+    await waitFor(() => expect(bridgeMock.countWorkspaceVersionChanges).toHaveBeenCalledWith({ workspaceId: "ws-1", versionId: "nested" }));
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({ versions: [MAIN, DRAFT, FRESH], activeVersionId: "draft" });
+    rerender(<Page onError={onError} refreshKey={1} />);
+    await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(3));
+    await act(async () => {
+      nestedCount.reject(new Error("count failed"));
+      await nestedCount.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(details("fresh")).toContain("2 files differ from Main"));
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("counts the files each merge left to decide, and opens the review", async () => {
@@ -336,7 +379,7 @@ describe("VersionsPage", () => {
     render(<Page onError={onError} />);
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onError).toHaveBeenCalledWith(
-      "dohc could not read which merges have files to decide.", expect.any(Error), expect.any(Function), "versions-conflicts");
+      "dohc could not read which merges have files to decide.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-conflicts:/));
     bridgeMock.listWorkspaceVersionConflicts.mockResolvedValueOnce({
       conflicts: [{ conflictId: "c1", path: "c1.md", sourceVersionId: "draft", targetVersionId: "main", origin: "merge",
         contentKind: "text", currentText: "a", incomingText: "b", baseText: null }],
@@ -346,6 +389,17 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(within(row("draft")).getByTestId("versions-page-conflicts").textContent).toBe("1 to decide"));
   });
 
+  it("takes back the files to decide's row once a later read works", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockRejectedValueOnce(new Error("conflicts failed"));
+    const onError = vi.fn();
+    const onSettled = vi.fn();
+    const { rerender } = render(<Page onError={onError} onSettled={onSettled} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onSettled).not.toHaveBeenCalled();
+    rerender(<Page onError={onError} onSettled={onSettled} versionKey={1} />);
+    await waitFor(() => expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError)));
+  });
+
   it("shows the rows sorted by when each was made when the last changes can't be read, and says so once", async () => {
     bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
     const onError = vi.fn();
@@ -353,7 +407,7 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(screen.getAllByTestId("versions-page-row")).toHaveLength(4));
     expect(screen.getAllByTestId("versions-page-name").map((name) => name.textContent)).toEqual(["Main", "Draft two", "Fresh", "Draft"]);
     expect(onError).toHaveBeenCalledExactlyOnceWith(
-      "dohc could not read when each version last changed.", expect.any(Error), expect.any(Function), "versions-last-changes");
+      "dohc could not read when each version last changed.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-last-changes:/));
     // Not known, so no made time that would say it has no change of its own.
     await waitFor(() => expect(details("fresh")).toBe("Made from Main · Same as Main"));
     const again = Promise.reject(new Error("history failed"));
@@ -375,14 +429,14 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     act(filedRetry(onError));
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
-    expect(onError.mock.calls[1]?.[3]).toBe("versions-last-changes");
+    expect(filedIdentity(onError, 1)).toBe(filedIdentity(onError));
     expect(onSettled).not.toHaveBeenCalled();
     rerender(<Page onError={onError} onSettled={onSettled} historyKey="1" />);
     await waitFor(() => expect(details("draft")).toContain("Changed 1h ago by Ice"));
-    expect(onSettled).toHaveBeenCalledExactlyOnceWith("versions-last-changes");
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError));
   });
 
-  it("takes back a failed read's row when the tab closes", async () => {
+  it("takes back a failed read's row when the page goes", async () => {
     bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
     const onError = vi.fn();
     const onSettled = vi.fn();
@@ -390,7 +444,21 @@ describe("VersionsPage", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
     expect(onSettled).not.toHaveBeenCalled();
     unmount();
-    expect(onSettled).toHaveBeenCalledExactlyOnceWith("versions-last-changes");
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError));
+  });
+
+  it("files a row for each page a split shows, and one page going takes back only its own", async () => {
+    bridgeMock.listVersionLastChanges.mockRejectedValue(new Error("history failed"));
+    const left = { onError: vi.fn(), onSettled: vi.fn() };
+    const right = { onError: vi.fn(), onSettled: vi.fn() };
+    const shown = render(<Page {...left} />);
+    render(<Page {...right} />);
+    await waitFor(() => expect(left.onError).toHaveBeenCalledOnce());
+    await waitFor(() => expect(right.onError).toHaveBeenCalledOnce());
+    expect(filedIdentity(left.onError)).not.toBe(filedIdentity(right.onError));
+    shown.unmount();
+    expect(left.onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(left.onError));
+    expect(right.onSettled).not.toHaveBeenCalled();
   });
 
   it("shows an empty state that names what stays the same when only Main exists", async () => {

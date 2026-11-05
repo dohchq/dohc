@@ -25,9 +25,12 @@ interface ReadReports {
 
 // One read's row in Notices. A read that keeps failing files it once, until
 // the read works again, which takes the row back, or its Try again runs.
-function useReadNotice(reports: ReadReports, identity: string, fallback: string, retry: () => void) {
+function useReadNotice(reports: ReadReports, read: string, fallback: string, retry: () => void) {
+  // Each page has its own row, since a split can show two.
+  const identity = `${read}:${useId()}`;
   const filed = useRef(false);
-  // Its Try again reads for this tab, so the row goes when the tab closes.
+  // Its Try again reads for this page, so the row goes with the page, as when
+  // its tab closes or another tab shows in its place.
   useEffect(() => () => {
     if (filed.current) reports.onSettled(identity);
   }, []);
@@ -116,16 +119,19 @@ export function VersionsPage(props: {
   const countOrder = useRef<string[]>([]);
   countOrder.current = ordered.filter((version) => version.kind !== "main").map((version) => version.id);
   const activeVersionId = snapshot?.activeVersionId ?? null;
-  // One row in Notices for every count that failed. Its Try again counts
-  // them all again, and it goes once none has failed.
+  // One row in Notices while a version shown has a failed count. Its Try
+  // again counts every one of them again.
+  const countErrors = useRef(new Map<string, unknown>());
   const failedCounts = useRef<string[]>([]);
   failedCounts.current = countOrder.current.filter((versionId) => counts.get(versionId) === "failed");
   const countsNotice = useReadNotice(props, "versions-counts", "dohc could not count the differences from Main.",
     () => recount(failedCounts.current));
-  const countsFailed = failedCounts.current.length > 0;
+  const failedKey = failedCounts.current.join("\n");
   useEffect(() => {
-    if (!countsFailed) countsNotice.worked();
-  }, [countsFailed]);
+    const first = failedCounts.current[0];
+    if (first === undefined) countsNotice.worked();
+    else countsNotice.failed(countErrors.current.get(first));
+  }, [failedKey]);
   // Counting waits for the first listing, so it runs in the order the rows show.
   const listed = lastChanges !== null;
   useEffect(() => {
@@ -157,15 +163,14 @@ export function VersionsPage(props: {
         const versionId: string | undefined = [...order.slice(start), ...order.slice(0, start)].find((id) => staleCounts.current.has(id));
         if (versionId === undefined) break;
         staleCounts.current.delete(versionId);
-        let count: Count = "failed";
-        let error: unknown;
+        let count: Count;
         try {
           count = (await bridge().countWorkspaceVersionChanges({ workspaceId, versionId })).count;
-        } catch (caught) {
-          error = caught;
+        } catch (error) {
+          countErrors.current.set(versionId, error);
+          count = "failed";
         }
         if (!countReads.isCurrent(token)) return;
-        if (count === "failed") countsNotice.failed(error);
         // Newer than what the row shows, even if it was marked again while it
         // counted. The mark counts it again in its turn.
         setCounts((current) => new Map(current).set(versionId, count));
