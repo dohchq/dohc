@@ -513,7 +513,7 @@ describe("desktop CLI workspace context", () => {
         reason: "Version files are hidden because dohc can't read .dohc/files.toml" });
       expect(await cli("version", "conflicts")).toEqual({ exitCode: 1, stdout: "",
         stderr: "dohc: Conflicts are hidden because dohc can't read .dohc/files.toml\n" });
-      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
       // A shared view keeps no versions of its own.
       vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
