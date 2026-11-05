@@ -188,6 +188,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
+import { publishReopenKey } from "./documentVersionKey";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
@@ -1909,6 +1910,7 @@ export function DesktopWorkspaceShell(props: {
   // For a lookup that must not act on a version a later switch replaced.
   const versionEpochRef = useRef(versionEpoch);
   versionEpochRef.current = versionEpoch;
+  useEffect(() => publishReopenKey(workspaceId, versionEpoch), [workspaceId, versionEpoch]);
   const engineRebuildReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
   useEffect(() => {
