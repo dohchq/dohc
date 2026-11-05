@@ -891,9 +891,10 @@ describe("workspace manager with registered workspaces", () => {
     expect(confirm.textContent).toBe("Remove from list");
     expect(confirm.className).not.toContain("danger");
     expect(bridge.forgetWorkspace).not.toHaveBeenCalled();
-    // The panel takes focus, and Tab reaches Cancel first.
-    expect(document.activeElement?.getAttribute("data-focus-surface")).toBe("dialog");
-    await user.tab();
+    // Focus starts on the confirm button, as in every confirm dialog, and the
+    // left arrow reaches Cancel.
+    expect(document.activeElement).toBe(confirm);
+    await user.keyboard("{ArrowLeft}");
     expect(document.activeElement).toBe(screen.getByTestId("workspace-remove-cancel"));
     await user.keyboard("{Enter}");
     expect(screen.queryByTestId("workspace-remove-confirm")).toBeNull();
