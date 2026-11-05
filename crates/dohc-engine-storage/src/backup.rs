@@ -99,6 +99,8 @@ const COMPARED_TABLES: &[&str] = &[
     "file_objects",
     "capture_file_holds",
     "capture_first_imports",
+    "work_references",
+    "work_reference_outbox",
     "blobs",
     "binary_blobs",
     "path_aliases",

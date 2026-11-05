@@ -595,6 +595,7 @@ fn map_domain(error: &DomainError) -> WireError {
         }
         DomainError::FileNotFound => (InvalidParams, "file-not-found"),
         DomainError::ObjectIdentityMismatch => (InvalidParams, "object-identity-mismatch"),
+        DomainError::WorkTargetNotFound => (InvalidParams, "work-target-not-found"),
         DomainError::TargetPathExists => (InvalidParams, "target-path-exists"),
         DomainError::LiveDocumentBindingActive => (InvalidParams, "live-document-binding-active"),
         DomainError::LivePageOwned => (InvalidParams, "live-page-owned"),

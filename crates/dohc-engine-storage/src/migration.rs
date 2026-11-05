@@ -3607,6 +3607,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("capture_first_imports.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 84,
+        id: "v2-work-references",
+        sql: include_str!("work_references.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5595,6 +5601,10 @@ mod tests {
                 "v2-capture-first-imports",
                 "c6b0c309e5dd16fe6ba196efaa0b4afb91719d1f099ef53aabc513c906c60657",
             ),
+            (
+                "v2-work-references",
+                "47ea813d36d84c48a87bdd1daae1ad00382d54eadd3600954e2fca6b34ee4f67",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -5859,6 +5869,76 @@ mod tests {
                 .any(|detail| detail.contains("COVERING INDEX materialization_retained_blocked")),
             "{plan:?}"
         );
+    }
+
+    /// The work reference tables arrive empty on an existing store, and refuse
+    /// a row that does not fit its kind, a second reference to one target, and
+    /// a changed target.
+    #[test]
+    fn work_references_upgrade_adds_empty_strict_tables() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-work-references");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 84);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        for table in ["work_references", "work_reference_outbox"] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
+        let insert = |reference: &str, kind: &str, version: Option<&str>, thread: Option<&str>| {
+            conn.execute(
+                "INSERT INTO work_references(reference, workspace_id, target_kind, target_id, \
+                 version_id, thread_id, created_at_ms, registration) \
+                 VALUES (?1, 'ws', ?2, 'target', ?3, ?4, 1, 'pending')",
+                rusqlite::params![reference, kind, version, thread],
+            )
+        };
+        let a = "A".repeat(43);
+        assert!(insert(&a, "file", Some("main"), None).is_ok());
+        for (reference, kind, version, thread) in [
+            ("B".repeat(42), "file", Some("main"), None),
+            (format!("{}=", "B".repeat(42)), "file", Some("main"), None),
+            ("B".repeat(43), "file", None, None),
+            ("B".repeat(43), "message", None, None),
+            ("B".repeat(43), "message", Some("main"), Some("thread")),
+            ("B".repeat(43), "folder", Some("main"), None),
+            ("B".repeat(43), "file", Some("main"), None),
+        ] {
+            assert!(
+                insert(&reference, kind, version, thread).is_err(),
+                "{reference} {kind} {version:?} {thread:?}"
+            );
+        }
+        assert!(insert(&"B".repeat(43), "app", Some("main"), None).is_ok());
+        assert!(
+            conn.execute(
+                "UPDATE work_references SET target_id = 'other' WHERE reference = ?1",
+                [&a],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            conn.execute(
+                "UPDATE work_references SET registration = 'registered' WHERE reference = ?1",
+                [&a],
+            )
+            .unwrap(),
+            1
+        );
+        conn.execute(
+            "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, 1)",
+            [&a],
+        )
+        .unwrap();
     }
 
     #[test]
