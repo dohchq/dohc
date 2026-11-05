@@ -4357,7 +4357,8 @@ describe("sync answers after Settings closed", () => {
 
     await user.click(await screen.findByTestId("activity-settings"));
     await user.click(await screen.findByTestId("settings-nav-cloud"));
-    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+    // Signed out, nothing syncs, so Pause sync stands in for the switch.
+    await user.click(await screen.findByRole("button", { name: "Pause sync" }));
     await waitFor(() => expect(bridge.cloudStopSync).toHaveBeenCalled());
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());

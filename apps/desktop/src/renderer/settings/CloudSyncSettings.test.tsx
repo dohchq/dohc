@@ -105,16 +105,16 @@ afterEach(() => {
 
 describe("CloudSyncSettings", () => {
   // Pausing needs no account. Turning sync on does, so signed out the switch
-  // stays off and says why, below Connect server.
+  // stays off and says why, below Connect server. Signed out, nothing syncs,
+  // so Pause sync stands in for the switch, without Try again.
   it("lets a signed-out owner pause, then says turning sync on needs the server", async () => {
     render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
     expect(screen.getByTestId("settings-cloud-connect")).toBeTruthy();
     expect(screen.queryByTestId("settings-row-account")).toBeNull();
     expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
-    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
-    expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("switch")).toBeNull();
 
-    fireEvent.click(syncSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "Pause sync" }));
 
     await waitFor(() => expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce());
     await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("false"));
@@ -621,27 +621,118 @@ describe("CloudSyncSettings", () => {
 
     rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
     enable.reject(new Error("Passphrase could not unlock synced secrets."));
-    await waitFor(() => expect(syncSwitch().getAttribute("aria-busy")).not.toBe("true"));
+    await waitFor(() => expect((screen.getByTestId("cloud-pause-sync") as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-passphrase-submit")).toBeNull();
+  });
+
+  // The person's setting is on, but nothing syncs: a switch could read
+  // neither. The line says so, and Try again and Pause sync take its place.
+  it("shows no switch while the account is unconfirmed, only the line, Try again and Pause sync", () => {
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSyncConnected: false })} />);
+
+    const row = within(screen.getByTestId("settings-row-sync-workspace"));
+    expect(row.queryByRole("switch")).toBeNull();
+    const line = row.getByTestId("cloud-workspace-relink");
+    expect(line.textContent).toBe(SYNC_UNCONFIRMED_ACCOUNT);
+    expect(line.className).toContain("text-danger");
+    const mark = line.firstElementChild!;
+    expect(mark.getAttribute("class")).toContain("lucide-triangle-alert");
+    expect(mark.getAttribute("aria-hidden")).toBe("true");
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Pause sync"]);
+    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+  });
+
+  // Pause sync is the switch's off. It saves the pause, so neither a restart
+  // nor a sign-in resumes sync, and the row becomes the paused one.
+  it("pauses sync from the unconfirmed row without a confirm, then shows the paused switch", async () => {
+    const stop = deferred<CloudStopSyncResult>();
+    bridgeMock.cloudStopSync.mockReturnValueOnce(stop.promise);
+    const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    const pause = screen.getByRole("button", { name: "Pause sync" }) as HTMLButtonElement;
+    pause.focus();
+    fireEvent.click(pause);
+
+    expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce();
+    expect(bridgeMock.cloudStopSync).toHaveBeenCalledWith();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(pause.disabled).toBe(true);
+    expect((screen.getByTestId("cloud-relink-workspace") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(pause);
+    expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      stop.resolve(stopped("ws-1"));
+    });
+
+    expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull();
+    expect(screen.queryByTestId("cloud-pause-sync")).toBeNull();
+    expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
+    expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
+    expect(document.activeElement).toBe(syncSwitch());
+    expect(settings.onChanged).toHaveBeenCalledOnce();
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+  });
+
+  // The person's choice outlives the unconfirmed state: only Pause sync or
+  // the switch's off records off.
+  it("keeps sync on through an unconfirmed account, and shows it on again once confirmed", () => {
+    const nothingCalled = () => {
+      expect(bridgeMock.cloudStopSync).not.toHaveBeenCalled();
+      expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+    };
+    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
+    nothingCalled();
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSyncConnected: false })} />);
+    const row = within(screen.getByTestId("settings-row-sync-workspace"));
+    expect(row.queryByRole("switch")).toBeNull();
+    expect(row.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_UNCONFIRMED_ACCOUNT);
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Pause sync"]);
+    nothingCalled();
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED)} />);
+    expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull();
+    expect(screen.queryByTestId("cloud-pause-sync")).toBeNull();
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByTestId("cloud-sync-paused")).toBeNull();
+    nothingCalled();
   });
 
   // A Disconnect whose file removal failed leaves main's cache empty while
   // the saved session still reads as signed in: the same account, not yet
   // read again. Enabling again reads it and resumes sync.
-  it("pauses sync in About's words, and resumes it with Try again for the same account", async () => {
+  it("resumes sync with Try again through the enable path, for the same account", async () => {
+    const enable = deferred<void>();
+    bridgeMock.cloudEnableSync.mockReturnValueOnce(enable.promise);
     const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
-    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_UNCONFIRMED_ACCOUNT);
-    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
-    fireEvent.click(screen.getByTestId("cloud-relink-workspace"));
+    const again = screen.getByTestId("cloud-relink-workspace") as HTMLButtonElement;
+    again.focus();
+    fireEvent.click(again);
 
-    await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
-    await waitFor(() => expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull());
+    expect(bridgeMock.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    expect(again.disabled).toBe(true);
+    expect((screen.getByTestId("cloud-pause-sync") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("switch")).toBeNull();
+
+    await act(async () => {
+      enable.resolve();
+    });
+
+    expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull();
+    expect(screen.queryByTestId("cloud-pause-sync")).toBeNull();
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(syncSwitch());
     expect(screen.getByTestId("cloud-sync-code")).toBeTruthy();
     expect(settings.onChanged).toHaveBeenCalledOnce();
+    expect(bridgeMock.cloudStopSync).not.toHaveBeenCalled();
   });
 
   // Another account owns the remote: main refuses, and its reason says what

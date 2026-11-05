@@ -3197,7 +3197,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             </SettingRow>
           </div>
         </Specimen>
-        <Specimen label="sync on, account unconfirmed: not syncing, with Try again">
+        <Specimen label="account unconfirmed: not syncing, with Try again and Pause sync">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
           </div>
