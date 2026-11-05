@@ -1011,7 +1011,7 @@ export function EngineHistoryView(props: {
       entries.find((entry): entry is CollectionEntry => entry.kind === "collection" && entry.datasetId === datasetId)?.name;
     const unavailable = props.unavailableSources ?? [];
     const omitted = props.omittedSources ?? 0;
-    return [missingSourcesWords(unavailable, omitted, nameOf), missingSourcesShort(unavailable, nameOf)];
+    return [missingSourcesWords(unavailable, omitted, nameOf), missingSourcesShort(unavailable, nameOf)] as const;
   }, [props.unavailableSources, props.omittedSources, collections, entries]);
   const retry = props.onRetry ?? (() => undefined);
   const stickyHeaderIndices = useMemo(
