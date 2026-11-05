@@ -138,24 +138,36 @@ function countClauses(people: readonly LeveledRow[]): string[] {
       : `${count} ${count === 1 ? "person" : "people"} can ${verb}`);
 }
 
-// A share's live grants, widest level first. Anyone with the link has its
-// level, so only people above it are counted beside it. Without a link, one
-// person goes by name and several by count. The title names each.
+// How many links have each level, widest first: "1 link lets anyone edit".
+function linkClauses(links: readonly LeveledRow[]): string[] {
+  if (links.length === 1) return [`Anyone with the link can ${verbOf(links[0]!.access)}`];
+  return VERBS.map((verb) => ({ verb, count: links.filter((row) => verbOf(row.access) === verb).length }))
+    .filter(({ count }) => count > 0)
+    .map(({ verb, count }) => `${count} ${count === 1 ? "link lets" : "links let"} anyone ${verb}`);
+}
+
+// A share's live grants, widest level first. Anyone with a link has the
+// widest link's level, so only people above it are counted beside it.
+// Without a link, one person goes by name and several by count. The title
+// names each.
 function grantedWho(group: ShareGroup): Who | null {
   const live = group.rows.filter((row): row is LeveledRow => row.status === "active" && row.access !== null);
-  const link = live.find((row) => row.via === "link");
+  const links = live.filter((row) => row.via === "link")
+    .sort((a, b) => VERBS.indexOf(verbOf(a.access)) - VERBS.indexOf(verbOf(b.access)));
   const people = live.filter((row) => row.via !== "link");
   const title = [
-    ...(link ? [`Anyone with the link can ${verbOf(link.access)}`] : []),
+    ...(links.length > 0 ? linkClauses(links) : []),
     ...people.map((row) => `${recipientOf(row)} can ${verbOf(row.access)}`),
   ].join("\n");
+  const [link] = links;
   if (link) {
     const linkVerb = verbOf(link.access);
+    const anyone = `with ${links.length === 1 ? "the" : "a"} link can ${linkVerb}`;
     const above = people.filter((row) => VERBS.indexOf(verbOf(row.access)) < VERBS.indexOf(linkVerb));
-    const [first, ...others] = [...countClauses(above), `anyone with the link can ${linkVerb}`];
+    const [first, ...others] = [...countClauses(above), `anyone ${anyone}`];
     // The first clause stays whole; what follows it cuts.
     return others.length === 0
-      ? { lead: `Anyone with the link can ${linkVerb}`, rest: "", cut: "rest", title }
+      ? { lead: `Anyone ${anyone}`, rest: "", cut: "rest", title }
       : { lead: first!, rest: others.map((clause) => `, ${clause}`).join(""), cut: "rest", title };
   }
   const [only] = people;
@@ -265,9 +277,11 @@ function StatusWord(props: { word: Word }) {
 }
 
 // A name cut in its middle, so a short extension stays: "product-pl….md".
+// Only the last part of a path has an extension: "v1.2/README" has none.
 function NameLine(props: { name: string; title: string }) {
   const dot = props.name.lastIndexOf(".");
-  const cut = dot > 0 && props.name.length - dot <= 12 ? dot : props.name.length;
+  const base = props.name.lastIndexOf("/") + 1;
+  const cut = dot > base && props.name.length - dot <= 12 ? dot : props.name.length;
   return (
     <span className="flex min-w-0 leading-5" title={props.title}>
       <span className="truncate">{props.name.slice(0, cut)}</span>
