@@ -313,6 +313,7 @@ Never uppercase a label.
 Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
 `PathLine` in `ui/PathLine.tsx` draws it.
 When a row is too narrow for a whole name, cut the name in the middle and keep its extension: `product-pl….md`. When two rows in one list have the same name, show the folder before it: `plans/notes.md`.
+When a line holds a name beside other words, such as who made a change, the other words give way first, each down to a 48px floor, and the name keeps its room longest.
 
 When the title bar is crowded, Go to… and the Restricted Mode pill give way first. Each narrows to its icon and keeps its words as its tooltip and accessible name.
 The Alpha pill stays. The workspace and version names keep at least three letters and an ellipsis, with the full name in the tooltip.
