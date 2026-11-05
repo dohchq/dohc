@@ -47,7 +47,7 @@ it("lists a newer version waiting behind a conflict, and refuses a malformed one
   const listed = { conflictId: "c1", path: "notes.md", sourceVersionId: "main", targetVersionId: "main", origin: "sync",
     contentKind: "text", currentText: "mine", incomingText: "theirs", baseText: "base" };
   const waiting = { code: "resolve-existing-conflict", objectId: "notes-object", originId: "computer-d", originSeq: 4,
-    message: "Another computer saved a newer version of notes.md. dohc holds it until its conflict is resolved." };
+    message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved." };
   let answer: unknown = { ok: true, conflicts: [{ ...listed, waiting }, listed], nextAfterConflictId: null };
   const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => answer as never);
   const ctx = { root: process.cwd(), home: process.cwd(), request };

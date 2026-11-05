@@ -1550,6 +1550,15 @@ function ConflictResolver(props: {
       </button>
       {expanded ? (
         <div className="pt-2">
+          {conflict.origin === "sync" && conflict.waitingVersion ? (
+            <p
+              data-testid="version-conflict-waiting"
+              className="mb-2 mt-0 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
+            >
+              <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+              A newer version from another machine is waiting. It comes in after you resolve this conflict.
+            </p>
+          ) : null}
           {isBinary ? (
             <div
               data-testid="version-conflict-binary"
@@ -1592,15 +1601,6 @@ function ConflictResolver(props: {
               </SecondaryButton>
             </div>
           </div>
-          {conflict.origin === "sync" && conflict.waitingVersion ? (
-            <p
-              data-testid="version-conflict-waiting"
-              className="mb-0 mt-2 flex items-start gap-1.5 text-[11px] leading-4 text-muted"
-            >
-              <Hourglass size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-              Another computer saved a newer version. dohc holds it until you resolve this conflict.
-            </p>
-          ) : null}
           {combined === null && combineSeed !== null ? (
             <button
               type="button"

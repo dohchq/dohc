@@ -577,7 +577,7 @@ test("an agent's file save on one device opens a conflict against a record the o
     const reviewCard = page.getByTestId("version-conflict");
     await expect(reviewCard).toHaveCount(1);
     await expect(page.getByTestId("version-conflict-waiting")).toHaveText(
-      "Another computer saved a newer version. dohc holds it until you resolve this conflict.",
+      "A newer version from another machine is waiting. It comes in after you resolve this conflict.",
     );
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate(async (value) => {
@@ -608,7 +608,7 @@ test("an agent's file save on one device opens a conflict against a record the o
       path: apolloPath,
       waiting: {
         code: "resolve-existing-conflict",
-        message: `Another computer saved a newer version of ${apolloPath}. dohc holds it until its conflict is resolved.`,
+        message: `A newer version of ${apolloPath} from another machine is waiting. It comes in after this conflict is resolved.`,
       },
     });
     expect(JSON.stringify(listedForAgents)).not.toContain("waitingVersion");

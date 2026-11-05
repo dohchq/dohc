@@ -883,7 +883,7 @@ describe("ConflictReviewDialog read failure", () => {
 
 describe("ConflictReviewDialog waiting version", () => {
   const WAITING_COPY =
-    "Another computer saved a newer version. dohc holds it until you resolve this conflict.";
+    "A newer version from another machine is waiting. It comes in after you resolve this conflict.";
   const waitingVersion = {
     code: "resolve-existing-conflict" as const,
     objectId: "object-1",
@@ -929,6 +929,10 @@ describe("ConflictReviewDialog waiting version", () => {
     openReview();
     await settle();
     expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
+    // It comes before the two sides, so it's read before choosing one.
+    expect(screen.getByTestId("version-conflict-waiting").compareDocumentPosition(
+      screen.getAllByTestId("version-conflict-side-text")[0]!,
+    ) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Coordinates stay out of the card.
     expect(screen.getByTestId("conflict-review-dialog").textContent).not.toMatch(/computer-d|object-1/);
 

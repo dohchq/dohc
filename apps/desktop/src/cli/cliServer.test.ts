@@ -2452,7 +2452,7 @@ describe("CLI socket server", () => {
   it("passes a conflict's waiting version through to version conflicts and a resolve's remaining page", async () => {
     const waiting = {
       code: "resolve-existing-conflict" as const,
-      message: "Another computer saved a newer version of notes.md. dohc holds it until its conflict is resolved.",
+      message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
       objectId: "notes-object",
       originId: "computer-d",
       originSeq: 4,

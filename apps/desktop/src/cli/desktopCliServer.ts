@@ -542,7 +542,7 @@ export function createDesktopCliServer<State>(
                   const { waitingVersion, ...listed } = versionConflictForIpc(conflict);
                   if (waitingVersion === null) return listed;
                   // The conflict's own path, which a waiting move does not change.
-                  const message = `Another computer saved a newer version of ${conflict.path}. dohc holds it until its conflict is resolved.`;
+                  const message = `A newer version of ${conflict.path} from another machine is waiting. It comes in after this conflict is resolved.`;
                   const { code, objectId, originId, originSeq } = waitingVersion;
                   return { ...listed, waiting: { code, message, objectId, originId, originSeq } };
                 };

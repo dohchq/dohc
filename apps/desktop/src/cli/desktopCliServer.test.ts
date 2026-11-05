@@ -495,13 +495,13 @@ describe("desktop CLI workspace context", () => {
       f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
       expect(await mcp("versionConflicts")).toMatchObject({ ok: true, conflicts: [{ conflictId: "c1", origin: "sync", waiting: {
         code: "resolve-existing-conflict",
-        message: "Another computer saved a newer version of notes.md. dohc holds it until its conflict is resolved.",
+        message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
         objectId: "notes-object", originId: "computer-d", originSeq: 4 } }] });
       f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waitingVersion");
       f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
       expect((await cli("version", "conflicts")).stdout).toBe(
-        "c1 · sync · notes.md\n  Another computer saved a newer version. dohc holds it until you resolve this conflict.\n");
+        "c1 · sync · notes.md\n  A newer version from another machine is waiting. It comes in after you resolve this conflict.\n");
       f.capture.listOpenConflictsPage.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
       expect(await mcp("versionConflicts")).toEqual({ ok: true, conflicts: [], nextAfterConflictId: null });
 
