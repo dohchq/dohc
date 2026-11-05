@@ -291,8 +291,9 @@ describe("VersionsPage", () => {
     render(<Page onError={onError} onSettled={onSettled} />);
     await waitFor(() => expect(within(row("fresh")).queryByTestId("versions-page-count-retry")).not.toBeNull());
     expect(within(row("nested")).getByTestId("versions-page-count-retry")).toBeTruthy();
-    expect(onError).toHaveBeenCalledExactlyOnceWith(
-      "dohc could not count the differences from Main.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-counts:/));
+    // The row is filed from an effect, which can run after the render.
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(
+      "dohc could not count the differences from Main.", expect.any(Error), expect.any(Function), expect.stringMatching(/^versions-counts:/)));
     bridgeMock.countWorkspaceVersionChanges.mockClear();
     bridgeMock.countWorkspaceVersionChanges.mockResolvedValue({ count: 4 });
     act(filedRetry(onError));
@@ -332,7 +333,7 @@ describe("VersionsPage", () => {
     // Main's history grew, so every version counts again.
     rerender(<Page onError={onError} onSettled={onSettled} historyKey="1" />);
     await waitFor(() => expect(details("nested")).toContain("7 files differ from Main"));
-    expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError));
+    await waitFor(() => expect(onSettled).toHaveBeenCalledExactlyOnceWith(filedIdentity(onError)));
   });
 
   it("files nothing for a count that fails after its version has gone", async () => {
