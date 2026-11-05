@@ -16,7 +16,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { realpathSync, type BigIntStats } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { dirname, join, normalize, parse } from "node:path";
+import { dirname, join, parse } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
 import { recordNewCollectionsHolder } from "./collectionsHolder";
@@ -44,16 +44,9 @@ export function overlapsStateFolder(realRoot: string, stateDir: string): boolean
   return stateFolderOverlap(realRoot, canonicalWorkspaceRoot(stateDir), process.platform) !== null;
 }
 
-// The refusal names the folder as the person picked it, with the OS's
-// separators.
-export function assertNotStateFolder(
-  picked: string,
-  realRoot: string,
-  stateDir: string,
-  workspace: "new" | "listed",
-): void {
+export function assertNotStateFolder(realRoot: string, { stateDir, workspace }: { stateDir: string; workspace: "new" | "listed" }): void {
   const overlap = stateFolderOverlap(realRoot, canonicalWorkspaceRoot(stateDir), process.platform);
-  if (overlap !== null) throw new Error(stateFolderRefusal(normalize(picked), overlap, workspace));
+  if (overlap !== null) throw new Error(stateFolderRefusal(overlap, workspace));
 }
 
 // Forward slashes on Windows, as the app spells paths there. Elsewhere the
@@ -235,7 +228,7 @@ export async function createWorkspaceFolderWithFreshness(input: {
   const rootCheck = validateWorkspaceRootChoice(rootPath, home.path, process.platform);
   if (!rootCheck.ok) throw new Error(rootCheck.reason);
   if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new Error(HOME_FOLDER_REFUSAL);
-  assertNotStateFolder(input.rootPath, rootPath, input.stateDir, "new");
+  assertNotStateFolder(rootPath, { stateDir: input.stateDir, workspace: "new" });
   if (await isFilesystemRoot(folder)) throw new Error(DISK_ROOT_REFUSAL);
   if (await isDiskRoot(rootPath, folder)) throw new Error(DISK_ROOT_REFUSAL);
   const startedEmpty = (await readdir(rootPath)).length === 0;

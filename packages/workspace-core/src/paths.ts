@@ -122,10 +122,10 @@ export function validateWorkspaceRootChoice(
 export type StateFolderOverlap = "holds" | "inside";
 
 // A workspace already in the list can only be removed from the list.
-export function stateFolderRefusal(folder: string, overlap: StateFolderOverlap, workspace: "new" | "listed"): string {
+export function stateFolderRefusal(overlap: StateFolderOverlap, workspace: "new" | "listed"): string {
   const where = overlap === "holds" ? "holds dohc's own settings" : "is inside the folder that holds dohc's own settings";
   const next = workspace === "listed" ? "In Manage workspaces, choose Remove from list on its row." : "Choose another folder.";
-  return `${folder} ${where}, so it cannot be a workspace. ${next}`;
+  return `This folder ${where}, so it cannot be a workspace. ${next}`;
 }
 
 // How a workspace root overlaps the folder where dohc keeps its own settings

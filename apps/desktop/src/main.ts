@@ -2623,7 +2623,7 @@ const activity = {
   open: (workspace: RegistryEntry) =>
     workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
       const canonical = canonicalWorkspaceFor(lease);
-      assertNotStateFolder(workspace.rootPath, canonical.rootPath, stateDir(), "listed");
+      assertNotStateFolder(canonical.rootPath, { stateDir: stateDir(), workspace: "listed" });
       return workspaceActivity.open(canonical, lease.state.activity);
     }),
   close: (
@@ -3176,7 +3176,7 @@ function withEngineStoreRecoveredForAuthority<Result>(
 ): Promise<Result> {
   const workspace = canonicalWorkspaceFor(lease);
   // Recovery writes in the workspace's .dohc, so a refused folder stops here.
-  assertNotStateFolder(workspace.rootPath, workspace.rootPath, stateDir(), "listed");
+  assertNotStateFolder(workspace.rootPath, { stateDir: stateDir(), workspace: "listed" });
   return runInWorkspaceAuthorityLane(lease, "engine-store", () =>
     withEngineStoreRecoveredUnderEngineStoreLock(workspace, body, (rootPath) =>
       completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
@@ -3351,7 +3351,7 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 ): Promise<SyncStatusResult> {
   return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
     const canonicalWorkspace = canonicalWorkspaceFor(lease);
-    assertNotStateFolder(canonicalWorkspace.rootPath, canonicalWorkspace.rootPath, stateDir(), "listed");
+    assertNotStateFolder(canonicalWorkspace.rootPath, { stateDir: stateDir(), workspace: "listed" });
     return withEngineStoreRecoveredUnderEngineStoreLock(
       canonicalWorkspace,
       () => ensureWorkspaceActivityOpenBody(lease, options),

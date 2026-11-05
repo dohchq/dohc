@@ -168,7 +168,7 @@ test("workspace manager refuses a listed workspace inside dohc's state folder an
     desktop = await launchDesktopApp({ workspace });
     // dohc reopens the listed workspace at startup and refuses it there.
     await expect(desktop.page.getByTestId("workspace-open-failed")).toContainText(
-      "notes is inside the folder that holds dohc's own settings, so it cannot be a workspace. In Manage workspaces, choose Remove from list on its row.",
+      "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace. In Manage workspaces, choose Remove from list on its row.",
     );
     expect(await files()).toEqual(before);
 
