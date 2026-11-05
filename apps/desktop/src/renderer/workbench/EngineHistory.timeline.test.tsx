@@ -300,6 +300,12 @@ describe("History timeline changes", () => {
     expect(count.querySelector(".sr-only")?.textContent).toBe("2 or more files");
     cleanup();
 
+    // An undated Collection change lists last, but the pass it follows in
+    // main's order is still the oldest dated row, and the next page continues it.
+    view({ entries: [change(4, null), pass("p-2", 10), pass("p-1", 10)], hasMore: true });
+    expect(screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums [aria-hidden]")?.textContent).toBe("2+ files");
+    cleanup();
+
     view({ entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)], hasMore: true });
     const run = screen.getByTestId("engine-moment-run-toggle");
     expect(run.querySelector("[aria-hidden]")?.textContent).toBe("2+ changes");
