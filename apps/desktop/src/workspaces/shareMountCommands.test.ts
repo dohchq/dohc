@@ -1262,3 +1262,20 @@ it("reports a mount refresh that set aside its collision record and then failed"
   ]);
   expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
 });
+
+it("reports a mount refresh that set aside its collision record and then failed to mark the share ended", async () => {
+  const h = harness();
+  const { record } = await mountOnDisk(h, () => ({
+    pull: async () => { throw new ShareUnavailableError(); },
+    markEnded: async () => { throw new Error("could not save the ended share"); },
+  }));
+  await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+  await writeFile(record, "not json");
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result.results).toEqual([
+    { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true },
+  ]);
+  expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
+});
