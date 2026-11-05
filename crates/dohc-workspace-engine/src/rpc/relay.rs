@@ -3406,9 +3406,10 @@ mod tests {
             tokio::time::advance(std::time::Duration::from_secs(61)).await;
         } else {
             assert!(supervisor.cancel(1));
-            // Let the request's cancellation reach its operation token.
-            tokio::task::yield_now().await;
         }
+        // Let the stop reach the request's operation token before the actor
+        // runs. `advance` can return before the deadline task cancels it.
+        tokio::task::yield_now().await;
         drop(hold);
         let refused = answer
             .await
