@@ -63,7 +63,7 @@ pub(crate) struct PendingCursor {
 pub(super) struct PendingPull {
     handle: WorkspaceHandle,
     token: String,
-    page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
+    pub(super) page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
 }
 
 const MAX_PULL_REPAIR_RETRIES: usize = 3;
