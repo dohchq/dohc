@@ -141,6 +141,7 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
         no_atomic_placement_announced: false,
         first_import: None,
         carried: None,
+        rules: None,
     };
     let cancel = CancellationToken::new();
     env.observation.start(env.root.clone()).unwrap();
@@ -151,7 +152,6 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
                 &cancel,
                 None,
                 policy_fingerprint(&env.root),
-                read_capture_policy(&env.root),
                 0,
                 &env.scan,
                 &env.observation,
@@ -285,6 +285,7 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
         no_atomic_placement_announced: false,
         first_import: None,
         carried: None,
+        rules: None,
     };
     assert!(env.start_layer(&CancellationToken::new()).await.is_err());
     assert_eq!(env.status.snapshot().phase, CapturePhase::Degraded);

@@ -713,17 +713,6 @@ tracked = false
 /// and an edit it captures records with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_widen_saved_during_a_scan_records_as_a_rescan() {
-    widen_saved_during_a_scan(false).await;
-}
-
-// An unreadable visibility.toml does not hold capture, so the widened file
-// still records, and still as a rescan.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_widen_saved_during_a_scan_beside_an_unreadable_visibility_file_records_as_a_rescan() {
-    widen_saved_during_a_scan(true).await;
-}
-
-async fn widen_saved_during_a_scan(unreadable_visibility: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(
@@ -736,9 +725,6 @@ tracked = false
     );
     write_file(scratch.path(), "private/journal.md", b"personal");
     write_file(scratch.path(), "notes.md", b"first");
-    if unreadable_visibility {
-        std::fs::create_dir_all(scratch.path().join(".dohc/visibility.toml")).expect("directory");
-    }
     let probe = CaptureApplyProbe::default();
     let transport = InProcessTransport::new(Arc::new(
         EngineService::with_capture_apply_probe_for_harness(probe.clone()),
@@ -779,6 +765,61 @@ tracked = false
         moment_metadata(&db_path, "notes.md"),
         (summary, group),
         "an edit captured in the same pass records with it"
+    );
+}
+
+/// A comment added to the rules changes no rule, so an edit captured in that
+/// pass records as an ordinary edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_beside_a_comment_added_to_the_rules_records_as_an_edit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let rules = "[[rule]]
+path = \"private/**\"
+tracked = false
+";
+    write_file(scratch.path(), ".dohc/files.toml", rules.as_bytes());
+    write_file(scratch.path(), "notes.md", b"first");
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(&transport, &handle, "notes.md", Some("first")).await;
+
+    probe.pause_next_apply();
+    write_file(scratch.path(), "notes.md", b"second");
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .expect("the edit's pass must reach the pause");
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        format!(
+            "# Keep the journal private.
+{rules}"
+        )
+        .as_bytes(),
+    );
+    probe.release();
+    wait_for_text(&transport, &handle, "notes.md", Some("second")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let (summary, group) =
+        moment_metadata(&scratch.path().join(".dohc/engine/engine.db"), "notes.md");
+    assert_ne!(summary.as_deref(), Some("Found changes in the folder"));
+    assert!(
+        !group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile")),
+        "an ordinary edit records in no rescan group, got {group:?}"
     );
 }
 

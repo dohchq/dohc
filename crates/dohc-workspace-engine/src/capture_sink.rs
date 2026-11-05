@@ -426,7 +426,7 @@ pub(crate) fn bound_sink_params(
 }
 
 /// Capture's view of `.dohc/files.toml`, split by why there are no rules.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum PolicyState {
     /// A real answer: absent (default policy), parsed rules, or a MALFORMED
     /// file — the last lands here as `Known(None)` under the ratified WS-F
