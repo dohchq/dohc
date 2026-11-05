@@ -28,8 +28,6 @@ import {
   type AccessView,
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
-import { ChatAvatar, LinkMark } from "./ChatAvatar";
-import { neutralPresentation } from "./actorPresentation";
 import { shareSubject } from "./shareSubject";
 
 // The Sharing view: the shares this workspace granted, and the shares sent
@@ -120,6 +118,77 @@ function recipientOf(row: AccessShareRow): string {
   return row.recipientEmail ?? row.recipientUserId ?? "Unnamed person";
 }
 
+type Level = NonNullable<AccessShareRow["access"]>;
+type LeveledRow = AccessShareRow & { access: Level };
+// What a level lets a person do, widest first: the app's three verbs.
+const VERBS: readonly string[] = ["edit", "comment", "view"];
+const verbOf = (access: Level) => LEVELS[access].label.toLowerCase();
+
+// Who can do what, as a row's second line says it, in two parts: the one
+// that may cut, and the one that never does. `spoken` is how a row's name
+// reads it, when that differs. The title says it whole.
+type Who = { lead: string; rest: string; cut: "lead" | "rest"; title: string; spoken?: string };
+const sentenceOf = (who: Who) => who.spoken ?? `${who.lead}${who.rest}`;
+
+// How many people have each level, widest first: "1 person can edit", "2 can view".
+function countClauses(people: readonly LeveledRow[]): string[] {
+  return VERBS.map((verb) => ({ verb, count: people.filter((row) => verbOf(row.access) === verb).length }))
+    .filter(({ count }) => count > 0)
+    .map(({ verb, count }, index) => index > 0 ? `${count} can ${verb}`
+      : `${count} ${count === 1 ? "person" : "people"} can ${verb}`);
+}
+
+// A share's live grants, widest level first. Anyone with the link has its
+// level, so only people above it are counted beside it. Without a link, one
+// person goes by name and several by count. The title names each.
+function grantedWho(group: ShareGroup): Who | null {
+  const live = group.rows.filter((row): row is LeveledRow => row.status === "active" && row.access !== null);
+  const link = live.find((row) => row.via === "link");
+  const people = live.filter((row) => row.via !== "link");
+  const title = [
+    ...(link ? [`Anyone with the link can ${verbOf(link.access)}`] : []),
+    ...people.map((row) => `${recipientOf(row)} can ${verbOf(row.access)}`),
+  ].join("\n");
+  if (link) {
+    const linkVerb = verbOf(link.access);
+    const above = people.filter((row) => VERBS.indexOf(verbOf(row.access)) < VERBS.indexOf(linkVerb));
+    const [first, ...others] = [...countClauses(above), `anyone with the link can ${linkVerb}`];
+    // The first clause stays whole; what follows it cuts.
+    return others.length === 0
+      ? { lead: `Anyone with the link can ${linkVerb}`, rest: "", cut: "rest", title }
+      : { lead: first!, rest: others.map((clause) => `, ${clause}`).join(""), cut: "rest", title };
+  }
+  const [only] = people;
+  if (!only) return null;
+  if (people.length === 1) return { lead: recipientOf(only), rest: ` can ${verbOf(only.access)}`, cut: "lead", title };
+  // The count cuts; its verb and the counts after it do not.
+  const [first, ...others] = countClauses(people);
+  const verbAt = first!.indexOf(" can ");
+  return {
+    lead: first!.slice(0, verbAt),
+    rest: [first!.slice(verbAt), ...others].join(", "),
+    cut: "lead",
+    title,
+  };
+}
+
+// A share sent to the account, by its sender alone.
+function fromWho(sender: string, full: string): Who {
+  return { lead: "From ", rest: sender, cut: "rest", title: `From ${full}`, spoken: `from ${sender}` };
+}
+
+/** The names a list shows more than once: those rows show their folder too. */
+function repeatedNames(names: readonly string[]): ReadonlySet<string> {
+  const counts = new Map<string, number>();
+  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
+  return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
+}
+
+// A row's name, after its folder when another row in its list has the name too.
+function shownName(subject: Subject, repeated: ReadonlySet<string>): string {
+  return repeated.has(subject.name) && subject.folder ? `${subject.folder}${subject.name}` : subject.name;
+}
+
 // The grant a share's row speaks for: a live one, else one that still says
 // what the share covered. An ended grant comes back without its selector.
 function liveGrant(group: ShareGroup): AccessShareRow {
@@ -189,18 +258,20 @@ type Word = "damaged" | "ended" | "removed";
 
 function StatusWord(props: { word: Word }) {
   return (
-    <span data-testid="sharing-row-status" className="shrink-0 text-[11px] text-subtle">
+    <span data-testid="sharing-row-status" className="shrink-0 text-[12px] leading-4 text-muted">
       {props.word}
     </span>
   );
 }
 
-function LevelMark(props: { access: AccessShareRow["access"] | undefined }) {
-  const level = props.access ? LEVELS[props.access] : null;
-  if (!level) return null;
+// A name cut in its middle, so a short extension stays: "product-pl….md".
+function NameLine(props: { name: string; title: string }) {
+  const dot = props.name.lastIndexOf(".");
+  const cut = dot > 0 && props.name.length - dot <= 12 ? dot : props.name.length;
   return (
-    <span role="img" aria-label={level.label} title={level.label} className="shrink-0 text-subtle">
-      <level.icon size={13} aria-hidden />
+    <span className="flex min-w-0 leading-5" title={props.title}>
+      <span className="truncate">{props.name.slice(0, cut)}</span>
+      <span className="shrink-0 whitespace-pre">{props.name.slice(cut)}</span>
     </span>
   );
 }
@@ -208,81 +279,73 @@ function LevelMark(props: { access: AccessShareRow["access"] | undefined }) {
 // Wide enough for the rows' longest item, "Remove from workspace".
 const ROW_MENU_WIDTH = 200;
 
-// A row: the glyph, the name over its folder or sender, a control that stays
-// put, the status word, then the trail. On hover and keyboard focus the row's
-// actions take the trail's place, so the name keeps the room of the wider of
-// the two, not both; the status word stays. The view focuses a row when it
-// opens on it, and the row is named for a screen reader by what it shows.
+// A row: the glyph, the name over who can do what, a control that stays
+// put, and a mark that says where the share lives. At rest the name has the
+// row's free width; on hover and keyboard focus the row's actions take the
+// end of it, on the row's fill. An ended, removed or damaged row says so on
+// its second line, after its sender when it was sent to the account. The
+// view focuses a row when it opens on it, and the row is named for a screen
+// reader by what it shows.
 function ShareRow(props: {
   lane: SharingLane;
   shareId: string;
   status: string;
   subject: Subject;
-  sub: string | null;
+  // The name the row shows: the subject's, after its folder when the list repeats it.
+  name: string;
+  who: Who | null;
   // Words a row must show whole, wrapped under the second line.
   note?: string | null;
-  // The level, or the status word, for the row's name.
-  state: string | null;
   word?: Word | null;
   lead?: ReactNode;
-  trail: ReactNode;
+  mark?: ReactNode;
   copies?: ReactNode;
   menu: readonly MoreMenuItem[];
   children?: ReactNode;
 }) {
-  const { subject } = props;
+  const { subject, who } = props;
   const acts = props.copies !== undefined || props.menu.length > 0;
-  const name = [subject.name, props.sub, props.state].filter(Boolean).join(", ");
+  const label = [props.name, who ? sentenceOf(who) : null, props.word].filter(Boolean).join(", ");
   // The note is sentences: it describes the row rather than joining its name.
   const noteId = `${useId()}-note`;
   return (
     <li data-testid={`sharing-${props.lane}-row`} data-share-id={props.shareId} data-status={props.status}>
-      <div role="group" aria-label={name} aria-describedby={props.note ? noteId : undefined} data-sharing-row-focus
-        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover dohc-focus-row`}>
+      <div role="group" aria-label={label} aria-describedby={props.note ? noteId : undefined} data-sharing-row-focus
+        className={`group ${ABOUT_ROW} min-h-10 ${props.note ? "flex-wrap gap-y-0.5 py-1.5" : ""} hover:bg-hover keyboard:focus-within:bg-hover dohc-focus-row`}>
         {subject.glyph}
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate" title={subject.title}>{subject.name}</span>
-          {props.sub ? <span className="truncate text-[11px] text-subtle" title={props.sub}>{props.sub}</span> : null}
-        </span>
-        {props.lead}
-        {props.word ? <StatusWord word={props.word} /> : null}
-        {/* The trail and the actions share one cell, right-aligned, so the
-            trails line up at the row's end. The actions are positioned: the
-            faded trail is a layer of its own and would take their clicks. */}
-        <span className="grid shrink-0 items-center justify-items-end">
-          <span className={`col-start-1 row-start-1 flex items-center gap-1.5 ${acts ? "transition-opacity duration-75 group-hover:opacity-0 group-focus-within:opacity-0" : ""}`}>
-            {props.trail}
-          </span>
-          {acts ? (
-            <span data-testid={`sharing-${props.lane}-actions`}
-              className="relative col-start-1 row-start-1 flex items-center gap-0.5 opacity-0 transition-opacity duration-75 group-hover:opacity-100 group-focus-within:opacity-100">
-              {props.copies}
-              {props.menu.length > 0 ? (
-                <MoreMenu label="Share actions" testId={`sharing-${props.lane}-menu`} items={props.menu} width={ROW_MENU_WIDTH} />
+          <NameLine name={props.name} title={subject.title} />
+          {who || props.word ? (
+            <span className="flex min-w-0 gap-2">
+              {who ? (
+                <span data-testid="sharing-row-who" title={who.title} className="flex min-w-0 text-[12px] leading-4 text-muted">
+                  <span className={who.cut === "lead" ? "truncate" : "shrink-0 whitespace-pre"}>{who.lead}</span>
+                  {who.rest ? <span className={who.cut === "rest" ? "truncate" : "shrink-0 whitespace-pre"}>{who.rest}</span> : null}
+                </span>
               ) : null}
+              {props.word ? <StatusWord word={props.word} /> : null}
             </span>
           ) : null}
         </span>
+        {props.lead}
+        {props.mark}
+        {/* Collapsed at rest, so the name keeps the room; still in the tab
+            order, so keyboard focus opens it. The negative margin takes back
+            the row's gap while it is empty. */}
+        {acts ? (
+          <span data-testid={`sharing-${props.lane}-actions`}
+            className="-ml-2 flex max-w-0 shrink-0 items-center gap-0.5 overflow-hidden opacity-0 transition-opacity duration-75 group-hover:ml-0 group-hover:max-w-none group-hover:overflow-visible group-hover:opacity-100 group-focus-within:ml-0 group-focus-within:max-w-none group-focus-within:overflow-visible group-focus-within:opacity-100">
+            {props.copies}
+            {props.menu.length > 0 ? (
+              <MoreMenu label="Share actions" testId={`sharing-${props.lane}-menu`} items={props.menu} width={ROW_MENU_WIDTH} />
+            ) : null}
+          </span>
+        ) : null}
         {/* The whole width under the name, past the glyph (15px and its 8px gap). */}
         {props.note ? <span id={noteId} data-testid="sharing-row-note" className="basis-full pl-[23px] text-[11px] leading-4 text-subtle">{props.note}</span> : null}
       </div>
       {props.children}
     </li>
-  );
-}
-
-function Faces(props: { rows: readonly AccessShareRow[] }) {
-  const active = props.rows.filter((row) => row.status === "active");
-  const people = active.filter((row) => row.via !== "link").slice(0, 3);
-  return (
-    <span className="flex items-center">
-      {active.some((row) => row.via === "link") ? <LinkMark /> : null}
-      {people.map((row, index) => (
-        <span key={row.grantId} className={index > 0 || active.some((r) => r.via === "link") ? "-ml-1.5" : undefined}>
-          <ChatAvatar presentation={neutralPresentation} name={recipientOf(row)} kind="human" size="strip" />
-        </span>
-      ))}
-    </span>
   );
 }
 
@@ -304,6 +367,8 @@ export type SharingActions = {
 
 function GrantedRow(props: {
   group: ShareGroup;
+  // The names its list shows more than once.
+  repeated: ReadonlySet<string>;
   waiting: WaitingChanges | undefined;
   confirming: boolean;
   busy: boolean;
@@ -320,7 +385,6 @@ function GrantedRow(props: {
   const code = copies.code;
   const invitation = props.invitations ? copies.invitation : null;
   const word: Word | null = active ? null : first.status === "damaged" ? "damaged" : "ended";
-  const level = active?.access ? LEVELS[active.access].label : null;
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (props.confirming) cancelRef.current?.focus();
@@ -335,8 +399,8 @@ function GrantedRow(props: {
       shareId={group.shareId}
       status={active ? "active" : first.status}
       subject={subject}
-      sub={subject.folder}
-      state={word ?? level}
+      name={shownName(subject, props.repeated)}
+      who={word ? null : grantedWho(group)}
       word={word}
       menu={menu}
       copies={code || invitation ? (
@@ -364,12 +428,6 @@ function GrantedRow(props: {
           {waiting.count}
         </button>
       ) : undefined}
-      trail={
-        <>
-          <Faces rows={group.rows} />
-          {active ? <LevelMark access={active.access} /> : null}
-        </>
-      }
     >
       {props.confirming && group.rows.some(endsOnEnd) ? (
         <div
@@ -429,6 +487,7 @@ function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
 function ReceivedRow(props: {
   row: AccessShareRow | null;
   mount: ShareMount | undefined;
+  repeated: ReadonlySet<string>;
   // Whether the relay's listing was read, so a missing grant means removed.
   listed: boolean;
   skipsShown: boolean;
@@ -461,7 +520,11 @@ function ReceivedRow(props: {
       ? [{ label: "Add to workspace", onSelect: () => actions.mount(shareId), disabled: props.busy }]
       : [];
   const word: Word | null = damaged ? "damaged" : removed ? "removed" : active || !row ? null : "ended";
-  const level = access ? LEVELS[access].label : null;
+  // The level only while the share is live and dohc knows it; else the sender alone.
+  const who: Who = access && !word
+    ? { lead: sender, rest: ` lets you ${verbOf(access)}`, cut: "lead", title: `${parts.full} lets you ${verbOf(access)}` }
+    : fromWho(sender, parts.full);
+  const where = mount ? `In this workspace as shared-with-me/${mount.label}` : null;
   // A removal says it whole, in the relay's words, and what a copy still here does.
   const note = removed
     ? [row?.removalMessage, mount ? "Your copy stays readable but won't update." : null].filter(Boolean).join(" ") || null
@@ -472,23 +535,16 @@ function ReceivedRow(props: {
       shareId={shareId}
       status={row?.status ?? (damaged ? "damaged" : removed ? "removed" : "unlisted")}
       subject={subject}
-      sub={`from ${sender}`}
+      name={shownName(subject, props.repeated)}
+      who={who}
       note={note}
-      state={word ?? level}
       word={word}
       menu={menu}
-      trail={
-        <>
-          {mount ? (
-            <span role="img" aria-label={`In this workspace as shared-with-me/${mount.label}`}
-              title={`shared-with-me/${mount.label}`} data-testid="sharing-mounted" className="shrink-0 text-subtle">
-              <FolderInput size={13} aria-hidden />
-            </span>
-          ) : null}
-          <span title={parts.full} className="inline-flex"><ChatAvatar presentation={neutralPresentation} name={sender} kind="human" size="strip" /></span>
-          {word ? null : <LevelMark access={access ?? null} />}
-        </>
-      }
+      mark={where ? (
+        <span role="img" aria-label={where} title={where} data-testid="sharing-mounted" className="shrink-0 text-subtle">
+          <FolderInput size={13} aria-hidden />
+        </span>
+      ) : undefined}
     >
       {mount && props.skipsShown ? <SkippedChanges mount={mount} actions={actions} /> : null}
     </ShareRow>
@@ -599,18 +655,28 @@ export function SharingPanel(props: {
   ref?: Ref<HTMLDivElement>;
 }) {
   const { actions, mounts, received } = props;
+  const receivedRows = received.status === "ready" ? received.answer.rows.filter((row): row is AccessShareRow => row.kind === "share") : [];
+  const mountOf = (shareId: string) => mounts.find((mount) => mount.shareId === shareId);
+  // Mounts on this computer the listing does not name.
+  const unlistedMounts = mounts.filter((mount) => !receivedRows.some((row) => row.shareId === mount.shareId));
+  const receivedRepeated = repeatedNames([
+    // A grant that no longer says what it covered goes by its folder's name, as its row does.
+    ...receivedRows.map((row) => {
+      const mount = mountOf(row.shareId);
+      return mount && !row.selector ? mount.label : shareSubject(row).name;
+    }),
+    ...unlistedMounts.map((mount) => mount.label),
+  ]);
   const receivedRow = (row: AccessShareRow | null, mount: ShareMount | undefined, listed: boolean) => (
     <ReceivedRow key={row ? `${row.shareId}\0${row.grantId}` : `mount\0${mount!.shareId}`} row={row} mount={mount}
-      listed={listed} skipsShown={skipsShown(mount, props.skipView)} busy={props.busyShareId === (row?.shareId ?? mount!.shareId)}
-      actions={actions} />
+      repeated={receivedRepeated} listed={listed} skipsShown={skipsShown(mount, props.skipView)}
+      busy={props.busyShareId === (row?.shareId ?? mount!.shareId)} actions={actions} />
   );
-  // Mounts on this computer the listing does not name. Only a whole listing
-  // can say the relay no longer lists one; a partial one may on a later page.
+  // Only a whole listing can say the relay no longer lists a mount; a
+  // partial one may on a later page.
   const unlisted = (known: boolean) => {
-    const rows = received.status === "ready" ? received.answer.rows : [];
     const listed = known && received.status === "ready" && received.answer.nextCursor === null;
-    return mounts.filter((mount) => !rows.some((row) => row.kind === "share" && row.shareId === mount.shareId))
-      .map((mount) => receivedRow(null, mount, listed));
+    return unlistedMounts.map((mount) => receivedRow(null, mount, listed));
   };
   return (
     <div ref={props.ref} data-testid="sharing-view" className="min-h-0 flex-1 overflow-y-auto pb-2">
@@ -627,15 +693,19 @@ export function SharingPanel(props: {
       ) : null}
       {props.granted ? (
         <Section lane="granted" view={props.granted} setup={props.grantedSetup} actions={actions}>
-          {(answer) => groupShares(answer.rows).map((group) => (
-            <GrantedRow key={group.shareId} group={group} waiting={props.waiting.get(group.shareId)} invitations={props.invitations}
-              confirming={props.confirmShareId === group.shareId} busy={props.busyShareId === group.shareId} actions={actions} />
-          ))}
+          {(answer) => {
+            const groups = groupShares(answer.rows);
+            const repeated = repeatedNames(groups.map((group) => shareSubject(liveGrant(group)).name));
+            return groups.map((group) => (
+              <GrantedRow key={group.shareId} group={group} repeated={repeated} waiting={props.waiting.get(group.shareId)}
+                invitations={props.invitations} confirming={props.confirmShareId === group.shareId}
+                busy={props.busyShareId === group.shareId} actions={actions} />
+            ));
+          }}
         </Section>
       ) : null}
       <Section lane="received" view={received} setup={props.receivedSetup} actions={actions} local={unlisted}>
-        {(answer) => answer.rows.flatMap((row) => row.kind === "share"
-          ? [receivedRow(row, mounts.find((mount) => mount.shareId === row.shareId), true)] : [])}
+        {() => receivedRows.map((row) => receivedRow(row, mountOf(row.shareId), true))}
       </Section>
     </div>
   );
