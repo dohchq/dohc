@@ -277,7 +277,7 @@ const ROW_MENU_WIDTH = 200;
 // is open. Inside the scroller, so its focus halos are inset.
 const ROW_ACTIONS = [
   "pointer-events-none absolute bottom-0 right-1 flex h-6 items-center gap-0.5 pl-4 opacity-0 transition-opacity duration-75",
-  "bg-[image:linear-gradient(to_right,transparent,var(--color-hover)_16px),linear-gradient(to_right,transparent,var(--color-panel)_16px)]",
+  "bg-[image:linear-gradient(to_right,transparent,var(--dohc-hover)_16px),linear-gradient(to_right,transparent,var(--dohc-panel)_16px)]",
   "[&_button:focus-visible]:-outline-offset-2",
   "group-hover:pointer-events-auto group-hover:opacity-100",
   "keyboard:group-focus-within:pointer-events-auto keyboard:group-focus-within:opacity-100",
