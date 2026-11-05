@@ -5939,6 +5939,15 @@ mod tests {
             1,
             "registration removes the outbox row"
         );
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, 1)",
+                ["D".repeat(43)],
+            )
+            .is_err(),
+            "an outbox row needs its reference"
+        );
     }
 
     #[test]

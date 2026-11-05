@@ -23,9 +23,6 @@ use serde::{Deserialize, Serialize};
 /// The length of a reference: 32 random bytes in unpadded base64url.
 pub const WORK_REFERENCE_LENGTH: usize = 43;
 
-/// The longest text id a transactional record may have.
-pub const MAX_TRANSACTIONAL_RECORD_ID_BYTES: usize = 1024;
-
 /// What a caller asks to reference. A version-scoped target without a
 /// `versionId` uses the active version.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -308,17 +305,7 @@ fn make_in(
             now_ms,
         ],
     );
-    match inserted {
-        Ok(_) => {}
-        // Only a repeated random reference can collide here: the target was
-        // looked up in this transaction.
-        Err(rusqlite::Error::SqliteFailure(error, _))
-            if error.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            return Err(DomainError::DuplicateId);
-        }
-        Err(error) => return Err(DomainError::sql_persist(error)),
-    }
+    inserted.map_err(insert_error)?;
     tx.execute(
         "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, ?2)",
         params![reference, now_ms],
@@ -328,6 +315,19 @@ fn make_in(
         reference,
         created: true,
     })
+}
+
+/// A repeated random reference is a duplicate. Any other refusal is a store
+/// failure: the target was looked up in this transaction.
+fn insert_error(error: rusqlite::Error) -> DomainError {
+    match &error {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+        {
+            DomainError::DuplicateId
+        }
+        _ => DomainError::sql_persist(error),
+    }
 }
 
 /// Check that `input` names work that exists here, and return its stable
@@ -681,9 +681,13 @@ fn record_path(
     version_id: &str,
     record_id: &str,
 ) -> Result<Option<String>, DomainError> {
+    // The record's file decides: a deleted file leaves no snapshot, even
+    // before the Collection index catches up.
     conn.prepare_cached(
-        "SELECT file_path FROM collection_records \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND record_id = ?3",
+        "SELECT s.path FROM collection_records r \
+         JOIN snapshots s ON s.workspace_id = r.workspace_id \
+           AND s.version_id = r.version_id AND s.object_id = r.object_id \
+         WHERE r.workspace_id = ?1 AND r.version_id = ?2 AND r.record_id = ?3",
     )
     .map_err(DomainError::sql_corrupt)?
     .query_row(params![workspace_id, version_id, record_id], |row| {
@@ -751,9 +755,7 @@ fn transactional_record_key(record_id: &TransactionalRecordId) -> Result<String,
     const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
     let valid = match record_id {
         TransactionalRecordId::Number(number) => number.unsigned_abs() <= MAX_SAFE_INTEGER,
-        TransactionalRecordId::Text(text) => {
-            !text.is_empty() && text.len() <= MAX_TRANSACTIONAL_RECORD_ID_BYTES
-        }
+        TransactionalRecordId::Text(text) => !text.is_empty(),
     };
     let invalid = || DomainError::InvalidInput {
         reason: "recordId is not a transactional record id",
@@ -767,6 +769,46 @@ fn transactional_record_key(record_id: &TransactionalRecordId) -> Result<String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_repeated_reference_is_a_duplicate() {
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let mut store = EngineStore::open(&root.path().join("engine.db"), 1).unwrap();
+        let outcome = store
+            .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                let insert = |reference: String, kind: &str, target: &str| {
+                    tx.execute(
+                        "INSERT INTO work_references(reference, workspace_id, target_kind, \
+                         target_id, dataset_id, created_at_ms) VALUES (?1, 'ws', ?2, ?3, 'd', 1)",
+                        params![reference, kind, target],
+                    )
+                    .map(|_| ())
+                    .map_err(insert_error)
+                };
+                insert("A".repeat(43), "transactionalCollection", "t")?;
+                Ok::<_, DomainError>([
+                    insert("A".repeat(43), "transactionalCollection", "other"),
+                    insert("B".repeat(43), "transactionalCollection", "t"),
+                    insert("C".repeat(43), "message", "m"),
+                ])
+            })
+            .unwrap();
+        let TxnOutcome::Committed([repeated, same_target, wrong_kind]) = outcome else {
+            panic!("the inserts crashed");
+        };
+        assert!(
+            matches!(repeated, Err(DomainError::DuplicateId)),
+            "{repeated:?}"
+        );
+        assert!(
+            matches!(same_target, Err(DomainError::Storage(_))),
+            "{same_target:?}"
+        );
+        assert!(
+            matches!(wrong_kind, Err(DomainError::Storage(_))),
+            "{wrong_kind:?}"
+        );
+    }
 
     #[test]
     fn a_minted_reference_is_256_url_safe_bits() {

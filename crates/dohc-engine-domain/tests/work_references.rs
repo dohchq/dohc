@@ -399,6 +399,144 @@ fn a_deleted_target_resolves_as_deleted() {
 }
 
 #[test]
+fn a_new_file_at_a_deleted_path_is_a_new_target() {
+    let (_scratch, _db, mut store) = fresh();
+    write(&mut store, MAIN, "notes/plan.md", "first", "First", 2);
+    let old = make(&mut store, &file_by_path("notes/plan.md"), 3).reference;
+    delete(&mut store, "notes/plan.md", 4);
+    write(&mut store, MAIN, "notes/plan.md", "second", "Second", 5);
+
+    assert_eq!(
+        found(&store, &old),
+        (
+            WorkTarget::File {
+                version_id: MAIN.to_owned(),
+                object_id: "first".to_owned()
+            },
+            WorkTargetState::Deleted,
+            None
+        )
+    );
+    let new = make(&mut store, &file_by_path("notes/plan.md"), 6);
+    assert!(new.created);
+    assert_ne!(new.reference, old);
+    assert_eq!(
+        found(&store, &new.reference),
+        (
+            WorkTarget::File {
+                version_id: MAIN.to_owned(),
+                object_id: "second".to_owned()
+            },
+            WorkTargetState::Live,
+            Some("notes/plan.md".to_owned())
+        )
+    );
+}
+
+#[test]
+fn a_deleted_record_collection_or_app_resolves_as_deleted() {
+    let (_scratch, _db, mut store) = fresh();
+    write(
+        &mut store,
+        MAIN,
+        "people/collection.yaml",
+        "schema",
+        "name: People\n",
+        2,
+    );
+    write(
+        &mut store,
+        MAIN,
+        "people/ada.md",
+        "ada",
+        &format!("---\nid: {RECORD}\n---\n"),
+        3,
+    );
+    write(
+        &mut store,
+        MAIN,
+        "apps/trip/index.html",
+        "trip",
+        "<p>Trip</p>",
+        4,
+    );
+    reconcile(&mut store);
+    let record = make(
+        &mut store,
+        &WorkTargetInput::DocumentRecord {
+            version_id: None,
+            record_id: RECORD.to_owned(),
+        },
+        5,
+    )
+    .reference;
+    let collection = make(
+        &mut store,
+        &WorkTargetInput::DocumentCollection {
+            version_id: None,
+            path: "people".to_owned(),
+        },
+        5,
+    )
+    .reference;
+    let app = make(
+        &mut store,
+        &WorkTargetInput::App {
+            version_id: None,
+            object_id: None,
+            path: Some("apps/trip/index.html".to_owned()),
+        },
+        5,
+    )
+    .reference;
+    for reference in [&record, &collection, &app] {
+        assert_eq!(found(&store, reference).1, WorkTargetState::Live);
+    }
+
+    // Each reads as deleted as soon as its file is gone, and stays deleted
+    // once the Collection index catches up.
+    delete(&mut store, "people/ada.md", 6);
+    assert_eq!(found(&store, &record).1, WorkTargetState::Deleted);
+    delete(&mut store, "people/collection.yaml", 7);
+    assert_eq!(found(&store, &collection).1, WorkTargetState::Deleted);
+    delete(&mut store, "apps/trip/index.html", 8);
+    reconcile(&mut store);
+    assert_eq!(
+        found(&store, &record),
+        (
+            WorkTarget::DocumentRecord {
+                version_id: MAIN.to_owned(),
+                record_id: RECORD.to_owned()
+            },
+            WorkTargetState::Deleted,
+            None
+        )
+    );
+    assert_eq!(
+        found(&store, &collection),
+        (
+            WorkTarget::DocumentCollection {
+                version_id: MAIN.to_owned(),
+                object_id: "schema".to_owned()
+            },
+            WorkTargetState::Deleted,
+            None
+        )
+    );
+    assert_eq!(
+        found(&store, &app),
+        (
+            WorkTarget::App {
+                version_id: MAIN.to_owned(),
+                object_id: "trip".to_owned()
+            },
+            WorkTargetState::Deleted,
+            None
+        )
+    );
+}
+
+#[test]
 fn each_version_of_a_file_has_its_own_reference() {
     let (_scratch, _db, mut store) = fresh();
     write(&mut store, MAIN, "plan.md", "plan", "Plan", 2);
@@ -556,6 +694,18 @@ fn transactional_targets_keep_their_record_id_type() {
     )
     .reference;
     assert_ne!(number, text);
+    // A dataset accepts any nonempty text key; the request cap bounds it.
+    let long_id = TransactionalRecordId::Text("r".repeat(4096));
+    let long = make(&mut store, &record(long_id.clone()), 2);
+    assert!(long.created);
+    assert_eq!(
+        found(&store, &long.reference).0,
+        WorkTarget::TransactionalRecord {
+            dataset_id: DATASET.to_owned(),
+            table_id: TABLE.to_owned(),
+            record_id: long_id
+        }
+    );
     assert_eq!(
         make(&mut store, &record(TransactionalRecordId::Number(7)), 3).reference,
         number

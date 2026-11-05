@@ -774,6 +774,16 @@ mod tests {
     }
 
     #[test]
+    fn backup_compares_work_reference_tables() {
+        for table in ["work_references", "work_reference_outbox"] {
+            assert!(
+                COMPARED_TABLES.contains(&table),
+                "backup restore verification must compare {table}"
+            );
+        }
+    }
+
+    #[test]
     fn backup_compares_owner_ydoc_outbox_tables() {
         for table in [
             "owner_ydoc_outboxes",
