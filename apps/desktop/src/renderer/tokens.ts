@@ -81,7 +81,9 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     ink: "#f6f4ee",
     hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
     selected: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
-    scrim: "rgba(0, 0, 0, 0.40)",
+    // Black dims a near-black page far less than a paper one, so dark needs
+    // more of it for the page behind a dialog to recede.
+    scrim: "rgba(0, 0, 0, 0.65)",
     muted: "#a9a599",
     subtle: "#7d7a6e",
     accent: "#d7d0c0",
