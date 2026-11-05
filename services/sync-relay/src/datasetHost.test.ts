@@ -600,15 +600,20 @@ it("keeps an app working when its Collection moves, or when its dataset.json com
   await f.invoke(link, id(5), {name: "Late"}, publicationId, "late");
 });
 
-it("fails closed when another Collection takes a moved Collection's old folder", async () => {
+it("keeps an app working when another Collection takes its moved Collection's old folder (#3186)", async () => {
   const f = await fixture(); await f.activate(); pushFile(f.storage, "dataset", null, collectionFile());
   const publicationId = f.publish(), link = f.link("friend");
   pushFile(f.storage, "dataset", collectionFile(), collectionFile("archive/registrations/dataset.json"));
   pushFile(f.storage, "other", null, {path: "registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
   await f.invoke(link, id(5), {name: "Moved"}, publicationId, "moved");
   f.advance(120_000);
+  await f.invoke(link, id(5), {name: "Still moved"}, publicationId, "still-moved");
+  // The other Collection's file at the old folder never stands in for this one.
+  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), null);
+  await f.invoke(link, id(5), {name: "Deleted"}, publicationId, "deleted");
+  f.advance(120_000);
   await expect(f.invoke(link, id(5), {name: "Refused"}, publicationId, "refused")).rejects.toMatchObject(collectionMissing);
-  expect((await f.invoke(owner, id(6))).result).toMatchObject([{name: "Moved"}]);
+  expect((await f.invoke(owner, id(6))).result).toHaveLength(3);
 });
 
 it("looks for a root Collection's dataset.json at the workspace root", async () => {
