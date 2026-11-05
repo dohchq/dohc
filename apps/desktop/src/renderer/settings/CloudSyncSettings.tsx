@@ -3,7 +3,7 @@ import { Sparkles, TriangleAlert } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
-import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { formatChatTime } from "../time";
@@ -298,7 +298,11 @@ export function CloudSyncSettings(props: {
             title="Sync this workspace"
             testId="settings-row-sync-workspace"
             description={
-              unconfirmed ? (
+              unconfirmed && !status.connected ? (
+                // Disconnecting is a choice, not a fault: Connect server sits
+                // in the row above.
+                <span data-testid="cloud-workspace-not-connected">{SYNC_NOT_CONNECTED}</span>
+              ) : unconfirmed ? (
                 <span data-testid="cloud-workspace-relink" className="flex gap-1 text-danger">
                   <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
                   <span>{SYNC_UNCONFIRMED_ACCOUNT}</span>

@@ -4949,7 +4949,7 @@ describe("a page delete refused while History is off", () => {
 // account again the way Settings' Try again does, opens Settings at the sync
 // row, and pauses nothing: once the account is confirmed, sync reads normal.
 it("reads the account again from Notices, opens Sync settings, and pauses nothing", async () => {
-  let status: SyncStatusResult = { ...SYNC_STATUS, state: "account-unconfirmed", accountUnconfirmed: "other-account" };
+  let status: SyncStatusResult = { ...SYNC_STATUS, state: "account-unconfirmed" };
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
     cloudEnableSync: vi.fn(async () => {
       status = { ...SYNC_STATUS };
@@ -4981,5 +4981,32 @@ it("reads the account again from Notices, opens Sync settings, and pauses nothin
   act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
   await waitFor(() => expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("synced"));
   expect(screen.queryByTestId("notice-account-unconfirmed")).toBeNull();
+  expect(bridge.cloudStopSync).not.toHaveBeenCalled();
+});
+
+// Nobody is connected, which is a choice, not a fault. Its row offers the same
+// connect flow as Settings' Connect server, never Try again, and pauses
+// nothing.
+it("offers Connect server from Notices while nobody is connected, and pauses nothing", async () => {
+  const status: SyncStatusResult = { ...SYNC_STATUS, state: "not-connected" };
+  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+    cloudEnableSync: vi.fn(),
+    cloudStopSync: vi.fn(),
+  });
+  bridge.openWorkspace = vi.fn(async () => status);
+  bridge.getSyncStatus = vi.fn(async () => status);
+  bridge.cloudStatus = vi.fn(async () => ({ connected: false, email: "", serverUrl: "", workspaceSynced: true }));
+  renderShell(bridge);
+  const user = userEvent.setup();
+
+  const title = await screen.findByTestId("sync-status");
+  expect(title.textContent).toBe("Connect server to sync");
+  expect(title.textContent).not.toBe("Couldn't confirm account");
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const row = await screen.findByTestId("notice-not-connected");
+  expect(within(row).queryByRole("button", { name: "Try again" })).toBeNull();
+  await user.click(within(row).getByRole("button", { name: "Connect server" }));
+  expect(await screen.findByTestId("cloud-sync-panel")).toBeTruthy();
+  expect(bridge.cloudEnableSync).not.toHaveBeenCalled();
   expect(bridge.cloudStopSync).not.toHaveBeenCalled();
 });

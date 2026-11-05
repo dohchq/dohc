@@ -96,11 +96,11 @@ export interface WorkspaceActivityOptions {
   onHeldFiles?: (workspaceId: string, files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
   observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
   onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
-  // Live facts main owns: why it can't confirm the account that syncs this
-  // workspace (absent when it can, or when the workspace doesn't sync), and
-  // the workspace's saved pause.
+  // Live facts main owns: why a synced workspace can't sync on this
+  // computer's session (absent when it can, or when the workspace doesn't
+  // sync), and the workspace's saved pause.
   cloudStateFor?: (workspaceId: string) => {
-    accountUnconfirmed?: "signed-out" | "other-account";
+    syncBlocked?: "not-connected" | "account-unconfirmed";
     syncPause?: SyncStatusResult["syncPause"];
   };
   // Builds a sync engine for a workspace when it is enabled and connected;
@@ -280,11 +280,6 @@ export function createWorkspaceActivity(
     const collectionsWaitingForSync: SyncStatusResult["collectionsWaitingForSync"] =
       state.syncPauseReopenFailed ? "reopen" : w?.collectionsWaiting ? "sync" : undefined;
     const conflictCount = snap?.conflictCount ?? 0;
-    // An engine whose sign-in the server refused stops. Like a signed-out or
-    // other account, that leaves the account unconfirmed and records no
-    // pause, so sync runs again once the account is confirmed.
-    const accountUnconfirmed: SyncStatusResult["accountUnconfirmed"] =
-      cloud.accountUnconfirmed ?? (snap?.authExpired ? "sign-in-expired" : undefined);
     const status = deriveSyncStatus({
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
@@ -292,7 +287,12 @@ export function createWorkspaceActivity(
       // A retry someone asked for shows as syncing until it ends.
       syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
       // An engine stopped on the relay API version names the side to update.
-      syncBlocked: snap?.updateRequired ? "update-required" : accountUnconfirmed ? "account-unconfirmed" : null,
+      // One whose sign-in the server refused stops too, leaving the account
+      // unconfirmed. Neither records a pause, so sync runs again once the
+      // session is confirmed.
+      syncBlocked: snap?.updateRequired
+        ? "update-required"
+        : cloud.syncBlocked ?? (snap?.authExpired ? "account-unconfirmed" : null),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and
@@ -302,7 +302,6 @@ export function createWorkspaceActivity(
     const historyCaptureDetail = w?.historyCaptureDetail ?? null;
     const baseStatus = {
       ...status,
-      ...(status.state === "account-unconfirmed" && accountUnconfirmed ? { accountUnconfirmed } : {}),
       ...(syncPause ? { syncPause } : {}),
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),

@@ -8,6 +8,7 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   "local-changes": "Local changes",
   conflict: "Conflict",
   "sync-failed": "Sync failed",
+  "not-connected": "Connect server to sync",
   "account-unconfirmed": "Couldn't confirm account",
   // The update the title bar names replaces it.
   "update-required": "Sync stopped",
@@ -16,13 +17,14 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
 // The tooltip and accessible name, where the words beside the dot can't say
 // enough.
 const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
-  "account-unconfirmed": "Not syncing. dohc could not confirm this workspace's account.",
+  "not-connected": "Not syncing. Connect your server to sync this workspace.",
+  "account-unconfirmed": "Not syncing. dohc couldn't confirm this workspace's account.",
 };
 
 // The dot's shape says the kind of state before its color does: filled is
 // settled, a ring is still working or waiting, a triangle needs the person.
-// Only a state that needs the person shows its words; the rest keep them for
-// the accessible name and the tooltip.
+// A state that needs the person shows its words, and so does a wait only the
+// person can end; the rest keep them for the accessible name and the tooltip.
 type DotKind = "saved" | "working" | "waiting" | "attention";
 
 const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
@@ -31,6 +33,8 @@ const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
   "local-changes": "working",
   conflict: "attention",
   "sync-failed": "attention",
+  // Disconnecting is a choice, not a fault.
+  "not-connected": "waiting",
   "account-unconfirmed": "attention",
   "update-required": "attention",
 };
@@ -71,16 +75,16 @@ function liveDeliveryLabel(
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
-// The sync state names the server as the problem. An account dohc can't
-// confirm is not the server's fault, so it never does.
+// The sync state names the server as the problem. No server connection, or
+// an account dohc can't confirm, is not the server's fault, so neither does.
 export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
   return syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable";
 }
 
 // The title bar says "Server unreachable". Features that need the server
 // then add no indicator, toast or row of their own, since the server's
-// report covers them. A failed save or a required update
-// takes the title bar's words, and then they show again.
+// report covers them. A failed save or a required update takes the title
+// bar's words, and then they show again.
 export function titleBarNamesServer(syncStatus: SyncStatusResult | null | undefined, failedSaves: number): boolean {
   return syncNamesServer(syncStatus) && !syncStatus?.updateRequired &&
     saveFailedLabel(syncStatus ?? null, failedSaves) === null;
@@ -126,8 +130,9 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
     : state
       ? SYNC_DOT[state]
       : "waiting";
-  // A state that needs the person says so in words beside the dot.
-  const worded = dot === "attention";
+  // A state that needs the person says so in words beside the dot, and so
+  // does a state waiting on the person rather than on dohc.
+  const worded = dot === "attention" || (dot === "waiting" && state !== undefined);
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either. Live editing waits on a server the
   // title bar already names.

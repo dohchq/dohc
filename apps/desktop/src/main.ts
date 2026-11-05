@@ -2530,7 +2530,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       syncPause: workspace ? syncPauseFor(workspace, localInstallationId()) : undefined,
       // Legacy and different-account bindings stay local-only.
       ...(remote && !workspaceRemoteMatchesCredentials(remote, cachedCredentials)
-        ? { accountUnconfirmed: cachedCredentials ? "other-account" as const : "signed-out" as const }
+        ? { syncBlocked: cachedCredentials ? "account-unconfirmed" as const : "not-connected" as const }
         : {}),
     };
   },

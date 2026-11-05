@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { Overlay } from "../Overlay";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
 import {
@@ -114,6 +114,12 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("settings-row-account")).toBeNull();
     expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
+    // Disconnecting was a choice: the line names the way back, not a fault.
+    const row = within(screen.getByTestId("settings-row-sync-workspace"));
+    expect(row.getByTestId("cloud-workspace-not-connected").textContent).toBe(SYNC_NOT_CONNECTED);
+    expect(row.queryByTestId("cloud-workspace-relink")).toBeNull();
+    expect(row.queryByText(/confirm/)).toBeNull();
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Pause sync"]);
 
     const pause = screen.getByRole("button", { name: "Pause sync" });
     pause.focus();
@@ -718,6 +724,7 @@ describe("CloudSyncSettings", () => {
     expect(mark.getAttribute("class")).toContain("lucide-triangle-alert");
     expect(mark.getAttribute("aria-hidden")).toBe("true");
     expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Pause sync"]);
+    expect(row.queryByTestId("cloud-workspace-not-connected")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
   });
 
