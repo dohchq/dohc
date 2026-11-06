@@ -57,6 +57,7 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   onError(fallback: string, error: unknown, retry: (() => void) | null, identity?: string): void;
   /** The records loaded, so the row their last failed load left in Notices goes. */
   onSettled?(identity: string): void;
+  /** A change that answered after the page closed, which the page can no longer show. */
   onNotice?(message: string): void;
   /** Shell-owned confirmation states the real recovery path before deletion. */
   confirmDelete?(row: TransactionalRow): Promise<boolean>;
@@ -182,7 +183,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const trigger = useRef<HTMLElement | null>(null);
   const currentQuery = useRef(query); currentQuery.current = query;
   const loadedVersion = useRef(props.recordsVersion), changedVersion = useRef(props.recordsChanged);
-  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); readActive.current?.abort(); openRecordRead.current?.abort(); }; }, []);
+  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; readActive.current?.abort(); openRecordRead.current?.abort(); }; }, []);
   useLayoutEffect(() => { if (editor) (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button")?.focus(); }, [editor]);
 
   function request(operation: DatasetOperation, input: AppBackendJson, key: string): TransactionalInvoke {
@@ -347,11 +348,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     try {
       const submission = change.request ??= request(change.operation, change.input, change.key);
       const response = await invoke(submission, abort.signal);
-      if (!alive.current || abort.signal.aborted) return;
+      if (abort.signal.aborted) return;
+      // The page shows its own change. Once it has closed, a notice says the change saved, and in which Collection.
+      if (!alive.current) { if (table) onNotice?.(`${change.undo ? "Reversed the last edit" : change.label} in ${table.name}`); return; }
       setUndo(priorContract.current === contractKey ? undoFromReceipt(change, response.result) : null);
       mutation.current = null; setPending(null); closeEditor();
       locked.current = false; setBusy(false);
-      onNotice?.(change.undo ? "Reversed the last edit" : change.label);
       if (priorContract.current === contractKey) await load(currentQuery.current);
     } catch (cause) {
       if (alive.current && !abort.signal.aborted) {
