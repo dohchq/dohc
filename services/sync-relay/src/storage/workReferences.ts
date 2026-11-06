@@ -8,6 +8,7 @@ import {fileSideOf, filterOpForShare, pathVisibleThroughShare, targetVersionId, 
 import type {StorageContext} from "./context";
 
 export const WORK_REFERENCE_BATCH = 128;
+export const WORK_REFERENCE_SCAN_LIMIT = 1024;
 export function indexReceivedWorkTargets(storage: StorageContext, rows: readonly {
   recipient: ReceivedRecipient; workspaceId: string; objectId: string; objectToken: string; sourceHandle: string;
 }[]): void {
@@ -84,7 +85,7 @@ function scope(storage: StorageContext, workspaceId: string, target: WorkTarget,
   }
   if (target.kind === "transactionalCollection" || target.kind === "transactionalRecord") {
     const proof = datasetAccess?.get(targetJson(target));
-    return proof ? {versionId: null, objectId: null, path: null, live: proof()} : null;
+    return {versionId: null, objectId: null, path: null, live: proof?.() ?? false};
   }
   let objectId: string;
   if (target.kind === "documentRecord") {
@@ -158,8 +159,7 @@ export function registerWorkReferencesInTransaction(storage: StorageContext, inp
       if (known) {
         if (known.workspace_id !== input.workspaceId || known.target_json !== targetJson(mapping.target)) throw notFound();
         const current = scope(storage, input.workspaceId, mapping.target, input.datasetAccess);
-        if (current) storage.db.prepare(`UPDATE sync_relay_work_reference_scopes SET deleted=?,last_path=coalesce(?,last_path) WHERE reference=?`)
-          .run(current.live ? 0 : 1, current.path, mapping.reference);
+        if (current) refreshScope(storage, mapping.reference, current);
         registered.push(mapping.reference);
         continue;
       }
@@ -190,6 +190,12 @@ export async function makeWorkReference(storage: StorageContext, input: {
         .get(...recipient, source ?? "", target.objectId);
       if (!row) throw notFound();
       target = {...target, objectId: String(row.object_id)};
+    }
+    if (!owner && target.kind === "message") {
+      const wire = storage.findThreadCreateChannelWireId(input.workspaceId, target.threadId);
+      const channel = wire && storage.db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
+        AND json_extract(payload_json,'$.wireId')=? ORDER BY relay_seq LIMIT 1`).get(input.workspaceId, wire);
+      target = {...target, channelId: channel ? JSON.parse(String(channel.payload_json)).channelId : null};
     }
     const current = scope(storage, input.workspaceId, target, datasetAccess);
     if (!current?.live || !owner && !grants.some(grant => readable(storage, input.workspaceId, target, current, grant))) throw notFound();
@@ -230,8 +236,12 @@ function resolveIn(storage: StorageContext, input: Parameters<typeof resolveWork
   const recipient: ReceivedRecipient = input.reader.kind === "user" ? ["user", input.reader.userId] : ["link", input.reader.grantId];
   const identity = createReceivedIdentity(input.identityKey), sourceHandle = identity.source(recipient, workspaceId);
   if (!sourceHandle) return unavailable;
-  // Chat and record ids are served unchanged by the share log and Collection reads.
-  const projected = "objectId" in target ? {...target, objectId: identity.object(recipient, workspaceId, target.objectId)!} : target;
+  // Message, thread, and record ids match the share's other read paths.
+  let projected = "objectId" in target ? {...target, objectId: identity.object(recipient, workspaceId, target.objectId)!} : target;
+  if (projected.kind === "message" && (input.reader.kind === "link" || fileSideOf(grant.effectiveSelector))) {
+    const {channelId: _channelId, ...message} = projected;
+    projected = message;
+  }
   if (input.reader.kind === "link") input.reader.requireSession();
   if ("objectId" in target && "objectId" in projected) {
     observed.push({recipient, workspaceId, objectId: target.objectId, objectToken: projected.objectId, sourceHandle});
@@ -241,69 +251,91 @@ function resolveIn(storage: StorageContext, input: Parameters<typeof resolveWork
 
 export async function listWorkReferences(storage: StorageContext, input: {
   workspaceId: string; reader: WorkReferenceReader; after?: string; identityKey?: string | Uint8Array;
-}): Promise<{references: WorkReferenceMapping[]; nextAfter: string | null; hasMore: boolean}> {
+}): Promise<{references: WorkReferenceMapping[]; nextAfter: string; hasMore: boolean}> {
   const observed: Parameters<typeof indexReceivedWorkTargets>[1][number][] = [];
   const owner = input.reader.kind === "user" && storage.workspaceIsOwnedBy(input.workspaceId, input.reader.userId);
   const identity = JSON.stringify([input.workspaceId, input.reader.kind, input.reader.kind === "user" ? input.reader.userId : input.reader.grantId,
     input.reader.grantId ?? null]);
   const key = input.identityKey && createHash("sha256").update(input.identityKey).digest();
   const authorize = () => {
-    if (owner ? !(input.reader.kind === "user" && storage.workspaceIsOwnedBy(input.workspaceId, input.reader.userId)) :
-        !key || !authorizations(storage, input.workspaceId, input.reader).length) throw notFound();
+    if (owner) {
+      if (!(input.reader.kind === "user" && storage.workspaceIsOwnedBy(input.workspaceId, input.reader.userId))) throw notFound();
+      return "";
+    }
+    const grants = authorizations(storage, input.workspaceId, input.reader);
+    if (!key || !grants.length) throw notFound();
+    return createHash("sha256").update(stableJsonStringify(grants.map(grant => [
+      grant.grant.grantId, grant.grant.generation, grant.effectiveSelector,
+    ]))).digest("hex");
   };
-  storage.readLiveAuthority(authorize);
+  const shareVersion = storage.readLiveAuthority(authorize);
   let after = input.after ?? "0";
   if (!owner && input.after) {
     try {
-      if (after.length > 2048) throw notFound();
-      const bytes = Buffer.from(after, "base64url"), decipher = createDecipheriv("aes-256-gcm", key!, bytes.subarray(0, 12));
+      if (after.length !== 144) throw notFound();
+      const bytes = Buffer.from(after, "base64url");
+      if (bytes.length !== 108) throw notFound();
+      const decipher = createDecipheriv("aes-256-gcm", key!, bytes.subarray(0, 12));
       decipher.setAAD(Buffer.from(identity));
       decipher.setAuthTag(bytes.subarray(12, 28));
-      after = Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString("utf8");
+      const cursor = Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString("utf8");
+      after = cursor.slice(16) === shareVersion ? cursor.slice(0, 16) : "0";
     } catch { throw notFound(); }
   }
   if (!/^\d+$/.test(after) || !Number.isSafeInteger(Number(after))) throw notFound();
-  let scanAfter = Number(after);
+  let scanAfter = Number(after), scanned = 0, exhausted = false;
   const proofs = new Map<string, () => boolean>();
   const admitted: {seq: number; mapping: WorkReferenceMapping}[] = [];
-  // Hidden rows never determine the public continuation. Only an authorized lookahead does.
-  while (admitted.length <= WORK_REFERENCE_BATCH) {
+  const mappingAt = (row: {reference: unknown; target_json: unknown; created_at_ms: unknown}, datasetAccess: DatasetReferenceAccess): WorkReferenceMapping | null => {
+    const target = decodeWorkTarget(JSON.parse(String(row.target_json)));
+    if (owner) return {reference: String(row.reference), target, createdAtMs: Number(row.created_at_ms),
+      deleted: !scope(storage, input.workspaceId, target, datasetAccess)?.live};
+    const resolved = resolveIn(storage, {...input, reference: String(row.reference)}, observed, datasetAccess);
+    return resolved.status === "found" ? {reference: resolved.reference, target: resolved.target, createdAtMs: resolved.createdAtMs} : null;
+  };
+  const checkAuthority = () => { if (authorize() !== shareVersion) throw notFound(); };
+  while (admitted.length <= WORK_REFERENCE_BATCH && scanned < WORK_REFERENCE_SCAN_LIMIT) {
+    const limit = Math.min(WORK_REFERENCE_BATCH, WORK_REFERENCE_SCAN_LIMIT - scanned);
     const rows = storage.readLiveAuthority(() => {
-      authorize();
-      return storage.db.prepare(`SELECT seq,reference,target_json FROM sync_relay_work_references WHERE workspace_id=? AND seq>?
-        ORDER BY seq LIMIT ?`).all(input.workspaceId, scanAfter, WORK_REFERENCE_BATCH);
+      checkAuthority();
+      return storage.db.prepare(`SELECT seq,reference,target_json,created_at_ms FROM sync_relay_work_references WHERE workspace_id=? AND seq>?
+        ORDER BY seq LIMIT ?`).all(input.workspaceId, scanAfter, limit);
     });
-    if (!rows.length) break;
+    scanned += rows.length;
+    if (!rows.length) { exhausted = true; break; }
     const datasetAccess = await prepareDatasetAccess(storage, input.workspaceId, input.reader,
       rows.map(row => decodeWorkTarget(JSON.parse(String(row.target_json)))));
     storage.readLiveAuthority(() => {
-      authorize();
+      checkAuthority();
       for (const row of rows) {
         scanAfter = Number(row.seq);
-        const resolved = resolveIn(storage, {...input, reference: String(row.reference)}, observed, datasetAccess);
-        if (resolved.status === "found") {
+        const mapping = mappingAt(row as Parameters<typeof mappingAt>[0], datasetAccess);
+        if (mapping) {
           const proof = datasetAccess.get(String(row.target_json));
           if (proof) proofs.set(String(row.target_json), proof);
-          admitted.push({seq: scanAfter, mapping: {
-            reference: resolved.reference, target: resolved.target, createdAtMs: resolved.createdAtMs,
-          }});
+          admitted.push({seq: scanAfter, mapping});
         }
         if (admitted.length > WORK_REFERENCE_BATCH) break;
       }
     });
-    if (rows.length < WORK_REFERENCE_BATCH) break;
+    if (rows.length < limit) { exhausted = true; break; }
   }
-  // Recheck the complete page after any asynchronous dataset read.
   const page = storage.readLiveAuthority(() => {
-    authorize();
-    const authorized = admitted.filter(row => resolveIn(storage, {...input, reference: row.mapping.reference}, [], proofs).status === "found");
+    checkAuthority();
+    const authorized = admitted.flatMap(row => {
+      const stored = storage.db.prepare(`SELECT reference,target_json,created_at_ms FROM sync_relay_work_references WHERE reference=?`).get(row.mapping.reference);
+      const mapping = stored && mappingAt(stored as Parameters<typeof mappingAt>[0], proofs);
+      return mapping ? [{seq: row.seq, mapping}] : [];
+    });
     const visible = authorized.slice(0, WORK_REFERENCE_BATCH);
-    const hasMore = authorized.length > WORK_REFERENCE_BATCH;
-    let nextAfter = visible.length ? String(hasMore ? visible.at(-1)!.seq : scanAfter) : owner ? String(scanAfter) : input.after ?? null;
-    if (nextAfter && !owner && visible.length) {
+    const lookahead = authorized.length > WORK_REFERENCE_BATCH;
+    const hasMore = lookahead || !exhausted && scanned === WORK_REFERENCE_SCAN_LIMIT;
+    const position = String(lookahead ? visible.at(-1)!.seq : scanAfter);
+    let nextAfter = position;
+    if (!owner) {
       const nonce = randomBytes(12), cipher = createCipheriv("aes-256-gcm", key!, nonce);
       cipher.setAAD(Buffer.from(identity));
-      const bytes = Buffer.concat([cipher.update(nextAfter, "utf8"), cipher.final()]);
+      const bytes = Buffer.concat([cipher.update(position.padStart(16, "0") + shareVersion, "utf8"), cipher.final()]);
       nextAfter = Buffer.concat([nonce, cipher.getAuthTag(), bytes]).toString("base64url");
     }
     return {references: visible.map(row => row.mapping), nextAfter, hasMore};
@@ -312,8 +344,18 @@ export async function listWorkReferences(storage: StorageContext, input: {
   return page;
 }
 
+function refreshScope(storage: StorageContext, reference: string, current: Scope): void {
+  const stored = storage.db.prepare(`SELECT version_id,object_id,last_path,deleted FROM sync_relay_work_reference_scopes WHERE reference=?`).get(reference);
+  if (!stored) throw notFound();
+  const path = current.path ?? stored.last_path;
+  if (stored.version_id === current.versionId && stored.object_id === current.objectId && stored.last_path === path && stored.deleted === (current.live ? 0 : 1)) return;
+  storage.db.prepare(`UPDATE sync_relay_work_reference_scopes SET version_id=?,object_id=?,last_path=?,deleted=? WHERE reference=?`)
+    .run(current.versionId,current.objectId,path,current.live ? 0 : 1,reference);
+  storage.db.prepare(`UPDATE sync_relay_work_references SET seq=(SELECT coalesce(max(seq),0)+1 FROM sync_relay_work_references) WHERE reference=?`).run(reference);
+}
+
 export function updateWorkReferenceScopes(storage: StorageContext, workspaceId: string, objectId: string, versionId: string, path: string | null): void {
-  storage.db.prepare(`UPDATE sync_relay_work_reference_scopes SET last_path=coalesce(?,last_path),deleted=?
-    WHERE workspace_id=? AND version_id=? AND object_id=?`)
-    .run(path, path === null ? 1 : 0, workspaceId, versionId, objectId);
+  const rows = storage.db.prepare(`SELECT reference FROM sync_relay_work_reference_scopes WHERE workspace_id=? AND version_id=? AND object_id=?`)
+    .all(workspaceId, versionId, objectId);
+  for (const row of rows) refreshScope(storage, String(row.reference), {versionId,objectId,path,live:path !== null});
 }

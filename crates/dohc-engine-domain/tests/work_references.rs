@@ -30,6 +30,7 @@ fn learned_references_resolve_after_local_rows_without_creating_outbox_entries()
     write(&mut store, MAIN, "notes/plan.md", "plan", "Plan", 2);
     let local = make(&mut store, &file_by_path("notes/plan.md"), 3);
     let mapping = WorkReferenceMapping {
+        deleted: false,
         reference: "B".repeat(43),
         target: WorkTarget::File {
             version_id: MAIN.into(),

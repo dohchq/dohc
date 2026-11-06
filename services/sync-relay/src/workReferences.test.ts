@@ -1,5 +1,5 @@
 import type {StorageContext} from "./storage/context";
-import {afterEach, describe, expect, it} from "vitest";
+import {afterEach, describe, expect, it, vi} from "vitest";
 import {hashLinkBearer} from "./linkSecurity";
 import {LINK_KEY, RELAY_EXCHANGE_KEY, linkRequest, seedLinkGrant, seedLinkSession} from "./testing";
 import {appendLog, chatChannelCreate, chatMessageAppend, chatThreadCreate, claimWorkspace, closeTestStorages, createShare, denialBytes, inspectDatabase, json, jsonBody, moment, putBlob, request, sequenced, storagePath, testHandler, testStorage} from "./testing";
@@ -143,7 +143,7 @@ describe("work reference registration and resolution", () => {
     expect((await handler(request("other", `/sync/shares/${otherShare}/work-references${query}`))).status).toBe(404);
     expect((await handler(request("reader", `/sync/shares/${shareId}/work-references?after=forged`))).status).toBe(404);
     expect(await json(await handler(request("hidden", `/sync/shares/${hiddenShare}/work-references`))))
-      .toMatchObject({references: [], nextAfter: null, hasMore: false});
+      .toMatchObject({references: [], nextAfter: expect.any(String), hasMore: false});
   });
 
   it("resolves version snapshots and rechecks link sessions and grant revocation", async () => {
@@ -184,16 +184,97 @@ describe("work reference registration and resolution", () => {
     expect(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_work_references").get()!.n).toBe(0);
   });
 
-  it("does not reveal any cursor for hundreds of hidden mappings", async () => {
-    const {handler} = await fixture();
-    const shareId = await createShare(handler, "owner", ws, {paths: ["private"], recipientUserId: "reader", access: "view"});
-    const read = () => handler(request("reader", `/sync/shares/${shareId}/work-references`)).then(json);
+  it("keeps mixed and empty recipient cursors fixed-width and skips scanned hidden rows", async () => {
+    const {handler, storage} = await fixture();
+    await appendLog(handler, "owner", ws, [moment("private/hidden.md", "Plan", {originSeq: 1, objectId: "hidden", momentId: "hidden-write"})], {originId: "device"});
+    const shareId = await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "reader", access: "view"});
+    const read = (after?: string) => handler(request("reader", `/sync/shares/${shareId}/work-references${after ? `?after=${encodeURIComponent(after)}` : ""}`)).then(json);
     const empty = await read();
+    await register(handler, [{reference: ref, target, createdAtMs: 1}]);
+    const one = await read();
     for (let start = 0; start < 500; start += 128) {
-      await register(handler, Array.from({length: Math.min(128, 500 - start)}, (_, i) => ({reference: String(start + i).padStart(43, "0"), target, createdAtMs: 1})));
+      await register(handler, Array.from({length: Math.min(128, 500 - start)}, (_, i) => ({reference: String(start + i).padStart(43, "0"), target: {...target, objectId: "hidden"}, createdAtMs: 1})));
     }
-    expect(await read()).toEqual(empty);
-    expect(empty).toEqual({references: [], nextAfter: null, hasMore: false});
+    const mixed = await read();
+    expect(mixed.references).toEqual(one.references);
+    expect(mixed.hasMore).toBe(false);
+    expect(mixed.nextAfter.length).toBe(one.nextAfter.length);
+    expect(empty.nextAfter.length).toBe(one.nextAfter.length);
+    const objects = vi.spyOn(storage, "objectMoment");
+    try {
+      const caughtUp = await read(mixed.nextAfter);
+      expect(caughtUp).toMatchObject({references: [], hasMore: false});
+      expect(caughtUp.nextAfter.length).toBe(empty.nextAfter.length);
+      expect(objects).not.toHaveBeenCalled();
+    } finally { objects.mockRestore(); }
+  });
+
+  it("caps a recipient scan at 1024 rows and continues from its hidden tail", async () => {
+    const {handler, storage} = await fixture();
+    const shareId = await createShare(handler, "owner", ws, {paths: ["private"], recipientUserId: "reader", access: "view"});
+    for (let start = 0; start < 1100; start += 128) {
+      await register(handler, Array.from({length: Math.min(128, 1100 - start)}, (_, i) => ({reference: String(start + i).padStart(43, "0"), target, createdAtMs: 1})));
+    }
+    await appendLog(handler, "owner", ws, [moment("private/visible.md", "Plan", {originSeq: 1, objectId: "visible", momentId: "visible-write"})], {originId: "device"});
+    await register(handler, [{reference: ref, target: {...target, objectId: "visible"}, createdAtMs: 1}]);
+    const objects = vi.spyOn(storage, "objectMoment");
+    try {
+      const first = await json(await handler(request("reader", `/sync/shares/${shareId}/work-references`)));
+      expect(first).toMatchObject({references: [], hasMore: true});
+      expect(objects).toHaveBeenCalledTimes(1024);
+      const second = await json(await handler(request("reader", `/sync/shares/${shareId}/work-references?after=${first.nextAfter}`)));
+      expect(second).toMatchObject({references: [{reference: ref}], hasMore: false});
+    } finally { objects.mockRestore(); }
+  });
+
+  it("resends a binding moved into a share after its saved cursor", async () => {
+    const {handler} = await fixture();
+    await register(handler, [{reference: ref, target, createdAtMs: 1}]);
+    const shareId = await createShare(handler, "owner", ws, {paths: ["private"], recipientUserId: "reader", access: "view"});
+    const first = await json(await handler(request("reader", `/sync/shares/${shareId}/work-references`)));
+    expect(first.references).toEqual([]);
+    await appendLog(handler, "owner", ws, [moment("private/plan.md", "Plan", {originSeq: 1, objectId: "plan", momentId: "move-plan", operation: "rename", beforePath: "notes/plan.md", beforeContent: "Plan", afterPath: "private/plan.md", afterContent: "Plan"})], {originId: "device"});
+    expect(await json(await handler(request("reader", `/sync/shares/${shareId}/work-references?after=${first.nextAfter}`))))
+      .toMatchObject({references: [{reference: ref, target: {kind: "file"}}], hasMore: false});
+  });
+
+  it("restarts a recipient cursor when its share version changes", async () => {
+    const {handler, storage} = await fixture();
+    await register(handler, [{reference: ref, target, createdAtMs: 1}]);
+    const shareId = await createShare(handler, "owner", ws, {paths: ["private"], recipientUserId: "reader", access: "view"});
+    const path = `/sync/shares/${shareId}/work-references`;
+    const first = await json(await handler(request("reader", path)));
+    expect(first.references).toEqual([]);
+    const selector = storage.db.prepare("SELECT selector_json FROM sync_relay_shares WHERE share_id=?").get(shareId)!;
+    const expanded = {...JSON.parse(String(selector.selector_json)), paths: ["notes"]};
+    storage.tx(() => {
+      storage.db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify(expanded), shareId);
+      storage.db.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE share_id=?").run(shareId);
+    });
+    expect(await json(await handler(request("reader", `${path}?after=${first.nextAfter}`))))
+      .toMatchObject({references: [{reference: ref}], hasMore: false});
+  });
+
+  it("omits the local channel id for file-share and link message readers", async () => {
+    const {handler, storage} = await fixture();
+    await appendLog(handler, "owner", ws, sequenced([
+      chatChannelCreate("group"), chatThreadCreate("thread", "group", {linkedObjectId: "plan", linkedPathHint: "notes/plan.md"}),
+      chatMessageAppend("message", "thread", "Plan", {authorUserId: "owner"}),
+    ]), {originId: "chat-device"});
+    const message = {kind: "message", messageId: "message", threadId: "thread", channelId: null};
+    await register(handler, [{reference: ref, target: message, createdAtMs: 1}]);
+    const shareId = await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "reader", access: "view"});
+    const token = "L".repeat(43);
+    seedLinkGrant(storage, {shareId, grantId: "message-link", secretHash: hashLinkBearer("secret", LINK_KEY)});
+    seedLinkSession(storage, {grantId: "message-link", capabilityHash: hashLinkBearer(token, LINK_KEY)});
+    for (const response of [await handler(request("reader", `/sync/work-references/${ref}`)), await handler(linkRequest(token, `/sync/work-references/${ref}`))]) {
+      expect(response.status).toBe(200);
+      const found = await json(response);
+      expect(found.target).toEqual({kind: "message", messageId: "message", threadId: "thread"});
+      expect(await json(await handler(request("reader", "/sync/internal/work-references", mintBody(found.target)))))
+        .toMatchObject({reference: ref, target: found.target});
+    }
+    expect(await json(await handler(request("owner", `/sync/work-references/${ref}`)))).toMatchObject({target: message});
   });
 
   it("registers a new target in the same batch as its referencing message", async () => {
@@ -218,8 +299,19 @@ describe("work reference registration and resolution", () => {
     }
     expect(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_work_reference_scopes WHERE deleted=1").get()!.n).toBe(129);
     expect(storage.db.prepare("SELECT last_path FROM sync_relay_work_reference_scopes LIMIT 1").get()!.last_path).toBe("notes/plan.md");
+    const first = await json(await handler(request("owner", `/sync/${ws}/work-references`)));
+    expect(first.references).toHaveLength(128);
+    expect(first.references.every((mapping: {deleted?: boolean}) => mapping.deleted === true)).toBe(true);
+    const deleted = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${first.nextAfter}`)));
+    expect(deleted.references).toMatchObject([{reference: references[128]!.reference, deleted: true}]);
+    expect(deleted.hasMore).toBe(false);
     await appendLog(handler, "owner", ws, [moment("notes/plan.md", "Plan", {originSeq: 2, objectId: "plan", momentId: "restore-plan"})], {originId: "device"});
-    expect(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_work_reference_scopes WHERE deleted=0").get()!.n).toBe(129);
+    const restored = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${deleted.nextAfter}`)));
+    expect(restored.references).toHaveLength(128);
+    expect(restored.references.every((mapping: {deleted?: boolean}) => mapping.deleted === false)).toBe(true);
+    const tail = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${restored.nextAfter}`)));
+    expect([...restored.references, ...tail.references].map((mapping: {reference: string}) => mapping.reference).sort()).toEqual(references.map(mapping => mapping.reference).sort());
+    expect(tail.hasMore).toBe(false);
     expect((await handler(request("owner", `/sync/work-references/${references[0]!.reference}`))).status).toBe(200);
   });
 

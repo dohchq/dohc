@@ -1023,7 +1023,7 @@ fn a_shared_link_thread_and_post_apply_only_from_the_link_origin() {
 #[test]
 fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
     use dohc_engine_domain::work_references::{WorkReferenceResolution, resolve_work_reference};
-    let (_scratch, _path, mut engine) = open_store();
+    let (_scratch, path, mut engine) = open_store();
     let response = |wire: &str, channel: &str, thread: &str, message: &str, mappings| {
         SharedChannelResponse {
             work_references: mappings,
@@ -1064,17 +1064,27 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
         .unwrap();
     let mappings = [("A","m-allowed","t-allowed"),("B","m-other","t-other")].map(|(r,m,t)|
         serde_json::from_value(json!({"reference":r.repeat(43),"createdAtMs":1,"target":{"kind":"message","messageId":m,"threadId":t,"channelId":"owner-coordinate"}})).unwrap()).to_vec();
+    let mut first_page = response(
+        "wire-allowed",
+        "c-allowed",
+        "t-allowed",
+        "m-allowed",
+        mappings,
+    );
+    first_page.has_more = true;
+    first_page.reference_has_more = true;
+    let terminal = SharedChannelResponse {
+        work_references: Vec::new(),
+        next_reference_after: None,
+        reference_has_more: false,
+        own_origin_id: None,
+        ops: Vec::new(),
+        next_cursor: 4,
+        has_more: false,
+        push: None,
+    };
     let client = RelaySyncClient::new(PagedShareRelay::new(
-        [(
-            0,
-            response(
-                "wire-allowed",
-                "c-allowed",
-                "t-allowed",
-                "m-allowed",
-                mappings,
-            ),
-        )],
+        [(0, first_page), (3, terminal.clone()), (4, terminal)],
         [],
     ));
     client
@@ -1108,4 +1118,44 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 2).unwrap();
+    let second = client
+        .pull_shared_channel(
+            &mut engine,
+            "ws",
+            "allowed-share",
+            "wire-allowed",
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(second.has_more);
+    assert_eq!(
+        dohc_engine_domain::work_references::work_reference_page_after(
+            &engine,
+            "ws",
+            "channel:allowed-share"
+        )
+        .unwrap()
+        .as_deref(),
+        Some("tail")
+    );
+    let third = client
+        .pull_shared_channel(
+            &mut engine,
+            "ws",
+            "allowed-share",
+            "wire-allowed",
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(!third.has_more);
+    assert_eq!(
+        *client.transport().reference_pulls.lock().unwrap(),
+        [
+            (true, None),
+            (false, Some("tail".into())),
+            (true, Some("tail".into()))
+        ]
+    );
 }

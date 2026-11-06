@@ -291,7 +291,7 @@ fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
                 200,
                 json!({
                     "ops":[], "nextCursor":0, "hasMore":false,
-                    "workReferences":[expected], "nextReferenceAfter":"next-page", "referenceHasMore":true,
+                    "workReferences":[WorkReferenceMapping {deleted: true, ..expected.clone()}], "nextReferenceAfter":"next-page", "referenceHasMore":true,
                 }),
             )
         }
@@ -320,7 +320,13 @@ fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
             reference_after: Some("page-cursor".into()),
         })
         .unwrap();
-    assert_eq!(pulled.work_references, vec![mapping]);
+    assert_eq!(
+        pulled.work_references,
+        vec![WorkReferenceMapping {
+            deleted: true,
+            ..mapping
+        }]
+    );
     assert_eq!(pulled.next_reference_after.as_deref(), Some("next-page"));
     assert!(pulled.reference_has_more);
 }
@@ -1632,6 +1638,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         .expect("share push");
     let shared = transport
         .shared_channel_pull(SharedChannelRequest {
+            include_work_references: true,
             reference_after: None,
             share_id: "share-1".to_owned(),
             channel_wire_id: "wire-1".to_owned(),
@@ -1646,6 +1653,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     );
     transport
         .share_view_pull(ShareViewRequest {
+            include_work_references: true,
             reference_after: None,
             share_id: "share-1".to_owned(),
             cursor: 0,
@@ -1659,6 +1667,26 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         })
         .expect("share blob");
 
+    transport
+        .shared_channel_pull(SharedChannelRequest {
+            include_work_references: false,
+            reference_after: Some("mapping-tail".into()),
+            share_id: "share-1".into(),
+            channel_wire_id: "wire-1".into(),
+            origin_id: "member".into(),
+            cursor: 1,
+            ops: Vec::new(),
+        })
+        .unwrap();
+    transport
+        .share_view_pull(ShareViewRequest {
+            include_work_references: false,
+            reference_after: Some("mapping-tail".into()),
+            share_id: "share-1".into(),
+            cursor: 1,
+            limit: 500,
+        })
+        .unwrap();
     let seen = seen.lock().expect("seen endpoints");
     for endpoint in [
         "POST /sync/workspaces",
@@ -1677,12 +1705,14 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         assert!(seen.contains(endpoint), "missing endpoint {endpoint}");
     }
     assert!(seen.contains(
-        "TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1&originId=member"
+        "TARGET /sync/shares/share-1/log?since=0&limit=500&channelWireId=wire-1&originId=member&referenceAfter=&includeReferences=true"
     ));
     assert!(
-        seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500"),
+        seen.contains("TARGET /sync/shares/share-1/log?since=0&limit=500&referenceAfter=&includeReferences=true"),
         "forwarding an unbounded share-view limit exceeds the response budget"
     );
+    assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&channelWireId=wire-1&originId=member&referenceAfter=mapping-tail&includeReferences=false"));
+    assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&referenceAfter=mapping-tail&includeReferences=false"));
 }
 
 #[test]
@@ -2018,6 +2048,7 @@ fn shared_channel_pull_requires_authenticated_origin_metadata() {
         TestResponse::json(200, json!({"ops": [], "nextCursor": 0, "hasMore": false}))
     });
     let result = transport(&server).shared_channel_pull(SharedChannelRequest {
+        include_work_references: true,
         reference_after: None,
         share_id: "share".into(),
         channel_wire_id: "wire".into(),
@@ -2411,6 +2442,7 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
             .map(drop),
         hosted
             .shared_channel_pull(SharedChannelRequest {
+                include_work_references: true,
                 reference_after: None,
                 share_id: "share-1".to_owned(),
                 channel_wire_id: "wire-1".to_owned(),
@@ -2421,6 +2453,7 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
             .map(drop),
         hosted
             .share_view_pull(ShareViewRequest {
+                include_work_references: true,
                 reference_after: None,
                 share_id: "share-1".to_owned(),
                 cursor: 0,

@@ -814,6 +814,104 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
 }
 
 #[test]
+fn share_view_fetches_mappings_once_while_draining_log_pages() {
+    use dohc_engine_domain::work_references::{
+        WorkReferenceResolution, resolve_work_reference, work_reference_page_after,
+    };
+    let (_scratch, path, mut engine) = open_store();
+    let token = format!("share-object:v1:{}", "a".repeat(64));
+    let body = b"admitted".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let mut op = share_view_write_op(0, "docs/a.md", &sha);
+    op.payload["objectId"] = json!(token);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [
+                (
+                    0,
+                    ShareViewResponse {
+                        work_references: vec![
+                            serde_json::from_value(
+                                json!({"reference":"A".repeat(43),"createdAtMs":1,
+                "target":{"kind":"file","versionId":"main","objectId":token}}),
+                            )
+                            .unwrap(),
+                        ],
+                        next_reference_after: Some("first-mapping".into()),
+                        reference_has_more: true,
+                        ops: vec![op],
+                        next_cursor: 1,
+                        has_more: true,
+                    },
+                ),
+                (
+                    1,
+                    ShareViewResponse {
+                        work_references: Vec::new(),
+                        next_reference_after: None,
+                        reference_has_more: false,
+                        ops: Vec::new(),
+                        next_cursor: 2,
+                        has_more: false,
+                    },
+                ),
+                (
+                    2,
+                    ShareViewResponse {
+                        work_references: Vec::new(),
+                        next_reference_after: Some("last-mapping".into()),
+                        reference_has_more: false,
+                        ops: Vec::new(),
+                        next_cursor: 2,
+                        has_more: false,
+                    },
+                ),
+            ],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+    let grant = tracked_grant(["docs"]);
+    let first = client
+        .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+        .unwrap();
+    assert!(matches!(
+        resolve_work_reference(&engine, "ws", &"A".repeat(43)).unwrap(),
+        WorkReferenceResolution::Found { .. }
+    ));
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+        .unwrap();
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 2).unwrap();
+    let second = client
+        .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+        .unwrap();
+    assert!(second.has_more);
+    assert_eq!(
+        work_reference_page_after(&engine, "ws", "view:share")
+            .unwrap()
+            .as_deref(),
+        Some("first-mapping")
+    );
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &second.pending_cursor, &NoFaults)
+        .unwrap();
+    let third = client
+        .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+        .unwrap();
+    assert!(!third.has_more);
+    assert_eq!(
+        *client.transport().reference_pulls.lock().unwrap(),
+        [
+            (true, None),
+            (false, Some("first-mapping".into())),
+            (true, Some("first-mapping".into()))
+        ]
+    );
+}
+
+#[test]
 fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
     let (_scratch, _path, mut engine) = open_store();
     let op = |seq, path: &str| ShareReplicationEnvelope {
@@ -6254,6 +6352,27 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
         })
         .unwrap();
     let (_scratch2, _path2, mut version_engine) = open_store();
+    seed_replication_version(&mut version_engine, "main", "main");
+    VersionedTextStore::new(&mut version_engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "private-owner-object".into(),
+                path: "docs/private.md".into(),
+                text: "draft".into(),
+                moment_id: "private-draft".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+
     let mut snapshot = share_view_write_op(0, "docs/a.md", &sha);
     snapshot.op_kind = "version.create".into();
     snapshot.payload = json!({"versionId":"v","forkSnapshots":[{"path":"docs/a.md","objectId":token,"blobSha256":sha}]});
@@ -6298,6 +6417,17 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
         )
         .unwrap();
     version_engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
+    version_engine
+        .read_with(|conn| {
+            assert_eq!(
+                crate::share::object_main_path(conn, "ws", "private-owner-object")
+                    .unwrap()
+                    .as_deref(),
+                Some("docs/private.md")
+            );
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
     for reference in ["W", "F"] {
         assert!(matches!(
             dohc_engine_domain::work_references::resolve_work_reference(

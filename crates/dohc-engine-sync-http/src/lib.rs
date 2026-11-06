@@ -1087,6 +1087,7 @@ impl RelayTransport for HttpRelayTransport {
                 ("channelWireId", req.channel_wire_id),
                 ("originId", req.origin_id),
                 ("referenceAfter", req.reference_after.unwrap_or_default()),
+                ("includeReferences", req.include_work_references.to_string()),
             ],
         )?;
         if has_origin && page.own_origin_id.as_ref().is_none_or(String::is_empty) {
@@ -1139,7 +1140,10 @@ impl RelayTransport for HttpRelayTransport {
             &req.share_id,
             req.cursor,
             req.limit.min(MAX_PULL_OPS),
-            &[("referenceAfter", req.reference_after.unwrap_or_default())],
+            &[
+                ("referenceAfter", req.reference_after.unwrap_or_default()),
+                ("includeReferences", req.include_work_references.to_string()),
+            ],
         )?;
         Ok(ShareViewResponse {
             work_references: page.work_references,

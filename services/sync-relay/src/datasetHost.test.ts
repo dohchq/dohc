@@ -70,7 +70,7 @@ it("checks transactional reference targets through current dataset reads and gua
   expect(await register([mapping])).toEqual([reference]);
   expect(await register([{...mapping, reference: "F".repeat(43), target: {...target, recordId: "missing"}}])).toEqual(["F".repeat(43)]);
   expect(await f.storage.resolveWorkReference({reference: "F".repeat(43), reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
-  expect(await register([{...mapping, reference: "G".repeat(43), target: {...target, tableId: id(99)}}])).toEqual([]);
+  expect(await register([{...mapping, reference: "G".repeat(43), target: {...target, tableId: id(99)}}])).toEqual(["G".repeat(43)]);
   const reader = {kind: "user" as const, userId: "helper", grantId: "helper-grant"};
   expect(await f.storage.resolveWorkReference({reference, reader, identityKey: "key"})).toEqual({status: "unavailable"});
   f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {
@@ -101,6 +101,32 @@ it("keeps custom transactional record reads unavailable until they have an exist
   const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId:"w",userId:"owner",references});
   expect(f.storage.appendLogBatch({workspaceId:"w",originId:"probe",ops:[],workReferences:{userId:"owner",references,datasetAccess}}).registeredReferences).toEqual([reference]);
   expect(await f.storage.resolveWorkReference({reference,reader:{kind:"user",userId:"owner"}})).toEqual({status:"unavailable"});
+});
+
+it("acknowledges 200 records from a deleted dataset before a newer reference", async () => {
+  const f = await fixture();
+  await f.activate();
+  f.host.archiveDataset(owner, scope);
+  const preview = f.host.deletePreview(owner, scope);
+  await f.host.deleteDataset(owner, {...scope, expected: preview.cursor, reviewToken: preview.reviewToken, acknowledge: true});
+  for (let start = 0; start < 200; start += 128) {
+    const references = Array.from({length: Math.min(128, 200 - start)}, (_, i) => ({
+      reference: String(start + i).padStart(43, "0"), createdAtMs: 1,
+      target: {kind: "transactionalRecord" as const, datasetId: scope.datasetId, tableId: id(2), recordId: String(start + i)},
+    }));
+    const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId: "w", userId: "owner", references});
+    expect(f.storage.appendLogBatch({workspaceId: "w", originId: "reference-probe", ops: [],
+      workReferences: {userId: "owner", references, datasetAccess}}).registeredReferences).toEqual(references.map(row => row.reference));
+  }
+  pushFile(f.storage, "newer-file", null, {path: "newer.md", text: "Newer"});
+  const reference = "N".repeat(43), references = [{reference, createdAtMs: 2,
+    target: {kind: "file" as const, versionId: "main", objectId: "newer-file"}}];
+  const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId: "w", userId: "owner", references});
+  expect(f.storage.appendLogBatch({workspaceId: "w", originId: "reference-probe", ops: [],
+    workReferences: {userId: "owner", references, datasetAccess}}).registeredReferences).toEqual([reference]);
+  expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_work_reference_scopes WHERE deleted=1").get()!.n).toBe(200);
+  expect(await f.storage.resolveWorkReference({reference: "0".repeat(43), reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
+  expect(await f.storage.resolveWorkReference({reference, reader: {kind: "user", userId: "owner"}})).toMatchObject({status: "found"});
 });
 
 async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }) {

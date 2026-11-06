@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { JsonValue } from "../protocol";
 import { VersionedLiveAdapter } from "../versioned/versionedLiveAdapter";
-import { decodeMadeWorkReference, decodeWorkReferenceResolution } from "./workReferences";
+import { decodeMadeWorkReference, decodeWorkReferenceMapping, decodeWorkReferenceResolution } from "./workReferences";
 
 const REFERENCE = "A".repeat(42) + "_";
 
@@ -69,6 +69,13 @@ describe("work references", () => {
     ]) {
       expect(decodeWorkReferenceResolution(resolution(target, { path: "a.md" }))).toEqual(resolution(target, { path: "a.md" }));
     }
+  });
+
+  it("decodes recipient message projections and owner tombstones", () => {
+    const projected = {reference: REFERENCE, target: {kind: "message", messageId: "m", threadId: "t"}, createdAtMs: 1};
+    expect(decodeWorkReferenceMapping(projected)).toEqual(projected);
+    expect(decodeWorkReferenceMapping({...projected, deleted: true})).toEqual({...projected, deleted: true});
+    expect(() => decodeWorkReferenceMapping({...projected, deleted: "yes"})).toThrow();
   });
 
   it("rejects malformed engine results", async () => {

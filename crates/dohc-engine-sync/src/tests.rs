@@ -227,6 +227,8 @@ fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_js
 #[derive(Default)]
 pub(crate) struct FakeRelay {
     refuse_oversized_proofs: bool,
+    unprovable_dataset: Option<String>,
+    reference_bindings: Mutex<BTreeMap<String, dohc_engine_domain::work_references::WorkTarget>>,
     push_budget_limit: Option<usize>,
     pushes: Mutex<Vec<PushRequest>>,
     pub(crate) pull: Mutex<Option<PullResponse>>,
@@ -276,12 +278,29 @@ impl RelayTransport for FakeRelay {
         }
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
+        let mut bindings = self.reference_bindings.lock().unwrap();
+        let registered_references = req
+            .work_references
+            .iter()
+            .filter_map(|mapping| {
+                use dohc_engine_domain::work_references::WorkTarget;
+                let dataset = match &mapping.target {
+                    WorkTarget::TransactionalRecord { dataset_id, .. }
+                    | WorkTarget::TransactionalCollection { dataset_id, .. } => Some(dataset_id),
+                    _ => None,
+                };
+                if dataset.is_some() && dataset == self.unprovable_dataset.as_ref() {
+                    return None;
+                }
+                if let Some(existing) = bindings.get(&mapping.reference) {
+                    assert_eq!(existing, &mapping.target);
+                }
+                bindings.insert(mapping.reference.clone(), mapping.target.clone());
+                Some(mapping.reference.clone())
+            })
+            .collect();
         Ok(PushResponse {
-            registered_references: req
-                .work_references
-                .iter()
-                .map(|mapping| mapping.reference.clone())
-                .collect(),
+            registered_references,
             settlement_refusals,
             hosted_refusals: Vec::new(),
             redundant_recoveries: Vec::new(),
@@ -748,6 +767,7 @@ struct PagedShareRelay {
     shared_pages: BTreeMap<i64, SharedChannelResponse>,
     view_pages: BTreeMap<i64, ShareViewResponse>,
     shared_pulls: Mutex<Vec<i64>>,
+    reference_pulls: Mutex<Vec<(bool, Option<String>)>>,
     shared_pushes: Mutex<Vec<ShareLogPushRequest>>,
     view_pulls: Mutex<Vec<(i64, usize)>>,
     view_blobs: BTreeMap<String, Vec<u8>>,
@@ -782,6 +802,7 @@ impl PagedShareRelay {
             shared_pages: shared_pages.into_iter().collect(),
             view_pages: view_pages.into_iter().collect(),
             shared_pulls: Mutex::new(Vec::new()),
+            reference_pulls: Mutex::new(Vec::new()),
             shared_pushes: Mutex::new(Vec::new()),
             view_pulls: Mutex::new(Vec::new()),
             view_blobs: BTreeMap::new(),
@@ -871,6 +892,10 @@ impl RelayTransport for PagedShareRelay {
         &self,
         req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError> {
+        self.reference_pulls
+            .lock()
+            .unwrap()
+            .push((req.include_work_references, req.reference_after.clone()));
         self.shared_pulls
             .lock()
             .expect("shared pull calls")
@@ -901,6 +926,10 @@ impl RelayTransport for PagedShareRelay {
     }
 
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
+        self.reference_pulls
+            .lock()
+            .unwrap()
+            .push((req.include_work_references, req.reference_after.clone()));
         self.view_pulls
             .lock()
             .expect("view pull calls")
@@ -1129,6 +1158,27 @@ fn restored_backup_drains_its_older_reference_outbox() {
     let backup = path.with_file_name("backup.db");
     std::fs::copy(&path, &backup).unwrap();
     let mut engine = EngineStore::open(&path, 2).unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM work_references WHERE reference=?1",
+                [&made.reference],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    let newer = make_work_reference(
+        &mut engine,
+        "ws",
+        &WorkTargetInput::TransactionalCollection {
+            dataset_id: "00000000-0000-4000-8000-000000000001".into(),
+            table_id: "00000000-0000-4000-8000-000000000002".into(),
+        },
+        2,
+        &NoFaults,
+    )
+    .unwrap();
+    assert_ne!(newer.reference, made.reference);
     let client = RelaySyncClient::new(FakeRelay::default());
     client
         .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3, 0)
@@ -1144,16 +1194,94 @@ fn restored_backup_drains_its_older_reference_outbox() {
         .push_workspace(&mut restored, "ws", &NoFaults, &NoLiveLeases, 5, 0)
         .unwrap();
     assert!(pending_work_references(&restored, "ws").unwrap().is_empty());
-    let sent = client.transport().pushed_requests();
+    let bindings = client.transport().reference_bindings.lock().unwrap();
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(
+        bindings.get(&made.reference),
+        bindings.get(&newer.reference)
+    );
+}
+
+#[test]
+fn unprovable_reference_windows_yield_to_a_newer_reference() {
+    use dohc_engine_domain::work_references::{
+        TransactionalRecordId, WorkTargetInput, make_work_reference, pending_work_references,
+    };
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let missing_dataset = "00000000-0000-4000-8000-000000000001";
+    for record in 0..200 {
+        make_work_reference(
+            &mut engine,
+            "ws",
+            &WorkTargetInput::TransactionalRecord {
+                dataset_id: missing_dataset.into(),
+                table_id: "00000000-0000-4000-8000-000000000002".into(),
+                record_id: TransactionalRecordId::Number(record),
+            },
+            1,
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    let newer = make_work_reference(
+        &mut engine,
+        "ws",
+        &WorkTargetInput::TransactionalCollection {
+            dataset_id: "00000000-0000-4000-8000-000000000003".into(),
+            table_id: "00000000-0000-4000-8000-000000000004".into(),
+        },
+        2,
+        &NoFaults,
+    )
+    .unwrap();
+    let first_window = pending_work_references(&engine, "ws").unwrap();
+    assert_eq!(first_window.len(), 128);
+    let client = RelaySyncClient::new(FakeRelay {
+        unprovable_dataset: Some(missing_dataset.into()),
+        ..Default::default()
+    });
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3, 0)
+        .unwrap();
+    let next_window = pending_work_references(&engine, "ws").unwrap();
     assert!(
-        sent.iter()
-            .filter(|request| request
+        next_window
+            .iter()
+            .any(|mapping| mapping.reference == newer.reference)
+    );
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 4, 0)
+        .unwrap();
+    assert!(
+        client
+            .transport()
+            .reference_bindings
+            .lock()
+            .unwrap()
+            .contains_key(&newer.reference)
+    );
+    let sent = client.transport().pushed_requests();
+    let sent_refs: BTreeSet<_> = sent
+        .iter()
+        .flat_map(|request| {
+            request
                 .work_references
                 .iter()
-                .any(|m| m.reference == made.reference))
-            .count()
-            >= 2
+                .map(|mapping| mapping.reference.clone())
+        })
+        .collect();
+    assert_eq!(sent_refs.len(), 201);
+    assert!(
+        sent.iter()
+            .all(|request| request.work_references.len() <= 128)
     );
+    let later = pending_work_references(&engine, "ws").unwrap();
+    assert!(first_window.iter().any(|mapping| {
+        later
+            .iter()
+            .any(|retry| retry.reference == mapping.reference)
+    }));
 }
 
 #[test]

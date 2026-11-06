@@ -21,8 +21,8 @@ use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 use crate::references::{MomentRefs, VersionCreateRefs, YdocRefs, conflict_open_sides};
 pub use dohc_engine_domain::work_references::WorkReferenceMapping;
 use dohc_engine_domain::work_references::{
-    acknowledge_work_references, learn_work_reference_page, pending_work_references,
-    work_reference_page_after,
+    acknowledge_work_references, defer_work_reference_registrations, learn_work_reference_page,
+    pending_work_references, work_reference_page_after, work_reference_pull_state,
 };
 
 mod direct_write;
@@ -332,6 +332,7 @@ pub struct ShareReplicationEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelRequest {
+    pub include_work_references: bool,
     pub reference_after: Option<String>,
     pub share_id: String,
     pub channel_wire_id: String,
@@ -361,6 +362,7 @@ pub struct ShareLogPushRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewRequest {
+    pub include_work_references: bool,
     pub reference_after: Option<String>,
     pub share_id: String,
     pub cursor: i64,
@@ -2439,6 +2441,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             {
                 acknowledge_work_references(store, workspace_id, batch).map_err(reference_error)?;
             }
+            let unregistered: Vec<_> = references
+                .iter()
+                .filter(|mapping| !progress.registered_references.contains(&mapping.reference))
+                .map(|mapping| mapping.reference.clone())
+                .collect();
+            defer_work_reference_registrations(store, workspace_id, &unregistered)
+                .map_err(reference_error)?;
             resume_needed |= !registered.is_empty()
                 && !pending_work_references(store, workspace_id)
                     .map_err(reference_error)?
@@ -2517,6 +2526,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             "owner",
             &fetch.reference_page.0,
             fetch.reference_page.1.as_deref(),
+            false,
+            reference_pages_remaining,
         )
         .map_err(reference_error)?;
         let OrdinaryFetch {
@@ -4476,13 +4487,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             crate::CursorKind::SharedChannel,
         )
         .map_err(local)?;
+        let scope_id = format!("channel:{share_id}");
+        let reference_after =
+            work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
+        let (log_pages_pending, reference_pages_pending) =
+            work_reference_pull_state(store, workspace_id, &scope_id).map_err(reference_error)?;
+        let include_work_references = !log_pages_pending;
         let page = self.transport.shared_channel_pull(SharedChannelRequest {
-            reference_after: work_reference_page_after(
-                store,
-                workspace_id,
-                &format!("channel:{share_id}"),
-            )
-            .map_err(reference_error)?,
+            include_work_references,
+            reference_after: reference_after.clone(),
             share_id: share_id.to_owned(),
             channel_wire_id: channel_wire_id.to_owned(),
             origin_id: identity
@@ -4580,25 +4593,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if matches!(committed, TxnOutcome::Crashed { .. }) {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
-        if !page.has_more {
-            let mappings = received_work_reference_mappings(
-                store,
-                workspace_id,
-                &boundary,
-                &page.work_references,
-            )?;
-            learn_work_reference_page(
-                store,
-                workspace_id,
-                &format!("channel:{share_id}"),
-                &mappings,
-                page.next_reference_after.as_deref(),
-            )
-            .map_err(reference_error)?;
-        }
+        let mappings = if include_work_references {
+            received_work_reference_mappings(store, workspace_id, &boundary, &page.work_references)?
+        } else {
+            Vec::new()
+        };
+        learn_work_reference_page(
+            store,
+            workspace_id,
+            &scope_id,
+            &mappings,
+            if include_work_references {
+                page.next_reference_after.as_deref()
+            } else {
+                reference_after.as_deref()
+            },
+            page.has_more,
+            if include_work_references {
+                page.reference_has_more
+            } else {
+                reference_pages_pending
+            },
+        )
+        .map_err(reference_error)?;
         Ok(SharedChannelPullOutcome {
             fetched,
-            has_more: page.has_more || page.reference_has_more,
+            has_more: page.has_more
+                || if include_work_references {
+                    page.reference_has_more
+                } else {
+                    reference_pages_pending
+                },
             applied,
             refused,
             rejections,
@@ -4909,13 +4934,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut cursor =
             crate::read_share_cursor(store, workspace_id, share_id, crate::CursorKind::ShareView)
                 .map_err(local)?;
+        let scope_id = format!("view:{share_id}");
+        let reference_after =
+            work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
+        let (log_pages_pending, reference_pages_pending) =
+            work_reference_pull_state(store, workspace_id, &scope_id).map_err(reference_error)?;
+        let include_work_references = !log_pages_pending;
         let page = self.transport.share_view_pull(ShareViewRequest {
-            reference_after: work_reference_page_after(
-                store,
-                workspace_id,
-                &format!("view:{share_id}"),
-            )
-            .map_err(reference_error)?,
+            include_work_references,
+            reference_after: reference_after.clone(),
             share_id: share_id.to_owned(),
             cursor,
             limit: crate::model::MAX_PULL_OPS_PER_PASS,
@@ -5061,25 +5088,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // `refuse_replay_unit`. What reaches here is only what must abort.
             replay_share_view_op(&mut replay, &envelope)?;
         }
-        if !page.has_more {
-            let mappings = received_work_reference_mappings(
-                store,
-                workspace_id,
-                &boundary,
-                &page.work_references,
-            )?;
-            learn_work_reference_page(
-                store,
-                workspace_id,
-                &format!("view:{share_id}"),
-                &mappings,
-                page.next_reference_after.as_deref(),
-            )
-            .map_err(reference_error)?;
-        }
+        let mappings = if include_work_references {
+            received_work_reference_mappings(store, workspace_id, &boundary, &page.work_references)?
+        } else {
+            Vec::new()
+        };
+        learn_work_reference_page(
+            store,
+            workspace_id,
+            &scope_id,
+            &mappings,
+            if include_work_references {
+                page.next_reference_after.as_deref()
+            } else {
+                reference_after.as_deref()
+            },
+            page.has_more,
+            if include_work_references {
+                page.reference_has_more
+            } else {
+                reference_pages_pending
+            },
+        )
+        .map_err(reference_error)?;
         Ok(ShareViewPullOutcome {
             fetched,
-            has_more: page.has_more || page.reference_has_more,
+            has_more: page.has_more
+                || if include_work_references {
+                    page.reference_has_more
+                } else {
+                    reference_pages_pending
+                },
             applied,
             skipped,
             refusals,
@@ -6501,6 +6540,7 @@ fn references_for_batch(
                 required.insert(
                     reference.clone(),
                     WorkReferenceMapping {
+                        deleted: false,
                         reference,
                         target,
                         created_at_ms,

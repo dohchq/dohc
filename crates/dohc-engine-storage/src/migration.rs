@@ -5623,7 +5623,7 @@ mod tests {
             ),
             (
                 "v2-learned-work-references",
-                "eb375cd867263916724d5795e53d02ceb5ad6bf51ddb11e0b1692289a9c63457",
+                "f34c71071b0d3085e5a2fc0afcf63782eb4a26cb75ae2e010090aaae295b5f67",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

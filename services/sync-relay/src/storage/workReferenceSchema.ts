@@ -14,7 +14,7 @@ export function initializeWorkReferenceSchema(db: SqliteDb): void {
   CREATE INDEX IF NOT EXISTS idx_sync_relay_work_references_page
     ON sync_relay_work_references(workspace_id,seq);
   CREATE TRIGGER IF NOT EXISTS sync_relay_work_references_immutable
-    BEFORE UPDATE ON sync_relay_work_references BEGIN SELECT RAISE(ABORT,'work references are immutable'); END;
+    BEFORE UPDATE OF reference,workspace_id,target_json,created_at_ms,registered_by ON sync_relay_work_references BEGIN SELECT RAISE(ABORT,'work references are immutable'); END;
   CREATE TABLE IF NOT EXISTS sync_relay_work_reference_scopes (
     reference TEXT PRIMARY KEY REFERENCES sync_relay_work_references(reference) ON DELETE CASCADE,
     workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
