@@ -266,7 +266,9 @@ export function MentionComposer(props: {
   }>({ left: 0, bottom: 0, maxHeight: 192, placement: "above" });
   // The menu floats off the whole composer, above it unless only below has
   // room, so it never covers the text, the toolbar, or a bar stacked on top.
-  // Measured on open and when the composer or window resizes, not per key.
+  // Measured on open, when the composer or window resizes, and when the
+  // list's rows change, not per key.
+  const placeMenu = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     if (!showMenu) return;
     const menu = menuRef.current;
@@ -276,7 +278,9 @@ export function MentionComposer(props: {
     const stack = stackRef.current ?? form;
     const position = () => {
       const frame = form.getBoundingClientRect();
-      const top = stack.getBoundingClientRect().top;
+      // The topmost bar, the poll, or the box itself: its border, not the
+      // stack's empty margin above it.
+      const top = (stack.firstElementChild ?? form).getBoundingClientRect().top;
       const above = top - MENU_GAP_PX - MENU_EDGE_PX;
       const below = window.innerHeight - frame.bottom - MENU_GAP_PX - MENU_EDGE_PX;
       const height = Math.min(192, menu.scrollHeight + 2);
@@ -292,14 +296,21 @@ export function MentionComposer(props: {
     const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
     resized?.observe(stack);
     position();
+    placeMenu.current = position;
     window.addEventListener("resize", position);
     document.addEventListener("scroll", scrolled, true);
     return () => {
+      placeMenu.current = null;
       resized?.disconnect();
       window.removeEventListener("resize", position);
       document.removeEventListener("scroll", scrolled, true);
     };
   }, [showMenu]);
+  // A filtered or loaded list has a new height, so it may fit the other side.
+  const fileLoading = fileStage?.loading ?? false;
+  useLayoutEffect(() => {
+    placeMenu.current?.();
+  }, [menuLength, fileLoading]);
 
   useLayoutEffect(() => {
     if (!highlightFileOnOpen.current || pendingCaret.current !== null || !active) return;
