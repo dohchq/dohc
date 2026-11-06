@@ -1657,18 +1657,13 @@ mod held_reader_tests {
 }
 
 #[cfg(test)]
-mod saturation_tests {
+pub(crate) mod test_support {
     use super::*;
-    use dohc_engine_testkit::{ScratchDir, engine_db_path};
-    use std::future::{Future, poll_fn};
-    use std::sync::atomic::AtomicUsize;
-    use std::task::Poll;
-    use std::time::{Duration, Instant};
-    use tokio::sync::Semaphore;
+    use std::time::Duration;
 
     // Prepare the real command channel and holds before worker_main publishes.
     // This removes the race between spawn returning and its first idle slot.
-    fn spawn_prequeued_actor(
+    pub(crate) fn spawn_prequeued_actor(
         db: &std::path::Path,
         prepare: impl FnOnce(&ActorHandle),
     ) -> WorkspaceActor {
@@ -1736,6 +1731,18 @@ mod saturation_tests {
         assert!(!actor.store_freshly_created, "exercise a reopened store");
         actor
     }
+}
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::test_support::spawn_prequeued_actor;
+    use super::*;
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Semaphore;
 
     #[tokio::test]
     async fn conversation_retry_wakes_without_a_parser_and_keeps_command_priority() {
