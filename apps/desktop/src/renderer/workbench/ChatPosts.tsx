@@ -667,6 +667,10 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               </AgentName>
             </span>
             {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} presentation={comment.presentation} /> : null}
+            {/* A continued comment has no badge, so a link agent's hidden line still says agent before the link mark. */}
+            {isAgent && continues && comment.authorKind === "link" ? (
+              <span data-testid="chats-comment-link-agent" className="sr-only"> agent </span>
+            ) : null}
             {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge

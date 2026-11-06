@@ -622,6 +622,32 @@ describe("ChatsView document thread", () => {
     expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
   });
 
+  it("keeps agent, then link holder, for screen readers on a link agent's continued comment", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "The full opening post body." });
+    const linkAgent = { authorKind: "link", linkAgent: true, authorDisplayName: "Claude Code" } as const;
+    const first = message({ ...linkAgent, id: "comment-1", parentMessageId: opening.id, body: "First" });
+    const second = message({ ...linkAgent, id: "comment-2", parentMessageId: opening.id, body: "Second", createdAtMs: NOW + 60_000 });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, first, second] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-comments-divider");
+    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
+    expect(items.map((item) => item.dataset.continues)).toEqual(["false", "true"]);
+    const spoken = (item: Element) => [...item.querySelectorAll(".sr-only")]
+      .map((word) => word.textContent?.trim().toLowerCase())
+      .filter((word) => word === "agent" || word === "link holder");
+    // The first comment's badge says agent; the continued one has no badge and says it in words.
+    expect(items[0]!.querySelector('[data-testid="chats-comment-agent-badge"]')).not.toBeNull();
+    expect(items[0]!.querySelector('[data-testid="chats-comment-link-agent"]')).toBeNull();
+    expect(spoken(items[0]!)).toEqual(["agent", "link holder"]);
+    expect(items[1]!.querySelector('[data-testid="chats-comment-agent-badge"]')).toBeNull();
+    expect(spoken(items[1]!)).toEqual(["agent", "link holder"]);
+  });
+
   it("enters reply mode and sends the true parent message id", async () => {
     const user = userEvent.setup();
     const opening = message();
