@@ -469,7 +469,7 @@ describe("workspace manager", () => {
     await screen.findByText("dohc does not have permission to use this file or folder.");
     const change = screen.getByRole("button", { name: "Change location" });
     expect(change.classList.contains("border")).toBe(true);
-    expect(change.classList.contains("h-8")).toBe(true);
+    expect(change.classList.contains("h-6")).toBe(true);
     expect(screen.getByRole("button", { name: "Create workspace" })).toHaveProperty("disabled", false);
 
     await user.click(change);
@@ -517,8 +517,12 @@ describe("workspace manager", () => {
     const change = await screen.findByRole("button", { name: "Change location" });
     await user.click(change);
     expect(await screen.findByText("Dialog unavailable")).toBeTruthy();
+    // The error changes Change's look, not the button, so keyboard focus stays on it.
+    expect(screen.getByRole("button", { name: "Change location" })).toBe(change);
+    expect(document.activeElement).toBe(change);
 
-    await user.click(screen.getByRole("button", { name: "Change location" }));
+    await user.click(change);
+    expect(document.activeElement).toBe(change);
     await locationReads("/home/sam/projects/research/Personal");
     await act(async () => slowDefault.resolve("/home/sam/dohc"));
     expect(location()).toBe("/home/sam/projects/research/Personal");
