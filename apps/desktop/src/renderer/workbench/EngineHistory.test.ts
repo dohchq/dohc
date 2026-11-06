@@ -298,6 +298,14 @@ describe("groupTimeline", () => {
       .map((group) => group.moments.length)).toEqual([1, 1]);
   });
 
+  // Every connected agent is the unnamed agent; the name it gave tells them apart.
+  it("folds a connected agent's edits only under the name it gave", () => {
+    const connected = (id: string, agentName: string) =>
+      moment({ id, agentAuthorName: agentName, authors: [{ kind: "agent", agentId: "dohc-mcp", agentName }] });
+    expect(groupEngineMoments([connected("m3", "Codex"), connected("m2", "Codex"), connected("m1", "Claude")])
+      .map((group) => group.moments.map((entry) => entry.id))).toEqual([["m3", "m2"], ["m1"]]);
+  });
+
   // An agent's file write is its own one-moment operation.
   it("folds an agent's writes that each carry their own operation", () => {
     const groups = groupEngineMoments(["op-3", "op-2", "op-1"].map((correlationId, index) =>

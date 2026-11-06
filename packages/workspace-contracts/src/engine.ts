@@ -222,10 +222,11 @@ export type MomentAuthor =
   | AutomationMomentAuthor;
 
 // A person's own write names them, as desktop main reads them. A local agent
-// write names the person the agent works for. An automation names its run's
-// person, and none when its run has none.
+// write names the person the agent works for, and the name the agent gave
+// itself when no run holds the slot. An automation names its run's person,
+// and none when its run has none.
 export type MomentWriteAuthor =
-  | (Omit<AgentMomentAuthor, "agentName"> & { onBehalfOf: string })
+  | (AgentMomentAuthor & { onBehalfOf: string })
   | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName" | "relayConfirmed">
   | AutomationMomentAuthor;
 
