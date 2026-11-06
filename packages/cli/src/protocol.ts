@@ -37,6 +37,9 @@ const requestBase = {
   protocolVersion: z.literal(CLI_PROTOCOL_VERSION),
   // Caller-reported, unverified attribution; grants no authority.
   door: z.enum(["cli", "mcp"]).optional(),
+  // The secret of the run dohc started this caller in (DOHC_RUN_SECRET). Only
+  // a request that carries it is that run's.
+  runSecret: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 };
 
 const argsBase = {

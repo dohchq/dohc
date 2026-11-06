@@ -4,7 +4,7 @@ import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-c
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   createChatRunnerProcess,
@@ -227,7 +227,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // at the run's chain depth, for the person main names.
   setRunAttribution(
     workspace: ChatDispatchWorkspace,
-    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch } | null,
+    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch; secret: string } | null,
   ): void | Promise<void>;
   runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
@@ -325,6 +325,12 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 // MCP server that its launch starts (chatRunnerProcess.ts replyServerArguments).
 // A custom command replies through the dohc CLI.
 type ReplyForm = "argument" | "mcp";
+
+// A new secret for each run. Only the run's process gets it, so only its
+// requests are the run's.
+function runSecret(): string {
+  return randomBytes(32).toString("hex");
+}
 
 function replyFormFor(tool: AgentLaunchProfile["tool"] | undefined): ReplyForm {
   return tool ? "mcp" : "argument";
@@ -1068,11 +1074,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (profile?.tool === "claude" && !supportsAgentProfile("claude", await options.agentToolVersion(profile.executable))) {
         throw new Error(`update Claude Code to ${CLAUDE_MIN_VERSION} or later to use this agent`);
       }
+      const secret = runSecret();
       await options.setRunAttribution(workspace, {
         agentId: agent.id,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
         dispatch: "run",
+        secret,
       });
       startedRuns.set(claim.run.runId, workspace.workspaceId);
       // Only people's own messages, which only the owner's send records,
@@ -1102,6 +1110,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         profile,
         dohcTools,
         prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, profile?.tool, dohcTools),
+        runSecret: secret,
         // A reply-only Codex run checks its servers first, and dohc can start
         // quitting meanwhile.
         assertMayStart: () => {
@@ -1941,11 +1950,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         const prompt = replyFormFor(profile?.tool) === "mcp"
           ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
           : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
+        const secret = runSecret();
         await options.setRunAttribution(workspace, {
           agentId: agent.id,
           agentRunId: runId,
           depth: 0,
           dispatch: "self-test",
+          secret,
         });
         startedRuns.set(runId, workspace.workspaceId);
         const child = await spawnConfiguredRunner({
@@ -1959,6 +1970,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           // The self-test checks only that the reply arrives.
           dohcTools: "reply",
           prompt,
+          runSecret: secret,
           assertMayStart: () => {
             if (shuttingDown) throw new Error("Agent dispatch is stopping.");
             assertMayStart();

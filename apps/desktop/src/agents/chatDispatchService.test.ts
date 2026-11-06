@@ -4334,6 +4334,11 @@ describe("chatDispatchService", () => {
     expect(threadId).toEqual(expect.any(String));
     const runId = call.options.env.DOHC_RUN_ID;
     if (!runId) throw new Error("Expected self-test attribution.");
+    // The run's secret reaches only its environment: not its prompt or arguments.
+    const secret = call.options.env.DOHC_RUN_SECRET;
+    expect(secret).toMatch(/^[a-f0-9]{64}$/u);
+    expect(call.process.stdinText).not.toContain(secret);
+    expect(call.args.join(" ")).not.toContain(secret);
     if (profile) {
       expect(call.command).toBe(profile.executable);
       // The run starts the dohc MCP server it replies through.
@@ -4345,6 +4350,7 @@ describe("chatDispatchService", () => {
         `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}','--tool','dohc_reply_to_chat']`,
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
+        "mcp_servers.dohc.env_vars=['DOHC_RUN_SECRET']",
         "mcp_servers.dohc.default_tools_approval_mode='approve'",
       ].flatMap((entry) => ["--config", entry]).concat(codexRunConfig({ rootPath: fixture.workspace.rootPath, runId, platform, files: { requirements: [], config: [], managedPreferences: [] }, readOnly: true, replyOnly: true })) : ["--mcp-config", configPath], true));
       if (profile.tool === "claude") {

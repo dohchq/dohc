@@ -69,6 +69,23 @@ describe("sendCliRequest", () => {
     expect(JSON.parse(transport.mock.calls[0]![1])).toMatchObject({ door, token: TOKEN, args: { actor: "agent" } });
   });
 
+  it("sends the run's secret from DOHC_RUN_SECRET, and leaves out a malformed one", async () => {
+    const stateDir = await tempStateDir();
+    const lines: string[] = [];
+    const transport = vi.fn(async (_endpoint: string, line: string) => {
+      lines.push(line);
+      return { protocolVersion: CLI_PROTOCOL_VERSION, ok: true, result: { groups: [] } };
+    });
+    const cases = [["b".repeat(64), "b".repeat(64)], ["B".repeat(64), undefined], ["b".repeat(63), undefined], [undefined, undefined]] as const;
+    for (const [secret, sent] of cases) {
+      await sendCliRequest(
+        { protocolVersion: CLI_PROTOCOL_VERSION, verb: "groups", args: { cwd: "/workspace", actor: "agent" } },
+        { stateDir, transport, platform: "linux", env: secret === undefined ? {} : { DOHC_RUN_SECRET: secret } },
+      );
+      expect((JSON.parse(lines.at(-1) ?? "{}") as { runSecret?: string }).runSecret).toBe(sent);
+    }
+  });
+
   it("reports a protocol mismatch before validating a future response shape", async () => {
     const stateDir = await tempStateDir();
     await expect(

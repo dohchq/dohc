@@ -80,6 +80,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
       profile,
       dohcTools,
       prompt: "",
+      runSecret: "a".repeat(64),
       assertMayStart,
     });
   return { calls, checks, root, spawn };
@@ -487,6 +488,7 @@ describe("chat runner process", () => {
         command: `"${shim}"`,
         dohcTools: "reply",
         prompt: "",
+        runSecret: "a".repeat(64),
         assertMayStart: () => undefined,
       });
       const exitCode = await new Promise<number | null>((resolveExit) => child.onExit(resolveExit));
@@ -517,6 +519,7 @@ describe("chat runner process", () => {
       profile: { tool: "codex", executable: codex },
       dohcTools: "reply",
       prompt: "",
+      runSecret: "a".repeat(64),
       assertMayStart: () => undefined,
     });
     await expect(start(root)).rejects.toThrow(

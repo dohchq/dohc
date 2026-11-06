@@ -555,6 +555,22 @@ describe("workspaceActivity agent run state", () => {
     await activity.stopAll();
   });
 
+  it("holds a dispatched run's secret only while that run holds the slot", async () => {
+    const { activity } = await opened();
+    const secret = "a".repeat(64);
+    await activity.claimAgentRun(id, run("cli-run"), undefined, secret);
+    expect(activity.dispatchedRunSecret(id)).toBeNull();
+    await activity.clearAgentRun(id, "cli-run");
+    await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" }, undefined, secret);
+    expect(activity.dispatchedRunSecret(id)).toBe(secret);
+    // A second run is refused the slot, so it can't replace the secret.
+    expect(await activity.claimAgentRun(id, { ...run("dispatch-2"), dispatch: "run" }, undefined, "b".repeat(64))).toBe(false);
+    expect(activity.dispatchedRunSecret(id)).toBe(secret);
+    await activity.clearAgentRun(id, "dispatch-1");
+    expect(activity.dispatchedRunSecret(id)).toBeNull();
+    await activity.stopAll();
+  });
+
   it("pushes nothing for a refused claim and returns to idle after a failed one", async () => {
     const { activity, capture, pushed } = await opened();
     expect(await activity.claimAgentRun(id, run("run-1"))).toBe(true);

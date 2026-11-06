@@ -122,7 +122,7 @@ function codexReplyServer(args) {
   const codexTail = args.at(-2) === "--json" ? ["--skip-git-repo-check", "--ephemeral", "--json", "-"] : CODEX_TAIL;
   const tail = readOnly ? ["--ignore-rules", ...codexTail] : codexTail;
   const sandbox = process.platform === "win32" && (readOnly || config.has("windows.sandbox")) ? ["windows.sandbox", ...(readOnly ? ["windows.allow_mxc"] : [])] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"] : []), "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.env_vars", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"] : []), "projects", ...sandbox];
   if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
     owners.some((key) => key === "mcp_servers.dohc.enabled" || config.get(key) !== "false") ||
     (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]" || config.get("agents.enabled") !== "false" || config.get("approvals_reviewer") !== "'user'"))) {
@@ -142,6 +142,7 @@ function codexReplyServer(args) {
     (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
     (sandbox.length > 1 && config.get("windows.allow_mxc") !== "false") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
+    config.get("mcp_servers.dohc.env_vars") !== "['DOHC_RUN_SECRET']" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
     JSON.stringify(args.slice(-tail.length)) !== JSON.stringify(tail) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
@@ -176,7 +177,9 @@ function startCodexOutput(args) {
 }
 
 // Reply as Claude Code and Codex do: start the dohc MCP server the launch
-// names, outside the runner's environment, and call the reply tool once.
+// names, outside the runner's environment, and call the reply tool once. The
+// server keeps the run's secret: Claude Code passes its own environment, and
+// Codex the variables the launch names, which codexReplyServer checks.
 function replyThroughMcp(args, body) {
   const launch = profileTool === "codex" ? codexReplyServer(args) : claudeReplyServer(args);
   if (!launch || !existsSync(launch.command)) {
