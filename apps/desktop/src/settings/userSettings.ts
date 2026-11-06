@@ -136,11 +136,6 @@ export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents
   return agent?.launch ? { ...agent, launch: agent.launch } : null;
 }
 
-/** Whether a name an agent gives itself is one of your agents' ids, which only their runs' messages carry. */
-export function isOwnAgentId(settings: Pick<DesktopUserSettings, "agents">, name: string): boolean {
-  return listAgents(settings).some(({ id }) => id === name);
-}
-
 // A message names one of your agents with @ and its name's handle: the name
 // without spaces or the punctuation a handle cannot hold. "" names no agent.
 export function agentHandle(name: string): string {

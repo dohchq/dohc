@@ -126,7 +126,6 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
     agentIdsNamedIn: async () => [],
-    isOwnAgentId: async () => false,
     localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -1256,7 +1255,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       expect(result).toMatchObject({ok: true, fromPath: "old.md", toPath: "new.md", undo: {available: false, paths: [],
         reason: "Rename finished. dohc could not save Undo information or update links to this file. Rename it back yourself."}});
       const authored = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
-      expect(authored).toMatchObject({author: {kind: "agent", agentId: "Client"}});
+      expect(authored).toMatchObject({author: {kind: "agent", agentId: "dohc-mcp"}});
       expect(await readMoveRecovery(f.root, authored.operationId)).toBeUndefined();
       expect(await readFile(join(f.root, "new.md"), "utf8")).toBe("original");
       expect(engine).not.toHaveBeenCalled();

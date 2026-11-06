@@ -295,10 +295,10 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       }, { timeout: 30_000 })
       .toBe(true);
 
-    // The engine records the agent's update under the name it gave, and the
-    // person's typing as a person's.
+    // The engine records the agent's update as the unnamed agent's, since no
+    // dohc run started it, and the person's typing as a person's.
     const authors = ydocUpdateAuthors(temp.rootPath);
-    expect(authors).toContainEqual({ actorOriginId: "e2e-agent", actorKind: "agent" });
+    expect(authors).toContainEqual({ actorOriginId: "dohc-mcp", actorKind: "agent" });
     expect(authors.some((author) => author.actorKind === "human")).toBe(true);
 
     // With no editor open, the edit opens a session of its own, settles, and

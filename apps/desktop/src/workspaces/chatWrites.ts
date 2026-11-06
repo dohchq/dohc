@@ -23,9 +23,8 @@ import {
 // local person, naming the automation and its chain depth. Identity is never
 // the caller's: it comes from the registry and the signed-in session.
 // `agentName` is the name an agent gave for itself, such as an MCP client's
-// handshake name. It is provenance, like a document edit's author; without
-// it the message is from "Agent". A name that is one of the person's agents'
-// ids is dropped, so no other agent takes that agent's place.
+// handshake name. The message shows it; without it the message is from
+// "Agent". It is only a claim, so the message's key is the unnamed agent's.
 // `agentId` names the agent of a run dohc dispatched, which main knows; the
 // message carries that agent's id and settings name.
 // `reported` is what the agent said about itself: its MCP client's product
@@ -93,8 +92,6 @@ export function createChatWrites(dependencies: {
   agentDisplayName(agentId: string): Promise<string>;
   // The person's agents a message names.
   agentIdsNamedIn(body: string): Promise<string[]>;
-  // Whether a name is one of the person's agents' ids.
-  isOwnAgentId(name: string): Promise<boolean>;
   // The stable per-install id a signed-out reaction is authored under.
   localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
@@ -111,7 +108,7 @@ export function createChatWrites(dependencies: {
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, agentIdsNamedIn, isOwnAgentId, localInstallationId, projectChatBookmarks,
+    localUserDisplayName, agentDisplayName, agentIdsNamedIn, localInstallationId, projectChatBookmarks,
     queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, betweenDispatchScans,
     notifyRenderer,
   } = dependencies;
@@ -219,13 +216,6 @@ export function createChatWrites(dependencies: {
     return await personActorFor(writer);
   }
 
-  // Keeps an agent's own name unless it is one of the person's agents' ids,
-  // which would give its message that agent's key.
-  async function admittedWriter(writer: ChatWriter): Promise<ChatWriter> {
-    if (writer.via !== "cli" || writer.agentName === undefined || !await isOwnAgentId(writer.agentName)) return writer;
-    return { via: "cli", actor: writer.actor, ...(writer.agentId ? { agentId: writer.agentId } : {}), ...(writer.reported ? { reported: writer.reported } : {}) };
-  }
-
   // People and agents; only they react.
   async function personActorFor(writer: PersonWriter) {
     return writer.via === "cli" && writer.actor === "agent"
@@ -257,15 +247,14 @@ export function createChatWrites(dependencies: {
       (findWorkspace(place.workspaceId)?.remote ?? findWorkspace(place.workspaceId)?.pausedRemote) !== undefined) {
       throw new AutomationChatSessionWait();
     }
-    const writer = await admittedWriter(input.writer);
-    const actor = await actorFor(writer);
+    const actor = await actorFor(input.writer);
     const namedAgentIds = input.writer.via === "renderer" ? await agentIdsNamedIn(body) : [];
     const attachments = await input.resolveAttachments();
     const authorActorKey = deriveChatActorKey({
       credentials: admission.actorCredentials,
       installationId: admission.installationId,
       workspaceId: place.workspaceId,
-      writer,
+      writer: input.writer,
       displayName: actor.author.displayName,
     });
     return { admission, fields: {
@@ -502,7 +491,9 @@ export function deriveChatActorKey(input: {
       author: input.writer.via === "automation"
         ? { kind: "automation", automationId: input.writer.automationId }
         : input.writer.via === "cli" && input.writer.actor === "agent"
-          ? { kind: "agent", claimedName: input.writer.agentId ?? input.writer.agentName }
+          // Only a run dohc dispatched names its agent. Any other agent is
+          // the unnamed agent, whatever name it gives.
+          ? { kind: "agent", claimedName: input.writer.agentId }
           : { kind: "human" },
       displayName: input.displayName,
       origin: input.writer.via,
