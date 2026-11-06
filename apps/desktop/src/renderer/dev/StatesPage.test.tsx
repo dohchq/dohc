@@ -2,7 +2,7 @@
 // chat-messages forces a hover on a row of a virtualized list. jsdom has no
 // layout, so the list mock renders every row for the forced-state check.
 import "../../testing/legendListMock";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setOwnPresentation } from "../workbench/actorPresentation";
 import { setChosenColors } from "../workbench/chosenColors";
@@ -33,6 +33,25 @@ const expectForcedTarget = (mark: HTMLElement) =>
   expect(mark.querySelector(mark.dataset.forceTarget ?? ""), mark.dataset.forceTarget).not.toBeNull();
 
 describe("states page", () => {
+  it("draws the start tiles and recent files in every empty editor group", () => {
+    vi.stubGlobal("dohcDesktop", {});
+    try {
+      render(<StatesPage parts={new Set(["editor-groups", "editor-groups-empty", "editor-group-focus"])} />);
+      const surfaces = screen.getAllByTestId("start-surface");
+      expect(surfaces).toHaveLength(6);
+      for (const surface of surfaces) {
+        const group = surface.closest("[data-editor-group-id]")!;
+        expect(group.querySelector("[role=tab]")).toBeNull();
+        for (const name of ["Page", "Collection", "Drawing", "plan.md", "notes.md"]) {
+          fireEvent.click(within(surface).getByRole("button", { name }));
+        }
+        expect(within(surface).getByRole("heading", { name: "Recent" })).toBeTruthy();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("opens only at its address and only with the dev-tools grant", () => {
     expect(statesPageRequested(STATES_PAGE_HASH, true)).toBe(true);
     expect(statesPageRequested(STATES_PAGE_HASH, false)).toBe(false);
