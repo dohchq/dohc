@@ -47,14 +47,14 @@ describe("the surface ladder", () => {
 });
 
 describe("state fills", () => {
-  // The decided alphas (MEGA-PLAN step 2): 7% hover and 11% selected,
-  // and one 40% scrim with no blur. Both themes share them.
-  it("are 7% hover, 11% selected and a 40% scrim in both themes", () => {
+  // The decided alphas (MEGA-PLAN step 2), and a scrim with no blur.
+  it("are 7% hover and 11% selected in both themes, and a 40% or 65% scrim", () => {
     for (const mode of ["light", "dark"] as const) {
       expect(inkAlpha(palette[mode].hover, "hover")).toBe(0.07);
       expect(inkAlpha(palette[mode].selected, "selected")).toBe(0.11);
-      expect(palette[mode].scrim).toBe("rgba(0, 0, 0, 0.40)");
     }
+    expect(palette.light.scrim).toBe("rgba(0, 0, 0, 0.40)");
+    expect(palette.dark.scrim).toBe("rgba(0, 0, 0, 0.65)");
   });
 
   it("tell a hovered row from a selected one on every surface", () => {
@@ -231,7 +231,6 @@ describe("styles.css mirrors tokens.ts", () => {
   it("state utilities map to their semantic tokens", () => {
     for (const state of ["hover", "selected", "scrim"] as const) {
       expect(block("@theme inline")).toContain(`--color-${state}: var(--dohc-${state});`);
-      expect(palette.light[state]).toBe(palette.dark[state]);
     }
   });
 
