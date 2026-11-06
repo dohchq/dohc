@@ -471,11 +471,11 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       }}
       onApproveChoices={async (input, signal) => {
         signal.throwIfAborted();
-        const sequence = request.current;
         const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        signal.throwIfAborted();
-        if (sequence !== request.current) throw Error("The Collection changed. Refresh to check its choices.");
         if (result.kind !== "migrated") throw Error("dohc could not confirm these choices. Refresh the Collection.");
+        // The choices are approved even if the page read the Collection again
+        // meanwhile, as it does when they apply, so what follows still happens.
+        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
         setCreatingForm(false);
         await refresh();
       }}
