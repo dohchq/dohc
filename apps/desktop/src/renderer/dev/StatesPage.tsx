@@ -1317,7 +1317,7 @@ const LONG_NOTICE = {
   id: "self-test",
   tone: "danger" as const,
   title: "The self-test did not finish",
-  body: "dohc stopped the self-test at its third step and kept its log. Copy the details to find the log and the step that stopped, then try again.",
+  body: "dohc stopped the self-test at its third step and kept its log. Copy the details for the log's location, then try again.",
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
   copyText: "The self-test did not finish",
