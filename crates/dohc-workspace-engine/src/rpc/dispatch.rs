@@ -34,6 +34,8 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "files.resolve"
+                | "workReferences.make"
+                | "workReferences.resolve"
                 | "documents.keepRetainedVersion"
                 | "capture.reconcile"
                 | "capture.retryHeld"
@@ -442,6 +444,14 @@ impl EngineService {
             }
             "files.drain" => {
                 Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, true))
+                    .await?
+            }
+            "workReferences.make" => {
+                self.work_references_make(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "workReferences.resolve" => {
+                self.work_references_resolve(&ctx, request.workspace, request.params)
                     .await?
             }
             "workspace.close" => self.workspace_close(request.workspace).await?,
@@ -1284,6 +1294,12 @@ impl EngineService {
                     "received shares do not keep retained versions",
                 ));
             }
+            if method == "workReferences.make" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not make work references",
+                ));
+            }
         }
         if read_only
             && !matches!(
@@ -1506,6 +1522,8 @@ mod tests {
             "links.in",
             "links.resolve",
             "files.resolve",
+            "workReferences.make",
+            "workReferences.resolve",
             "ydoc.ownerStop.request",
             "ydoc.ownerStop.release",
             "ydoc.ownerStop.clear",
@@ -1770,6 +1788,8 @@ mod tests {
             "versions.list",
             "versions.setActive",
             "watcher.status",
+            "workReferences.make",
+            "workReferences.resolve",
             "workspace.close",
             "workspace.open",
             "ydoc.adoptCollectionRecord",

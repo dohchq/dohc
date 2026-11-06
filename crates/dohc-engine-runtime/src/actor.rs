@@ -55,6 +55,7 @@ mod search;
 mod secrets;
 mod versioned;
 mod versions;
+mod work_references;
 mod ydoc;
 
 pub use capture::{

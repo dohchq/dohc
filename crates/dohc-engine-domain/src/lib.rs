@@ -37,6 +37,7 @@ pub mod records;
 pub mod secrets;
 pub mod store;
 mod synced_deletion;
+pub mod work_references;
 pub use store::{
     DuplicateFile, FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
     duplicate_file_in_tx, ensure_operation_published_in, is_duplicate_in, operation_moments_in,

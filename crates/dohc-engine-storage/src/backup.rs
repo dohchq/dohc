@@ -99,6 +99,8 @@ const COMPARED_TABLES: &[&str] = &[
     "file_objects",
     "capture_file_holds",
     "capture_first_imports",
+    "work_references",
+    "work_reference_outbox",
     "blobs",
     "binary_blobs",
     "path_aliases",
@@ -764,6 +766,16 @@ mod tests {
             "ydoc_drain_reports",
             "released_hold_copy_decisions",
         ] {
+            assert!(
+                COMPARED_TABLES.contains(&table),
+                "backup restore verification must compare {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_compares_work_reference_tables() {
+        for table in ["work_references", "work_reference_outbox"] {
             assert!(
                 COMPARED_TABLES.contains(&table),
                 "backup restore verification must compare {table}"

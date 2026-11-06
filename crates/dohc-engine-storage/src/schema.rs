@@ -136,6 +136,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "active_versions",
     "capture_file_holds",
     "capture_first_imports",
+    "work_references",
+    "work_reference_outbox",
     "file_objects",
     "blobs",
     "path_aliases",
@@ -924,6 +926,28 @@ mod tests {
         ] {
             let directory =
                 dohc_test_scratch::ScratchDir::new_named("owner-outbox-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "open must reject a store missing {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_schema_rejects_missing_work_reference_tables() {
+        for table in ["work_references", "work_reference_outbox"] {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("work-reference-schema").unwrap();
             let path = directory.path().join("store.sqlite");
             drop(crate::EngineStore::open(&path, 0).unwrap());
             let connection = rusqlite::Connection::open(&path).unwrap();

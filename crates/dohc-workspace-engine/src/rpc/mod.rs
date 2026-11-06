@@ -25,6 +25,7 @@ pub(super) mod search;
 pub(super) mod secrets;
 pub(super) mod versioned;
 pub(super) mod versions;
+pub(super) mod work_references;
 pub(super) mod workspace;
 pub(super) mod ydoc;
 
