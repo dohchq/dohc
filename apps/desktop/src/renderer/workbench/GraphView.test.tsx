@@ -108,7 +108,7 @@ describe("GraphView", () => {
     fireEvent.focus(beta);
     const description = screen.getByTestId("graph-focused-node");
     expect(screen.getByTestId("graph-canvas").getAttribute("aria-describedby")).toBe(description.id);
-    expect(description.textContent).toBe("beta.md, 1 link");
+    expect(description.textContent).toBe("beta.md, Page, 1 link");
     fireEvent.click(beta);
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
   });
@@ -139,11 +139,40 @@ describe("GraphView", () => {
     canvas.focus();
     fireEvent.keyDown(canvas, { key: "ArrowRight" });
     // With nothing open, focus starts on the most-linked node.
-    expect(screen.getByTestId("graph-focused-node").textContent).toBe("beta.md, 2 links");
+    expect(screen.getByTestId("graph-focused-node").textContent).toBe("beta.md, Page, 2 links");
     fireEvent.keyDown(canvas, { key: "Enter" });
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
     fireEvent.keyDown(canvas, { key: "Escape" });
     expect(canvas.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("names a focused node's kind, and says nothing on hover", async () => {
+    stubPages(["sketch.excalidraw", "alpha.md"], [["alpha.md", "sketch.excalidraw"]]);
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={vi.fn()} />);
+    const canvas = await screen.findByTestId("graph-canvas");
+    await waitFor(() => expect(canvas.dataset.nodeCount).toBe("2"));
+    const description = screen.getByTestId("graph-focused-node");
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 400, 300));
+    // Sweep the pointer until it lands on a node, so hover is proven to have lit one.
+    const hoverSomeNode = (except = "") => {
+      for (let y = 0; y < 300; y += 3) for (let x = 0; x < 400; x += 3) {
+        fireEvent.pointerMove(canvas, { clientX: x, clientY: y, pointerId: 1 });
+        if (canvas.dataset.hovered && canvas.dataset.hovered !== except) return canvas.dataset.hovered;
+      }
+      return "";
+    };
+    expect(hoverSomeNode()).not.toBe("");
+    expect(description.textContent).toBe("");
+    expect(canvas.getAttribute("aria-describedby")).toBeNull();
+
+    canvas.focus();
+    fireEvent.keyDown(canvas, { key: "ArrowRight" });
+    const focused = description.textContent;
+    expect(["sketch.excalidraw, Drawing, 1 link", "alpha.md, Page, 1 link"]).toContain(focused);
+    // Hovering the other node keeps the focused node's words.
+    const focusedPath = focused!.split(",")[0]!;
+    expect(hoverSomeNode(focusedPath)).not.toBe(focusedPath);
+    expect(description.textContent).toBe(focused);
   });
 
   it("marks the open page on the full graph", async () => {

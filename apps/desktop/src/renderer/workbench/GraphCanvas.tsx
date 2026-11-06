@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
 import { DEFAULT_FORCES, placeNodes, type GraphForces, type LayoutFrame, type LayoutRequest } from "./graphLayout";
 
@@ -7,9 +7,15 @@ export type GraphShape = "circle" | "ring" | "diamond" | "square" | "bubble" | "
 export type CanvasNode = {
   path: string;
   title: string;
+  // The kind's name, spoken because the shape only shows it.
+  kind: string;
   shape: GraphShape;
   degree: number;
 };
+
+export function nodeAnnouncement(node: CanvasNode): string {
+  return `${node.title}, ${node.kind}, ${node.degree.toLocaleString()} link${node.degree === 1 ? "" : "s"}`;
+}
 
 export type GraphDisplay = { arrows: boolean; textFade: number; nodeSize: number; linkThickness: number };
 export const DEFAULT_DISPLAY: GraphDisplay = { arrows: false, textFade: 0.5, nodeSize: 0.5, linkThickness: 0.5 };
@@ -110,7 +116,6 @@ export type GraphRenderer = ReturnType<typeof createGraphRenderer>;
 
 type Callbacks = {
   open(index: number): void;
-  hover(index: number): void;
   settled(): void;
 };
 
@@ -658,7 +663,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (index === hover) return;
     hover = index;
     canvas.style.cursor = index >= 0 ? "pointer" : "";
-    callbacks.hover(index);
     relight();
   }
 
@@ -861,7 +865,6 @@ export function GraphCanvas(props: {
   const rendererRef = useRef<GraphRenderer | null>(null);
   const callbacks = useRef(props);
   callbacks.current = props;
-  const [hovered, setHovered] = useState(-1);
   const describedId = useId();
 
   useEffect(() => {
@@ -869,7 +872,6 @@ export function GraphCanvas(props: {
     if (!canvas) return;
     const renderer = createGraphRenderer(canvas, props.surface, {
       open: (index) => callbacks.current.onOpen(index),
-      hover: setHovered,
       settled: () => undefined,
     });
     rendererRef.current = renderer;
@@ -925,8 +927,8 @@ export function GraphCanvas(props: {
     rendererRef.current?.setFocus(props.focusIndex);
   }, [props.focusIndex]);
 
-  const described = props.focusIndex >= 0 ? props.focusIndex : hovered;
-  const describedNode = described >= 0 ? props.nodes[described] : undefined;
+  // Only keyboard focus speaks. Hover lights the node and says nothing.
+  const describedNode = props.focusIndex >= 0 ? props.nodes[props.focusIndex] : undefined;
 
   function onKeyDown(event: React.KeyboardEvent<HTMLCanvasElement>) {
     const renderer = rendererRef.current;
@@ -985,9 +987,7 @@ export function GraphCanvas(props: {
         className={`block touch-none select-none ${props.className}`}
       />
       <p id={describedId} data-testid="graph-focused-node" aria-live="polite" className="sr-only">
-        {describedNode
-          ? `${describedNode.title}, ${describedNode.degree.toLocaleString()} link${describedNode.degree === 1 ? "" : "s"}`
-          : ""}
+        {describedNode ? nodeAnnouncement(describedNode) : ""}
       </p>
     </>
   );

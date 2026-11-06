@@ -50,6 +50,7 @@ const SHAPES = Object.fromEntries(GRAPH_KINDS.map(({ kind, shape }) => [kind, sh
   GraphKind,
   CanvasNode["shape"]
 >;
+const KIND_NAMES = Object.fromEntries(GRAPH_KINDS.map(({ kind, name }) => [kind, name])) as Record<GraphKind, string>;
 
 type GraphViewModel = {
   nodes: CanvasNode[];
@@ -133,6 +134,7 @@ function buildModel(
   const nodes = sources.map((node, i) => ({
     path: node.path,
     title: node.title,
+    kind: KIND_NAMES[graphKind(node)],
     shape: SHAPES[graphKind(node)],
     degree: linkDegree[i]!,
   }));
