@@ -4196,7 +4196,7 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
             )?;
             query
                 .query_map([WS], |row| row.get::<_, String>(0))?
-                .collect()
+                .collect::<rusqlite::Result<Vec<String>>>()
         })
         .expect("journaled messages")
         .iter()
