@@ -1,7 +1,7 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { test, expect, type Locator, type Page } from "@playwright/test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
@@ -59,13 +59,15 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
   }
 });
 
-function runnerCommand(mode: "report" | "silent-fail" | "ask"): string {
+type RunnerMode = "report" | "silent-fail" | "ask" | "write-report";
+
+function runnerCommand(mode: RunnerMode): string {
   return `node "${fakeRunner.replaceAll('"', '\\"')}" ${mode}`;
 }
 
 async function seedRunnerSettings(
   temp: Pick<TempWorkspace, "homeDir">,
-  mode: "report" | "silent-fail" | "ask",
+  mode: RunnerMode,
 ): Promise<string> {
   const command = runnerCommand(mode);
   const settings: DesktopUserSettings = {
@@ -284,6 +286,67 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     // second reply.
     await page.getByTestId("notice-center-toggle").click();
     await expect(center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" })).toHaveCount(1);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("a dispatched run's credential stays out of its log, History, and chat", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "agent-dispatch-credential-e2e";
+  // The fake runner leaves its run's secret here, outside the workspace and dohc's folders.
+  const runFile = join(temp.baseDir, "run.json");
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedRunnerSettings(temp, "write-report");
+    desktop = await launchDesktopApp({ workspace: temp, env: { FAKE_RUNNER_RUN_FILE: runFile } });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
+    const page = desktop.page;
+    await openMyAgent(page);
+
+    const composer = page.getByTestId("chats-lane-composer");
+    await composer.fill("write the run notes");
+    await composer.press("Enter");
+    await expect(page.getByTestId("chats-lane-message").filter({ hasText: REPORT })).toHaveCount(1);
+    // Read once the run has ended, so its log is complete.
+    await expect.poll(() => page.evaluate(async (id) => {
+      const api = (window as unknown as {
+        dohcDesktop: { getAgentRunStatus(payload: { workspaceId: string }): Promise<{ activeRun: unknown }> };
+      }).dohcDesktop;
+      return (await api.getAgentRunStatus({ workspaceId: id })).activeRun;
+    }, workspaceId), { timeout: 60_000 }).toBeNull();
+
+    const run = JSON.parse(await readFile(runFile, "utf8")) as { secret: string; threadId: string };
+    expect(run.secret).toMatch(/^[a-f0-9]{64}$/u);
+    const read = () => page.evaluate(async ({ id, threadId }) => {
+      const api = (window as unknown as {
+        dohcDesktop: {
+          listChatMessages(payload: { workspaceId: string; threadId: string }): Promise<unknown>;
+          listEngineMoments(payload: { workspaceId: string }): Promise<{ moments: Array<{ path: string; authors?: unknown[] }> }>;
+        };
+      }).dohcDesktop;
+      return {
+        messages: await api.listChatMessages({ workspaceId: id, threadId }),
+        moments: (await api.listEngineMoments({ workspaceId: id })).moments,
+      };
+    }, { id: workspaceId, threadId: run.threadId });
+    // The run wrote as itself, so History credits Nova, not the unnamed agent.
+    await expect.poll(async () => (await read()).moments.find((moment) => moment.path === "notes/run.md")?.authors)
+      .toEqual([expect.objectContaining({ kind: "agent", agentId: "default" })]);
+    const { messages, moments } = await read();
+    expect(JSON.stringify(messages)).toContain(REPORT);
+
+    // The run's log holds its tool results, and none of what the run left holds its secret.
+    const logs = join(temp.homeDir, "run-logs");
+    const files = (await readdir(logs, { withFileTypes: true })).filter((entry) => entry.isFile());
+    const left = await Promise.all(files.map((entry) => readFile(join(logs, entry.name), "utf8")));
+    expect(left.join("\n")).toContain("notes/run.md");
+    for (const text of [...left, JSON.stringify(moments), JSON.stringify(messages), await page.locator("body").innerText()]) {
+      expect(text).not.toContain(run.secret);
+    }
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

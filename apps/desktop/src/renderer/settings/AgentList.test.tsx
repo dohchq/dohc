@@ -177,6 +177,19 @@ it("says an agent didn't reply, names it in Notices with why and its log, and of
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
 });
 
+it("says dohc couldn't confirm an agent's replies when its reply wasn't the check's", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({
+    ok: false, unconfirmed: true, detail: "Codex replied without this check's credential.", logPath: "C:\\Logs\\check.log",
+  });
+  const { onError } = renderList();
+  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  expect(onError).toHaveBeenCalledWith("dohc couldn't confirm Codex's replies.", undefined, expect.any(Function), [
+    ["Cause", "Codex replied without this check's credential."],
+    ["Log", "C:\\Logs\\check.log"],
+  ], "agent-check:ws-1:codex");
+});
+
 it("checks the agent again from the failed check's toast", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner exited before reporting self-test success." });
   const { onError } = renderList();

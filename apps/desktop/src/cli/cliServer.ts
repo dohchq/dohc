@@ -434,7 +434,7 @@ export interface CliServerOptions {
   // The engine's id for that run when dohc dispatched it as agent work, or
   // null. The engine reads the run's agent from it, so a read from the run
   // moves only that agent's place, whatever the command line says. Any other
-  // read is that of agents outside a run.
+  // read is that of connected agents.
   dispatchedRunId(workspaceId: string): string | null;
   // The run an agent's writes name while a run dohc dispatched, or one
   // started from Settings, holds the workspace's run slot, or null. It is

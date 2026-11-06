@@ -2026,20 +2026,25 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             if (!test || test.settled) return;
             try {
               const messages = await chat.listMessages({ workspaceId, threadId });
+              const replies = messages.filter(
+                (message) => message.author.kind === "agent" && message.body.trim() === marker,
+              );
               // Only the run's own reply carries its agent. A reply that lost
-              // the run's secret is the unnamed agent's and doesn't pass.
-              if (
-                messages.some(
-                  (message) =>
-                    message.author.kind === "agent" &&
-                    message.authorAgentId === agent.id &&
-                    message.body.trim() === marker,
-                )
-              ) {
+              // the run's secret is the unnamed agent's, so the check ends there.
+              if (replies.some((message) => message.authorAgentId === agent.id)) {
                 await complete({
                   ok: true,
                   detail:
                     "Runner self-test passed. The harness reported through dohc chat.",
+                });
+                return;
+              }
+              if (replies.length > 0) {
+                await complete({
+                  ok: false,
+                  unconfirmed: true,
+                  detail: `${agent.name} replied without this check's credential, so its replies would show as Agent. Check the Command in ${agent.name}'s details.`,
+                  logPath,
                 });
                 return;
               }
