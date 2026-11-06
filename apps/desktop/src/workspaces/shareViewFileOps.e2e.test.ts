@@ -600,6 +600,16 @@ describe("share-view file operations through the real store", () => {
       const path = "docs/packing/collection.yaml";
       const controlPath = "docs/packing/automations.yaml";
       await seedSharedFiles(view, [{ path, text: "fields: {}\n" }, { path: controlPath, text: "actions: []\n" }]);
+      const grantedSelector = { paths: ["docs"], versionId: null, access: "edit" as const };
+      await expect(view.directClient.pushDirectWrites({ shareId: SHARE_ID, grantedSelector }))
+        .resolves.toEqual({ writes: [{ paths: [path, controlPath], result: "written" }], morePending: false });
+      expect([...uploaded].sort()).toEqual(
+        ["fields: {}\n", "actions: []\n"].map(text => createHash("sha256").update(text).digest("hex")).sort(),
+      );
+      expect(collectionWritePaths.filter(value => value != null).sort()).toEqual([path, controlPath].sort());
+      uploaded.length = 0;
+      collectionWritePaths.length = 0;
+      written.length = 0;
       await writeFile(join(view.rootPath, path), "my own file", "utf8");
       const record = join(view.rootPath, ".dohc", "local", "share-refresh", "share-collision-record.json");
       await mkdir(dirname(record), { recursive: true, mode: 0o700 });
@@ -609,7 +619,6 @@ describe("share-view file operations through the real store", () => {
         await withStaleSensitiveWorkspaceOperation(view.rootPath,
           lease => owner.files.reconcile(lease, owner.requested, "refresh"));
       }
-      const grantedSelector = { paths: ["docs"], versionId: null, access: "edit" as const };
       await expect(view.directClient.pushDirectWrites({ shareId: SHARE_ID, grantedSelector }))
         .resolves.toEqual({ writes: [], morePending: false });
       expect(uploaded).not.toContain(ownFileSha256);
