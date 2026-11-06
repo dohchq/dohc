@@ -339,8 +339,8 @@ it("marks the agent the owner's change declared beside the authenticated owner",
 });
 it("marks a connected agent's change with the plug, and a guest's agent as the guest's", async () => {
   const f = fixture(), original = f.call.getMockImplementation()!, base = reviewFixture();
-  // The second change is a guest's, by their run's agent. The third is a connected agent's.
-  const changes = [null, {authority: reader, agent: {kind: "agent", agentId: "trip-agent-hosted", onBehalfOf: "reader", depth: 0}},
+  // The second change is a guest's, by an agent whose id reverses the text after it. The third is a connected agent's.
+  const changes = [null, {authority: reader, agent: {kind: "agent", agentId: `trip${String.fromCodePoint(0x202e)}agent`, onBehalfOf: "reader", depth: 0}},
     {authority: owner, agent: {kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "local-person", depth: 0}}];
   const review = {...base, acceptedEvents: base.acceptedEvents.map((event, index) => {
     const change = changes[index];
@@ -358,6 +358,9 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   fireEvent.blur(plugged);
   fireEvent.focus(run);
   expect(screen.getByRole("tooltip").textContent).toContain("Owned by Account reader");
+  // Neither the card nor the row shows the id.
+  expect(run.closest("li")!.textContent!.split("Change details")[0]).not.toContain("trip");
+  expect(run.parentElement!.nextElementSibling!.textContent).toBe("Agent");
 });
 
 it("allows declining content replacement after access stops", async () => {

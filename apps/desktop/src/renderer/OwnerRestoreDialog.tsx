@@ -69,12 +69,14 @@ function ChangeList({label, events, emails}: {label: string; events: OwnerRestor
       {events.slice(start, start + 50).map(({metadata}) => {
         const {authority, receipt, receivedAtMs} = metadata.accepted;
         const agent = metadata.authorSnapshot?.find(entry => entry.kind === "agent");
+        // A guest gives both the name and the id, so either shows only when nothing in it hides or reorders text.
+        const agentName = shownAgentName(agent?.agentName) ?? shownAgentName(agent?.agentId) ?? "Agent";
         return <li key={receipt.deliveryId}>
           {author(authority, emails)}
           {agent ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
             presentation={isConnectedAgentId(agent.agentId) ? {...neutralPresentation, connected: true} : undefined}
-            author={{authorDisplayName: shownAgentName(agent.agentName) ?? agent.agentId, authorOwnerDisplayName: author(authority, emails)}} />
-            <span className="min-w-0 break-all text-agent">{shownAgentName(agent.agentName) ?? agent.agentId}</span></span> : null}
+            author={{authorDisplayName: agentName, authorOwnerDisplayName: author(authority, emails)}} />
+            <span className="min-w-0 break-all text-agent">{agentName}</span></span> : null}
           <span> · {time(receivedAtMs)}</span>
           <details><summary className="cursor-pointer">Change details</summary><pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{escapeHiddenText(JSON.stringify(metadata, null, 2))}</pre></details>
         </li>;
