@@ -2065,11 +2065,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           {filesExpanded ? (
             <>
               {empty ? (
-                props.listed && (
+                props.listed ? (
                   <div className="px-3 py-1.5 text-[11px] text-subtle">
                     No files
                   </div>
-                )
+                ) : null
               ) : (
                 <ul
                   ref={workspaceTreeRef}
