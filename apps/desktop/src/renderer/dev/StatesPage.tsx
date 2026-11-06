@@ -505,7 +505,7 @@ function ObjectRows(props: { label: string; selected: boolean }) {
         <li key={kind} className="px-1">
           <span
             className={`flex h-7 items-center gap-1.5 rounded-md pl-7 pr-2 text-[13px] ${
-              props.selected ? "bg-selected text-ink" : "text-muted"
+              props.selected ? "bg-selected text-ink font-medium" : "text-muted"
             }`}
           >
             <ObjectGlyph kind={kind} size={15} className={props.selected ? "text-ink" : "text-subtle"} />

@@ -38,7 +38,7 @@
   --dohc-line: #e4e1d8;
   --dohc-ink: #1c1b18;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
   /* The fill of loading bars. */
   --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.40);
@@ -73,7 +73,7 @@
   --dohc-line: #2a2925;
   --dohc-ink: #f6f4ee;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
   --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.65);
   --dohc-muted: #a9a599;

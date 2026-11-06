@@ -54,7 +54,7 @@ function LayoutToggle(props: {
         onClick={props.onClick}
         className={`titlebar-no-drag relative grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
           props.pressed
-            ? "bg-selected text-ink"
+            ? "bg-selected text-ink font-medium"
             : "text-subtle hover:bg-hover hover:text-ink"
         }`}
       >
