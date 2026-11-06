@@ -50,6 +50,6 @@ export function createWorkReferenceRoutes(storage: SyncRelayStorage, identityKey
       return respond(resolved);
     }
     return respond(await storage.listWorkReferences({workspaceId: route.workspaceId, reader, identityKey,
-      after: new URL(request.url).searchParams.get("after") ?? undefined}));
+      after: new URL(request.url).searchParams.get("after") || undefined}));
   };
 }

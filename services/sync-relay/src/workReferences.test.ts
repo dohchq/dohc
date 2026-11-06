@@ -287,6 +287,17 @@ describe("work reference registration and resolution", () => {
     }
   });
 
+  it("accepts an empty after on owner and share listing routes", async () => {
+    const {handler} = await fixture();
+    await register(handler, [{reference: ref, target, createdAtMs: 1}]);
+    const shareId = await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "reader", access: "view"});
+    for (const [user, path] of [["owner", `/sync/${ws}/work-references`], ["reader", `/sync/shares/${shareId}/work-references`]]) {
+      const response = await handler(request(user!, `${path}?after=`));
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({references: [{reference: ref}]});
+    }
+  });
+
   it("lists share mappings only on the final log page", async () => {
     const {handler, storage} = await fixture();
     await appendLog(handler, "owner", ws, [moment("notes/later.md", "Plan", {originSeq: 1, objectId: "later", momentId: "later-write"})], {originId: "device"});
@@ -325,16 +336,18 @@ describe("work reference registration and resolution", () => {
   it("mints through a link using the message's non-null canonical channel binding", async () => {
     const {handler, storage} = await fixture();
     await appendLog(handler, "owner", ws, sequenced([
-      chatChannelCreate("group"), chatThreadCreate("thread", "group"),
+      chatChannelCreate("group", {type: "both", folderPath: "notes"}), chatThreadCreate("thread", "group"),
       chatMessageAppend("message", "thread", "Plan", {authorUserId: "owner"}),
     ]), {originId: "chat-device"});
     const message = {kind: "message", messageId: "message", threadId: "thread", channelId: "channel-group"};
     await register(handler, [{reference: ref, target: message, createdAtMs: 1}]);
-    const shareId = await createShare(handler, "owner", ws, {channelWireId: "group", recipientUserId: "reader", access: "read-only"});
+    const shareId = await createShare(handler, "owner", ws, {channelWireId: "group", paths: ["notes"], recipientUserId: "reader", access: "read-only"});
     const token = "L".repeat(43);
     seedLinkGrant(storage, {shareId, grantId: "channel-link", access: "read-only", secretHash: hashLinkBearer("secret", LINK_KEY)});
     seedLinkSession(storage, {grantId: "channel-link", capabilityHash: hashLinkBearer(token, LINK_KEY)});
-    const projected = await json(await handler(linkRequest(token, `/sync/work-references/${ref}`)));
+    const resolved = await handler(linkRequest(token, `/sync/work-references/${ref}`));
+    expect(resolved.status).toBe(200);
+    const projected = await json(resolved);
     expect(projected.target).toEqual({kind: "message", messageId: "message", threadId: "thread"});
     const minted = await handler(linkRequest(token, "/sync/internal/work-references", mintBody(projected.target)));
     expect(minted.status).toBe(200);

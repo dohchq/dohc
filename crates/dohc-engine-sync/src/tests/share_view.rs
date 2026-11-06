@@ -816,7 +816,8 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
 #[test]
 fn share_view_learns_a_mapping_after_its_target_arrives_on_the_second_log_page() {
     use dohc_engine_domain::work_references::{
-        WorkReferenceResolution, resolve_work_reference, work_reference_page_after,
+        WorkReferenceResolution, learn_work_reference_page, resolve_work_reference,
+        work_reference_page_after,
     };
     let (_scratch, path, mut engine) = open_store();
     let token = format!("share-object:v1:{}", "a".repeat(64));
@@ -873,6 +874,7 @@ fn share_view_learns_a_mapping_after_its_target_arrives_on_the_second_log_page()
         )
         .with_view_blobs([(sha, body)]),
     );
+    learn_work_reference_page(&mut engine, "ws", "view:share", &[], Some("first-mapping")).unwrap();
     let grant = tracked_grant(["docs"]);
     let first = client
         .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
@@ -882,8 +884,10 @@ fn share_view_learns_a_mapping_after_its_target_arrives_on_the_second_log_page()
         WorkReferenceResolution::Unknown
     ));
     assert_eq!(
-        work_reference_page_after(&engine, "ws", "view:share").unwrap(),
-        None
+        work_reference_page_after(&engine, "ws", "view:share")
+            .unwrap()
+            .as_deref(),
+        Some("first-mapping")
     );
     client
         .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
@@ -913,8 +917,8 @@ fn share_view_learns_a_mapping_after_its_target_arrives_on_the_second_log_page()
     assert_eq!(
         *client.transport().reference_pulls.lock().unwrap(),
         [
-            (true, None),
-            (true, None),
+            (true, Some("first-mapping".into())),
+            (true, Some("first-mapping".into())),
             (true, Some("first-mapping".into()))
         ]
     );
