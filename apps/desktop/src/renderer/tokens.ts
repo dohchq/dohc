@@ -29,6 +29,7 @@ export interface ThemeTokens {
   danger: string;
   dangerFill: string;
   onDanger: string;
+  dangerTint: string;
   selection: string;
 }
 
@@ -77,6 +78,8 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // A danger confirm's fill and label.
     dangerFill: "#9d3c28",
     onDanger: "#faf9f5",
+    // The tile behind a danger confirmation's glyph, and nothing else.
+    dangerTint: "#eadcd3",
     selection: "rgba(58, 126, 233, 0.22)",
   },
   dark: {
@@ -109,6 +112,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // reads soft with a dark label. The fill is deeper, under an ink label.
     dangerFill: "#b04530",
     onDanger: "#f6f4ee",
+    dangerTint: "#30241f",
     selection: "rgba(102, 148, 245, 0.30)",
   },
 };
@@ -138,6 +142,7 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   danger: "--dohc-danger",
   dangerFill: "--dohc-danger-fill",
   onDanger: "--dohc-on-danger",
+  dangerTint: "--dohc-danger-tint",
   selection: "--dohc-selection",
 };
 

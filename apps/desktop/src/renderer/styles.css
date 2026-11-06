@@ -53,6 +53,7 @@
   --dohc-danger: #9d3c28;
   --dohc-danger-fill: #9d3c28;
   --dohc-on-danger: #faf9f5;
+  --dohc-danger-tint: #eadcd3;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
   /* Identity hues: olive belongs to the agent default.
@@ -89,6 +90,7 @@
   --dohc-danger: #e1866c;
   --dohc-danger-fill: #b04530;
   --dohc-on-danger: #f6f4ee;
+  --dohc-danger-tint: #30241f;
   --dohc-selection: rgba(102, 148, 245, 0.30);
   --dohc-hue-rust: #dc9378;
   --dohc-hue-amber: #d9b05a;
@@ -122,6 +124,7 @@
   --color-danger: var(--dohc-danger);
   --color-danger-fill: var(--dohc-danger-fill);
   --color-on-danger: var(--dohc-on-danger);
+  --color-danger-tint: var(--dohc-danger-tint);
   --color-hue-rust: var(--dohc-hue-rust);
   --color-hue-amber: var(--dohc-hue-amber);
   --color-hue-teal: var(--dohc-hue-teal);
