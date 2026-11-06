@@ -60,3 +60,10 @@ it("refuses an account session without a validated, consistent sign-in", async (
   expect(() => accountSessionFrom({ user: { id: "a" }, session: { id: "s", userId: "a", expiresAt: "never" } }))
     .toThrow(UnauthorizedError);
 });
+
+it("takes the alert mention name from the validated account", () => {
+  expect(accountSessionFrom({user: {id: "account", name: "Alice"},
+    session: {id: "sign-in", userId: "account", expiresAt: 5000}})).toEqual({
+    userId: "account", sessionId: "sign-in", expiresAtMs: 5000, displayName: "Alice",
+  });
+});

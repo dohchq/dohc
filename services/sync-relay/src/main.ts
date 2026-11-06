@@ -2,7 +2,8 @@ import {parsePublicEditRelease} from "@dohc/security-contract";
 import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createAccountSessionResolver, createSessionActorResolver, UnauthorizedError, type ResolveAccountSession, type ResolveActor } from "@dohc/workspace-auth/session";
-import { parsePushVapidPublicKey } from "./pushRoutes";
+import { readPushConfig } from "./pushConfig";
+import { createPushSender } from "./pushSender";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -312,12 +313,11 @@ const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession} =
   })();
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
-// Only the public key. Without it the browser chat page reports alerts unavailable.
-const pushVapidPublicKey = process.env.DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY || undefined;
-if (pushVapidPublicKey !== undefined) {
-  try { parsePushVapidPublicKey(pushVapidPublicKey); }
-  catch { fatal("FATAL: DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY must be a base64url P-256 public key."); }
-}
+const pushConfig = (() => {
+  try {return readPushConfig(process.env);}
+  catch {fatal("FATAL: Invalid push sender configuration.");}
+})();
+const pushVapidPublicKey = pushConfig?.publicKey;
 
 const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
   allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
@@ -737,11 +737,25 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 }) : undefined;
 
 let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
+const pushSender = createPushSender({storage: storage as StorageContext, config: pool ? pushConfig : undefined,
+  async sessionIsValid(session, signal) {
+    signal.throwIfAborted();
+    const query = {text: `SELECT 1 FROM "session" s JOIN "user" u ON u.id = s."userId"
+      WHERE s.id = $1 AND s."userId" = $2 AND s."expiresAt" > now()`, values: [session.sessionId, session.userId],
+      query_timeout: 5000};
+    const result = await pool!.query(query);
+    signal.throwIfAborted();
+    return result.rowCount === 1;
+  }, onError: () => console.error("[sync-relay] Push delivery could not finish.")});
+const stopPushSender = () => {void pushSender.close().catch(() => console.error("[sync-relay] Push sender could not close."));};
+process.once("SIGINT", stopPushSender); process.once("SIGTERM", stopPushSender);
+server.once("close", stopPushSender);
 const stopJournalCheck = () => journalCheck?.close();
 process.once("SIGINT", stopJournalCheck); process.once("SIGTERM", stopJournalCheck);
 server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
   journalCheck = startLiveJournalCheck((storage as StorageContext).db);
+  pushSender.start();
   void (async () => {
     for (const job of pendingDeletions.splice(0)) await deletions.purge(job.user_id,job.email).catch(() => console.error("[sync-relay] Account deletion remains pending."));
   })();
@@ -756,6 +770,7 @@ installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
     stopJournalCheck();
+    await pushSender.close();
     await publicationOperator.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();

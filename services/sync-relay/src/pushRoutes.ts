@@ -113,7 +113,7 @@ export function createPushRoutes(options: {
       }
       storage.bindPushSubscription({installationId, userId: session.userId, sessionId: session.sessionId,
         sessionExpiresAtMs: session.expiresAtMs, endpoint, p256dh, auth, vapidKeyId: vapid.keyId,
-        browserExpiresAtMs: expiresAtMs, nowMs});
+        browserExpiresAtMs: expiresAtMs, nowMs, accountName: session.displayName});
     } else if (path !== PUSH_STATUS_PATH) {
       storage.removePushSubscription({installationId, userId: session.userId});
     }
