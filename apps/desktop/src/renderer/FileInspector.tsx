@@ -1005,8 +1005,9 @@ export const FileInspector = memo(function FileInspector(
             contentReadTicket={contentReadTicket}
             latestContentRequestId={latestContentRequestId}
             refreshAfterConflict={refreshAfterConflict}
-            testId={kind === "json" ? "view-json" : "view-text"}
-            language={kind === "json" ? "json" : extensionOf(props.path) || "text"}
+            // Only a .json file claims JSON; the other data files keep the text view.
+            testId={extensionOf(props.path) === "json" ? "view-json" : "view-text"}
+            language={extensionOf(props.path) || "text"}
             workspaceId={props.workspaceId}
             path={props.path}
             truncated={truncated}

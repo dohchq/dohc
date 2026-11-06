@@ -67,7 +67,10 @@ describe("file kind records", () => {
     ["rows.csv", "CSV table", "file-spreadsheet"],
     ["main.ts", "Code", "file-code"],
     ["notes.txt", "Text", "file-type"],
+    ["server.log", "Text", "file-type"],
     ["config.json", "Data", "file-braces"],
+    ["compose.yaml", "Data", "file-braces"],
+    ["index.html", "Code", "file-code"],
     ["plan.excalidraw", "Drawing", "pen-tool"],
     ["photo.png", "Image", "image"],
     ["data.sqlite", "Database", "database"],
@@ -78,7 +81,7 @@ describe("file kind records", () => {
     expect(fileKindForPath(path)).toMatchObject({ name, glyphId });
   });
 
-  it.each(["txt", "log", "env", "ini", "html", "htm", "xml", "yaml", "yml", "toml"])(
+  it.each(["txt", "log"])(
     "uses the text glyph for %s while retaining text loading", (extension) => {
       expect(fileKindForPath(`file.${extension}`)).toMatchObject({
         displayKind: "text", glyphId: "file-type", opens: { content: "text" },
@@ -86,7 +89,15 @@ describe("file kind records", () => {
     },
   );
 
-  it.each(["js", "tsx", "css", "py", "rs", "sh", "sql"])(
+  it.each(["json", "xml", "yaml", "yml", "toml", "ini", "env"])(
+    "uses the data glyph for %s while retaining text loading", (extension) => {
+      expect(fileKindForPath(`file.${extension}`)).toMatchObject({
+        displayKind: "json", glyphId: "file-braces", opens: { content: "text" },
+      });
+    },
+  );
+
+  it.each(["js", "tsx", "css", "py", "rs", "sh", "sql", "html", "htm"])(
     "uses a code glyph for %s while retaining text loading", (extension) => {
       expect(fileKindForPath(`file.${extension}`)).toMatchObject({
         displayKind: "code", glyphId: "file-code", opens: { content: "text" },

@@ -86,13 +86,13 @@ export const FILE_KIND_RECORDS = {
   },
   json: {
     displayKind: "json", name: "Data", glyphId: "file-braces", displayNameRule: "basename",
-    extensions: ["json"],
+    extensions: ["json", "xml", "yaml", "yml", "toml", "ini", "env"],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   text: {
     displayKind: "text", name: "Text", glyphId: "file-type", displayNameRule: "basename",
-    extensions: ["txt", "html", "htm", "xml", "yaml", "yml", "toml", "ini", "env", "log"],
+    extensions: ["txt", "log"],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
@@ -101,6 +101,7 @@ export const FILE_KIND_RECORDS = {
     extensions: [
       "css", "scss", "sass", "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "sql",
       "sh", "bash", "zsh", "ps1", "py", "rb", "go", "rs", "java", "c", "cpp", "h", "hpp",
+      "html", "htm",
     ],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
