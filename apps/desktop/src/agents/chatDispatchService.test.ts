@@ -4458,7 +4458,7 @@ describe("chatDispatchService", () => {
     await expect(resultPromise).resolves.toEqual({
       ok: false,
       unconfirmed: true,
-      detail: "Nova replied without this check's credential, so its replies would show as Agent. Check the Command in Nova's details.",
+      detail: "Nova's Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in Nova's details.",
       logPath: join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log`),
     });
     expect(fixture.killCalls).toContainEqual({ pid: -call.process.pid!, signal: "SIGTERM" });

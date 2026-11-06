@@ -2043,7 +2043,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
                 await complete({
                   ok: false,
                   unconfirmed: true,
-                  detail: `${agent.name} replied without this check's credential, so its replies would show as Agent. Check the Command in ${agent.name}'s details.`,
+                  detail: `${agent.name}'s Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in ${agent.name}'s details.`,
                   logPath,
                 });
                 return;
