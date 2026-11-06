@@ -511,7 +511,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         if (event.defaultPrevented || isComposingKey(event)) return;
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeEditor(); }
         else if (event.key === "Enter" && event.target instanceof HTMLInputElement && event.target.type !== "checkbox" && event.target.type !== "file") { event.preventDefault(); submitEditor(); }
-      }}>{fields.map(field => <td key={field.fieldId} className="px-3 py-1.5 align-top">{createFields.includes(field) ? <div className="flex flex-col gap-1">{valueInput(field)}{fieldError(field)}</div> : null}</td>)}{props.buttons?.fields.map(field => <td key={`button:${field}`} />)}<td className="px-3 py-1.5 align-top"><div className="flex justify-end gap-2">
+      }}>{fields.map(field => <td key={field.fieldId} className="px-3 py-1.5 align-top">{createFields.includes(field) ? <div className="flex flex-col gap-1 wrap-anywhere">{valueInput(field)}{fieldError(field)}</div> : null}</td>)}{props.buttons?.fields.map(field => <td key={`button:${field}`} />)}<td className="px-3 py-1.5 align-top"><div className="flex justify-end gap-2">
         <IconButton title="Cancel" aria-label="Cancel" disabled={disabled} onClick={closeEditor}><X size={15} strokeWidth={1.9} aria-hidden /></IconButton>
         <IconButton title="Create record" aria-label="Create record" disabled={disabled} onClick={submitEditor}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
       </div></td></tr> : null}
