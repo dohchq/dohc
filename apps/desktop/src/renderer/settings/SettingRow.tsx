@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
 import { Check, Minus, Plus, RotateCcw } from "lucide-react";
 import { AGENT_HUES, IDENTITY_HUES, palette, type AgentHue, type IdentityHue } from "../tokens";
 import { useRadioGroup } from "../ui/SegmentedControl";
@@ -293,9 +293,11 @@ export function SwitchControl(props: {
   // The change it asked for is still running.
   busy?: boolean;
   onChange: (checked: boolean) => void;
+  ref?: Ref<HTMLButtonElement>;
 }) {
   return (
     <button
+      ref={props.ref}
       type="button"
       role="switch"
       aria-label={props.label}

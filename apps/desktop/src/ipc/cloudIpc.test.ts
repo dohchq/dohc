@@ -419,6 +419,15 @@ describe("registered cloud handlers", () => {
     });
     h.cache.set({ ...credentials, userId: "other" });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ workspaceSyncConnected: false });
+    // An unconfirmed account records nothing, so once it matches again sync
+    // reads on and connected, with no pause saved.
+    h.cache.set(credentials);
+    await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({
+      workspaceSynced: true, workspaceSyncConnected: true,
+    });
+    expect(h.workspace.remote).toEqual({ serverUrl: credentials.serverUrl, ownerUserId: credentials.userId });
+    expect(h.workspace.syncPause).toBeUndefined();
+    expect(h.workspace.pausedRemote).toBeUndefined();
   });
 
   it.each(["renderer", "authority"] as const)("stops enrollment after a claim when its %s retires", async (reason) => {

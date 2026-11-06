@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
+import { Sparkles, TriangleAlert } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
@@ -103,6 +103,33 @@ export function CloudSyncSettings(props: {
     workspaceSyncConnected: status?.workspaceSyncConnected ?? false,
     workspaceSecretState: status?.workspaceSecretState ?? "none",
     ...(status?.syncPause ? { syncPause: status.syncPause } : {}),
+  };
+  // Sync is on, but nothing syncs. A switch can only read on or off, so the
+  // row offers Try again and Pause sync in its place.
+  const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
+  // The buttons go when either action works or the account is confirmed on
+  // its own. Focus they held moves to the switch that takes their place once
+  // it can be used, or to Connect server while signed out, where the switch
+  // can't turn on. Focus the person moved to another control stays there.
+  // A busy switch or a status still loading has nothing to focus yet, so the
+  // move waits for the next answer.
+  const syncSwitch = useRef<HTMLButtonElement | null>(null);
+  const connectButton = useRef<HTMLButtonElement | null>(null);
+  const actionHeldFocus = useRef(false);
+  useEffect(() => {
+    if (unconfirmed || !actionHeldFocus.current) return;
+    const target = syncSwitch.current?.disabled === false ? syncSwitch.current : connectButton.current;
+    if (!target) return;
+    actionHeldFocus.current = false;
+    if (document.activeElement === document.body) target.focus();
+  }, [unconfirmed, syncBusy, status]);
+  const holdsFocus = {
+    onFocus: () => {
+      actionHeldFocus.current = true;
+    },
+    onBlur: (event: FocusEvent) => {
+      if (event.relatedTarget) actionHeldFocus.current = false;
+    },
   };
   const relayUrl = status?.relayUrl?.trim() ?? "";
   // The join handle: one copyable line carrying the workspace id and its
@@ -227,7 +254,7 @@ export function CloudSyncSettings(props: {
 
   const connectRow = (
     <SettingRow title="Server" testId="settings-row-server">
-      <PrimaryButton data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
+      <PrimaryButton ref={connectButton} data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
         Connect server
       </PrimaryButton>
     </SettingRow>
@@ -236,7 +263,6 @@ export function CloudSyncSettings(props: {
   // switch: pausing needs no account, and turning sync on does.
   if (!status.connected && !status.workspaceSyncOwned) return connectRow;
 
-  const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
   const syncPause = sync.workspaceSynced ? undefined : sync.syncPause;
   const needsServer = !status.connected && !sync.workspaceSynced;
   const secretState = sync.workspaceSynced && sync.workspaceSyncConnected ? sync.workspaceSecretState : "none";
@@ -262,8 +288,9 @@ export function CloudSyncSettings(props: {
             testId="settings-row-sync-workspace"
             description={
               unconfirmed ? (
-                <span data-testid="cloud-workspace-relink" className="text-danger">
-                  {SYNC_UNCONFIRMED_ACCOUNT}
+                <span data-testid="cloud-workspace-relink" className="flex gap-1 text-danger">
+                  <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
+                  <span>{SYNC_UNCONFIRMED_ACCOUNT}</span>
                 </span>
               ) : syncPause || needsServer ? (
                 <>
@@ -279,29 +306,46 @@ export function CloudSyncSettings(props: {
               ) : undefined
             }
           >
-            {/* Enabling again reads this account's saved session, which
-                resumes sync when it owns the workspace. Another account
-                gets main's reason in a notice, and Disconnect above is the
-                way to the right one. */}
-            {unconfirmed && status.connected ? (
-              <SecondaryButton
-                data-testid="cloud-relink-workspace"
-                disabled={syncBusy !== null}
-                onClick={() => void enableSync()}
-              >
-                Try again
-              </SecondaryButton>
-            ) : null}
-            {/* Off pauses sync on this computer, and on resumes it, so
-                neither asks first. The switch moves at the click and holds
-                still until main answers. */}
-            <SwitchControl
-              label="Sync this workspace"
-              checked={syncBusy === "stop" ? false : sync.workspaceSynced || (syncBusy === "enable" && passphrasePurpose === null)}
-              busy={syncBusy !== null}
-              disabled={syncBusy !== null || needsServer || (!sync.workspaceSynced && passphrasePurpose !== null)}
-              onChange={(on) => void (on ? enableSync() : stopSync())}
-            />
+            {unconfirmed ? (
+              <>
+                {/* Enabling again reads this account's saved session, which
+                    resumes sync when it owns the workspace. Another account
+                    gets main's reason in a notice, and Disconnect above is
+                    the way to the right one. */}
+                {status.connected ? (
+                  <SecondaryButton
+                    data-testid="cloud-relink-workspace"
+                    disabled={syncBusy !== null}
+                    {...holdsFocus}
+                    onClick={() => void enableSync()}
+                  >
+                    Try again
+                  </SecondaryButton>
+                ) : null}
+                {/* The switch's off: it saves the pause, so neither a restart
+                    nor a sign-in resumes sync. */}
+                <SecondaryButton
+                  data-testid="cloud-pause-sync"
+                  disabled={syncBusy !== null}
+                  {...holdsFocus}
+                  onClick={() => void stopSync()}
+                >
+                  Pause sync
+                </SecondaryButton>
+              </>
+            ) : (
+              // Off pauses sync on this computer, and on resumes it, so
+              // neither asks first. The switch moves at the click and holds
+              // still until main answers.
+              <SwitchControl
+                ref={syncSwitch}
+                label="Sync this workspace"
+                checked={syncBusy === "stop" ? false : sync.workspaceSynced || (syncBusy === "enable" && passphrasePurpose === null)}
+                busy={syncBusy !== null}
+                disabled={syncBusy !== null || needsServer || (!sync.workspaceSynced && passphrasePurpose !== null)}
+                onChange={(on) => void (on ? enableSync() : stopSync())}
+              />
+            )}
           </SettingRow>
           {syncCode ? (
             <SettingRow title="Workspace code" testId="cloud-sync-code-block">
@@ -321,7 +365,11 @@ export function CloudSyncSettings(props: {
               busy={syncBusy !== null}
               onStart={setPassphrasePurpose}
               onPassphrase={setPassphrase}
-              onSubmit={() => void enableSync()}
+              onSubmit={() => {
+                // Try again asked for the passphrase; the form goes once it unlocks.
+                if (unconfirmed) actionHeldFocus.current = true;
+                void enableSync();
+              }}
             />
           ) : null}
         </>
