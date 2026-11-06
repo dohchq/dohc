@@ -365,6 +365,7 @@ describe("chat runner process", () => {
         command: "",
         profile: { tool: "codex", executable: join(scratch, executable) },
         prompt: "",
+        runSecret: "a".repeat(64),
         assertMayStart: () => undefined,
       });
     }
