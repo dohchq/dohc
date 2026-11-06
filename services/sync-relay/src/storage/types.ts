@@ -942,6 +942,8 @@ export interface SyncRelayStorage {
   }): AppendLogBatchResult;
   appendLinkChatPost(input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1]): import("./linkChat").AppendLinkChatPostResult;
   appendAgentChatPost(input: Parameters<typeof import("./linkChat").appendAgentChatPost>[1]): import("./linkChat").AppendAgentChatPostResult;
+  linkPrincipalThreadIds(workspaceId: string, principalId: string): Set<string>;
+  advanceAgentWaitCursor(connectionId: string, cursor: number): void;
   registerAgentClient(input: Parameters<typeof import("./agentConnections").registerAgentClient>[1]): boolean;
   getAgentClient(clientId: string): import("./agentConnections").AgentClientRow | null;
   beginAgentAuthorization(input: Parameters<typeof import("./agentConnections").beginAgentAuthorization>[1]): boolean;

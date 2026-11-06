@@ -38,6 +38,14 @@ function LinkHolderMark({label}: {label: string}) {
     <path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><path d="M8 12h8"/></svg>;
 }
 
+// The agent's rounded square holds Sparkles, as the desktop draws an agent.
+function SparklesIcon() {
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true" data-icon="sparkles">
+    <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>
+    <path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>;
+}
+
 function ChatMessage({message, group}: {message: NamedChatMessage; group: string | null}) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(() => message.body === null ? null : renderSafeMarkdown(message.body, () => null), [message.body]);
@@ -47,8 +55,10 @@ function ChatMessage({message, group}: {message: NamedChatMessage; group: string
   const sent = new Date(message.createdAtMs), dated = !Number.isNaN(sent.getTime());
   return <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
     <p className="chat-meta">
-      {agent && <span className="chat-agent-mark" role="img" aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
-        title={message.linkAgent ? joined : undefined}/>}
+      {agent && (message.authorKind === "automation"
+        ? <span className="chat-agent-mark" role="img" aria-label="Automation"/>
+        : <span className="chat-agent-mark chat-agent-icon" role="img" aria-label="Agent" title={message.linkAgent ? joined : undefined}>
+          <SparklesIcon/></span>)}
       <span className="chat-author">{message.authorDisplayName}</span>
       {message.authorKind === "link" && <LinkHolderMark label={message.linkAgent ? joined : "Link holder"}/>}
       {agent && message.authorOwnerDisplayName && <span className="chat-owner">Owned by {message.authorOwnerDisplayName}</span>}

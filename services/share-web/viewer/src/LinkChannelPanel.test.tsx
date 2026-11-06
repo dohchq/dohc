@@ -80,7 +80,9 @@ it("shows an agent that joined with the link as an agent, marked with the link a
   expect(posted.dataset.authorKind).toBe("link");
   const marks = [...posted.querySelectorAll('[role="img"]')].map(node => node.getAttribute("aria-label"));
   expect(marks).toEqual(["Agent", "Joined with a link to Team"]);
-  expect(posted.querySelector(".chat-agent-mark")?.getAttribute("title")).toBe("Joined with a link to Team");
+  const mark = posted.querySelector(".chat-agent-mark");
+  expect(mark?.getAttribute("title")).toBe("Joined with a link to Team");
+  expect(mark?.querySelector('svg[data-icon="sparkles"]')).not.toBeNull();
 });
 
 it("shows the name this browser set on an earlier visit, with no field to change it", async () => {

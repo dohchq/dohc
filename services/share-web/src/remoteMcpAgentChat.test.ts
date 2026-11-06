@@ -26,7 +26,8 @@ function fixture(options: {agentChat?: boolean; deadlineMs?: number; wait?: (cal
     wait: async (input, signal) => {
       const call = {input, signal};
       waits.push(call);
-      return options.wait ? options.wait(call) : Response.json({ok: true, group: {channelWireId: "wire-team", name: "Team"}, messages: [], cursor: 40});
+      return options.wait ? options.wait(call)
+        : Response.json({ok: true, group: {channelWireId: "wire-team", name: "Team"}, mention: "@Helper", messages: [], cursor: 40});
     },
   };
   async function serve(request: Request): Promise<Response> {
@@ -76,13 +77,14 @@ it("offers the wait tool only to an agent that signed in, and posts as that agen
 });
 
 it("returns messages with an opaque cursor that resumes from where the relay stopped", async () => {
-  const f = fixture({wait: ({input}) => Response.json({ok: true, group: {channelWireId: "wire-team", name: "Team"},
+  const f = fixture({wait: ({input}) => Response.json({ok: true, group: {channelWireId: "wire-team", name: "Team"}, mention: "@Helper",
     messages: input.cursor === undefined ? [message(41, {linkAgent: true, authorKind: "link", authorDisplayName: "Helper"})] : [],
     cursor: input.cursor === undefined ? 41 : 57})});
   const client = await f.connect();
   const first = structured(await client.callTool({name: "dohc_wait_for_messages", arguments: {thread: "thread-team"}}))!;
   expect(first.messages).toEqual([{threadId: "thread-team", messageId: "message-41", group: {id: "wire-team", name: "Team", kind: "group"},
     author: {kind: "link", displayName: "Helper", linkAgent: true}, createdAtMs: 1_000, text: "hello"}]);
+  expect(first.mention).toBe("@Helper");
   expect(typeof first.cursor).toBe("string");
 
   const second = structured(await client.callTool({name: "dohc_wait_for_messages", arguments: {thread: "thread-team", cursor: first.cursor}}))!;
@@ -100,6 +102,21 @@ it("returns messages with an opaque cursor that resumes from where the relay sto
     expect(textOf(refused)).toContain("cursor");
   }
   expect(f.waits).toHaveLength(2);
+});
+
+it("returns the messages that fit its result, with a cursor that resumes after the last one", async () => {
+  const body = "x".repeat(400 * 1024);
+  const f = fixture({wait: ({input}) => Response.json({ok: true, group: {channelWireId: "wire-team", name: "Team"}, mention: "@Helper",
+    messages: input.cursor === undefined ? [41, 42, 43].map(relaySeq => message(relaySeq, {body})) : [],
+    cursor: input.cursor === undefined ? 43 : 60})});
+  const client = await f.connect();
+  const first = await client.callTool({name: "dohc_wait_for_messages", arguments: {}});
+  expect(first.isError).toBeFalsy();
+  expect(Buffer.byteLength(textOf(first))).toBeLessThanOrEqual(1024 * 1024);
+  expect((structured(first)!.messages as Array<{messageId: string}>).map(kept => kept.messageId)).toEqual(["message-41", "message-42"]);
+
+  await client.callTool({name: "dohc_wait_for_messages", arguments: {cursor: structured(first)!.cursor}});
+  expect(f.waits.map(call => call.input.cursor)).toEqual([undefined, 42]);
 });
 
 it("holds within this request's deadline and never past the relay's bound", async () => {

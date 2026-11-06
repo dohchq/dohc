@@ -254,3 +254,10 @@ export function appendAgentChatPost(storage: StorageContext, input: {
     return { ok: true, replayed: false, workspaceId, shareId, row };
   });
 }
+
+/** The threads a link principal posted in. A lifetime limit bounds its posts. */
+export function linkPrincipalThreadIds(storage: StorageContext, workspaceId: string, principalId: string): Set<string> {
+  const rows = storage.db.prepare(`SELECT DISTINCT json_extract(payload_json, '$.threadId') AS thread_id FROM sync_relay_log
+    WHERE workspace_id = ? AND origin_id = ? AND op_kind = 'chat.message.append'`).all(workspaceId, linkChatOrigin(principalId));
+  return new Set(rows.map(row => String(row.thread_id)));
+}

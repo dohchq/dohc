@@ -1007,6 +1007,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_link_message_projection_names_its_connection() {
+        let agent = ChatMessage {
+            author_kind: ChatActorKind::Link,
+            author_display_name: "Helper".to_owned(),
+            link_author: Some(ChatMessageLinkAuthor {
+                grant_id: "grant".to_owned(),
+                principal_id: "principal".to_owned(),
+                agent_connection_id: Some("connection".to_owned()),
+            }),
+            ..message()
+        };
+        assert_eq!(
+            message_json(&agent)["author"],
+            json!({
+                "kind": "link",
+                "displayName": "Helper",
+                "grantId": "grant",
+                "principalId": "principal",
+                "agentConnectionId": "connection",
+            })
+        );
+    }
+
+    #[test]
     fn local_writers_cannot_name_a_link_author() {
         let refused = parse_actor_kind("link").unwrap_err();
         assert_eq!(refused.code, ErrorCode::InvalidParams);

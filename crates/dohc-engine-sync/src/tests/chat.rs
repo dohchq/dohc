@@ -1632,14 +1632,41 @@ fn a_link_agent_post_replays_with_its_agent_connection() {
     let read = LinkedChatStore::new(&mut engine)
         .get_message("ws", "link-message:agent")
         .expect("read the agent link message");
-    assert_eq!(
-        read.link_author,
-        Some(ChatMessageLinkAuthor {
-            grant_id: "grant-1".to_owned(),
-            principal_id: "principal-1".to_owned(),
-            agent_connection_id: Some("connection-1".to_owned()),
-        })
+    let agent = Some(ChatMessageLinkAuthor {
+        grant_id: "grant-1".to_owned(),
+        principal_id: "principal-1".to_owned(),
+        agent_connection_id: Some("connection-1".to_owned()),
+    });
+    assert_eq!(read.link_author, agent);
+
+    // A post that waits for its thread replays with its connection.
+    let mut early = link_message_payload("link-message:agent-early", "Early");
+    early["threadId"] = json!("late-thread");
+    early["agentConnectionId"] = json!("connection-1");
+    apply_chat_envelope(
+        &mut engine,
+        &envelope(LINK_ORIGIN, 1, "chat.message.append", early),
+        &NoFaults,
+    )
+    .expect("parked agent link message");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "imported"
+        }),
     );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let replayed = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "link-message:agent-early")
+        .expect("read the replayed agent link message");
+    assert_eq!(replayed.link_author, agent);
 }
 
 /// Only the relay names a message with the link message prefix. A device's

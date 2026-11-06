@@ -1,7 +1,8 @@
 import { jsonResponse, readBoundedJson } from "@dohc/service-http";
+import { handleForName, normalizeHandle, scanMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound, RelayError, relayError } from "./errors";
-import { linkChatMessage, refusePost, LINK_CHAT_MAX_POST_BYTES, LINK_CHAT_MAX_RESPONSE_BYTES, type LinkChatMessage } from "./linkChatRoutes";
+import { linkChatMessage, refusePost, LINK_CHAT_MAX_POST_BYTES, type LinkChatMessage } from "./linkChatRoutes";
 import { hashAgentCredential } from "./linkSecurity";
 import { messageFromOp } from "./namedRecipientChat";
 import { authorizeLinkChatAction } from "./shareAuthorization";
@@ -18,15 +19,22 @@ export type AgentChatRoute = { route: "agent-chat"; action: "post" | "wait" };
 // The longest single hold. share-web answers within its own request
 // deadline, so it may ask for less, never more.
 export const AGENT_CHAT_MAX_WAIT_MS = 25_000;
+// Held waits per connection, per link and per workspace. With the browser
+// follows' own caps, they keep a workspace's link readers inside the wait group's cap.
 export const MAX_AGENT_CHAT_WAITS_PER_CONNECTION = 4;
+export const MAX_AGENT_CHAT_WAITS_PER_LINK = 16;
+export const MAX_AGENT_CHAT_WAITS_PER_WORKSPACE = 64;
 // Rows per scan of the channel; a page of messages at the body cap fits the response.
 const WAIT_PAGE_ROWS = 16;
+// Half of share-web's result limit, so its projection of an answer, which
+// repeats the Group with each message, still fits it.
+export const AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES = 512 * 1024;
 const TOKEN_CHARS = 64;
 const THREAD_ID_CHARS = 256;
 
 type AgentChatStorage = Pick<SyncRelayStorage,
-  | "appendAgentChatPost" | "authenticateAgentAccessToken" | "fetchChatMessages" | "findChannelCreateKind"
-  | "getShare" | "getShareGrant" | "getShareLabels" | "workspaceIsOwnedBy"
+  | "advanceAgentWaitCursor" | "appendAgentChatPost" | "authenticateAgentAccessToken" | "fetchChatMessages"
+  | "findChannelCreateKind" | "getShare" | "getShareGrant" | "getShareLabels" | "linkPrincipalThreadIds" | "workspaceIsOwnedBy"
 >;
 
 class Refused extends Error {}
@@ -46,11 +54,32 @@ function boundedInteger(value: unknown, max: number): number {
   return value;
 }
 
+// People mention an agent that joined with a link by the name its posts
+// show. The name is fixed when it signs in, so the mention is too.
+export function agentMention(reportedName: string | null): string {
+  return `@${handleForName(reportedName ?? "") || "Agent"}`;
+}
+
+function mentions(body: string | null, mention: string): boolean {
+  const handle = normalizeHandle(mention.slice(1));
+  return body !== null && scanMentionTokens(body, { ignoreCode: true }).some(token => normalizeHandle(token.handle) === handle);
+}
+
 export interface AgentChatWaitBody {
   ok: true;
   group: { channelWireId: string; name: string | null };
+  mention: string;
   messages: LinkChatMessage[];
   cursor: number;
+}
+
+function take(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+function release(counts: Map<string, number>, key: string): void {
+  const count = (counts.get(key) ?? 1) - 1;
+  if (count === 0) counts.delete(key); else counts.set(key, count);
 }
 
 export function createAgentChatRoutes(input: {
@@ -64,8 +93,10 @@ export function createAgentChatRoutes(input: {
   maxResponseBytes?: number;
 }) {
   const { storage, linkKey, nowMs } = input;
-  const maxResponseBytes = input.maxResponseBytes ?? LINK_CHAT_MAX_RESPONSE_BYTES;
+  const maxResponseBytes = input.maxResponseBytes ?? AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES;
   const waitsByConnection = new Map<string, number>();
+  const waitsByLink = new Map<string, number>();
+  const waitsByWorkspace = new Map<string, number>();
 
   async function readInternal(request: Request): Promise<Record<string, unknown>> {
     if (!linkKey || !input.relayExchangeKeyConfigured || !input.hasValidRelayExchangeKey(request) || request.method !== "POST") {
@@ -116,11 +147,14 @@ export function createAgentChatRoutes(input: {
     return jsonResponse({ ok: true, message: linkChatMessage(message) });
   }
 
-  // Holds until a message the link may read arrives in its channel, or the
-  // deadline passes. Rows the link may not read, other threads, and the
-  // agent's own posts move the cursor without ending the hold. Access is
-  // checked before every scan, so before parking and after each wake, and
-  // again before the answer leaves.
+  // Holds until a message for this agent arrives in its link's channel, or
+  // the deadline passes. A message is for the agent when it mentions the
+  // agent or replies in a thread the agent posted in; a thread filter only
+  // narrows that. Other rows, and the agent's own posts, move the cursor
+  // without ending the hold. A scan reads one page of the log: one that
+  // finds nothing but has more answers at once with the cursor it reached.
+  // Access is checked before every scan, so before parking and after each
+  // wake, and again before the answer leaves.
   async function wait(body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
     fields(body, ["accessToken"], ["cursor", "threadId", "timeoutMs"]);
     const tokenHash = accessHash(body);
@@ -129,51 +163,59 @@ export function createAgentChatRoutes(input: {
     const requestedCursor = body.cursor === undefined ? null : boundedInteger(body.cursor, Number.MAX_SAFE_INTEGER);
     const deadline = nowMs() + timeoutMs;
     const first = current(tokenHash);
-    const { connectionId, principalId } = first.connection;
+    const { connectionId, principalId, grantId } = first.connection;
     const { workspaceId, shareId } = first.authorized.share;
     const { channelWireId } = first.authorized.effectiveSelector;
+    const mention = agentMention(first.connection.reportedName);
     const resolver = input.reads.chatResolverFor(workspaceId);
-    const held = waitsByConnection.get(connectionId) ?? 0;
-    if (held >= MAX_AGENT_CHAT_WAITS_PER_CONNECTION) throw relayError("link_read_rate_limited");
-    waitsByConnection.set(connectionId, held + 1);
+    if ((waitsByConnection.get(connectionId) ?? 0) >= MAX_AGENT_CHAT_WAITS_PER_CONNECTION ||
+        (waitsByLink.get(grantId) ?? 0) >= MAX_AGENT_CHAT_WAITS_PER_LINK ||
+        (waitsByWorkspace.get(workspaceId) ?? 0) >= MAX_AGENT_CHAT_WAITS_PER_WORKSPACE) throw relayError("link_read_rate_limited");
+    take(waitsByConnection, connectionId);
+    take(waitsByLink, grantId);
+    take(waitsByWorkspace, workspaceId);
     try {
-      let position = requestedCursor ?? storage.fetchChatMessages({ workspaceId, channelWireId, cursor: null, direction: "older", limit: 1 }).latestCursor;
+      // Without a cursor, from where this connection's waits last answered.
+      let position = requestedCursor ?? first.connection.waitCursor;
       const scan = () => {
         const { authorized } = current(tokenHash);
         if (authorized.effectiveSelector.channelWireId !== channelWireId) throw new Refused();
         const page = storage.fetchChatMessages({ workspaceId, channelWireId, cursor: position, direction: "newer", limit: WAIT_PAGE_ROWS });
         const found: LinkChatMessage[] = [];
+        const ownThreads = page.rows.length === 0 ? new Set<string>() : storage.linkPrincipalThreadIds(workspaceId, principalId);
         for (const row of page.rows) {
           if (row.settlementAdmission?.status === "refused") continue;
           const decision = filterOpForShare(authorized.effectiveSelector, row.opKind, row.payloadJson, resolver, "chat");
           if (!decision.allowed || (decision.payload as { linkPrincipalId?: unknown }).linkPrincipalId === principalId) continue;
           const message = messageFromOp({ relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload }, row.originId);
-          if (message && (threadId === null || message.threadId === threadId)) found.push(linkChatMessage(message));
+          if (!message || !(ownThreads.has(message.threadId) || mentions(message.body, mention))) continue;
+          if (threadId === null || message.threadId === threadId) found.push(linkChatMessage(message));
         }
         position = page.nextCursor;
         return { found, more: page.hasMore };
       };
+      const caughtUp = (scanned: { found: LinkChatMessage[]; more: boolean }) => scanned.found.length === 0 && !scanned.more;
       let result = scan();
-      while (result.found.length === 0 && !signal.aborted && nowMs() < deadline) {
-        if (result.more) {result = scan(); continue;}
+      while (caughtUp(result) && !signal.aborted && nowMs() < deadline) {
+        let parkScanFailed = false;
         try {
           await input.activity.wait(linkLogWaitGroup(workspaceId), `agent:${connectionId}`, {
             holdMs: Math.max(1, deadline - nowMs()), signal,
             shouldPark: () => {
-              try {result = scan(); return result.found.length === 0 && !result.more;}
-              catch {return false;}
+              try {result = scan(); return caughtUp(result);}
+              catch {parkScanFailed = true; return false;}
             },
           });
         } catch (error) {
           if (error instanceof DiscussionActivityCapacityError) throw relayError("link_read_rate_limited");
           throw error;
         }
-        if (result.found.length === 0) result = scan();
+        if (parkScanFailed || caughtUp(result)) result = scan();
       }
       if (signal.aborted) throw new Refused();
       current(tokenHash);
       const answer: AgentChatWaitBody = {
-        ok: true, group: { channelWireId, name: storage.getShareLabels(shareId).subjectName }, messages: [], cursor: position,
+        ok: true, group: { channelWireId, name: storage.getShareLabels(shareId).subjectName }, mention, messages: [], cursor: position,
       };
       for (const message of result.found) {
         const next = { ...answer, messages: [...answer.messages, message], cursor: message.relaySeq };
@@ -183,10 +225,12 @@ export function createAgentChatRoutes(input: {
         }
         answer.messages.push(message);
       }
+      storage.advanceAgentWaitCursor(connectionId, answer.cursor);
       return jsonResponse(answer);
     } finally {
-      const count = (waitsByConnection.get(connectionId) ?? 1) - 1;
-      if (count === 0) waitsByConnection.delete(connectionId); else waitsByConnection.set(connectionId, count);
+      release(waitsByConnection, connectionId);
+      release(waitsByLink, grantId);
+      release(waitsByWorkspace, workspaceId);
     }
   }
 

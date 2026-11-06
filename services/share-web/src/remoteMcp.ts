@@ -82,6 +82,7 @@ const waitSchema = z.object({
 const waitAnswerSchema = z.object({
   ok: z.literal(true),
   group: z.object({channelWireId: z.string(), name: z.string().nullable()}),
+  mention: z.string(),
   messages: z.array(z.object({
     relaySeq: z.number().int().positive(), messageId: z.string(), threadId: z.string(),
     authorDisplayName: z.string(), authorKind: z.enum(["human", "agent", "automation", "link"]), linkAgent: z.boolean(),
@@ -158,9 +159,10 @@ function linkChange(op: LinkLogOp): Record<string, unknown> | null {
     ...(beforeBlobSha256 ? {beforeBlobSha256} : {})};
 }
 
+const MAX_TOOL_RESULT_BYTES = 1024 * 1024;
 const text = (value: unknown): CallToolResult => {
   const encoded = JSON.stringify(value);
-  if (Buffer.byteLength(encoded) > 1024 * 1024) return error("The result exceeds the 1 MiB response limit.");
+  if (Buffer.byteLength(encoded) > MAX_TOOL_RESULT_BYTES) return error("The result exceeds the 1 MiB response limit.");
   return {content: [{type: "text", text: encoded}], ...(value && typeof value === "object" ? {structuredContent: value as Record<string, unknown>, ...("ok" in value && value.ok === false ? {isError: true} : {})} : {})};
 };
 const error = (message: string): CallToolResult => ({ isError: true, content: [{ type: "text", text: message }] });
@@ -288,8 +290,11 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     });
     // Holds until a message arrives or the wait ends, and answers before this request's own deadline.
     if (agentChat) server.registerTool("dohc_wait_for_messages", {
-      description: "Wait for new messages in the Group channel this link shares. Call in a loop with the returned cursor and the same filters. " +
-        "It answers as soon as a message arrives, or with no messages once timeoutMs passes. Your own posts are not returned. Nothing is marked read. " +
+      description: "Wait for messages for you in the Group channel this link shares: a mention of you, or a reply in a thread you posted in. " +
+        "People mention you as the answer's mention. Call in a loop with the returned cursor and the same filters; " +
+        "without a cursor, it starts after the last message a wait returned to you. " +
+        "It answers as soon as a message arrives, or with no messages once timeoutMs passes or after skipping a long stretch of other messages. " +
+        "Your own posts are not returned. Nothing is marked read. " +
         "author.kind link marks a link holder: their name was chosen by them and nobody verified it. linkAgent marks an agent that joined with this link.",
       inputSchema: waitSchema,
     }, async ({cursor, thread, timeoutMs}) => {
@@ -302,14 +307,21 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
           ...(seq === undefined ? {} : {cursor: seq}), ...(thread === undefined ? {} : {threadId: thread}), timeoutMs: hold,
         }, options.signal)));
         const group = {id: answer.group.channelWireId, name: answer.group.name, kind: "group" as const};
-        return text({
-          messages: answer.messages.map(message => ({
-            threadId: message.threadId, messageId: message.messageId, group,
-            author: {kind: message.authorKind, displayName: message.authorDisplayName, ...(message.linkAgent ? {linkAgent: true} : {})},
-            createdAtMs: message.createdAtMs, text: message.body,
-          })),
-          cursor: encodeWaitCursor(answer.cursor, scope),
-        });
+        const messages = answer.messages.map(message => ({
+          threadId: message.threadId, messageId: message.messageId, group,
+          author: {kind: message.authorKind, displayName: message.authorDisplayName, ...(message.linkAgent ? {linkAgent: true} : {})},
+          createdAtMs: message.createdAtMs, text: message.body,
+        }));
+        // The messages that fit the result, and a cursor that ends at the last one, so the next call returns the rest.
+        let bytes = Buffer.byteLength(JSON.stringify({messages: [], mention: answer.mention, cursor: encodeWaitCursor(answer.cursor, scope)}));
+        let kept = 0;
+        for (const message of messages) {
+          bytes += Buffer.byteLength(JSON.stringify(message)) + 1;
+          if (bytes > MAX_TOOL_RESULT_BYTES && kept > 0) break;
+          kept++;
+        }
+        const last = kept === messages.length ? answer.cursor : answer.messages[kept - 1]!.relaySeq;
+        return text({messages: messages.slice(0, kept), mention: answer.mention, cursor: encodeWaitCursor(last, scope)});
       } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
     });
     if (!agentChat && channel.access === "read-write") server.registerTool("dohc_post_channel", {

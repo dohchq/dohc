@@ -85,6 +85,8 @@ export function initializeAgentConnectionSchema(db: SqliteDb): void {
       resource_hash TEXT NOT NULL,
       connected_at_ms INTEGER NOT NULL,
       last_action_at_ms INTEGER,
+      -- The log position its waits have answered up to: a wait without a cursor starts here.
+      wait_cursor INTEGER NOT NULL CHECK (wait_cursor >= 0),
       status TEXT NOT NULL CHECK (status IN ('active', 'disconnected', 'retired')),
       ended_at_ms INTEGER,
       CHECK ((status = 'active') = (ended_at_ms IS NULL)),
@@ -152,6 +154,7 @@ export interface AgentConnectionRow {
   reportedName: string | null;
   connectedAtMs: number;
   lastActionAtMs: number | null;
+  waitCursor: number;
   status: AgentConnectionStatus;
   endedAtMs: number | null;
 }
@@ -171,7 +174,7 @@ type Guard = () => boolean;
 
 const CONNECTION_COLUMNS = `c.connection_id, c.workspace_id, c.share_id, c.grant_id, c.credential_id,
   c.generation, c.principal_id, c.client_id, c.reported_name, c.connected_at_ms,
-  c.last_action_at_ms, c.status, c.ended_at_ms`;
+  c.last_action_at_ms, c.wait_cursor, c.status, c.ended_at_ms`;
 
 function rowToConnection(row: Record<string, unknown>): AgentConnectionRow {
   return {
@@ -186,6 +189,7 @@ function rowToConnection(row: Record<string, unknown>): AgentConnectionRow {
     reportedName: nullableText(row.reported_name),
     connectedAtMs: Number(row.connected_at_ms),
     lastActionAtMs: row.last_action_at_ms === null ? null : Number(row.last_action_at_ms),
+    waitCursor: Number(row.wait_cursor),
     status: String(row.status) as AgentConnectionStatus,
     endedAtMs: row.ended_at_ms === null ? null : Number(row.ended_at_ms),
   };
@@ -473,11 +477,12 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
         principalBytes);
     storage.db.prepare(`INSERT INTO sync_relay_agent_connections (
         connection_id, workspace_id, share_id, grant_id, credential_id, generation, principal_id, client_id,
-        reported_name, resource_hash, connected_at_ms, last_action_at_ms, status, ended_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', NULL)`)
+        reported_name, resource_hash, connected_at_ms, last_action_at_ms, wait_cursor, status, ended_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+        (SELECT COALESCE(MAX(relay_seq), 0) FROM sync_relay_log WHERE workspace_id = ?), 'active', NULL)`)
       .run(input.connectionId, authorization.workspaceId, authorization.shareId, authorization.grantId,
         authorization.credentialId, authorization.generation, input.principalId, authorization.clientId,
-        authorization.reportedName, input.resourceHash, nowMs);
+        authorization.reportedName, input.resourceHash, nowMs, authorization.workspaceId);
     insertTokens(storage, input.connectionId, input, nowMs);
     storage.db.prepare(`UPDATE sync_relay_agent_authorizations SET status = 'redeemed', connection_id = ?
       WHERE authorization_id = ?`).run(input.connectionId, authorization.authorizationId);
@@ -559,6 +564,12 @@ export function recordAgentConnectionActionInTransaction(storage: StorageContext
 
 export function recordAgentConnectionAction(storage: StorageContext, connectionId: string, atMs: number): void {
   storage.tx(() => recordAgentConnectionActionInTransaction(storage, connectionId, atMs));
+}
+
+/** Moves an active connection's wait position forward to `cursor`, never back. */
+export function advanceAgentWaitCursor(storage: StorageContext, connectionId: string, cursor: number): void {
+  storage.db.prepare(`UPDATE sync_relay_agent_connections SET wait_cursor = MAX(wait_cursor, ?)
+    WHERE connection_id = ? AND status = 'active'`).run(Math.trunc(cursor), connectionId);
 }
 
 /** The link's active connections, newest first. The caller checks the owner. */
