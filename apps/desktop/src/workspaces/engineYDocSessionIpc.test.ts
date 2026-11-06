@@ -31,6 +31,11 @@ import {
 } from "./engineYDocSessionIpc";
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { isPrivacyDenial } from "./privacyDenial";
+import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./physicalWorkspaceRemoval";
+import type { RegistryEntry } from "./registryStore";
+import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
+import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
+import { windowShowsWorkspace } from "../window/workspaceWindowReuse";
 
 // A real macOS privacy refusal needs System Settings; a test answers for it.
 vi.mock("./privacyDenial", async (actual) => {
@@ -143,10 +148,14 @@ function rendererSession(
   const generation = generationOf();
   return {
     workspaceId,
+    attachmentId: AUTHORITY_ID,
     generation,
     isCurrent: () => isAvailable() && generationOf() === generation,
   };
 }
+
+// These tests open the workspace once, so a window's attachment is the current one.
+const currentAttachments = { isCurrentAttachment: () => true };
 
 function harness(
   session = providerSession(),
@@ -178,6 +187,7 @@ function harness(
             () => !retired,
             options.rendererWorkspaceId,
           ),
+    authorities: currentAttachments,
     acquireWorkspace: (workspaceId: string) => {
       const authority = workspaceAuthority(workspaceId);
       return options.rootPath === undefined ? authority : { ...authority, workspace: { ...authority.workspace, rootPath: options.rootPath } };
@@ -1231,6 +1241,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
@@ -1304,6 +1315,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
@@ -1551,6 +1563,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(() => generation),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
@@ -1787,6 +1800,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
@@ -1884,6 +1898,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const ipc = createEngineYDocSessionIpc({
         localPersonId: () => "person-local",
         sessionFor: () => rendererSession(),
+        authorities: currentAttachments,
         acquireWorkspace: workspaceAuthority,
         captureFor: () => capture,
         ensureCaptureFor: vi.fn(async () => undefined),
@@ -1928,6 +1943,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
@@ -1972,6 +1988,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const ipc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
       sessionFor: () => rendererSession(),
+      authorities: currentAttachments,
       acquireWorkspace: () => authority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor: vi.fn(async () => {
@@ -2517,5 +2534,152 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.open(sender, { ...openPayload, sessionId: "second" });
     await h.ipc.shutdown();
     expect(close).toHaveBeenLastCalledWith({ shuttingDown: true });
+  });
+});
+
+// After Forget, Open folder on the same folder opens the workspace again in a
+// new window, and the window from before Forget can stay open.
+describe("a window left from before Forget", () => {
+  function forgottenAndReopened(shareView: RegistryEntry["shareView"] | null) {
+    const workspace: RegistryEntry = {
+      workspaceId: openPayload.workspaceId, rootPath: "C:/workspace", kind: "personal", mode: "local-first",
+      ...(shareView ? { shareView } : {}),
+    };
+    let registered: RegistryEntry | null = null;
+    // The attachment each live-document open or admission wait ran under.
+    const ranUnder: symbol[] = [];
+    const authorities = createWorkspaceAuthorityOwner({
+      findWorkspace: () => registered,
+      canonicalizeRoot: (path) => path,
+      createState: () => ({}),
+      // As main does: the attachment's live documents close with it.
+      disposeState: async (_state, binding) => { await ipc.retireAuthority(binding.attachmentId); },
+    });
+    const register = () => authorities.registerBinding(workspace, {
+      persist: () => { registered = workspace; },
+      rollback: () => { registered = null; },
+    });
+    const forget = createWorkspaceForget({
+      currentBinding: (workspaceId) => authorities.currentBinding(workspaceId),
+      findWorkspace: () => registered,
+      removePhysicalWorkspace: createPhysicalWorkspaceRemoval({
+        retireBinding: (binding, retirement) => authorities.retireBinding(binding, retirement),
+        findWorkspace: () => registered,
+        removeWorkspace: () => { registered = null; },
+        removeDrafts: async () => undefined,
+        onError: (_workspaceId, error) => { throw error; },
+      }),
+      trust: { restrict: async () => undefined },
+      forgottenShareViews: { remember: async () => undefined },
+      clearNotices: () => undefined,
+      notifyRenderer: () => undefined,
+    });
+    const sessions = new RendererWorkspaceSessionOwner<EngineYDocIpcSender>({
+      retirement: {
+        retireSender: () => ({ requiredForAdmission: Promise.resolve(), detachedFromAdmission: Promise.resolve() }),
+        retireWorkspace: async () => undefined,
+      },
+    });
+    // Wired as main.ts wires createEngineYDocSessionIpc.
+    const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
+      sessionFor: (sender) => sessions.current(sender),
+      authorities,
+      acquireWorkspace: (workspaceId) => {
+        const lease = authorities.acquire(workspaceId);
+        return {
+          workspace: { workspaceId, rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId },
+          assertCurrent: () => lease.assertCurrent(),
+          release: () => lease.release(),
+        };
+      },
+      captureFor: (current) => ({
+        openYDocSession: async (input) => {
+          ranUnder.push(current.attachmentId);
+          return providerSession({ path: input.path });
+        },
+      }),
+      ensureCaptureFor: async () => undefined,
+      isSharedView: () => registered?.shareView !== undefined,
+      sharedCaptureFor: async (current) => ({
+        openYDocSession: vi.fn(),
+        waitForAdmission: async () => {
+          ranUnder.push(current.attachmentId);
+          return true;
+        },
+      }),
+      resolveDocumentPath: async (_workspace, path) => path,
+      onError: () => undefined,
+    });
+    const oldWindow = new FakeSender(1);
+    const newWindow = new FakeSender(2);
+    return {
+      ipc, ranUnder, oldWindow, newWindow,
+      shows: (sender: EngineYDocIpcSender) =>
+        windowShowsWorkspace(sessions.current(sender), workspace.workspaceId, authorities),
+      async start() {
+        const before = register();
+        await sessions.open(oldWindow, before, "document-old");
+        return before;
+      },
+      async forgetAndReopen() {
+        await forget(workspace.workspaceId);
+        expect(registered).toBeNull();
+        const after = register();
+        await sessions.open(newWindow, after, "document-new");
+        return after;
+      },
+    };
+  }
+
+  it("can't open a live document of the reopened workspace", async () => {
+    const r = forgottenAndReopened(null);
+    const before = await r.start();
+    expect((await r.ipc.open(r.oldWindow, { ...openPayload, sessionId: "old-before" })).available).toBe(true);
+    expect(r.ranUnder).toEqual([before.attachmentId]);
+
+    const after = await r.forgetAndReopen();
+    const label = (id: symbol) =>
+      id === before.attachmentId ? "before Forget" : id === after.attachmentId ? "after Open folder" : "unknown";
+    expect(r.shows(r.oldWindow)).toBe(false);
+    expect(r.shows(r.newWindow)).toBe(true);
+    r.ranUnder.length = 0;
+
+    // The new window opens its documents under the reopened attachment.
+    expect((await r.ipc.open(r.newWindow, { ...openPayload, sessionId: "new", path: "notes/b.md" })).available).toBe(true);
+    expect(r.ranUnder.map(label)).toEqual(["after Open folder"]);
+    r.ranUnder.length = 0;
+
+    // The old window shows the document as unavailable, not in the plain editor.
+    const opened = await r.ipc.open(r.oldWindow, { ...openPayload, sessionId: "old-after" });
+    expect({ opened, ranUnder: r.ranUnder.map(label) }).toEqual({
+      opened: { available: false, documentUnavailable: true },
+      ranUnder: [],
+    });
+    await r.ipc.shutdown();
+  });
+
+  it("isn't admitted to a live document of the reopened share", async () => {
+    const r = forgottenAndReopened({
+      shareId: "share", granterEmail: null, genericChatWritable: false,
+      grantedSelector: { paths: ["notes"], versionId: null, access: "edit" },
+    });
+    const before = await r.start();
+    expect(await r.ipc.waitForAdmission(r.oldWindow, { ...openPayload, sessionId: "old-before" })).toBe(true);
+    expect(r.ranUnder).toEqual([before.attachmentId]);
+
+    const after = await r.forgetAndReopen();
+    const label = (id: symbol) =>
+      id === before.attachmentId ? "before Forget" : id === after.attachmentId ? "after Open folder" : "unknown";
+    expect(r.shows(r.oldWindow)).toBe(false);
+    r.ranUnder.length = 0;
+
+    expect(await r.ipc.waitForAdmission(r.newWindow, { ...openPayload, sessionId: "new" })).toBe(true);
+    expect(r.ranUnder.map(label)).toEqual(["after Open folder"]);
+    r.ranUnder.length = 0;
+
+    const admitted = await r.ipc.waitForAdmission(r.oldWindow, { ...openPayload, sessionId: "old-after" });
+    expect({ admitted, ranUnder: r.ranUnder.map(label) }).toEqual({ admitted: false, ranUnder: [] });
+    await r.ipc.shutdown();
   });
 });

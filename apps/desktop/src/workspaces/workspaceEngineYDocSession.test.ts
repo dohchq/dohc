@@ -2121,7 +2121,8 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
   const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
   const ipc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
-    sessionFor: () => ({ workspaceId: WORKSPACE_ID, generation: 1, isCurrent: () => true }),
+    sessionFor: () => ({ workspaceId: WORKSPACE_ID, attachmentId: ATTACHMENT_ID, generation: 1, isCurrent: () => true }),
+    authorities: { isCurrentAttachment: () => true },
     acquireWorkspace: () => ({ workspace, assertCurrent: () => undefined, release: () => undefined }),
     captureFor: () => capture,
     ensureCaptureFor: async () => undefined,
@@ -2741,7 +2742,8 @@ it.each(["closed", "evicted"] as const)("preserves a renderer draft once after i
   let provider!: Awaited<ReturnType<typeof capture.openYDocSession>>;
   const ipc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
-    sessionFor: () => ({ workspaceId: WORKSPACE_ID, generation: 1, isCurrent: () => true }),
+    sessionFor: () => ({ workspaceId: WORKSPACE_ID, attachmentId: ATTACHMENT_ID, generation: 1, isCurrent: () => true }),
+    authorities: { isCurrentAttachment: () => true },
     acquireWorkspace: () => ({ workspace, assertCurrent() {}, release() {} }),
     captureFor: () => ({ openYDocSession: async input => provider = await capture.openYDocSession(input) }),
     ensureCaptureFor: async () => undefined, isSharedView: () => false,
@@ -2807,7 +2809,8 @@ it.each([
   let provider!: Awaited<ReturnType<typeof capture.openYDocSession>>;
   const ipc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
-    sessionFor: () => ({ workspaceId: WORKSPACE_ID, generation: 1, isCurrent: () => true }),
+    sessionFor: () => ({ workspaceId: WORKSPACE_ID, attachmentId: ATTACHMENT_ID, generation: 1, isCurrent: () => true }),
+    authorities: { isCurrentAttachment: () => true },
     acquireWorkspace: () => ({ workspace, assertCurrent() {}, release() {} }),
     captureFor: () => ({ openYDocSession: async input => provider = await capture.openYDocSession(input) }),
     ensureCaptureFor: async () => undefined, isSharedView: () => false,
