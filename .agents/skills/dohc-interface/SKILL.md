@@ -163,6 +163,7 @@ A secondary step that comes before the decision, such as `Save recovery file fir
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
 A disabled button keeps its shape and drops its color. A primary or danger confirm takes the `bg-line` fill; every kind shows its label and icon in `text-subtle`, with no hover. A danger confirm turns red only when pressing it will act.
+An icon button has no label and its icon is already subtle at rest, so a disabled icon button dims to 40%.
 Never label a button `OK`, `Yes`, or `Confirm`.
 
 ### Focus and keys
