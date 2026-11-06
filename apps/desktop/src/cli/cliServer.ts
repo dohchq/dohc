@@ -27,6 +27,7 @@ import {
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
+  type CliReportedAgent,
   type CliRequest,
   type CliResultByVerb,
   type CliShowMessage,
@@ -614,7 +615,14 @@ function rawChatMessage(
       ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
     } : {}),
     ...agentRequestsFor(message),
+    ...reportedFor(message),
   };
+}
+
+// What an agent's client reported about itself, so an agent reading the
+// chat sees what a person sees beside the name.
+function reportedFor(message: ChatMessage) {
+  return message.authorReported ? { authorReported: { ...message.authorReported } } : {};
 }
 
 // The agents still asked to answer a message, as the engine reports them.
@@ -745,15 +753,22 @@ function claimedAgentName(
 }
 
 // Who a chat write through this socket is. An agent's message during a run
-// dohc dispatched is that run's agent's.
+// dohc dispatched is that run's agent's. What an agent reported about itself
+// rides beside its name; a person's write carries none.
 function cliChatWriter(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
   agentName?: string,
+  reported?: CliReportedAgent,
 ): PersonWriter {
   const runAgentId = actor === "agent" ? options.dispatchedAgent(context.workspaceId) : null;
-  return { via: "cli", actor, ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}) };
+  return {
+    via: "cli",
+    actor,
+    ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}),
+    ...(actor === "agent" && reported ? { reported } : {}),
+  };
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
@@ -1216,6 +1231,7 @@ function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved"
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
     })),
     ...agentRequestsFor(message),
+    ...reportedFor(message),
   };
 }
 
@@ -2109,6 +2125,7 @@ interface FileChatStart {
   body: string;
   runId?: string;
   agent?: string;
+  reported?: CliReportedAgent;
 }
 
 // A comment on a file takes the path a person's does: a chat linked to the
@@ -2141,7 +2158,7 @@ async function startFileChat(
   let message: ChatMessage;
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: cliChatWriter("agent", context, options, input.agent),
+      writer: cliChatWriter("agent", context, options, input.agent, input.reported),
       threadId: thread.id,
       body,
       resolveAttachments: async () => [],
@@ -3416,6 +3433,7 @@ async function dispatchWorkspace(
         body: request.args.body,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         ...(request.args.agent ? { agent: request.args.agent } : {}),
+        ...(request.args.reported ? { reported: request.args.reported } : {}),
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await startFileChat(context, input, options)).result;
@@ -3423,7 +3441,7 @@ async function dispatchWorkspace(
         context,
         options,
         requestId,
-        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null],
+        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null, input.reported ?? null],
         async () => {
           const started = await startFileChat(context, input, options);
           return { done: started.created, result: started.result };
@@ -3653,7 +3671,7 @@ async function dispatchWorkspace(
       }
       const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: cliChatWriter(actor, context, options),
+        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
         channelId: channel.engine.id,
         // A chat-only group shows only its chat lane.
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
@@ -3712,7 +3730,7 @@ async function dispatchWorkspace(
         }
       }
       const reply = {
-        writer: cliChatWriter(actor, context, options),
+        writer: cliChatWriter(actor, context, options, undefined, request.args.reported),
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,

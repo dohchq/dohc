@@ -31,7 +31,10 @@ import {
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
   collectionSetFieldsFieldsSchema,
+  MAX_REPORTED_AGENT_CHARS,
   parseCliResult,
+  reportedAgentPartSchema,
+  type CliReportedAgent,
   type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliStreamPosition,
@@ -2063,9 +2066,39 @@ interface ChatWriteInput {
   runId?: string;
 }
 
-function chatWriteArgs(input: ChatWriteInput) {
+// What an agent reports about itself. The product and version come from its
+// MCP client's handshake, preferring the client's display title to its name;
+// the model is what the agent states. A part with a control character, or
+// with no text, is unknown, and dohc never fills in a guess.
+export function reportedAgent(
+  client: { name?: unknown; title?: unknown; version?: unknown } | undefined,
+  model: string | undefined,
+): CliReportedAgent | undefined {
+  const part = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || /\p{Cc}/u.test(value)) return undefined;
+    let capped = "";
+    for (const char of value.trim()) {
+      if (capped.length + char.length > MAX_REPORTED_AGENT_CHARS) break;
+      capped += char;
+    }
+    capped = capped.trimEnd();
+    return reportedAgentPartSchema.safeParse(capped).success ? capped : undefined;
+  };
+  const product = part(client?.title) ?? part(client?.name);
+  const version = product === undefined ? undefined : part(client?.version);
+  const stated = part(model);
+  if (product === undefined && stated === undefined) return undefined;
+  return {
+    ...(product !== undefined ? { product } : {}),
+    ...(version !== undefined ? { version } : {}),
+    ...(stated !== undefined ? { model: stated } : {}),
+  };
+}
+
+function chatWriteArgs(input: ChatWriteInput, reported: CliReportedAgent | undefined) {
   return {
     ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    ...(reported !== undefined ? { reported } : {}),
     attachments: input.attachments ?? [],
     needsDecision: Boolean(input.needsDecision || input.options?.length),
     ...(input.options !== undefined ? { options: input.options } : {}),
@@ -2079,11 +2112,12 @@ function chatWriteArgs(input: ChatWriteInput) {
 export async function startGroupChat(
   ctx: ToolContext,
   args: ChatWriteInput & { group: string; title?: string },
+  reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "post", {
     group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(args, reported),
   });
   if ("ok" in result) return result;
   return {
@@ -2111,13 +2145,14 @@ export async function replyToChat(
     resolve?: string;
     choose?: string;
   },
+  reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "reply", {
     thread: args.threadId,
     ...(args.to !== undefined ? { to: args.to } : {}),
     ...(args.resolve !== undefined ? { resolve: args.resolve } : {}),
     ...(args.choose !== undefined ? { choose: args.choose } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(args, reported),
   });
   if ("ok" in result) return result;
   return {
@@ -2441,6 +2476,7 @@ export async function startFileChat(
   ctx: ToolContext,
   args: { path: string; title: string; body: string; requestId?: string; runId?: string },
   agent: string | undefined,
+  reported?: CliReportedAgent,
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2448,6 +2484,7 @@ export async function startFileChat(
     ...args,
     path: resolved.normalized,
     ...(agent === undefined ? {} : { agent }),
+    ...(reported === undefined ? {} : { reported }),
   });
 }
 

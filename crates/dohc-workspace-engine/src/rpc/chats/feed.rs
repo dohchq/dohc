@@ -213,6 +213,7 @@ mod tests {
                 automation: None,
                 link_author: None,
                 author_agent_id: None,
+                author_reported: None,
                 attachments: Vec::new(),
             },
             thread: ChatThread {

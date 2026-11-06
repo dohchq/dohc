@@ -6,7 +6,13 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
-import type { LinkedChatStore, ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type {
+  LinkedChatStore,
+  ChatChannelType,
+  ChatMessageAutomationInput,
+  ChatReportedAgent,
+  ChatThreadLane,
+} from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -239,6 +245,7 @@ export class ChatsLiveAdapter {
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
+    authorReported?: ChatReportedAgent;
     namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
@@ -287,6 +294,7 @@ export class ChatsLiveAdapter {
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
         ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
           ? { namedAgentIds: input.namedAgentIds }
           : {}),
@@ -381,6 +389,7 @@ export class ChatsLiveAdapter {
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
+    authorReported?: ChatReportedAgent;
     namedAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
@@ -425,6 +434,7 @@ export class ChatsLiveAdapter {
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
         ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
           ? { namedAgentIds: input.namedAgentIds }
           : {}),

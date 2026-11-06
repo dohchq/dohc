@@ -10,6 +10,7 @@ import type {
   ChatDispatchFailedRun,
   ChatMessageRecord,
   ChatReactionRecord,
+  ChatReportedAgentRecord,
   ChatRunRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -36,6 +37,7 @@ import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
+import { AS_REPORTED, reportedProduct } from "./reportedAgent";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -60,7 +62,7 @@ function automationAsking(
 
 // What the agent ran, under its reply: the program and how it ended, then
 // the chip that opens the details.
-function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
+function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; reported?: ChatReportedAgentRecord }) {
   const { endedAtMs, exitCode } = props.run;
   const failed = endedAtMs !== undefined && exitCode !== 0;
   const program = runnerProgram(props.run.command);
@@ -84,7 +86,7 @@ function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
       />
       <span>{label}</span>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      <RunChip run={props.run} />
+      <RunChip run={props.run} reported={props.reported} />
     </div>
   );
 }
@@ -263,16 +265,16 @@ function RunAskedBy(props: { message: ChatMessageRecord }) {
 }
 
 // A post an agent opened during a run: who asked for the run, then its chip.
-function RunOpening(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
+function RunOpening(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; reported?: ChatReportedAgentRecord }) {
   return (
     <>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      <RunChip run={props.run} />
+      <RunChip run={props.run} reported={props.reported} />
     </>
   );
 }
 
-function RunChip(props: { run: ChatRunRecord }) {
+function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -320,27 +322,45 @@ function RunChip(props: { run: ChatRunRecord }) {
           data-testid="chats-run-popover"
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
-          <RunDetails run={props.run} />
+          <RunDetails run={props.run} reported={props.reported} />
         </span>
       ) : null}
     </span>
   );
 }
 
-// What ran for an agent's reply: its command, when it started, how it
-// ended, and its log.
-export function RunDetails(props: { run: ChatRunRecord }) {
+// What ran for an agent's reply: its command, the product and model the
+// agent reported, when it started, how it ended, and its log.
+export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord }) {
   const started = formatChatTime(props.run.startedAtMs);
+  const product = reportedProduct(props.reported);
+  const model = props.reported?.model;
   return (
     <>
-      <span className="grid gap-0.5">
+      <span className="grid gap-1">
         <span className="text-[11px] text-muted">Command</span>
         <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
           {props.run.command}
         </code>
       </span>
+      {product ? (
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Product</span>
+          <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
+            {product} <span className="text-muted">{AS_REPORTED}</span>
+          </span>
+        </span>
+      ) : null}
+      {model ? (
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Model</span>
+          <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
+            {model} <span className="text-muted">{AS_REPORTED}</span>
+          </span>
+        </span>
+      ) : null}
       <span className="grid grid-cols-2 gap-2">
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Started</span>
           <time
             data-testid="chats-run-started"
@@ -350,14 +370,14 @@ export function RunDetails(props: { run: ChatRunRecord }) {
             {started.label}
           </time>
         </span>
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Exit code</span>
           <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
             {props.run.exitCode ?? "—"}
           </span>
         </span>
       </span>
-      <span className="grid gap-0.5">
+      <span className="grid gap-1">
         <span className="text-[11px] text-muted">Log</span>
         <span className="flex min-w-0 items-center gap-1.5">
           <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
@@ -540,7 +560,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         className={className}
       >
         {askedBy ? <RunAskedBy message={askedBy} /> : null}
-        {run ? <RunChip run={run} /> : null}
+        {run ? <RunChip run={run} reported={messagesById.get(messageId)?.authorReported} /> : null}
       </FailedRunLine>
     );
   };
@@ -756,6 +776,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <RunLine
             run={runRecords[comment.id]}
             askedBy={automationAsking(runRecords[comment.id], messagesById)}
+            reported={comment.authorReported}
           />
         ) : null}
         {failedLine(comment.id, "mt-1 px-2", true)}
@@ -883,6 +904,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <RunOpening
                   run={runRecords[openingMessage.id]}
                   askedBy={automationAsking(runRecords[openingMessage.id], messagesById)}
+                  reported={openingMessage.authorReported}
                 />
               ) : null}
             </div>

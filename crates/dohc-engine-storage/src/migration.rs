@@ -3613,6 +3613,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("work_references.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 85,
+        id: "v2-chat-reported-agent",
+        sql: include_str!("chat_reported_agent.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5605,6 +5611,10 @@ mod tests {
                 "v2-work-references",
                 "7c56b7cc4fce9796ec7245bed34308a45f76b352bdb333067401a61edf964c4f",
             ),
+            (
+                "v2-chat-reported-agent",
+                "7e66943ecdb7659231ac8aab7a3629304243c0fb7264b14f381a2c98a58c551a",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -5869,6 +5879,94 @@ mod tests {
                 .any(|detail| detail.contains("COVERING INDEX materialization_retained_blocked")),
             "{plan:?}"
         );
+    }
+
+    #[test]
+    fn chat_reported_agent_upgrade_preserves_existing_messages() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-reported-agent");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 84);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 85);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread', 'Existing conversation', 10, 30); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, parent_message_id, origin, body, created_at_ms, \
+                  author_owner_display_name, author_actor_key) \
+                 VALUES ('ws', 'thread', 0, 'person', 'human', 'Ada', 'user-ada', NULL, \
+                         'desktop', 'Please check the plan.', 20, NULL, '{\"kind\":\"unknown\"}'), \
+                        ('ws', 'thread', 1, 'agent', 'agent', 'Nova', 'agent-nova', 'person', \
+                         'cli', 'The plan is ready.', 30, 'Ada', '{\"kind\":\"unknown\"}');",
+        )
+        .unwrap();
+        let messages = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT json_array(workspace_id, thread_id, message_order, message_id, author_kind, \
+                 author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, \
+                 author_owner_display_name, automation_id, chain_depth, author_actor_key, \
+                 link_grant_id, link_principal_id) FROM chat_messages ORDER BY message_order",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let old_messages = messages(&conn);
+        assert_eq!(old_messages.len(), 2);
+        assert!(
+            conn.prepare("SELECT author_reported FROM chat_messages")
+                .is_err()
+        );
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(messages(&conn), old_messages);
+        let reports: Vec<Option<String>> = conn
+            .prepare("SELECT author_reported FROM chat_messages ORDER BY message_order")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(reports, vec![None, None]);
+
+        let report = r#"{"product":"Codex","version":"1.0","model":"example-model"}"#;
+        for (message_id, value) in [("person", report), ("agent", "not json")] {
+            let error = conn
+                .execute(
+                    "UPDATE chat_messages SET author_reported=?1 WHERE message_id=?2",
+                    [value, message_id],
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        assert_eq!(
+            conn.execute(
+                "UPDATE chat_messages SET author_reported=?1 WHERE message_id='agent'",
+                [report],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT author_reported FROM chat_messages WHERE message_id='agent'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            report
+        );
+        assert_eq!(messages(&conn), old_messages);
     }
 
     /// The work reference tables arrive empty on an existing store, and refuse

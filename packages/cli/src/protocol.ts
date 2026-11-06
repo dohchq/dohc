@@ -75,10 +75,35 @@ const streamPageArgs = {
 const showArgsSchema = z
   .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
   .strict();
+// One part of what an agent reports about itself: printable text with no
+// surrounding space.
+export const MAX_REPORTED_AGENT_CHARS = 64;
+export const reportedAgentPartSchema = z
+  .string()
+  .min(1)
+  .max(MAX_REPORTED_AGENT_CHARS)
+  .refine((value) => value.trim() === value && !/\p{Cc}/u.test(value), {
+    message: "Use printable text with no space at either end.",
+  });
+// What an agent reports about itself: its MCP client's product and version
+// from the handshake, and the model the agent states. dohc shows it only as
+// reported. A version comes with its product.
+export const chatReportedAgentSchema = z
+  .object({
+    product: reportedAgentPartSchema.optional(),
+    version: reportedAgentPartSchema.optional(),
+    model: reportedAgentPartSchema.optional(),
+  })
+  .strict()
+  .refine((reported) => reported.version === undefined || reported.product !== undefined, {
+    message: "A reported version needs its product.",
+  });
+export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
 const postArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
+    reported: chatReportedAgentSchema.optional(),
     group: z.string().min(1),
     title: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -91,6 +116,7 @@ const replyArgsSchema = z
   .object({
     ...argsBase,
     runId: z.string().min(1).optional(),
+    reported: chatReportedAgentSchema.optional(),
     thread: z.string().min(1),
     to: z.string().min(1).optional(),
     attachments: z.array(z.string().min(1)),
@@ -303,6 +329,7 @@ const fileChatStartArgsSchema = z
   .object({
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
+    reported: chatReportedAgentSchema.optional(),
     requestId: requestIdSchema.optional(),
     runId: z.string().min(1).optional(),
     path: documentPathArg,
@@ -754,6 +781,7 @@ const cliShowMessageSchema = z
     attachments: z.array(cliAttachmentSchema),
     runId: z.string().min(1).optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 export type CliShowMessage = z.infer<typeof cliShowMessageSchema>;
@@ -1059,6 +1087,7 @@ const rawChatMessageSchema = z
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
+    authorReported: chatReportedAgentSchema.optional(),
   })
   .strict();
 const rawFailureSchema = z

@@ -1584,6 +1584,7 @@ fn post(message_id: &str, body: &str, now_ms: i64) -> StartChannelThread {
         now_ms,
         request_id: None,
         author_agent_id: None,
+        author_reported: None,
         named_agent_ids: Vec::new(),
     }
 }
@@ -1744,6 +1745,7 @@ fn a_group_message_claims_each_matching_subscription_once() {
                 attachments: Vec::new(),
                 automation: None,
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 25,
                 request_id: None,
@@ -2227,6 +2229,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                         chain_depth,
                     }),
                     author_agent_id: None,
+                    author_reported: None,
                     named_agent_ids: Vec::new(),
                     now_ms: 11,
                     request_id: None,
@@ -2292,6 +2295,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
                 attachments: Vec::new(),
                 automation: None,
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 17,
                 request_id: None,

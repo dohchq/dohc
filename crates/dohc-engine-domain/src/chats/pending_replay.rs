@@ -4,7 +4,8 @@ use super::{
     ThreadMessageResolution, bump_chat_conversation_revision,
     index_replicated_chat_message_search_rows, is_agent_id, mark_live_bookmarks_pending,
     normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
-    parse_mention_handles, resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    normalize_reported_agent, parse_mention_handles, reported_agent_json, resolve_feed_coordinate,
+    resolve_follow_target, resolve_thread_message,
 };
 use crate::AutomationClaim;
 use crate::automations::{AutomationGroupMessage, claim_group_message_in_tx};
@@ -65,6 +66,10 @@ struct PendingMessageAppend {
     link_principal_id: Option<String>,
     /// The agent that wrote an agent message, which sync apply also checked.
     author_agent_id: Option<String>,
+    /// What an agent reported about itself. A build that did not know the
+    /// field parked it unchecked, so replay checks it.
+    #[serde(default)]
+    author_reported: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -501,6 +506,11 @@ fn replay_pending_chat_operation(
                 .map_err(|_| DomainError::StateCorrupt {
                 reason: "pending chat message payload is corrupt",
             })?;
+            let Some(author_reported) = pending_reported_agent(&payload) else {
+                return Ok(PendingReplayOutcome::Refused(
+                    "pending chat message reported agent is invalid",
+                ));
+            };
             let thread_exists: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM chat_threads \
@@ -519,7 +529,12 @@ fn replay_pending_chat_operation(
                 )?;
                 return Ok(PendingReplayOutcome::Deferred);
             }
-            automation_claims.extend(apply_pending_message(tx, workspace_id, payload)?);
+            automation_claims.extend(apply_pending_message(
+                tx,
+                workspace_id,
+                payload,
+                author_reported,
+            )?);
             Ok(PendingReplayOutcome::Applied)
         }
         _ => Ok(PendingReplayOutcome::Refused(
@@ -528,10 +543,23 @@ fn replay_pending_chat_operation(
     }
 }
 
+/// The parked message's report, checked as sync apply checks it. `None` means
+/// it is invalid; `Some(None)` means the message reported nothing.
+fn pending_reported_agent(
+    payload: &PendingMessageAppend,
+) -> Option<Option<super::ChatReportedAgent>> {
+    let reported = match &payload.author_reported {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
+    };
+    normalize_reported_agent(payload.author_kind == "agent", reported.as_ref()).ok()
+}
+
 fn apply_pending_message(
     tx: &Transaction<'_>,
     workspace_id: &str,
     payload: PendingMessageAppend,
+    author_reported: Option<super::ChatReportedAgent>,
 ) -> Result<Vec<AutomationClaim>, DomainError> {
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
@@ -601,8 +629,8 @@ fn apply_pending_message(
             "INSERT OR IGNORE INTO chat_messages \
              (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
               author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name, \
-              link_grant_id,link_principal_id,author_agent_id) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+              link_grant_id,link_principal_id,author_agent_id,author_reported) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
                 workspace_id,
                 payload.thread_id,
@@ -618,7 +646,8 @@ fn apply_pending_message(
                 owner_name,
                 payload.link_grant_id,
                 payload.link_principal_id,
-                payload.author_agent_id
+                payload.author_agent_id,
+                reported_agent_json(author_reported.as_ref()),
             ],
         )
         .map_err(DomainError::sql_persist)?;

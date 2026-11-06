@@ -14,7 +14,7 @@ function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?
     <AgentBadge testIdPrefix="chats-post" author={author} presentation={presentation} />
   </AgentSettingsProvider>);
   fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
-  return screen.getByRole("tooltip").textContent ?? "";
+  return screen.getByRole("tooltip", { hidden: true }).textContent ?? "";
 }
 
 afterEach(cleanup);
@@ -42,6 +42,24 @@ describe("agent badge", () => {
     expect(tooltipFor({ authorDisplayName: "Cursor" }, mine, renamed)).not.toContain("Current local command");
   });
 
+  it("adds what the agent reported as one line, and no line when it reported nothing", () => {
+    const reported = (authorReported?: { product?: string; version?: string; model?: string }) => {
+      cleanup();
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ice", ...(authorReported ? { authorReported } : {}) }} presentation={theirs} />);
+      fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+      return screen.queryByTestId("chats-post-agent-reported")?.textContent ?? null;
+    };
+    expect(reported({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" })).toBe("Claude Code 2.1 · Claude Opus 5.5 (as reported)");
+    expect(screen.getByTestId("chats-post-agent-reported").classList.contains("wrap-anywhere")).toBe(true);
+    const suffix = screen.getByTestId("chats-post-agent-reported").querySelector("span");
+    expect(suffix?.textContent).toBe("(as reported)");
+    expect(suffix?.classList.contains("whitespace-nowrap")).toBe(true);
+    expect(reported({ product: "Claude Code", version: "2.1" })).toBe("Claude Code 2.1 (as reported)");
+    expect(reported({ model: "Claude Opus 5.5" })).toBe("Claude Opus 5.5 (as reported)");
+    expect(reported()).toBeNull();
+    expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Ice");
+  });
+
   it("closes on Escape, and stays open while it has focus", () => {
     render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }} presentation={theirs} />);
     const badge = screen.getByTestId("chats-post-agent-badge");
@@ -49,9 +67,9 @@ describe("agent badge", () => {
     badge.focus();
     fireEvent.focus(badge);
     fireEvent.mouseLeave(badge.parentElement!);
-    expect(screen.getByRole("tooltip")).not.toBeNull();
+    expect(screen.getByRole("tooltip", { hidden: true })).not.toBeNull();
     fireEvent.keyDown(badge, { key: "Escape" });
-    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.queryByRole("tooltip", { hidden: true })).toBeNull();
   });
 
   it("opens its details without opening the containing post", () => {
@@ -60,7 +78,7 @@ describe("agent badge", () => {
       <AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }} />
     </div>);
     fireEvent.click(screen.getByTestId("chats-post-agent-badge"));
-    expect(screen.getByRole("tooltip").textContent).toContain("Owned by Ada");
+    expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Ada");
     expect(onOpen).not.toHaveBeenCalled();
   });
 });

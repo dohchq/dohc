@@ -2030,6 +2030,16 @@ const CHAT_MESSAGE_AUTOMATION = z.object({
   collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
+// What an agent's client reported about itself: product, version, and the
+// model the agent stated. dohc shows it as reported and never fills it in.
+const REPORTED_AGENT_PART = z.string().min(1).max(64);
+export const ChatReportedAgentRecord = z.object({
+  product: REPORTED_AGENT_PART.optional(),
+  version: REPORTED_AGENT_PART.optional(),
+  model: REPORTED_AGENT_PART.optional(),
+});
+export type ChatReportedAgentRecord = z.infer<typeof ChatReportedAgentRecord>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
@@ -2038,6 +2048,7 @@ export const ChatMessageRecord = z.object({
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
+  authorReported: ChatReportedAgentRecord.optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,
@@ -2387,6 +2398,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
       createdAtMs: z.number(),
       bodySnippet: z.string().min(1).max(500),
       automation: CHAT_MESSAGE_AUTOMATION.optional(),
+      authorReported: ChatReportedAgentRecord.optional(),
       reactions: z.array(ChatReactionRecord),
     })
     .nullable()

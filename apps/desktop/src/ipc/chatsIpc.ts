@@ -103,6 +103,7 @@ export function chatMessageForIpc(message: ChatMessage, collectionOf: Automation
     authorDisplayName: message.author.displayName,
     ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
     ...(message.authorUserId ? { authorUserId: message.authorUserId } : {}),
+    ...(message.authorReported ? { authorReported: message.authorReported } : {}),
     ...(message.parentMessageId
       ? { parentMessageId: message.parentMessageId }
       : {}),
@@ -508,6 +509,7 @@ export function registerChatsIpcHandlers<
             createdAtMs: summary.openingMessage.createdAtMs,
             bodySnippet: summary.openingMessage.bodySnippet,
             ...(summary.openingMessage.automation ? { automation: automationForIpc(summary.openingMessage.automation, collectionOf) } : {}),
+            ...(summary.openingMessage.authorReported ? { authorReported: summary.openingMessage.authorReported } : {}),
             reactions: reactionViewer
               ? reactionsForViewer(openingReactions, reactionViewer)
               : openingReactions,

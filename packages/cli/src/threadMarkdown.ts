@@ -37,10 +37,19 @@ export function formatStreamPosition(position: CliStreamPosition): string {
   return `${position.createdAtMs}:${position.lane}:${position.id}`;
 }
 
-/** A message's author, how it came, when, and what its agents are doing. */
+// What an agent's client reported about itself, as people see it beside the
+// name: `Claude Code 2.1, Claude Opus 5.5 (as reported)`.
+function reportedAgentLabel(reported: CliShowMessage["authorReported"]): string[] {
+  const product = reported?.product ? (reported.version ? `${reported.product} ${reported.version}` : reported.product) : undefined;
+  const parts = [product, reported?.model].filter((part) => part !== undefined);
+  return parts.length > 0 ? [`${parts.join(", ")} (as reported)`] : [];
+}
+
+/** A message's author, what its agent reported, how it came, when, and what its agents are doing. */
 export function messageMetadata(message: CliShowMessage, handle: string): string[] {
   return [
     `**${renderAuthorDisplayName(message.author)}**`,
+    ...reportedAgentLabel(message.authorReported),
     // An automation's message says so, so an agent it woke knows no
     // person wrote the request. A link holder's says it came through a link.
     ...(message.author.kind === "automation" ? ["automation"] : []),

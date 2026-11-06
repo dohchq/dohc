@@ -837,6 +837,27 @@ describe("ChatsView hybrid feed", () => {
     });
   });
 
+  it("shows what an agent reported on its post card's badge, read from the channel listing", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({
+        openingMessage: openingPreview({ presentation: { group: "fixture", hue: null, self: false },
+          authorKind: "agent",
+          authorDisplayName: "Nova",
+          authorReported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" },
+        }),
+      })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    fireEvent.focus(await screen.findByTestId("chats-post-agent-badge"));
+    expect(screen.getByTestId("chats-post-agent-reported").textContent).toBe(
+      "Claude Code 2.1 · Claude Opus 5.5 (as reported)",
+    );
+  });
+
   it("renders post cards with excerpts, reactions, decisions, comments, and agent treatment", async () => {
     const user = userEvent.setup();
     const reaction = {

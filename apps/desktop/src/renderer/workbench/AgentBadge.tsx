@@ -1,9 +1,11 @@
-import { createContext, useContext, useId, useState, type ReactNode } from "react";
+import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
-import type { ActorPresentation } from "../../ipc/bridgeContract";
+import type { ActorPresentation, ChatReportedAgentRecord } from "../../ipc/bridgeContract";
 import { ownAgentNamed, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { useAgentInk } from "./ChatAvatar";
+import { AS_REPORTED, reportedAgentLine } from "./reportedAgent";
+import { resolveFloatingMenuPosition } from "../editor/floatingMenuPosition";
 
 export const AgentSettingsContext = createContext<DesktopUserSettings | null>(null);
 
@@ -18,6 +20,7 @@ type AgentAuthor = {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  authorReported?: ChatReportedAgentRecord;
 };
 
 export function AgentBadge(props: {
@@ -37,6 +40,36 @@ export function AgentBadge(props: {
   const { author } = props;
   const ownAgent = props.presentation?.self && settings ? ownAgentNamed(settings, author.authorDisplayName) : null;
   const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
+  const reported = reportedAgentLine(author.authorReported);
+  const trigger = useRef<HTMLSpanElement>(null);
+  const tooltip = useRef<HTMLSpanElement>(null);
+  const [place, setPlace] = useState<ReturnType<typeof resolveFloatingMenuPosition> | null>(null);
+  useLayoutEffect(() => {
+    const badge = trigger.current;
+    const card = tooltip.current;
+    if (!open || !badge || !card) return;
+    // Like Menu and the reaction picker, use the top layer to escape each
+    // virtualized feed row's paint containment.
+    card.showPopover?.();
+    const position = (event?: Event) => {
+      if (event?.target instanceof Node && card.contains(event.target)) return;
+      setPlace(resolveFloatingMenuPosition({
+        cursorRect: badge.getBoundingClientRect(),
+        menuWidth: card.offsetWidth,
+        menuMaxHeight: card.scrollHeight + card.offsetHeight - card.clientHeight,
+        margin: 4,
+        gap: 4,
+      }));
+    };
+    position();
+    document.addEventListener("scroll", position, true);
+    window.addEventListener("resize", position);
+    return () => {
+      document.removeEventListener("scroll", position, true);
+      window.removeEventListener("resize", position);
+      setPlace(null);
+    };
+  }, [open, reported, command]);
   return (
     <span
       className={`relative inline-flex ${ink}`}
@@ -50,6 +83,7 @@ export function AgentBadge(props: {
       }}
     >
       <span
+        ref={trigger}
         data-testid={`${props.testIdPrefix}-agent-badge`}
         data-chat-escape-local="true"
         tabIndex={0}
@@ -70,14 +104,29 @@ export function AgentBadge(props: {
       </span>
       {open ? (
         <span
+          ref={tooltip}
           id={descriptionId}
+          popover="manual"
           role="tooltip"
-          className="dohc-popover dohc-pop-in absolute left-0 top-full z-50 mt-1 flex w-max max-w-72 flex-col gap-1 rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
+          style={{
+            margin: 0,
+            inset: "auto",
+            left: place?.x,
+            top: place?.bottom === undefined ? place?.y : "auto",
+            bottom: place?.bottom ?? "auto",
+            maxHeight: place?.maxHeight,
+          }}
+          className="dohc-popover dohc-pop-in fixed z-50 flex w-max max-w-72 flex-col gap-1 overflow-y-auto rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
         >
           <span className="font-medium">{author.authorDisplayName}</span>
           <span className="text-muted">
             {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
           </span>
+          {reported ? (
+            <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">
+              {reported.slice(0, -AS_REPORTED.length)}<span className="whitespace-nowrap">{AS_REPORTED}</span>
+            </span>
+          ) : null}
           {command ? <span className="break-all text-[11px] text-muted">Current local command: <code className="font-mono">{command}</code></span> : null}
         </span>
       ) : null}

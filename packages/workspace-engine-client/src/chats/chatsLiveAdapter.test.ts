@@ -1430,6 +1430,35 @@ describe("loopback poll validation", () => {
   });
 });
 
+describe("loopback reported agent validation", () => {
+  it.each([
+    { name: "40 emoji, 80 UTF-16 units", model: "\u{1F600}".repeat(40) },
+    { name: "a leading byte order mark", model: "﻿Claude Opus 5.5" },
+  ])("refuses a model of $name, as the daemon does", async ({ model }) => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "bad-report", authorKind: "agent", authorDisplayName: "Nova", body: "Done",
+      authorReported: { model },
+    } })).rejects.toThrow("invalid-input");
+    expect(await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id })).toHaveLength(1);
+  });
+
+  it("accepts a model of 32 emoji, 64 UTF-16 units", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    const model = "\u{1F600}".repeat(32);
+    await loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "good-report", authorKind: "agent", authorDisplayName: "Nova", body: "Done",
+      authorReported: { model },
+    } });
+    const messages = await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id });
+    expect(messages.find(message => message.id === "good-report")?.authorReported).toEqual({ model });
+  });
+});
+
 
 it("decodes agent owner display metadata without changing its verified author", () => {
   const message = decodeChatsResult(CHATS_METHOD.messageSend, {
