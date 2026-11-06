@@ -398,6 +398,13 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // A send shows its ring only after a second on the timer the page started
     // when it mounted, before the clock was faked. Three composers per theme.
     await expect(page.locator('[data-part="composer-sending"] button[aria-busy="true"]')).toHaveCount(2 * 3);
+    // The self-test notice exists to show a clipped row: in the 420px Notices
+    // part its body runs past three lines, so the row offers Show more.
+    for (const theme of THEMES) {
+      const more = page.getByTestId(`states-${theme}`).locator('[data-part="notices"]').getByTestId("notice-self-test-more");
+      await expect(more).toHaveText("Show more");
+      expect(await more.evaluate((button) => button.closest("ul")?.parentElement?.getBoundingClientRect().width)).toBe(420);
+    }
 
     const failures: string[] = [];
     // A tab row keeps Share and the document's controls inside itself at any

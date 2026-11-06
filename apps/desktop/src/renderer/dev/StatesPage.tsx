@@ -1313,14 +1313,23 @@ function notice(id: string, tone: "danger" | "success") {
 }
 
 // A failure whose text runs past three lines: the row clips it and offers Show more.
+const SELF_TEST_TITLE = "Nova didn't reply to the check.";
+const SELF_TEST_BODY =
+  "Nova's runner stopped at step 3 of 5, before its tools started, so the check never reached Nova. dohc kept the runner's log and the step that stopped with this notice, and Copy puts both on your clipboard. Fix what the log names, then run the check again.";
 const LONG_NOTICE = {
   id: "self-test",
   tone: "danger" as const,
-  title: "The self-test did not finish",
-  body: "dohc stopped the self-test at its third step and kept its log. Copy the details for the log's location, then try again.",
+  title: SELF_TEST_TITLE,
+  body: SELF_TEST_BODY,
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
-  copyText: "The self-test did not finish",
+  // The body promises that Copy gives the log and the step that stopped.
+  copyText: [
+    SELF_TEST_TITLE,
+    SELF_TEST_BODY,
+    "Log: C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log",
+    "Step that stopped: 3 of 5",
+  ].join("\n"),
   onDismiss: noop,
 };
 
