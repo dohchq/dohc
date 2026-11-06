@@ -7,6 +7,16 @@ import { KindGlyph } from "./KindGlyph";
 afterEach(cleanup);
 
 describe("KindGlyph", () => {
+  it("draws code, data, text and documents each with its own glyph", () => {
+    const glyphs = ["app.ts", "package.json", "notes.txt", "plan.md"].map((path) => {
+      const { container, unmount } = render(<KindGlyph kind={fileKindForPath(path)} size={15} />);
+      const name = [...container.querySelector("svg")!.classList].find((name) => name.startsWith("lucide-file"));
+      unmount();
+      return name;
+    });
+    expect(glyphs).toEqual(["lucide-file-code", "lucide-file-braces", "lucide-file-type", "lucide-file-text"]);
+  });
+
   it("draws every kind's registry glyph without naming it", () => {
     for (const kind of Object.values(FILE_KIND_RECORDS)) {
       const { container, unmount } = render(<KindGlyph kind={kind} size={15} />);
