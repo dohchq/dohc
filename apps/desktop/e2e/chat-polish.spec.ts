@@ -35,12 +35,13 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await composer.fill("@");
       const menu = view.getByTestId("chats-mention-menu");
       await expect(menu).toBeVisible();
+      await waitForVisibleAnimations(page);
       const openBox = await composer.boundingBox();
       const menuBox = await menu.boundingBox();
       const frameBox = await view.locator("form", { has: composer }).boundingBox();
-      expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(frameBox!.y);
+      // 4px over the frame, the gap every floating menu keeps.
+      expect(frameBox!.y - (menuBox!.y + menuBox!.height)).toBeCloseTo(4, 1);
       expect(Math.abs(menuBox!.x - frameBox!.x)).toBeLessThanOrEqual(1);
-      await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`mentions-${theme}.png`) });
       await composer.press("Escape");
       const closedBox = await composer.boundingBox();
@@ -73,16 +74,19 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await expect(astronautPill).toHaveCount(0);
     // The menu opens above even when the composer has no room for it below.
     // A short thread leaves its composer high, so the window ends just
-    // under the composer, with less room than one row of the menu.
+    // under the composer's frame, with less room than one row of the menu.
+    const frame = view.locator("form", { has: composer });
     await page.setViewportSize({ width: 1280, height: 480 });
-    const placed = await composer.boundingBox();
+    const placed = await frame.boundingBox();
     await page.setViewportSize({ width: 1280, height: Math.ceil(placed!.y + placed!.height + 30) });
     await composer.fill("@");
     const upperMenu = view.getByTestId("chats-mention-menu");
     await expect(upperMenu).toBeVisible();
+    await waitForVisibleAnimations(page);
     const lowComposerBox = await composer.boundingBox();
+    const lowFrameBox = await frame.boundingBox();
     const upperMenuBox = await upperMenu.boundingBox();
-    expect(upperMenuBox!.y + upperMenuBox!.height).toBeLessThanOrEqual(lowComposerBox!.y);
+    expect(lowFrameBox!.y - (upperMenuBox!.y + upperMenuBox!.height)).toBeCloseTo(4, 1);
     await composer.press("Escape");
     expect((await composer.boundingBox())!.y).toBe(lowComposerBox!.y);
     await composer.fill("");
