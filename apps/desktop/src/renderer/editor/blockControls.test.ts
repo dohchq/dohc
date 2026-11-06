@@ -580,8 +580,9 @@ describe("blockControls gutter coverage", () => {
     );
     const gutters = () =>
       Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"));
+    // A task list's checkbox starts on the text edge, so it hangs nothing.
     expect(gutters().map((gutter) => gutter.dataset.hang)).toEqual([
-      undefined, "bullet", "number", "number", "number", "checkbox", "bar", "frame", "frame", "table", undefined,
+      undefined, "bullet", "number", "number", "number", undefined, "bar", "frame", "frame", "table", undefined,
     ]);
     const digits = () =>
       gutters().slice(2, 5).map((gutter) => gutter.style.getPropertyValue("--dohc-block-digits"));
