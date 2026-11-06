@@ -498,10 +498,10 @@ describe("Links for an open conversation", () => {
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
     const failed = await screen.findByTestId("about-conversation-links-failed");
-    expect(failed.textContent).toBe("Try again");
+    expect(failed.textContent).toBe("dohc could not load the links.Try again");
     expect(notices.report).toHaveBeenCalledExactlyOnceWith({
       identity: "about-conversation-links:wire-general",
-      message: expect.stringContaining("disk is busy"),
+      message: "dohc could not load the links.",
       cause: error,
       retry: expect.any(Function),
     });
