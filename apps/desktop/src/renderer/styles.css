@@ -604,11 +604,14 @@ body {
 }
 
 /* The resizable TableView owns its chrome gutter and horizontal scrollbar.
- * Its outer width adds 22px on each side for the left row grips and the
- * right add strip, so the table itself fills the reading column. */
+ * At every pane width it reaches 22px past the column on each side, into the
+ * editor's 56px padding, for the left row grips and the right add strip, so
+ * the table itself fills the reading column. */
 .dohc-notion-editor > .tableWrapper {
-  width: 100%;
-  max-width: calc(var(--dohc-editor-measure) + 44px);
+  width: calc(min(100%, var(--dohc-editor-measure)) + 44px);
+  max-width: none;
+  margin-left: calc(max(0px, (100% - var(--dohc-editor-measure)) / 2) - 22px);
+  margin-right: 0;
 }
 
 .dohc-notion-editor :is(p, h1, h2, h3, li, blockquote, code, pre, td, th) {
@@ -1035,14 +1038,13 @@ body {
 
 /* Framed blocks reach one block inset past the text edge once the gutter is
  * wider than the editor's 56px padding. A table's frame starts on the text
- * edge, and its wrapper reaches 22px past it, for its row grips and ⋯
- * button. */
+ * edge, and at every width its row grips and ⋯ button reach 22px past it. */
 .dohc-block-affordance[data-hang="frame"] {
   --dohc-block-hang: clamp(0px, var(--dohc-block-gutter) - 56px, var(--dohc-editor-block-inset));
 }
 
 .dohc-block-affordance[data-hang="table"] {
-  --dohc-block-hang: clamp(0px, var(--dohc-block-gutter) - 56px, 22px);
+  --dohc-block-hang: 22px;
 }
 
 /* The shown cluster sits above the others: a stacked one can run past its
