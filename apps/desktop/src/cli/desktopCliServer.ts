@@ -59,12 +59,19 @@ import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import { UNNAMED_AGENT_ID } from "../agents/activeAgentRun";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
   const { depth = 0, onBehalfOf, agentRunId } = origin.attribution;
   if (onBehalfOf === undefined) throw new Error("The agent write has no local person identity.");
-  return { kind: "agent", agentId: origin.actorOriginId ?? "dohc-mcp", onBehalfOf,
-    ...(agentRunId !== undefined ? { agentRunId } : {}), ...(depth > 0 ? { depth } : {}) };
+  return {
+    kind: "agent",
+    agentId: origin.actorOriginId ?? UNNAMED_AGENT_ID,
+    ...(origin.agentName !== undefined ? { agentName: origin.agentName } : {}),
+    onBehalfOf,
+    ...(agentRunId !== undefined ? { agentRunId } : {}),
+    ...(depth > 0 ? { depth } : {}),
+  };
 }
 
 // With no editor open, the file holds the document's settled text.

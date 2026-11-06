@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 const Person = z.object({ kind: z.literal("person"), personId: z.string().min(1) }).strict();
-const Agent = z.object({ kind: z.literal("agent"), agentId: z.string().min(1), onBehalfOf: z.string().min(1), depth: z.number().int().nonnegative() }).strict();
+// agentName is the name a connected agent gave itself, a label only.
+const Agent = z.object({ kind: z.literal("agent"), agentId: z.string().min(1), agentName: z.string().min(1).max(64).optional(), onBehalfOf: z.string().min(1), depth: z.number().int().nonnegative() }).strict();
 
 // Local pause provenance grants no workspace or relay authority.
 export const WorkspaceSyncPauseAuthor = z.discriminatedUnion("kind", [Person, Agent]);

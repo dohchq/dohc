@@ -1479,6 +1479,7 @@ pub fn validate_moment_metadata(
         };
         for field in [
             "agentId",
+            "agentName",
             "automationId",
             "humanId",
             "onBehalfOf",

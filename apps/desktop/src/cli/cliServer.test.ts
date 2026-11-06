@@ -1458,7 +1458,7 @@ describe("CLI socket server", () => {
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
     expect(stop).toHaveBeenLastCalledWith(undefined);
     await invoke("stopSync", { cwd: workspaceRoot, actor: "agent", agent: "Claude" });
-    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "person-local", depth: 0 });
     agentRunDepth = 2;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
     expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
@@ -2529,6 +2529,7 @@ describe("CLI socket server", () => {
     await expect(invoke("collectionSetFields", {
       cwd: workspaceRoot,
       actor: "agent",
+      agent: "Codex",
       recordPath: "tasks/a.md",
       fields: { status: "done", notes: null },
     })).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
@@ -2567,6 +2568,7 @@ describe("CLI socket server", () => {
         input: {
           recordPath: "tasks/a.md",
           fields: { status: "done", notes: null },
+          // A Collection edit doesn't record the name yet.
           author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
         },
       },
@@ -2733,13 +2735,13 @@ describe("CLI socket server", () => {
       path: "notes/plan.md",
       replacement: "Appended.",
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
-    // Outside a run, an agent is the unnamed agent, whatever name it gives.
+    // A connected agent is the unnamed agent, labeled with the name it gives.
     const agent = { actorKind: "agent", onBehalfOf: "person-local", depth: 0 };
     expect(edits).toEqual([
       {
         path: "notes/plan.md",
         edit: { find: "Draft.", replacement: "Final." },
-        origin: { actorOriginId: "dohc-mcp", attribution: agent },
+        origin: { actorOriginId: "dohc-mcp", agentName: "claude-code", attribution: agent },
       },
       {
         path: "notes/plan.md",
@@ -3231,8 +3233,10 @@ describe("CLI socket server", () => {
       const message = (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).find((row) => row.id === reply.messageId);
       const origin = writeFiles.mock.lastCall?.[1];
       if (!origin || !message?.authorActorKey) throw new Error("Expected the file write and the reply.");
+      const author = agentWriteAuthor(origin);
       return {
-        file: deriveMomentActor(agentWriteAuthor(origin), { source: "own-store", workspaceId: WORKSPACE_ID, identity }, name).key,
+        file: deriveMomentActor(author, { source: "own-store", workspaceId: WORKSPACE_ID, identity }, name).key,
+        fileName: author.kind === "agent" ? author.agentName : undefined,
         reply: parseActorKey(message.authorActorKey),
         name: message.author.displayName,
       };
@@ -3243,6 +3247,7 @@ describe("CLI socket server", () => {
     for (const name of ["Codex", "default"]) {
       const during = await writeAndReply(name);
       expect(during.file).toMatchObject({ kind: "agent", claimedName: "codex" });
+      expect(during.fileName).toBeUndefined();
       expect(during.reply).toEqual(during.file);
     }
 
@@ -3251,6 +3256,7 @@ describe("CLI socket server", () => {
     for (const name of ["Codex", "default"]) {
       const outside = await writeAndReply(name);
       expect(outside.file).toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
+      expect(outside.fileName).toBe(name);
       expect(outside.reply).toEqual(outside.file);
       expect(outside.name).toBe(name);
     }
@@ -3300,6 +3306,7 @@ describe("CLI socket server", () => {
       markdown: "# New",
       origin: {
         actorOriginId: "dohc-mcp",
+        agentName: "claude-code",
         attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 },
       },
     }]);

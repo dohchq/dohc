@@ -174,11 +174,12 @@ export function groupAgentAuthorName(
 }
 
 // The one agent or person that made a moment, by their stable id. Two agents
-// can share a name, so a run never compares names.
+// can share a name, so a name never joins two ids. Every connected agent is
+// the unnamed agent, so the name each gave keeps them apart.
 function soleAuthorKey(moment: EngineMomentRecord): string | undefined {
   const [author, ...others] = moment.authors ?? [];
   if (author === undefined || others.length > 0) return undefined;
-  if (author.kind === "agent") return `agent:${author.agentId}`;
+  if (author.kind === "agent") return `agent:${JSON.stringify([author.agentId, author.agentName ?? null])}`;
   // A person the owner shared with, writing directly.
   if (author.kind === "named") return `named:${author.userId}`;
   return author.kind === "human" ? `human:${author.humanId}` : undefined;
