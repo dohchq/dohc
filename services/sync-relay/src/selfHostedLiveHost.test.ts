@@ -12,8 +12,8 @@ import type {ServiceHostedSet} from "./serviceLiveHost";
 import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
-import {fixture as ticketFixture, binding, scope, retainServiceActivation} from "./liveTickets.test-helper";
-import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
+import {fixture as ticketFixture, binding, scope, keptByOwnerRestore, retainServiceActivation} from "./liveTickets.test-helper";
+import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled, SERVICE_HOST_MAX_WORKSPACES} from "./storage/serviceHostEnrollment";
@@ -55,6 +55,9 @@ const storeName = (workspaceId: string, replicationEpoch = "epoch", streamIdenti
 async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean; unavailable?: AbortSignal; pending?: string[];
   seed?(data: string, relay: Awaited<ReturnType<typeof ticketFixture>>): Promise<void>} = {}) {
   const f = await ticketFixture(); cleanup.push(f.close);
+  // The relay attaches its history as it opens its storage, before anything reads it (`openRelayDeployment`).
+  const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
+  attachLiveJournalHistory(f.storage as StorageContext, history);
   if (options.unavailable) vi.spyOn(f.storage, "unavailable", "get").mockReturnValue(options.unavailable);
   // The ticket fixture provisions a device; this supervisor test starts a clean service deployment.
   f.raw.exec("DELETE FROM sync_relay_session_host_control");
@@ -68,7 +71,6 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     f.storage.releaseServiceHostEnrollment({workspaceId: enrolled.workspaceId, objectId: enrolled.objectId, nowMs: 10});
   }
   await options.seed?.(data, f);
-  const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
   const frameChanges = createNamedFrameChanges(8);
   // A stand-in for the service host: it records each membership update, keeps
   // each wanted workspace attached, and, like a hosted replica, keeps a
@@ -495,6 +497,54 @@ it("keeps a document resumed before its activation retired departing until that 
   f.host.reconcile();
   await f.waitUpdate(["docs/a.md"]);
   expect(f.updates.at(-1)!.departing).toEqual([]);
+});
+
+// Proves: the owner's restore that kept a note's live session through the end
+// of its last Edit grant keeps it hosted, with no release. Pause takes it out
+// of the hosted set and Resume brings it back once the paused activation
+// retired. Stop takes it out for good: Resume leaves it out, and its
+// enrollment retires again.
+it.each(["pause", "stop"] as const)("keeps hosting a note its owner's restore kept live through the owner's %s and Resume as decided", async action => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const activationId = retainServiceActivation(f.raw, namespace, true);
+  keptByOwnerRestore(f.raw, namespace);
+  notifyRelayWrite(f.storage);
+  await f.waitPasses();
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
+  expect(f.updates.at(-1)!.departing).toEqual([]);
+  expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.events).toEqual([]);
+  const prepared = {...f.storage.retirableServiceActivation(binding)!, assertCurrent() {}};
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, nowMs: 40, ...(action === "stop" ? {retire: true, restoreFenceGeneration: 8, prepared} : {})});
+  await f.waitUpdate([]);
+  await vi.waitFor(() => expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
+  expect(f.enrollment()).toMatchObject({enabled: false, retired: action === "stop", ownerStop: action === "pause" ? "pause" : "retire"});
+  // The host retired the activation the Pause or Stop ended.
+  f.raw.prepare("UPDATE sync_relay_service_activations SET retired_at_ms=45,retired_boundary_json='{}',state_bytes=NULL WHERE activation_id=?").run(activationId);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, nowMs: 50});
+  if (action === "pause") await f.waitUpdate(["docs/a.md"]);
+  else {
+    await vi.waitFor(() => expect(f.enrollment()).toMatchObject({enabled: false, retired: true}), {timeout: 10_000});
+    expect(f.updates.at(-1)!.documents).toEqual([]);
+  }
+  expect(f.storage.getShareGrant(scope.grantId)).toMatchObject({status: "revoked"});
+});
+
+// Proves: a restore that ended one of two Edit grants keeps nothing live by
+// itself. Revoking the other grant later retires the document as usual.
+it("retires a document after an overlapping grant's later revocation, though a restore ended the first grant", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  f.share("share-overlap", ["docs"]);
+  await f.waitUpdate(["docs/a.md"]);
+  retainServiceActivation(f.raw, namespace, true);
+  // The other grant still covered the note, so the restore kept nothing.
+  keptByOwnerRestore(f.raw, namespace).update("intent_json=json_remove(intent_json,'$.keptRun')");
+  notifyRelayWrite(f.storage);
+  await f.waitPasses();
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
+  expect(f.storage.revokeShareGrant({shareId: "share-overlap", grantId: "share-overlap-edit", revokedAtMs: 31}).ok).toBe(true);
+  await f.waitUpdate([]);
+  await vi.waitFor(() => expect(f.storage.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => row.path)).toEqual(["docs/a.md"]), {timeout: 10_000});
 });
 
 it("retires the last document without stopping the daemon", async () => {
