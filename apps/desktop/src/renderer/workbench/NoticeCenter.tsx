@@ -225,9 +225,11 @@ const ROW_CLASS =
 // wraps leaves its controls where they were. It holds only icon controls;
 // worded actions get a line under the text, so they never squeeze the title.
 const ROW_CONTROLS_CLASS = "ml-auto flex h-6 shrink-0 items-center gap-2";
-const ROW_ACTIONS_CLASS = "-ml-1.5 mt-1 flex flex-wrap items-center gap-1";
-const ROW_ACTION_CLASS =
-  "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 aria-busy:opacity-50";
+const ROW_ACTIONS_CLASS = "mt-1 flex flex-wrap items-center gap-1";
+// A worded action is a bordered button on a toast and on its row, so inside
+// a row that opens it still reads as its own target.
+const ACTION_CLASS = "h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+const ROW_ACTION_CLASS = `${ACTION_CLASS} disabled:opacity-50 aria-busy:opacity-50`;
 
 // A row counts as read the moment the pointer or keyboard focus reaches it.
 type ReachHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onFocus">;
@@ -653,7 +655,7 @@ export function WorkspaceErrorToast(props: {
       aria-describedby={error.retryBlocked === undefined ? undefined : reasonId}
       aria-busy={error.retryBusy || undefined}
       onClick={() => props.onRetry?.(error.id)}
-      className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+      className={`${ACTION_CLASS} disabled:opacity-50`}
     >
       Try again
     </button>
@@ -719,7 +721,7 @@ export function WorkspaceErrorToast(props: {
           type="button"
           data-testid="workspace-shell-error-action"
           onClick={() => props.onAction?.(error.id)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+          className={ACTION_CLASS}
         >
           {error.actionLabel}
         </button>
@@ -727,7 +729,7 @@ export function WorkspaceErrorToast(props: {
       {props.onAction ? error.additionalActionLabels?.map((label, index) => (
         <button type="button" key={label} data-testid="workspace-shell-error-additional-action"
           onClick={() => props.onAction?.(error.id, index + 1)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink">
+          className={ACTION_CLASS}>
           {label}
         </button>
       )) : null}
@@ -870,7 +872,7 @@ export function LocalNoticeRow(props: {
             {notice.timeMs !== undefined ? (
               <time
                 dateTime={new Date(notice.timeMs).toISOString()}
-                className="mt-1 block text-[10px] text-subtle"
+                className="mt-1 block text-[12px] text-subtle"
               >
                 {relativeTime(notice.timeMs)}
               </time>
@@ -1834,7 +1836,7 @@ export function NoticeCenter(props: {
                     onHideSentNoticeToast?.();
                     props.onRetrySentNotice?.(sentToast.notice);
                   }}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  className={ACTION_CLASS}
                 >
                   Try again
                 </button>
@@ -1857,7 +1859,7 @@ export function NoticeCenter(props: {
                     onHideSentNoticeToast?.();
                     void openSentNotice(sentToast.notice);
                   }}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  className={ACTION_CLASS}
                 >
                   {isHeld(sentToast.notice) ? "Open note" : "Open"}
                 </button>
@@ -1890,7 +1892,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="owner-live-delivery-toast-action"
                   onClick={liveDeliveryAction.onClick}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  className={ACTION_CLASS}
                 >
                   {liveDeliveryAction.label}
                 </button>
@@ -1929,7 +1931,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="owner-live-refusals-toast-action"
                   onClick={onOpenLiveDocuments}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  className={ACTION_CLASS}
                 >
                   Live documents
                 </button>
@@ -1972,7 +1974,7 @@ export function NoticeCenter(props: {
                     closeDecline(declineToast);
                     onOpenSharingDeclined(declineToast.versionId, declineToast.objectId);
                   }}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  className={ACTION_CLASS}
                 >
                   Open document
                 </button>
@@ -2011,7 +2013,7 @@ export function NoticeCenter(props: {
                   type="button"
                   data-testid="crash-report-toast-send"
                   onClick={props.onSendCrashReport}
-                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  className={ACTION_CLASS}
                 >
                   Send report
                 </button>
@@ -2282,8 +2284,8 @@ export function NoticeCenter(props: {
                                     ) : null}
                                   </div>
                                 ) : null}
-                                <p className="m-0 mt-1 flex min-w-0 gap-2 text-[10px] text-subtle">
-                                  <time dateTime={new Date(notice.createdAtMs).toISOString()}>
+                                <p className="m-0 mt-1 flex min-w-0 items-baseline gap-2 text-[10px] text-subtle">
+                                  <time dateTime={new Date(notice.createdAtMs).toISOString()} className="text-[12px]">
                                     {relativeTime(notice.createdAtMs)}
                                   </time>
                                   {folder ? <span className="truncate">{folder}</span> : null}
