@@ -432,7 +432,7 @@ describe("a failed run's notice", () => {
     expect(result.current.sentNotices[0]?.openable).toBe(true);
     await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
     // An agent DM is one conversation, so the run opens the DM, not a thread view.
-    expect(openChat).toHaveBeenCalledWith({ level: "channel", channel: chat("chat-scout", "scout") });
+    expect(openChat).toHaveBeenCalledWith({ level: "channel", channel: chat("chat-scout", "scout"), lane: "chat" });
     expect(openFile).not.toHaveBeenCalled();
 
     // A thread that is gone says so on the row. A read that fails goes to
@@ -468,15 +468,15 @@ describe("a failed run's notice", () => {
       target: { thread: "thread-1", message: "m-3", run: "run-2" } });
     const { result, openChat } = setup([reply], [workspace("notes")]);
     await result.current.onOpenSentNotice(reply, live());
-    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm, focusMessageId: "m-3" });
+    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm, lane: "chat", focusMessageId: "m-3" });
 
     const stopped = { ...reply, target: { thread: "thread-1", run: "run-1" } };
     await result.current.onOpenSentNotice(stopped, live());
-    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm, focusMessageId: "m-2" });
+    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm, lane: "chat", focusMessageId: "m-2" });
 
     const silent = { ...reply, target: { thread: "thread-1", run: "run-9" } };
     await result.current.onOpenSentNotice(silent, live());
-    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm });
+    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm, lane: "chat" });
     chatRunRecordsForThread.mockResolvedValue({ runs: {} });
     listChatMessages.mockResolvedValue({ messages: [] });
   });
@@ -493,9 +493,14 @@ describe("a failed run's notice", () => {
       postedHere: true, target: { thread, message: "m-1" } });
     const { result, openChat } = setup([reply("lane-thread")], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(reply("lane-thread"), live())).resolves.toBeNull();
-    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: group, focusMessageId: "m-1" });
+    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: group, lane: "chat", focusMessageId: "m-1" });
     await expect(result.current.onOpenSentNotice(reply("post-thread"), live())).resolves.toBeNull();
     expect(openChat).toHaveBeenLastCalledWith({ level: "thread", channel: group, thread: record("post-thread"), focusMessageId: "m-1" });
+    // With no message, as when an agent's replies paused, it still opens the chat lane.
+    const paused = notice({ store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
+      target: { thread: "lane-thread" } });
+    await expect(result.current.onOpenSentNotice(paused, live())).resolves.toBeNull();
+    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: group, lane: "chat" });
     listChannelThreads.mockReset();
   });
 
@@ -510,7 +515,7 @@ describe("a failed run's notice", () => {
     const { result, openChat, openFile } = setup([inChat, inFile], [workspace("notes")]);
     expect(result.current.sentNotices.map((row) => row.openable)).toEqual([true, true]);
     await result.current.onOpenSentNotice(inChat, live());
-    expect(openChat).toHaveBeenCalledExactlyOnceWith({ level: "channel", channel: dm, focusMessageId: "m-1" });
+    expect(openChat).toHaveBeenCalledExactlyOnceWith({ level: "channel", channel: dm, lane: "chat", focusMessageId: "m-1" });
     await result.current.onOpenSentNotice(inFile, live());
     expect(openFile).toHaveBeenCalledExactlyOnceWith("Trip/plan.md");
     listChannelThreads.mockReset();

@@ -203,8 +203,9 @@ export type ChatsInvitation = { shareId: string; inputs: number };
 export type ChatsNav =
   | { level: "channels" }
   | { level: "feed" }
-  // An agent DM's conversation, at a message when one is named.
-  | { level: "channel"; channel: ChatChannelRecord; focusMessageId?: string }
+  // A channel, or with `lane` its chat lane, at a message when one is named.
+  // An agent DM is always its chat lane.
+  | { level: "channel"; channel: ChatChannelRecord; lane?: "chat"; focusMessageId?: string }
   | {
       level: "thread";
       channel: ChatChannelRecord;
@@ -1660,16 +1661,16 @@ export function ChatsView(props: {
   }, []);
 
   const openChannel = useCallback(
-    async (channel: ChatChannelRecord, focusMessageId?: string) => {
+    async (channel: ChatChannelRecord, lane?: "chat", focusMessageId?: string) => {
       const token = ++liveToken.current;
       const refreshSeq = ++channelRefreshSeq.current;
       setNav({
         level: "channel",
         channel: withListedAgent(channel, latestChannels.current),
+        ...(lane ? { lane } : {}),
         ...(focusMessageId ? { focusMessageId } : {}),
       });
-      // A message to land on at a group's level is in its chat lane.
-      if (focusMessageId) setGroupLane("chat");
+      if (lane) setGroupLane(lane);
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
@@ -2504,7 +2505,7 @@ export function ChatsView(props: {
       // no nav state, so the passive report alone would cancel nothing.
       props.onNavCommand?.(target);
       if (target.level === "feed") openFeed();
-      else if (target.level === "channel") void openChannel(target.channel, target.focusMessageId);
+      else if (target.level === "channel") void openChannel(target.channel, target.lane, target.focusMessageId);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
       } else void openDm(target.dm, target.focusMessageId);
@@ -2587,7 +2588,7 @@ export function ChatsView(props: {
     handoffReportBlocked.current = false;
     if (seed) {
       if (seed.level === "feed") openFeed();
-      else if (seed.level === "channel") void openChannel(seed.channel, seed.focusMessageId);
+      else if (seed.level === "channel") void openChannel(seed.channel, seed.lane, seed.focusMessageId);
       else if (seed.level === "thread") {
         void openThread(seed.channel, seed.thread, seed.focusMessageId);
       }

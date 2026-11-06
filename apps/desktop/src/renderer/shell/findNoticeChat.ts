@@ -23,7 +23,7 @@ export async function findNoticeChat(
     if (!thread) continue;
     const focus = target.message ?? (target.run === undefined ? undefined : await lastMessageOfRun(workspaceId, target.thread, target.run));
     const at = focus === undefined ? {} : { focusMessageId: focus };
-    return lane === "chat" ? { level: "channel", channel, ...at } : { level: "thread", channel, thread, ...at };
+    return lane === "chat" ? { level: "channel", channel, lane, ...at } : { level: "thread", channel, thread, ...at };
   }
   return null;
 }
