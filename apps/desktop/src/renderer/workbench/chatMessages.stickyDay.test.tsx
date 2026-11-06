@@ -61,6 +61,10 @@ function showTop(index: number) {
   act(() => reportViewable?.({
     viewableItems: [{ item, index, key: item.id, isViewable: true, containerId: 0 }],
     changed: [],
+    start: index,
+    end: index,
+    startBuffered: 0,
+    endBuffered: messages.length - 1,
   }));
 }
 
