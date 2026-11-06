@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -12,13 +11,12 @@ import { installedReaderConfig } from "../src/workspaces/installedReaderConfig.t
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 import signReader from "./sign-engine-reader-macos.mjs";
 import { useCachedNodeDownloads } from "./pinned-node-downloads.testSupport.mjs";
+import { builderLog, builderRequire } from "./electron-builder.testSupport.mjs";
 
-const require = createRequire(import.meta.url);
-const builder = createRequire(require.resolve("electron-builder/package.json"));
-builder("app-builder-lib");
+builderRequire("app-builder-lib");
 const desktop = fileURLToPath(new URL("..", import.meta.url));
 useCachedNodeDownloads();
-const { resolveFunction } = builder("app-builder-lib/out/util/resolve.js");
+const { resolveFunction } = builderRequire("app-builder-lib/out/util/resolve.js");
 const config = load(await readFile(new URL("../electron-builder.yml", import.meta.url), "utf8"));
 
 async function removeLayout(path) {
@@ -229,10 +227,10 @@ for (const [name, force, identity, signature, failure] of [
   ["explicit null identity permits unsigned development", false, null, "missing", undefined],
   ["explicit null identity refuses required signing", true, null, "missing", /forceCodeSigning/],
 ]) test(`electron-builder sign path: ${name}`, async t => {
-  const { MacPackager } = builder("app-builder-lib/out/macPackager.js");
-  const { MacTargetHelper } = builder("app-builder-lib/out/mac/MacTargetHelper.js");
-  const { PlatformPackager } = builder("app-builder-lib/out/platformPackager.js");
-  const codesign = builder("app-builder-lib/out/codeSign/macCodeSign.js");
+  const { MacPackager } = builderRequire("app-builder-lib/out/macPackager.js");
+  const { MacTargetHelper } = builderRequire("app-builder-lib/out/mac/MacTargetHelper.js");
+  const { PlatformPackager } = builderRequire("app-builder-lib/out/platformPackager.js");
+  const codesign = builderRequire("app-builder-lib/out/codeSign/macCodeSign.js");
   t.mock.method(codesign, "isSignAllowed", () => true);
   t.mock.method(codesign, "findIdentity", async () => null);
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-sign-path-"));
@@ -273,4 +271,12 @@ for (const [name, force, identity, signature, failure] of [
   if (identity !== null) assert.equal(afterSign, 1, "the real signApp return emits afterSign even without an identity");
   if (!force) assert.equal(checks, 0, "development needs no signature tools or accounts");
   else if (identity !== null) assert.equal(checks, 1, "one designated-requirement verification, without display-name matching");
+});
+
+test("electron-builder logs to stderr, not to the stream node:test reads results from", t => {
+  const written = [];
+  t.mock.method(process.stderr, "write", chunk => { written.push(String(chunk)); return true; });
+  builderLog.info({ reason: "identity explicitly is set to null" }, "skipped macOS code signing");
+  t.mock.restoreAll();
+  assert.match(written.join("").replace(/\x1b\[[0-9;]*m/g, ""), /^ {2}• skipped macOS code signing +reason=identity explicitly is set to null\n$/);
 });
