@@ -19,6 +19,8 @@ function RailGlyph(props: { Icon: LucideIcon }) {
 
 function RailButton(props: {
   label: string;
+  // The button's name when it says more than its label, such as a count.
+  name?: string;
   testId: string;
   active?: boolean;
   // Badge dot seam (conflicts, running agent — more arrive in later phases).
@@ -49,16 +51,15 @@ function RailButton(props: {
           }`}
         />
       ) : null}
+      {/* Notices' count: inside the button's corner, clear of its icon.
+          The button's name carries the exact number. */}
       {typeof props.count === "number" ? (
         <span
           data-testid={`${props.testId}-count`}
-          className="absolute -right-0.5 top-0 min-w-4 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
+          aria-hidden
+          className="absolute right-0.5 top-0.5 h-3 min-w-3 rounded-full bg-ink px-0.5 text-center text-[8px] font-semibold leading-3 text-bg"
         >
-          {/* Clamp at 99+: the right-anchored pill grows leftward, and at
-              four glyphs ("999+") it spanned ~36px of the 48px rail and
-              detached from its icon. Three glyphs keeps it a corner
-              ornament on the icon tile. */}
-          {props.count > 99 ? "99+" : props.count}
+          {props.count > 9 ? "9+" : props.count}
         </span>
       ) : null}
     </>
@@ -78,7 +79,7 @@ function RailButton(props: {
           type="button"
           data-testid={props.testId}
           title={props.label}
-          aria-label={props.label}
+          aria-label={props.name ?? props.label}
           aria-current={props.active ? "page" : undefined}
           onClick={props.onClick}
           onContextMenu={
@@ -139,6 +140,9 @@ export function ActivityBar(props: {
             active={props.sidebarVisible && props.activeView === view}
             badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
             count={view === "search" ? props.searchResultCount : undefined}
+            name={view === "search" && props.searchResultCount
+              ? `${VIEW_IDENTITY.search.label}, ${props.searchResultCount} result${props.searchResultCount === 1 ? "" : "s"}`
+              : undefined}
             onClick={() => props.onSelectView(view)}
             icon={<RailGlyph Icon={VIEW_IDENTITY[view].Icon} />}
           />
