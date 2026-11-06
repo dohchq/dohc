@@ -167,13 +167,13 @@ Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, re
 
 ### `dohc_list_versions`
 
-List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. Owner workspace only.
+List the workspace's versions and which one is active. canMergeIntoMain is true for a version that started from Main. A version's madeFromVersionId is the id of the version it was made from. Owner workspace only.
 
 A shared view keeps no versions of its own, so it does not offer this tool.
 
 No arguments.
 
-Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId } | { ok: false, reason }`.
+Returns `{ ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId } | { ok: false, reason }`.
 
 ### `dohc_compare_version`
 
@@ -1864,7 +1864,9 @@ dohc version list [options]
 
 List the versions and which one is active.
 
-With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain }[], activeVersionId }`.
+A version's madeFromVersionId is the id of the version it was made from.
+
+With `--json`, prints `{ schemaVersion, ok: true, versions: { kind, id, name, createdAtMs, canMergeIntoMain, madeFromVersionId? }[], activeVersionId }`.
 
 #### `dohc version compare`
 

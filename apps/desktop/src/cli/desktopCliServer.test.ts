@@ -462,9 +462,11 @@ describe("desktop CLI workspace context", () => {
       const mcp = (verb: "versionList" | "versionCompare" | "versionConflicts", args: Record<string, unknown> = {}) =>
         send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
 
-      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
-      expect(await mcp("versionList")).toMatchObject({ ok: true, activeVersionId: "draft",
-        versions: [{ id: "main", kind: "main", canMergeIntoMain: false }, { id: "draft", name: "Draft", canMergeIntoMain: true }] });
+      // Each version but Main says what it was made from, as the versions menu does.
+      expect(await mcp("versionList")).toEqual({ ok: true, activeVersionId: "draft", versions: [
+        { id: "main", name: "Main", kind: "main", createdAtMs: 10, canMergeIntoMain: false },
+        { id: "draft", name: "Draft", kind: "named", createdAtMs: 10, canMergeIntoMain: true, madeFromVersionId: "main" }] });
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
       // Untracked and secret files are left out, and the next page starts
       // after the last file shown, never after a hidden one.
@@ -511,7 +513,7 @@ describe("desktop CLI workspace context", () => {
         reason: "Version files are hidden because dohc can't read .dohc/files.toml" });
       expect(await cli("version", "conflicts")).toEqual({ exitCode: 1, stdout: "",
         stderr: "dohc: Conflicts are hidden because dohc can't read .dohc/files.toml\n" });
-      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
       // A shared view keeps no versions of its own.
       vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});

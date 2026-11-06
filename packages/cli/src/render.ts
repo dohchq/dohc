@@ -433,7 +433,13 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "versionList": {
       const list = result as CliResultByVerb["versionList"];
       if (!list.ok) return list.reason;
-      return list.versions.map(version => `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}`).join("\n");
+      // A parent that isn't in the list shows by its id.
+      const names = new Map(list.versions.map(version => [version.id, version.name]));
+      return list.versions.map(version => {
+        const parent = version.madeFromVersionId;
+        const madeFrom = parent === undefined ? "" : ` · made from ${lineSafe(names.get(parent) ?? parent)}`;
+        return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}`;
+      }).join("\n");
     }
     case "versionCompare": {
       const compare = result as CliResultByVerb["versionCompare"];

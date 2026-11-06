@@ -1268,6 +1268,7 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
 
 // A workspace's versions and the active one, whose files the folder shows.
 // canMergeIntoMain is false for a version made from another version.
+// madeFromVersionId is the version it was made from. Main has none.
 const versionListResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
@@ -1277,6 +1278,7 @@ const versionListResultSchema = z.discriminatedUnion("ok", [
       kind: z.enum(["main", "named"]),
       createdAtMs: z.number(),
       canMergeIntoMain: z.boolean(),
+      madeFromVersionId: z.string().min(1).optional(),
     }).strict()),
     activeVersionId: z.string().min(1),
   }).strict(),
