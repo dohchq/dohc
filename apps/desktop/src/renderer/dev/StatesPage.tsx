@@ -39,6 +39,7 @@ import { TextViewActions } from "../TextEditorView";
 import {
   DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
   DocumentControls,
+  LossyNoteNoticeView,
   MarkdownSourceStrip,
   OPENING_TITLE,
   OpeningState,
@@ -3145,6 +3146,20 @@ function Pane(props: { theme: "light" | "dark" }) {
           the tab row, as a document does: a calm save state says so only to
           screen readers. */}
       <Section part="file-view-actions" title="File view actions" menusAtRest>
+        {([false, true] as const).map((held) => (
+          <Specimen key={String(held)} label={held ? "held change" : "read-only note"} className="w-full">
+            <TabRowActionsSpecimen width="w-full" body={
+              <LossyNoteNoticeView held={held}>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Open externally</button>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Edit anyway</button>
+              </LossyNoteNoticeView>
+            }>
+              <ViewActions onShare={noop} actions={
+                <DocumentControls toggle={{ label: "Edit", disabled: true, title: "This note has parts dohc can't show." }} menu={null} />
+              } />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
         {FILE_VIEW_CSV_STATES.map((specimen) => (
           <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
             <TabRowActionsSpecimen width="w-full" path="data/funnel.csv">
