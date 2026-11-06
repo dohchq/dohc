@@ -1,4 +1,4 @@
-import { activityPin, desktopPins } from "../src/testPins";
+import { activityPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -17,16 +17,13 @@ import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./he
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
-  openAboutPanel,
   openChatsView,
   openWorkspaceFromFirstRun,
   trustOpenWorkspace,
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  waitForFileObjectId,
   waitForWorkspaceFile,
-  writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // Screenshot harness (@ui-audit) for the agent moments of the chat overhaul:
@@ -144,12 +141,11 @@ const LINK_OWNER = "e2e-link-marks-owner";
 const LINK_TOKEN = `test:${LINK_OWNER}`;
 const LINK_REDIRECT = "http://127.0.0.1:43110/callback";
 const LINK_VERIFIER = "link-marks-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
-const CABIN = "trip-plan/cabin.md";
 const SAID = {
   kickoff: "Kickoff: where do we stay?",
   memberAgent: "I can hold the lake cabin until Friday.",
-  linkAgent: `Booked @[${CABIN}] for the first week.`,
-  linkHolder: `Can we add a night? @[${CABIN}]`,
+  linkAgent: "Booked the lake cabin for the first week.",
+  linkHolder: "Can we add a night?",
   post: "Shortlist: three cabins near the lake.",
   linkAgentComment: "The second cabin has a dock.",
   linkHolderComment: "A dock wins it for me.",
@@ -234,8 +230,6 @@ test("@ui-audit link agent and link holder marks", async () => {
     const threadView = page.locator('[data-testid="chats-thread-view"][data-variant="page"]');
     await expect(channelView.getByTestId("chats-channel-title")).toHaveText("Trip plan");
     await waitForWorkspaceFile(page, LINK_WORKSPACE_ID, "trip-plan");
-    await writeWorkspaceFiles(temp, [{ path: CABIN, contents: "# Lake cabin\n\nSleeps six. Dock on the east side.\n" }]);
-    await waitForFileObjectId(page, LINK_WORKSPACE_ID, CABIN);
 
     // The owner's first chat message starts the Group's chat.
     await channelView.getByTestId("chats-group-lane-chat").click();
@@ -246,8 +240,10 @@ test("@ui-audit link agent and link holder marks", async () => {
     // The owner's agent, at the default color, posts, then answers in the chat.
     await waitForCliEndpoint(temp.homeDir);
     const posted = await runDohcCli(temp, ["chat", "post", "trip-plan", "--as-agent", SAID.post]);
-    const postThreadId = posted.stdout.match(/^posted\s+(\S+)\s/mu)?.[1];
-    if (!postThreadId) throw new Error(`The agent's post printed no thread: ${posted.stdout}`);
+    const handle = posted.stdout.match(/^posted\s+(\S+)\s/mu)?.[1];
+    if (!handle) throw new Error(`The agent's post printed no thread: ${posted.stdout}`);
+    // The CLI prints a short `th_` handle; the relay and the bridge use the engine's `thread-` id.
+    const postThreadId = handle.startsWith("th_") ? `thread-${handle.slice(3)}` : handle;
     await expect.poll(async () => groupOnRelay(await relayOps(), postThreadId) !== null,
       { timeout: 120_000, intervals: [1000] }).toBe(true);
     const group = groupOnRelay(await relayOps(), postThreadId)!;
@@ -322,19 +318,6 @@ test("@ui-audit link agent and link holder marks", async () => {
     await page.mouse.move(0, 0);
     await shoot(page, "link-marks-group");
 
-    // --- About this conversation: a file both link authors mentioned ------
-    await openAboutPanel(page);
-    const about = page.getByTestId(desktopPins.aboutRail);
-    const cabin = about.locator(`[data-testid="about-conversation-link"][data-path="${CABIN}"]`);
-    // The conversation's link index may still be building when About opens.
-    await expect(cabin).toBeVisible({ timeout: 30_000 });
-    const authors = cabin.getByTestId("about-conversation-link-authors");
-    await expect(authors).toContainText("agent link holder Claude Code");
-    await expect(authors).toContainText("link holder Wren");
-    await expect(authors).not.toContainText("agent link holder Wren");
-    await expect(cabin.locator("[data-link-agent]")).toHaveCount(1);
-    await shoot(page, "link-marks-about");
-
     // --- The post card, its thread, and the link agent's comment ----------
     await channelView.getByTestId("chats-group-lane-posts").click();
     const card = channelView.getByTestId("chats-post-card").filter({ hasText: SAID.post });
@@ -369,6 +352,12 @@ test("@ui-audit link agent and link holder marks", async () => {
     await page.keyboard.press("Escape");
 
     // --- Home ---------------------------------------------------------------
+    // A Group follow lists opening posts only. Comments reach Home once the
+    // owner follows the post's thread, which their agent's post does not do.
+    await page.evaluate(async ({ workspaceId, threadId }) => {
+      await (window as unknown as { dohcDesktop: Api }).dohcDesktop.setChatFollow({
+        workspaceId, target: { kind: "thread", threadId }, state: "following" });
+    }, { workspaceId: LINK_WORKSPACE_ID, threadId: postThreadId });
     await page.getByTestId("chats-feed-link").click();
     const home = page.locator('[data-testid="chats-personal-feed"][data-variant="page"]');
     const feedRow = (body: string) => home.getByTestId("chats-feed-item").filter({ hasText: body });
@@ -392,5 +381,40 @@ test("@ui-audit link agent and link holder marks", async () => {
         body: failures.map((result) => String(result.reason)).join("\n") });
       if (primaryFailure === undefined) throw new AggregateError(failures.map((result) => result.reason), "Link marks test cleanup failed.");
     }
+  }
+});
+
+// About this conversation lists a file by its latest mention, and a link
+// author's message carries no attachment the index reads. So About's link
+// marks are shot from the states page's specimen of the real part.
+test("@ui-audit link agent and link holder marks in About", async () => {
+  test.setTimeout(120_000);
+  await mkdir(SHOT_DIR, { recursive: true });
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace: temp, env: { DOHC_DEV_TOOLS: "1" } });
+    const page = desktop.page;
+    await expect(page.getByTestId("first-run-open-share")).toBeVisible();
+    await page.evaluate(() => { window.location.hash = "#/dev/states"; });
+    await expect(page.getByTestId("states-page")).toBeVisible();
+    for (const theme of ["light", "dark"] as const) {
+      const specimen = page.getByTestId(`states-${theme}`)
+        .locator('section[data-part="about-conversation-links"] > div > div')
+        .filter({ hasText: "files mentioned last by a link agent and by a link holder" });
+      const authors = (path: string) => specimen
+        .locator(`[data-testid="about-conversation-link"][data-path="${path}"]`)
+        .getByTestId("about-conversation-link-authors");
+      await expect(authors("trip-plan/cabin.md")).toHaveText("Mentioned by agent link holder Claude Code");
+      await expect(authors("trip-plan/dates.md")).toHaveText("Mentioned by link holder Wren");
+      await expect(specimen.locator("[data-link-agent]")).toHaveCount(1);
+      await specimen.scrollIntoViewIfNeeded();
+      await waitForVisibleAnimations(page);
+      await specimen.screenshot({ path: join(SHOT_DIR, `link-marks-about-${theme}.png`) });
+    }
+    expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } finally {
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
   }
 });

@@ -805,6 +805,14 @@ const ABOUT_MENTIONED: MentionedFile[] = [
 const ABOUT_MENTIONS: Extract<ConversationLinksView, { status: "ready" }> = {
   status: "ready", files: ABOUT_MENTIONED, more: false, building: false, partial: false,
 };
+// Two files a Group's link authors mentioned last: the cabin by an agent that
+// signed in with the link, the dates by a person who opened it.
+const ABOUT_LINK_MENTIONED: MentionedFile[] = [
+  { objectId: "states-cabin", path: "trip-plan/cabin.md", authors: [{ kind: "link", linkAgent: true, displayName: "Claude Code",
+    presentation: { group: "states-link-agent", hue: null, self: false } }] },
+  { objectId: "states-dates", path: "trip-plan/dates.md", authors: [{ kind: "link", displayName: "Wren",
+    presentation: { group: "states-wren", hue: null, self: false } }] },
+];
 function ConversationLinks(props: { view: ConversationLinksView }) {
   return <AboutConversationLinksView view={props.view} expanded onToggle={noop} onOpenFile={noop} onMore={noop} onRetry={noop} />;
 }
@@ -2908,6 +2916,11 @@ function Pane(props: { theme: "light" | "dark" }) {
               </AboutPanelSpecimen>
             </div>
           </div>
+        </Specimen>
+        <Specimen label="files mentioned last by a link agent and by a link holder">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_LINK_MENTIONED }} />
+          </AboutPanelSpecimen>
         </Specimen>
         <Specimen label="gathering while the conversation's link index builds">
           <AboutPanelSpecimen>
