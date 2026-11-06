@@ -92,8 +92,8 @@ fn learned_references_resolve_after_local_rows_without_creating_outbox_entries()
         },
         created_at_ms: 4,
     };
-    learn_work_references(&mut store, WS, &[mapping.clone()]).unwrap();
-    learn_work_references(&mut store, WS, &[mapping.clone()]).unwrap();
+    learn_work_references(&mut store, WS, std::slice::from_ref(&mapping)).unwrap();
+    learn_work_references(&mut store, WS, std::slice::from_ref(&mapping)).unwrap();
     assert_eq!(pending_work_references(&store, WS).unwrap().len(), 1);
     assert_eq!(
         make(&mut store, &file_by_path("notes/plan.md"), 5).reference,
@@ -112,9 +112,14 @@ fn learned_references_resolve_after_local_rows_without_creating_outbox_entries()
         resolve_work_reference(&store, "other-workspace", &mapping.reference).unwrap(),
         WorkReferenceResolution::Unknown
     ));
-    acknowledge_work_references(&mut store, "other-workspace", &[local.reference.clone()]).unwrap();
+    acknowledge_work_references(
+        &mut store,
+        "other-workspace",
+        std::slice::from_ref(&local.reference),
+    )
+    .unwrap();
     assert_eq!(pending_work_references(&store, WS).unwrap().len(), 1);
-    acknowledge_work_references(&mut store, WS, &[local.reference.clone()]).unwrap();
+    acknowledge_work_references(&mut store, WS, std::slice::from_ref(&local.reference)).unwrap();
     drop(store);
     let store = EngineStore::open(&db, 6).unwrap();
     assert!(pending_work_references(&store, WS).unwrap().is_empty());

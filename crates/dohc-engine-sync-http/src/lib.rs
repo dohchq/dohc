@@ -802,10 +802,7 @@ impl RelayTransport for HttpRelayTransport {
                 ("since", req.cursor.to_string()),
                 ("limit", req.limit.to_string()),
                 ("includeReferences", req.include_work_references.to_string()),
-                (
-                    "referenceAfter",
-                    req.reference_after.clone().unwrap_or_default(),
-                ),
+                ("referenceAfter", req.reference_after.unwrap_or_default()),
             ],
         )?;
         let wire: WireLogPage = self.json(
