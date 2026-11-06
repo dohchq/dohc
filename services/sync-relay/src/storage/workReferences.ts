@@ -288,8 +288,7 @@ export async function listWorkReferences(storage: StorageContext, input: {
   const admitted: {seq: number; mapping: WorkReferenceMapping}[] = [];
   const mappingAt = (row: {reference: unknown; target_json: unknown; created_at_ms: unknown}, datasetAccess: DatasetReferenceAccess): WorkReferenceMapping | null => {
     const target = decodeWorkTarget(JSON.parse(String(row.target_json)));
-    if (owner) return {reference: String(row.reference), target, createdAtMs: Number(row.created_at_ms),
-      deleted: !scope(storage, input.workspaceId, target, datasetAccess)?.live};
+    if (owner) return {reference: String(row.reference), target, createdAtMs: Number(row.created_at_ms)};
     const resolved = resolveIn(storage, {...input, reference: String(row.reference)}, observed, datasetAccess);
     return resolved.status === "found" ? {reference: resolved.reference, target: resolved.target, createdAtMs: resolved.createdAtMs} : null;
   };
@@ -303,7 +302,7 @@ export async function listWorkReferences(storage: StorageContext, input: {
     });
     scanned += rows.length;
     if (!rows.length) { exhausted = true; break; }
-    const datasetAccess = await prepareDatasetAccess(storage, input.workspaceId, input.reader,
+    const datasetAccess = owner ? proofs : await prepareDatasetAccess(storage, input.workspaceId, input.reader,
       rows.map(row => decodeWorkTarget(JSON.parse(String(row.target_json)))));
     storage.readLiveAuthority(() => {
       checkAuthority();

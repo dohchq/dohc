@@ -71,11 +71,9 @@ describe("work references", () => {
     }
   });
 
-  it("decodes recipient message projections and owner tombstones", () => {
+  it("decodes recipient message projections", () => {
     const projected = {reference: REFERENCE, target: {kind: "message", messageId: "m", threadId: "t"}, createdAtMs: 1};
     expect(decodeWorkReferenceMapping(projected)).toEqual(projected);
-    expect(decodeWorkReferenceMapping({...projected, deleted: true})).toEqual({...projected, deleted: true});
-    expect(() => decodeWorkReferenceMapping({...projected, deleted: "yes"})).toThrow();
   });
 
   it("rejects malformed engine results", async () => {

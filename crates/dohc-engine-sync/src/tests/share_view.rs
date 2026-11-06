@@ -814,7 +814,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
 }
 
 #[test]
-fn share_view_fetches_mappings_once_while_draining_log_pages() {
+fn share_view_learns_a_mapping_after_its_target_arrives_on_the_second_log_page() {
     use dohc_engine_domain::work_references::{
         WorkReferenceResolution, resolve_work_reference, work_reference_page_after,
     };
@@ -822,14 +822,27 @@ fn share_view_fetches_mappings_once_while_draining_log_pages() {
     let token = format!("share-object:v1:{}", "a".repeat(64));
     let body = b"admitted".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
-    let mut op = share_view_write_op(0, "docs/a.md", &sha);
-    op.payload["objectId"] = json!(token);
+    let mut first_op = share_view_write_op(0, "docs/b.md", &sha);
+    first_op.payload["objectId"] = json!(format!("share-object:v1:{}", "b".repeat(64)));
+    let mut target_op = share_view_write_op(1, "docs/a.md", &sha);
+    target_op.payload["objectId"] = json!(token);
     let client = RelaySyncClient::new(
         PagedShareRelay::new(
             [],
             [
                 (
                     0,
+                    ShareViewResponse {
+                        work_references: Vec::new(),
+                        next_reference_after: None,
+                        reference_has_more: false,
+                        ops: vec![first_op],
+                        next_cursor: 1,
+                        has_more: true,
+                    },
+                ),
+                (
+                    1,
                     ShareViewResponse {
                         work_references: vec![
                             serde_json::from_value(
@@ -840,18 +853,7 @@ fn share_view_fetches_mappings_once_while_draining_log_pages() {
                         ],
                         next_reference_after: Some("first-mapping".into()),
                         reference_has_more: true,
-                        ops: vec![op],
-                        next_cursor: 1,
-                        has_more: true,
-                    },
-                ),
-                (
-                    1,
-                    ShareViewResponse {
-                        work_references: Vec::new(),
-                        next_reference_after: None,
-                        reference_has_more: false,
-                        ops: Vec::new(),
+                        ops: vec![target_op],
                         next_cursor: 2,
                         has_more: false,
                     },
@@ -877,8 +879,12 @@ fn share_view_fetches_mappings_once_while_draining_log_pages() {
         .unwrap();
     assert!(matches!(
         resolve_work_reference(&engine, "ws", &"A".repeat(43)).unwrap(),
-        WorkReferenceResolution::Found { .. }
+        WorkReferenceResolution::Unknown
     ));
+    assert_eq!(
+        work_reference_page_after(&engine, "ws", "view:share").unwrap(),
+        None
+    );
     client
         .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
         .unwrap();
@@ -888,6 +894,9 @@ fn share_view_fetches_mappings_once_while_draining_log_pages() {
         .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
         .unwrap();
     assert!(second.has_more);
+    assert!(
+        matches!(resolve_work_reference(&engine,"ws",&"A".repeat(43)).unwrap(),WorkReferenceResolution::Found {path: Some(path),..} if path == "docs/a.md")
+    );
     assert_eq!(
         work_reference_page_after(&engine, "ws", "view:share")
             .unwrap()
@@ -905,7 +914,7 @@ fn share_view_fetches_mappings_once_while_draining_log_pages() {
         *client.transport().reference_pulls.lock().unwrap(),
         [
             (true, None),
-            (false, Some("first-mapping".into())),
+            (true, None),
             (true, Some("first-mapping".into()))
         ]
     );

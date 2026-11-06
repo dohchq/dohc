@@ -172,8 +172,6 @@ pub const WORK_REFERENCE_BATCH: usize = 128;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkReferenceMapping {
-    #[serde(default)]
-    pub deleted: bool,
     pub reference: String,
     pub target: WorkTarget,
     pub created_at_ms: i64,
@@ -194,7 +192,7 @@ pub fn pending_work_references(
         for reference in references {
             if let WorkReferenceResolution::Found {reference, target, created_at_ms, ..} =
                 resolve_in(conn, workspace_id, &reference.map_err(DomainError::sql_corrupt)?)? {
-                mappings.push(WorkReferenceMapping {reference, target, created_at_ms, deleted: false});
+                mappings.push(WorkReferenceMapping {reference, target, created_at_ms});
             }
         }
         Ok(mappings)
@@ -359,23 +357,12 @@ pub fn work_reference_page_after(
     ).optional().map(|row| row.flatten()).map_err(DomainError::sql_corrupt))
 }
 
-pub fn work_reference_pull_state(
-    store: &EngineStore,
-    workspace_id: &str,
-    scope_id: &str,
-) -> Result<(bool, bool), DomainError> {
-    store.read_with(|conn| conn.query_row("SELECT log_pages_pending,reference_pages_pending FROM work_reference_sync_pages WHERE workspace_id=?1 AND scope_id=?2",
-        params![workspace_id,scope_id],|row|Ok((row.get(0)?,row.get(1)?))).optional().map(|value|value.unwrap_or((false,false))).map_err(DomainError::sql_corrupt))
-}
-
 pub fn learn_work_reference_page(
     store: &mut EngineStore,
     workspace_id: &str,
     scope_id: &str,
     mappings: &[WorkReferenceMapping],
     next_after: Option<&str>,
-    log_pages_pending: bool,
-    reference_pages_pending: bool,
 ) -> Result<(), DomainError> {
     if next_after.is_some_and(|reference| reference.len() > 2048) {
         return Err(DomainError::InvalidInput {
@@ -384,9 +371,9 @@ pub fn learn_work_reference_page(
     }
     learn_work_references(store, workspace_id, mappings)?;
     store.write_with(&dohc_engine_storage::NoFaults, |tx| {
-        tx.execute("INSERT INTO work_reference_sync_pages VALUES (?1,?2,?3,?4,?5) \
-            ON CONFLICT(workspace_id,scope_id) DO UPDATE SET after_reference=excluded.after_reference,log_pages_pending=excluded.log_pages_pending,reference_pages_pending=excluded.reference_pages_pending",
-            params![workspace_id, scope_id, next_after, log_pages_pending, reference_pages_pending]).map_err(DomainError::sql_persist)?;
+        tx.execute("INSERT INTO work_reference_sync_pages VALUES (?1,?2,?3) \
+            ON CONFLICT(workspace_id,scope_id) DO UPDATE SET after_reference=excluded.after_reference",
+            params![workspace_id, scope_id, next_after]).map_err(DomainError::sql_persist)?;
         Ok::<_, DomainError>(())
     })?;
     Ok(())

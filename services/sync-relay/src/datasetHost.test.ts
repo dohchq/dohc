@@ -103,7 +103,7 @@ it("keeps custom transactional record reads unavailable until they have an exist
   expect(await f.storage.resolveWorkReference({reference,reader:{kind:"user",userId:"owner"}})).toEqual({status:"unavailable"});
 });
 
-it("acknowledges 200 records from a deleted dataset before a newer reference", async () => {
+it("acknowledges 200 unavailable record bindings from a deleted dataset", async () => {
   const f = await fixture();
   await f.activate();
   f.host.archiveDataset(owner, scope);
@@ -118,15 +118,8 @@ it("acknowledges 200 records from a deleted dataset before a newer reference", a
     expect(f.storage.appendLogBatch({workspaceId: "w", originId: "reference-probe", ops: [],
       workReferences: {userId: "owner", references, datasetAccess}}).registeredReferences).toEqual(references.map(row => row.reference));
   }
-  pushFile(f.storage, "newer-file", null, {path: "newer.md", text: "Newer"});
-  const reference = "N".repeat(43), references = [{reference, createdAtMs: 2,
-    target: {kind: "file" as const, versionId: "main", objectId: "newer-file"}}];
-  const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId: "w", userId: "owner", references});
-  expect(f.storage.appendLogBatch({workspaceId: "w", originId: "reference-probe", ops: [],
-    workReferences: {userId: "owner", references, datasetAccess}}).registeredReferences).toEqual([reference]);
   expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_work_reference_scopes WHERE deleted=1").get()!.n).toBe(200);
   expect(await f.storage.resolveWorkReference({reference: "0".repeat(43), reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
-  expect(await f.storage.resolveWorkReference({reference, reader: {kind: "user", userId: "owner"}})).toMatchObject({status: "found"});
 });
 
 async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }) {

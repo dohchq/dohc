@@ -22,7 +22,7 @@ use crate::references::{MomentRefs, VersionCreateRefs, YdocRefs, conflict_open_s
 pub use dohc_engine_domain::work_references::WorkReferenceMapping;
 use dohc_engine_domain::work_references::{
     acknowledge_work_references, defer_work_reference_registrations, learn_work_reference_page,
-    pending_work_references, work_reference_page_after, work_reference_pull_state,
+    pending_work_references, work_reference_page_after,
 };
 
 mod direct_write;
@@ -2526,8 +2526,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             "owner",
             &fetch.reference_page.0,
             fetch.reference_page.1.as_deref(),
-            false,
-            reference_pages_remaining,
         )
         .map_err(reference_error)?;
         let OrdinaryFetch {
@@ -4490,12 +4488,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let scope_id = format!("channel:{share_id}");
         let reference_after =
             work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
-        let (log_pages_pending, reference_pages_pending) =
-            work_reference_pull_state(store, workspace_id, &scope_id).map_err(reference_error)?;
-        let include_work_references = !log_pages_pending;
         let page = self.transport.shared_channel_pull(SharedChannelRequest {
-            include_work_references,
-            reference_after: reference_after.clone(),
+            include_work_references: true,
+            reference_after,
             share_id: share_id.to_owned(),
             channel_wire_id: channel_wire_id.to_owned(),
             origin_id: identity
@@ -4593,37 +4588,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if matches!(committed, TxnOutcome::Crashed { .. }) {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
-        let mappings = if include_work_references {
-            received_work_reference_mappings(store, workspace_id, &boundary, &page.work_references)?
-        } else {
-            Vec::new()
-        };
-        learn_work_reference_page(
-            store,
-            workspace_id,
-            &scope_id,
-            &mappings,
-            if include_work_references {
-                page.next_reference_after.as_deref()
-            } else {
-                reference_after.as_deref()
-            },
-            page.has_more,
-            if include_work_references {
-                page.reference_has_more
-            } else {
-                reference_pages_pending
-            },
-        )
-        .map_err(reference_error)?;
+        if !page.has_more {
+            let mappings = received_work_reference_mappings(
+                store,
+                workspace_id,
+                &boundary,
+                &page.work_references,
+            )?;
+            learn_work_reference_page(
+                store,
+                workspace_id,
+                &scope_id,
+                &mappings,
+                page.next_reference_after.as_deref(),
+            )
+            .map_err(reference_error)?;
+        }
         Ok(SharedChannelPullOutcome {
             fetched,
-            has_more: page.has_more
-                || if include_work_references {
-                    page.reference_has_more
-                } else {
-                    reference_pages_pending
-                },
+            has_more: page.has_more || page.reference_has_more,
             applied,
             refused,
             rejections,
@@ -4937,12 +4920,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let scope_id = format!("view:{share_id}");
         let reference_after =
             work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
-        let (log_pages_pending, reference_pages_pending) =
-            work_reference_pull_state(store, workspace_id, &scope_id).map_err(reference_error)?;
-        let include_work_references = !log_pages_pending;
         let page = self.transport.share_view_pull(ShareViewRequest {
-            include_work_references,
-            reference_after: reference_after.clone(),
+            include_work_references: true,
+            reference_after,
             share_id: share_id.to_owned(),
             cursor,
             limit: crate::model::MAX_PULL_OPS_PER_PASS,
@@ -5088,37 +5068,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // `refuse_replay_unit`. What reaches here is only what must abort.
             replay_share_view_op(&mut replay, &envelope)?;
         }
-        let mappings = if include_work_references {
-            received_work_reference_mappings(store, workspace_id, &boundary, &page.work_references)?
-        } else {
-            Vec::new()
-        };
-        learn_work_reference_page(
-            store,
-            workspace_id,
-            &scope_id,
-            &mappings,
-            if include_work_references {
-                page.next_reference_after.as_deref()
-            } else {
-                reference_after.as_deref()
-            },
-            page.has_more,
-            if include_work_references {
-                page.reference_has_more
-            } else {
-                reference_pages_pending
-            },
-        )
-        .map_err(reference_error)?;
+        if !page.has_more {
+            let mappings = received_work_reference_mappings(
+                store,
+                workspace_id,
+                &boundary,
+                &page.work_references,
+            )?;
+            learn_work_reference_page(
+                store,
+                workspace_id,
+                &scope_id,
+                &mappings,
+                page.next_reference_after.as_deref(),
+            )
+            .map_err(reference_error)?;
+        }
         Ok(ShareViewPullOutcome {
             fetched,
-            has_more: page.has_more
-                || if include_work_references {
-                    page.reference_has_more
-                } else {
-                    reference_pages_pending
-                },
+            has_more: page.has_more || page.reference_has_more,
             applied,
             skipped,
             refusals,
@@ -6540,7 +6508,6 @@ fn references_for_batch(
                 required.insert(
                     reference.clone(),
                     WorkReferenceMapping {
-                        deleted: false,
                         reference,
                         target,
                         created_at_ms,

@@ -228,7 +228,7 @@ fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_js
 pub(crate) struct FakeRelay {
     refuse_oversized_proofs: bool,
     unprovable_dataset: Option<String>,
-    reference_bindings: Mutex<BTreeMap<String, dohc_engine_domain::work_references::WorkTarget>>,
+    reference_bindings: Mutex<BTreeMap<String, WorkReferenceMapping>>,
     push_budget_limit: Option<usize>,
     pushes: Mutex<Vec<PushRequest>>,
     pub(crate) pull: Mutex<Option<PullResponse>>,
@@ -240,6 +240,18 @@ impl FakeRelay {
             refuse_oversized_proofs: true,
             ..Default::default()
         }
+    }
+    fn existing_work_reference(
+        &self,
+        target: &dohc_engine_domain::work_references::WorkTarget,
+    ) -> WorkReferenceMapping {
+        self.reference_bindings
+            .lock()
+            .unwrap()
+            .values()
+            .find(|mapping| &mapping.target == target)
+            .expect("registered target")
+            .clone()
     }
     pub(crate) fn pushed_requests(&self) -> Vec<PushRequest> {
         self.pushes.lock().unwrap().clone()
@@ -293,9 +305,11 @@ impl RelayTransport for FakeRelay {
                     return None;
                 }
                 if let Some(existing) = bindings.get(&mapping.reference) {
-                    assert_eq!(existing, &mapping.target);
+                    assert_eq!(&existing.target, &mapping.target);
                 }
-                bindings.insert(mapping.reference.clone(), mapping.target.clone());
+                bindings
+                    .entry(mapping.reference.clone())
+                    .or_insert_with(|| mapping.clone());
                 Some(mapping.reference.clone())
             })
             .collect();
@@ -1190,6 +1204,54 @@ fn restored_backup_drains_its_older_reference_outbox() {
         pending_work_references(&restored, "ws").unwrap()[0].reference,
         made.reference
     );
+    let target = dohc_engine_domain::work_references::WorkTarget::TransactionalCollection {
+        dataset_id: "00000000-0000-4000-8000-000000000001".into(),
+        table_id: "00000000-0000-4000-8000-000000000002".into(),
+    };
+    let existing = client.transport().existing_work_reference(&target);
+    assert_eq!(existing.reference, newer.reference);
+    *client.transport().pull.lock().unwrap() = Some(PullResponse {
+        work_references: vec![existing],
+        next_reference_after: Some("1".into()),
+        reference_has_more: false,
+        ops: Vec::new(),
+        next_cursor: 0,
+        has_more: false,
+    });
+    client
+        .pull_chat_workspace(
+            &mut restored,
+            &mut Default::default(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            5,
+        )
+        .unwrap();
+    restored
+        .read_with(|conn| {
+            let learned: String = conn.query_row(
+                "SELECT reference FROM learned_work_references WHERE reference=?1",
+                [&newer.reference],
+                |row| row.get(0),
+            )?;
+            assert_eq!(learned, newer.reference);
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    let reused = make_work_reference(
+        &mut restored,
+        "ws",
+        &WorkTargetInput::TransactionalCollection {
+            dataset_id: "00000000-0000-4000-8000-000000000001".into(),
+            table_id: "00000000-0000-4000-8000-000000000002".into(),
+        },
+        5,
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(reused.reference, made.reference);
+    assert!(!reused.created);
     client
         .push_workspace(&mut restored, "ws", &NoFaults, &NoLiveLeases, 5, 0)
         .unwrap();
@@ -1197,8 +1259,10 @@ fn restored_backup_drains_its_older_reference_outbox() {
     let bindings = client.transport().reference_bindings.lock().unwrap();
     assert_eq!(bindings.len(), 2);
     assert_eq!(
-        bindings.get(&made.reference),
-        bindings.get(&newer.reference)
+        bindings.get(&made.reference).map(|mapping| &mapping.target),
+        bindings
+            .get(&newer.reference)
+            .map(|mapping| &mapping.target)
     );
 }
 

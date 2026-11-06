@@ -1069,22 +1069,26 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
         "c-allowed",
         "t-allowed",
         "m-allowed",
-        mappings,
+        vec![],
     );
     first_page.has_more = true;
-    first_page.reference_has_more = true;
     let terminal = SharedChannelResponse {
-        work_references: Vec::new(),
-        next_reference_after: None,
-        reference_has_more: false,
+        work_references: mappings,
+        next_reference_after: Some("tail".into()),
+        reference_has_more: true,
         own_origin_id: None,
         ops: Vec::new(),
         next_cursor: 4,
         has_more: false,
         push: None,
     };
+    let last = SharedChannelResponse {
+        work_references: Vec::new(),
+        reference_has_more: false,
+        ..terminal.clone()
+    };
     let client = RelaySyncClient::new(PagedShareRelay::new(
-        [(0, first_page), (3, terminal.clone()), (4, terminal)],
+        [(0, first_page), (3, terminal), (4, last)],
         [],
     ));
     client
@@ -1096,6 +1100,22 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
             &NoFaults,
         )
         .unwrap();
+    assert!(matches!(
+        resolve_work_reference(&engine, "ws", &"A".repeat(43)).unwrap(),
+        WorkReferenceResolution::Unknown
+    ));
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 2).unwrap();
+    let second = client
+        .pull_shared_channel(
+            &mut engine,
+            "ws",
+            "allowed-share",
+            "wire-allowed",
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(second.has_more);
     assert!(matches!(
         resolve_work_reference(&engine, "ws", &"A".repeat(43)).unwrap(),
         WorkReferenceResolution::Found { .. }
@@ -1118,18 +1138,6 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
-    drop(engine);
-    let mut engine = EngineStore::open(&path, 2).unwrap();
-    let second = client
-        .pull_shared_channel(
-            &mut engine,
-            "ws",
-            "allowed-share",
-            "wire-allowed",
-            &NoFaults,
-        )
-        .unwrap();
-    assert!(second.has_more);
     assert_eq!(
         dohc_engine_domain::work_references::work_reference_page_after(
             &engine,
@@ -1152,10 +1160,6 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
     assert!(!third.has_more);
     assert_eq!(
         *client.transport().reference_pulls.lock().unwrap(),
-        [
-            (true, None),
-            (false, Some("tail".into())),
-            (true, Some("tail".into()))
-        ]
+        [(true, None), (true, None), (true, Some("tail".into()))]
     );
 }

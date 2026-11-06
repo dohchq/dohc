@@ -238,21 +238,108 @@ describe("work reference registration and resolution", () => {
       .toMatchObject({references: [{reference: ref, target: {kind: "file"}}], hasMore: false});
   });
 
-  it("restarts a recipient cursor when its share version changes", async () => {
+  it.each(["selector", "generation"] as const)("restarts a recipient cursor when only its %s changes", async change => {
     const {handler, storage} = await fixture();
     await register(handler, [{reference: ref, target, createdAtMs: 1}]);
-    const shareId = await createShare(handler, "owner", ws, {paths: ["private"], recipientUserId: "reader", access: "view"});
+    const shareId = await createShare(handler, "owner", ws, {paths: [change === "selector" ? "private" : "notes"], recipientUserId: "reader", access: "view"});
     const path = `/sync/shares/${shareId}/work-references`;
     const first = await json(await handler(request("reader", path)));
-    expect(first.references).toEqual([]);
-    const selector = storage.db.prepare("SELECT selector_json FROM sync_relay_shares WHERE share_id=?").get(shareId)!;
-    const expanded = {...JSON.parse(String(selector.selector_json)), paths: ["notes"]};
+    expect(first.references).toHaveLength(change === "selector" ? 0 : 1);
     storage.tx(() => {
-      storage.db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify(expanded), shareId);
-      storage.db.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE share_id=?").run(shareId);
+      if (change === "selector") {
+        const selector = storage.db.prepare("SELECT selector_json FROM sync_relay_shares WHERE share_id=?").get(shareId)!;
+        storage.db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+          .run(JSON.stringify({...JSON.parse(String(selector.selector_json)), paths: ["notes"]}), shareId);
+      } else storage.db.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE share_id=?").run(shareId);
     });
     expect(await json(await handler(request("reader", `${path}?after=${first.nextAfter}`))))
       .toMatchObject({references: [{reference: ref}], hasMore: false});
+  });
+
+  it("advances a cursor across only hidden rows without scanning them twice", async () => {
+    const {handler, storage} = await fixture();
+    const shareId = await createShare(handler, "owner", ws, {paths: ["private"], recipientUserId: "reader", access: "view"});
+    for (let start = 0; start < 500; start += 128) {
+      await register(handler, Array.from({length: Math.min(128, 500 - start)}, (_, i) => ({reference: String(start + i).padStart(43, "0"), target, createdAtMs: 1})));
+    }
+    const objects = vi.spyOn(storage, "objectMoment");
+    try {
+      const first = await json(await handler(request("reader", `/sync/shares/${shareId}/work-references`)));
+      expect(first).toMatchObject({references: [], hasMore: false});
+      expect(first.nextAfter).toHaveLength(144);
+      expect(objects).toHaveBeenCalledTimes(500);
+      objects.mockClear();
+      const second = await json(await handler(request("reader", `/sync/shares/${shareId}/work-references?after=${first.nextAfter}`)));
+      expect(second).toMatchObject({references: [], hasMore: false});
+      expect(second.nextAfter).toHaveLength(first.nextAfter.length);
+      expect(objects).not.toHaveBeenCalled();
+    } finally { objects.mockRestore(); }
+  });
+
+  it("accepts an empty referenceAfter on owner and share log routes", async () => {
+    const {handler} = await fixture();
+    await register(handler, [{reference: ref, target, createdAtMs: 1}]);
+    const shareId = await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "reader", access: "view"});
+    for (const [user, path] of [["owner", `/sync/${ws}/log`], ["reader", `/sync/shares/${shareId}/log`]]) {
+      const response = await handler(request(user!, `${path}?since=0&referenceAfter=`));
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({workReferences: [{reference: ref}]});
+    }
+  });
+
+  it("lists share mappings only on the final log page", async () => {
+    const {handler, storage} = await fixture();
+    await appendLog(handler, "owner", ws, [moment("notes/later.md", "Plan", {originSeq: 1, objectId: "later", momentId: "later-write"})], {originId: "device"});
+    await register(handler, [{reference: ref, target: {...target, objectId: "later"}, createdAtMs: 1}]);
+    const shareId = await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "reader", access: "view"});
+    const list = vi.spyOn(storage, "listWorkReferences");
+    try {
+      const first = await json(await handler(request("reader", `/sync/shares/${shareId}/log?since=0&limit=1&referenceAfter=`)));
+      expect(first.hasMore).toBe(true);
+      expect(first.workReferences).toBeUndefined();
+      expect(list).not.toHaveBeenCalled();
+      const last = await json(await handler(request("reader", `/sync/shares/${shareId}/log?since=${first.nextCursor}&referenceAfter=`)));
+      expect(last).toMatchObject({hasMore: false, workReferences: [{reference: ref}]});
+      expect(list).toHaveBeenCalledTimes(1);
+    } finally { list.mockRestore(); }
+  });
+
+  it("lists owner bindings without probing their targets", async () => {
+    const {handler, storage} = await fixture();
+    const datasetTarget = {kind: "transactionalCollection", datasetId: "00000000-0000-4000-8000-000000000001", tableId: "00000000-0000-4000-8000-000000000002"};
+    await register(handler, [{reference: ref, target, createdAtMs: 1}, {reference: "D".repeat(43), target: datasetTarget, createdAtMs: 1}]);
+    const dataset = vi.fn(async () => { throw new Error("owner listing must not read dataset targets"); });
+    storage.workReferenceDatasetAccess = dataset;
+    const objects = vi.spyOn(storage, "objectMoment");
+    try {
+      const response = await handler(request("owner", `/sync/${ws}/work-references`));
+      expect(response.status).toBe(200);
+      const page = await json(response);
+      expect(page.references.map((mapping: {reference: string}) => mapping.reference)).toEqual([ref, "D".repeat(43)]);
+      expect(page.references.every((mapping: object) => !("deleted" in mapping))).toBe(true);
+      expect(objects).not.toHaveBeenCalled();
+      expect(dataset).not.toHaveBeenCalled();
+    } finally { objects.mockRestore(); }
+  });
+
+  it("mints through a link using the message's non-null canonical channel binding", async () => {
+    const {handler, storage} = await fixture();
+    await appendLog(handler, "owner", ws, sequenced([
+      chatChannelCreate("group"), chatThreadCreate("thread", "group"),
+      chatMessageAppend("message", "thread", "Plan", {authorUserId: "owner"}),
+    ]), {originId: "chat-device"});
+    const message = {kind: "message", messageId: "message", threadId: "thread", channelId: "channel-group"};
+    await register(handler, [{reference: ref, target: message, createdAtMs: 1}]);
+    const shareId = await createShare(handler, "owner", ws, {channelWireId: "group", recipientUserId: "reader", access: "read-only"});
+    const token = "L".repeat(43);
+    seedLinkGrant(storage, {shareId, grantId: "channel-link", access: "read-only", secretHash: hashLinkBearer("secret", LINK_KEY)});
+    seedLinkSession(storage, {grantId: "channel-link", capabilityHash: hashLinkBearer(token, LINK_KEY)});
+    const projected = await json(await handler(linkRequest(token, `/sync/work-references/${ref}`)));
+    expect(projected.target).toEqual({kind: "message", messageId: "message", threadId: "thread"});
+    const minted = await handler(linkRequest(token, "/sync/internal/work-references", mintBody(projected.target)));
+    expect(minted.status).toBe(200);
+    expect(await json(minted)).toMatchObject({reference: ref, target: projected.target});
+    expect(await json(await handler(request("owner", `/sync/work-references/${ref}`)))).toMatchObject({target: message});
   });
 
   it("omits the local channel id for file-share and link message readers", async () => {
@@ -301,14 +388,12 @@ describe("work reference registration and resolution", () => {
     expect(storage.db.prepare("SELECT last_path FROM sync_relay_work_reference_scopes LIMIT 1").get()!.last_path).toBe("notes/plan.md");
     const first = await json(await handler(request("owner", `/sync/${ws}/work-references`)));
     expect(first.references).toHaveLength(128);
-    expect(first.references.every((mapping: {deleted?: boolean}) => mapping.deleted === true)).toBe(true);
     const deleted = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${first.nextAfter}`)));
-    expect(deleted.references).toMatchObject([{reference: references[128]!.reference, deleted: true}]);
+    expect(deleted.references).toMatchObject([{reference: references[128]!.reference}]);
     expect(deleted.hasMore).toBe(false);
     await appendLog(handler, "owner", ws, [moment("notes/plan.md", "Plan", {originSeq: 2, objectId: "plan", momentId: "restore-plan"})], {originId: "device"});
     const restored = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${deleted.nextAfter}`)));
     expect(restored.references).toHaveLength(128);
-    expect(restored.references.every((mapping: {deleted?: boolean}) => mapping.deleted === false)).toBe(true);
     const tail = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${restored.nextAfter}`)));
     expect([...restored.references, ...tail.references].map((mapping: {reference: string}) => mapping.reference).sort()).toEqual(references.map(mapping => mapping.reference).sort());
     expect(tail.hasMore).toBe(false);

@@ -291,7 +291,7 @@ fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
                 200,
                 json!({
                     "ops":[], "nextCursor":0, "hasMore":false,
-                    "workReferences":[WorkReferenceMapping {deleted: true, ..expected.clone()}], "nextReferenceAfter":"next-page", "referenceHasMore":true,
+                    "workReferences":[expected], "nextReferenceAfter":"next-page", "referenceHasMore":true,
                 }),
             )
         }
@@ -320,13 +320,7 @@ fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
             reference_after: Some("page-cursor".into()),
         })
         .unwrap();
-    assert_eq!(
-        pulled.work_references,
-        vec![WorkReferenceMapping {
-            deleted: true,
-            ..mapping
-        }]
-    );
+    assert_eq!(pulled.work_references, vec![mapping]);
     assert_eq!(pulled.next_reference_after.as_deref(), Some("next-page"));
     assert!(pulled.reference_has_more);
 }

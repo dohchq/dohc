@@ -40,6 +40,6 @@ export type WorkReferenceResolution = typeof Resolution.Type;
 export const decodeMadeWorkReference = Schema.decodeUnknownSync(Made);
 export const decodeWorkReferenceResolution = Schema.decodeUnknownSync(Resolution);
 export const decodeWorkTarget = Schema.decodeUnknownSync(Target, {onExcessProperty: "error"});
-const Mapping = Schema.Struct({reference: Reference, target: Target, createdAtMs: SafeInt, deleted: Schema.optionalKey(Schema.Boolean)});
+const Mapping = Schema.Struct({reference: Reference, target: Target, createdAtMs: SafeInt});
 export type WorkReferenceMapping = typeof Mapping.Type;
 export const decodeWorkReferenceMapping = Schema.decodeUnknownSync(Mapping, {onExcessProperty: "error"});

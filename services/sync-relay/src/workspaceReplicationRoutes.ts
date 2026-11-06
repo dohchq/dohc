@@ -231,7 +231,7 @@ export function createWorkspaceReplicationRoutes(
         limit,
       });
       const mappings = url.searchParams.get("includeReferences") === "false" ? {references: [], nextAfter: null, hasMore: false} : await storage.listWorkReferences({workspaceId: route.workspaceId, reader: {kind: "user", userId: actor.userId},
-        after: url.searchParams.get("referenceAfter") ?? undefined});
+        after: url.searchParams.get("referenceAfter") || undefined});
       guard();
       const response = jsonResponse({
         ok: true,

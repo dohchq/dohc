@@ -16,7 +16,5 @@ CREATE TABLE work_reference_sync_pages (
     workspace_id TEXT NOT NULL,
     scope_id TEXT NOT NULL,
     after_reference TEXT,
-    log_pages_pending INTEGER NOT NULL DEFAULT 0 CHECK(log_pages_pending IN (0,1)),
-    reference_pages_pending INTEGER NOT NULL DEFAULT 0 CHECK(reference_pages_pending IN (0,1)),
     PRIMARY KEY(workspace_id, scope_id)
 ) STRICT;
