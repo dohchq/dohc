@@ -264,8 +264,8 @@ describe("EditorTabs strip scrolling", () => {
     }
 
     // Only the strip scrolls: scrollIntoView would scroll every scrolling
-    // ancestor too, the window included. A revealed tab stops 33px from a
-    // faded edge: the 24px fade and its 9px join.
+    // ancestor too, the window included. A revealed tab stops 49px from a
+    // faded edge: the 40px fade and its 9px join.
     it("reveals the active tab clear of the fades when activation changes by any means, scrolling only the strip", () => {
       const scrollIntoView = vi.fn();
       Element.prototype.scrollIntoView = scrollIntoView;
@@ -279,15 +279,15 @@ describe("EditorTabs strip scrolling", () => {
       rerender(renderStrip("b.md"));
       expect(scrollTo).not.toHaveBeenCalled();
 
-      // d.md ends at 400px: its end 33px inside the view.
+      // d.md ends at 400px: its end 49px inside the view.
       rerender(renderStrip("d.md"));
       expect(scrollTo).toHaveBeenCalledTimes(1);
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 183, behavior: "smooth" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 199, behavior: "smooth" });
       expect(scrollTo.mock.contexts[0]).toBe(strip);
 
-      // b.md starts at 100px, left of the view: its start 33px inside.
+      // b.md starts at 100px, left of the view: its start 49px inside.
       rerender(renderStrip("b.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 67, behavior: "smooth" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 51, behavior: "smooth" });
 
       // e.md is last: the strip scrolls to its end, which has no fade.
       rerender(renderStrip("e.md"));
@@ -311,7 +311,7 @@ describe("EditorTabs strip scrolling", () => {
       // view, and comes back without an animation.
       resize(250);
       expect(scrollTo).toHaveBeenCalledTimes(1);
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 183, behavior: "auto" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 199, behavior: "auto" });
 
       // Widened, the tab is still in view: nothing scrolls.
       resize(300);
@@ -328,7 +328,7 @@ describe("EditorTabs strip scrolling", () => {
       // The next width change reveals it again.
       resize(260);
       expect(scrollTo).toHaveBeenCalledTimes(2);
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 173, behavior: "auto" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 189, behavior: "auto" });
     });
 
     // Places the tabs a test names at [left, width] over `content` px of tabs
@@ -350,7 +350,7 @@ describe("EditorTabs strip scrolling", () => {
     }
 
     // The strip's end does not fade, so a last tab needs no margin there; the
-    // 33px margin at its start does not fit beside a 224px tab in 250px.
+    // 49px margin at its start does not fit beside a 224px tab in 250px.
     it("reveals a last tab with no room for its margin whole, at the strip's end", () => {
       const span = layOut(640, { "a.md": [0, 100], "e.md": [400, 224] });
       const { rerender } = render(renderStrip("a.md"));
@@ -380,8 +380,8 @@ describe("EditorTabs strip scrolling", () => {
       const { rerender } = render(renderStrip("a.md"));
       const strip = screen.getByRole("tablist");
       rerender(renderStrip("c.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 233, behavior: "smooth" });
-      expect(span("c.md")).toEqual({ start: 67, end: 217 });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 249, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 51, end: 201 });
 
       strip.scrollLeft = 250;
       scrollTo.mockClear();
@@ -390,7 +390,7 @@ describe("EditorTabs strip scrolling", () => {
     });
 
     it("reveals a middle tab with no room for both margins whole, as clear of both fades as the room allows", () => {
-      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 190] });
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 160] });
       const { rerender } = render(renderStrip("a.md"));
       const strip = screen.getByRole("tablist");
       // 30px of room: 15px on each side.
@@ -398,12 +398,12 @@ describe("EditorTabs strip scrolling", () => {
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 285, behavior: "smooth" });
       expect(span("c.md")).toEqual({ start: 15, end: 235 });
 
-      // 60px of room clears both 24px fades, if not the joins beside them:
+      // 90px of room clears both 40px fades, if not the joins beside them:
       // the nearest such scroll, and none while the tab is already clear.
       rerender(renderStrip("d.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 276, behavior: "smooth" });
-      expect(span("d.md")).toEqual({ start: 24, end: 214 });
-      strip.scrollLeft = 270;
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 260, behavior: "smooth" });
+      expect(span("d.md")).toEqual({ start: 40, end: 200 });
+      strip.scrollLeft = 255;
       scrollTo.mockClear();
       resize(251);
       expect(scrollTo).not.toHaveBeenCalled();
@@ -425,6 +425,56 @@ describe("EditorTabs strip scrolling", () => {
       expect(drawn.className.split(" ")).toEqual(expect.arrayContaining(["pointer-events-none", "z-[6]"]));
     }
     expect(screen.getByRole("tab", { selected: true }).className).toContain("z-10");
+  });
+
+  // A cut name's first two or three letters sit in the fade's solid outer
+  // 16px, so no short fragment shows, and the fade runs to the strip's own
+  // fill. The left fade runs rightward from the left edge, the right one
+  // leftward from the right edge.
+  it("fades each edge over 40px from the strip's own fill, solid over the outer 16px", () => {
+    renderTabs("a.md");
+    const frame = screen.getByTestId("editor-tabs");
+    expect(frame.className.split(" ")).toContain("bg-panel");
+    const drawn = (side: string) => {
+      const fade = frame.querySelector<HTMLElement>(`[data-strip-fade="${side}"]`);
+      return ((fade?.className.includes("absolute") ? fade : fade?.firstElementChild) as HTMLElement).className.split(" ");
+    };
+    for (const [side, direction] of [["left", "bg-linear-to-r"], ["right", "bg-linear-to-l"]] as const) {
+      expect(drawn(side)).toEqual(
+        expect.arrayContaining(["w-10", "from-panel", "from-40%", "to-transparent", direction, `${side}-0`]),
+      );
+    }
+  });
+
+  // The strip's buttons rest at the muted tone of the other tab-row controls.
+  it("tones the strip's buttons muted at rest", () => {
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={noop}
+      />,
+    );
+    const buttons = [
+      screen.getByTestId("tabs-overflow"),
+      screen.getByTestId("create-editor-group-right"),
+      screen.getByRole("button", { name: "Close editor group" }),
+    ];
+    for (const button of buttons) {
+      const classes = button.className.split(" ");
+      expect(classes).toContain("text-muted");
+      expect(classes.filter((name) => name.includes("text-subtle"))).toEqual([]);
+    }
   });
 
   // The fades in styles.css read these: an edge the strip can still scroll
