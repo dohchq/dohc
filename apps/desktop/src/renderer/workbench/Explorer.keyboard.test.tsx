@@ -183,7 +183,10 @@ describe("Explorer tree tab stop", () => {
 });
 
 describe("the active row inside a multi-selection", () => {
-  it("keeps every selected row medium weight when the tree is not focused", async () => {
+  // Every selected row shares one fill. The ring marks the focused row, not
+  // the open file, so the open file alone is medium weight and still reads
+  // after focus leaves the tree.
+  it("keeps its weight cue when the tree is not focused", async () => {
     const user = userEvent.setup();
     render(
       <Fixture
@@ -202,7 +205,7 @@ describe("the active row inside a multi-selection", () => {
     await user.click(screen.getByRole("button", { name: "After tree" }));
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "After tree" }));
     expect(row("notes.md").className).toContain("font-medium");
-    expect(row("apps/reading-list/index.html").className).toContain("font-medium");
+    expect(row("apps/reading-list/index.html").className).not.toContain("font-medium");
     expect(row("apps/reading-list/index.html").className).toContain("bg-selected");
     expect(row("notes.md").className).toContain("bg-selected");
   });
