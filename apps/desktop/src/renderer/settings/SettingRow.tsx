@@ -27,7 +27,8 @@ export function SettingRow(props: {
   // The controls keep their size and the text takes what is left, from a
   // readable width: 15rem, or 8rem for a compact row's title. Controls that
   // don't fit beside that wrap under the text.
-  const first = props.compact ? "min-w-0 flex-[1_1_8rem]" : "min-w-0 flex-[1_1_15rem]";
+  // mr-4 and the row's gap-x-2 keep 24 px between the text and what follows it.
+  const first = props.compact ? "mr-4 min-w-0 flex-[1_1_8rem]" : "mr-4 min-w-0 flex-[1_1_15rem]";
   // Reset and the place a row keeps for it share one footprint.
   const resetPlace = `size-6 shrink-0 ${props.top ? "mt-1" : ""}`;
   const text = (
@@ -53,7 +54,7 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
+      className={`flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-2 gap-y-2 border-b border-line last:border-b-0 ${
         props.compact ? "py-2" : "py-4"
       } ${props.highlighted ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
     >
@@ -65,21 +66,23 @@ export function SettingRow(props: {
       ) : (
         text
       )}
+      {/* A row that can reset keeps Reset's place left of the controls, so
+          they never move or wrap when it appears. The place is its own item:
+          when the controls wrap under the text, it stays at the end of the
+          text's line and the controls start at the text's left edge. */}
+      {props.onReset && !props.modified ? <span aria-hidden className={resetPlace} /> : null}
+      {props.onReset && props.modified ? (
+        <button
+          type="button"
+          aria-label="Reset"
+          title="Reset"
+          onClick={props.onReset}
+          className={`grid place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${resetPlace}`}
+        >
+          <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
+        </button>
+      ) : null}
       <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
-        {/* A row that can reset keeps Reset's place left of the controls, so
-            they share the right edge and never move or wrap when it appears. */}
-        {props.onReset && !props.modified ? <span aria-hidden className={resetPlace} /> : null}
-        {props.onReset && props.modified ? (
-          <button
-            type="button"
-            aria-label="Reset"
-            title="Reset"
-            onClick={props.onReset}
-            className={`grid place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${resetPlace}`}
-          >
-            <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
-          </button>
-        ) : null}
         {props.children}
       </div>
     </div>
