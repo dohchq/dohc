@@ -308,6 +308,7 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `text-success`, `text-warning`, `text-danger` | State only |
 | `bg-danger-fill`, `text-on-danger` | A danger confirm's fill and label. Dark has its own deeper fill, so never put `text-danger` text on it |
 | `bg-line` as a fill | A disabled primary or danger confirm |
+| `bg-danger-tint` | The tile behind a danger confirmation's glyph, and nothing else |
 
 ### Type
 

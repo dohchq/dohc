@@ -224,6 +224,12 @@ describe("the danger confirm", () => {
       const halo = contrast(mix(t.accent, t.panel, Number(alpha![1]) / 100), t.panel);
       expect(halo, `halo on panel (${mode}) = ${halo.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
     });
+    // A danger confirmation's glyph sits on its tinted tile.
+    it(`${mode} glyph clears 3:1 on its tile`, () => {
+      const t = palette[mode];
+      const glyph = contrast(t.danger, t.dangerTint);
+      expect(glyph, `danger on danger-tint (${mode}) = ${glyph.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+    });
   }
 });
 
