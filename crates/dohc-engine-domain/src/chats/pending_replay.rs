@@ -64,6 +64,8 @@ struct PendingMessageAppend {
     /// A link message's link, which sync apply also checked.
     link_grant_id: Option<String>,
     link_principal_id: Option<String>,
+    /// The agent connection of an agent's link message, which sync apply also checked.
+    agent_connection_id: Option<String>,
     /// The agent that wrote an agent message, which sync apply also checked.
     author_agent_id: Option<String>,
     /// What an agent reported about itself. A build that did not know the
@@ -629,8 +631,8 @@ fn apply_pending_message(
             "INSERT OR IGNORE INTO chat_messages \
              (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
               author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name, \
-              link_grant_id,link_principal_id,author_agent_id,author_reported) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+              link_grant_id,link_principal_id,author_agent_id,author_reported,agent_connection_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 workspace_id,
                 payload.thread_id,
@@ -648,6 +650,7 @@ fn apply_pending_message(
                 payload.link_principal_id,
                 payload.author_agent_id,
                 reported_agent_json(author_reported.as_ref()),
+                payload.agent_connection_id,
             ],
         )
         .map_err(DomainError::sql_persist)?;

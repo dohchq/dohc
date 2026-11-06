@@ -24,13 +24,14 @@ export const MAX_LINK_CHAT_FOLLOWS_PER_GRANT = 32;
 // What a link holder sees of a message: no account IDs.
 export type LinkChatMessage = Omit<NamedChatMessage, "authorUserId">;
 
-function linkChatMessage(message: NamedChatMessage): LinkChatMessage {
+export function linkChatMessage(message: NamedChatMessage): LinkChatMessage {
   return {
     relaySeq: message.relaySeq,
     messageId: message.messageId,
     threadId: message.threadId,
     authorDisplayName: message.authorDisplayName,
     authorKind: message.authorKind,
+    linkAgent: message.linkAgent,
     authorOwnerDisplayName: message.authorOwnerDisplayName,
     createdAtMs: message.createdAtMs,
     body: message.body,
@@ -38,7 +39,7 @@ function linkChatMessage(message: NamedChatMessage): LinkChatMessage {
   };
 }
 
-function refusePost(reason: Exclude<AppendLinkChatPostResult, { ok: true }>["reason"]): Response {
+export function refusePost(reason: Exclude<AppendLinkChatPostResult, { ok: true }>["reason"]): Response {
   switch (reason) {
     case "read-only": return linkRefusal("link_view_access");
     case "paused": throw relayError("link_discussion_paused");

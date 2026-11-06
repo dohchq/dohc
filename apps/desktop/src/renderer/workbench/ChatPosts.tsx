@@ -648,7 +648,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               <AgentColorAvatar>
                 <ChatAvatar presentation={comment.presentation}
                   name={comment.authorDisplayName}
-                  kind={comment.authorKind}
+                  kind={comment.authorKind} linkAgent={comment.linkAgent === true}
                   size="comment"
                 />
               </AgentColorAvatar>
@@ -667,7 +667,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               </AgentName>
             </span>
             {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} presentation={comment.presentation} /> : null}
-            {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
+            {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" linkAgent={comment.linkAgent === true} /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
@@ -819,7 +819,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         <AgentColorAvatar>
           <ChatAvatar presentation={openingMessage.presentation}
             name={openingMessage.authorDisplayName}
-            kind={openingMessage.authorKind}
+            kind={openingMessage.authorKind} linkAgent={openingMessage.linkAgent === true}
             size="row"
           />
         </AgentColorAvatar>
@@ -835,7 +835,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               </AgentName>
             </span>
             {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} presentation={openingMessage.presentation} /> : null}
-            {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" /> : null}
+            {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" linkAgent={openingMessage.linkAgent === true} /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-message"

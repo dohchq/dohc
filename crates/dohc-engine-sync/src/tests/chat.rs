@@ -1483,6 +1483,7 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     let link = Some(ChatMessageLinkAuthor {
         grant_id: "grant-1".to_owned(),
         principal_id: "principal-1".to_owned(),
+        agent_connection_id: None,
     });
     assert_eq!(read.link_author, link);
     let mention: String = engine
@@ -1549,6 +1550,9 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         ("linkGrantId", json!(" grant-1")),
         ("linkPrincipalId", json!("")),
         ("linkPrincipalId", json!("principal-2")),
+        ("agentConnectionId", json!("")),
+        ("agentConnectionId", json!(" connection-1")),
+        ("agentConnectionId", json!(1)),
         ("authorKind", json!("human")),
         ("messageId", json!("forged")),
     ] {
@@ -1607,6 +1611,34 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
     assert_eq!(
         apply_chat_envelope(&mut engine, &at_cap, &NoFaults).expect("link message at the cap"),
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+}
+
+/// An agent that joined with a link posts as that link, and its post also
+/// names the agent connection the relay authenticated.
+#[test]
+fn a_link_agent_post_replays_with_its_agent_connection() {
+    use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
+
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let mut payload = link_message_payload("link-message:agent", "Done");
+    payload["agentConnectionId"] = json!("connection-1");
+    let message = envelope(LINK_ORIGIN, 0, "chat.message.append", payload);
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults).expect("agent link message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let read = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "link-message:agent")
+        .expect("read the agent link message");
+    assert_eq!(
+        read.link_author,
+        Some(ChatMessageLinkAuthor {
+            grant_id: "grant-1".to_owned(),
+            principal_id: "principal-1".to_owned(),
+            agent_connection_id: Some("connection-1".to_owned()),
+        })
     );
 }
 

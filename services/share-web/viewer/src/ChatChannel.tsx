@@ -31,23 +31,26 @@ const dayAndTime = new Intl.DateTimeFormat(undefined, {month: "short", day: "num
 const sentAt = (date: Date) => date.toDateString() === new Date().toDateString() ? timeOfDay.format(date) : dayAndTime.format(date);
 
 // Beside a link holder's chosen name: the share link's mark, as the desktop shows it.
-function LinkHolderMark() {
-  return <svg className="chat-link-mark" role="img" aria-label="Link holder" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-    strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round"><title>Link holder</title>
+// An agent that joined with the link says which Group the link opens.
+function LinkHolderMark({label}: {label: string}) {
+  return <svg className="chat-link-mark" role="img" aria-label={label} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round"><title>{label}</title>
     <path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><path d="M8 12h8"/></svg>;
 }
 
-function ChatMessage({message}: {message: NamedChatMessage}) {
+function ChatMessage({message, group}: {message: NamedChatMessage; group: string | null}) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(() => message.body === null ? null : renderSafeMarkdown(message.body, () => null), [message.body]);
-  const agent = message.authorKind === "agent" || message.authorKind === "automation";
+  const agent = message.authorKind === "agent" || message.authorKind === "automation" || message.linkAgent;
+  const joined = group ? `Joined with a link to ${group}` : "Joined with a link";
   // A safe integer can lie outside the Date range; such a message shows without a time.
   const sent = new Date(message.createdAtMs), dated = !Number.isNaN(sent.getTime());
   return <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
     <p className="chat-meta">
-      {agent && <span className="chat-agent-mark" role="img" aria-label={message.authorKind === "agent" ? "Agent" : "Automation"}/>}
+      {agent && <span className="chat-agent-mark" role="img" aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
+        title={message.linkAgent ? joined : undefined}/>}
       <span className="chat-author">{message.authorDisplayName}</span>
-      {message.authorKind === "link" && <LinkHolderMark/>}
+      {message.authorKind === "link" && <LinkHolderMark label={message.linkAgent ? joined : "Link holder"}/>}
       {agent && message.authorOwnerDisplayName && <span className="chat-owner">Owned by {message.authorOwnerDisplayName}</span>}
       {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
     </p>
@@ -238,7 +241,7 @@ export function ChannelView({client, name, onEnded, composerField, holdSend = fa
             <button type="button" className="handoff-button secondary" onClick={() => setAttempt(value => value + 1)}>Try again</button></div> :
             !messages ? <p className="chat-state">Loading messages…</p> :
             !messages.length && olderCursor === null ? <p className="chat-state">No messages in this channel yet.</p> :
-            <ol className="chat-list">{messages.map(message => <ChatMessage key={message.relaySeq} message={message}/>)}</ol>}
+            <ol className="chat-list">{messages.map(message => <ChatMessage key={message.relaySeq} message={message} group={name}/>)}</ol>}
           {following === "delayed" && <p className="chat-follow-status" role="status">New messages are delayed. dohc is trying again.</p>}
           {following === "stopped" && <div className="chat-follow-status"><p role="status">New messages stopped updating.</p>
             <button type="button" className="handoff-button secondary" onClick={follow}>Try again</button></div>}

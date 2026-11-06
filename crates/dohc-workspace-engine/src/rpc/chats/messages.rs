@@ -213,7 +213,8 @@ impl<'a> From<&'a ChatMessageAutomation> for AutomationWire<'a> {
     }
 }
 
-/// A link author also names its link grant and link principal.
+/// A link author also names its link grant and link principal, and an agent
+/// that joined with the link names its agent connection.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AuthorWire<'a> {
@@ -223,6 +224,8 @@ pub(super) struct AuthorWire<'a> {
     grant_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     principal_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_connection_id: Option<&'a str>,
 }
 
 impl<'a> AuthorWire<'a> {
@@ -236,6 +239,7 @@ impl<'a> AuthorWire<'a> {
             display_name,
             grant_id: link_author.map(|link| link.grant_id.as_str()),
             principal_id: link_author.map(|link| link.principal_id.as_str()),
+            agent_connection_id: link_author.and_then(|link| link.agent_connection_id.as_deref()),
         }
     }
 }
@@ -979,6 +983,7 @@ mod tests {
             link_author: Some(ChatMessageLinkAuthor {
                 grant_id: "grant".to_owned(),
                 principal_id: "principal".to_owned(),
+                agent_connection_id: None,
             }),
             ..message()
         };

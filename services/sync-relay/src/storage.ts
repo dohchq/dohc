@@ -1646,6 +1646,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return linkChatStorage.appendLinkChatPost(this, input);
   }
 
+  appendAgentChatPost(input: Parameters<typeof linkChatStorage.appendAgentChatPost>[1]): linkChatStorage.AppendAgentChatPostResult {
+    return linkChatStorage.appendAgentChatPost(this, input);
+  }
+
   registerAgentClient(input: Parameters<typeof agentConnectionStorage.registerAgentClient>[1]): boolean {
     return agentConnectionStorage.registerAgentClient(this, input);
   }

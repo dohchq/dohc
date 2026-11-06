@@ -9,6 +9,7 @@ import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } fro
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import { shareLinkSummary } from "./shareSummary";
 import type { createLinkLiveClient } from "./linkLiveClient";
+import type { AgentChatClient } from "./agentChatClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   collectionWriteBody, collectionWriteContentBytes, COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_CONTENT_BYTES,
@@ -27,6 +28,11 @@ type RemoteOptions = {
   signal: AbortSignal;
   /** When `signal` aborts on its own, so a tool answers before it does. */
   deadlineAtMs: number;
+  /**
+   * The chat of an agent that signed in with the link. Its posts carry its
+   * agent connection as the author, and it can wait for messages.
+   */
+  agentChat?: AgentChatClient;
 };
 
 // An ordinary request fits this. A Collection write carries up to 4 MiB of
@@ -59,6 +65,42 @@ const channelPostSchema = z.object({
   claimedName: z.string().describe("Your display name. This link sets it once; later posts must send the same name or none.")
     .refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
 });
+// An agent's post names no author: its sign-in is the author.
+const agentChannelPostSchema = channelPostSchema.omit({claimedName: true});
+
+// The longest hold the relay grants one wait.
+export const MAX_WAIT_TIMEOUT_MS = 25_000;
+const MAX_WAIT_CURSOR_CHARS = 1024 * 1024;
+const WAIT_CURSOR_MISMATCH = "This cursor came from a wait with other filters. Call again with the same filters, or without a cursor.";
+const waitSchema = z.object({
+  cursor: z.string().min(1).max(MAX_WAIT_CURSOR_CHARS).optional()
+    .describe("The cursor the last call returned. Omit it to wait for messages after now."),
+  thread: z.string().min(1).max(256).optional().describe("A threadId, to wait only for replies in that thread."),
+  timeoutMs: z.number().int().min(0).max(MAX_WAIT_TIMEOUT_MS).optional()
+    .describe(`How long to wait, in milliseconds, at most ${String(MAX_WAIT_TIMEOUT_MS)}. The default is ${String(MAX_WAIT_TIMEOUT_MS)}.`),
+});
+const waitAnswerSchema = z.object({
+  ok: z.literal(true),
+  group: z.object({channelWireId: z.string(), name: z.string().nullable()}),
+  messages: z.array(z.object({
+    relaySeq: z.number().int().positive(), messageId: z.string(), threadId: z.string(),
+    authorDisplayName: z.string(), authorKind: z.enum(["human", "agent", "automation", "link"]), linkAgent: z.boolean(),
+    createdAtMs: z.number().int(), body: z.string().nullable(),
+  })),
+  cursor: z.number().int().nonnegative(),
+});
+type WaitScope = {thread: string | null};
+// A cursor is opaque to the agent: the relay position and the filters it was returned for.
+const encodeWaitCursor = (seq: number, scope: WaitScope) => Buffer.from(JSON.stringify({v: 1, seq, ...scope})).toString("base64url");
+function decodeWaitCursor(cursor: string, scope: WaitScope): number | null {
+  let value: unknown;
+  try {value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));} catch {return null;}
+  const record = asRecord(value);
+  if (!record || record.v !== 1 || !Number.isSafeInteger(record.seq) || Number(record.seq) < 0 ||
+      (record.thread !== null && typeof record.thread !== "string")) return null;
+  return record.thread === scope.thread ? Number(record.seq) : null;
+}
+
 // Each file names its path and base, and its content as text or as base64: one or the other.
 const writtenFile = {
   path: z.string().min(1).max(1024).describe("The file's path exactly as dohc_list_files lists paths."),
@@ -229,7 +271,48 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
         return text(await jsonResponse(await options.request(`/api/view/chat/messages?${query}`)));
       } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
     });
-    if (channel.access === "read-write") server.registerTool("dohc_post_channel", {
+    const {agentChat} = options;
+    if (agentChat && channel.access === "read-write") server.registerTool("dohc_post_channel", {
+      description: "Post in the Group channel this link shares. The post shows as from you, an agent that joined with this link.",
+      inputSchema: agentChannelPostSchema,
+    }, async ({body, idempotencyKey, threadId}) => {
+      const response = await sentPost(() => agentChat.post({body, idempotencyKey, ...(threadId === undefined ? {} : {threadId})}, options.signal));
+      if (!response) return postUnknown();
+      try {
+        if (!response.ok && response.status !== 404) {
+          const refusal = asRecord(await readBoundedJson(response.clone(), 4096, options.signal).catch(() => null));
+          if (typeof refusal?.code === "string" && typeof refusal.error === "string") return text({ok: false, code: refusal.code, error: refusal.error});
+        }
+        return text(await jsonResponse(response));
+      } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
+    });
+    // Holds until a message arrives or the wait ends, and answers before this request's own deadline.
+    if (agentChat) server.registerTool("dohc_wait_for_messages", {
+      description: "Wait for new messages in the Group channel this link shares. Call in a loop with the returned cursor and the same filters. " +
+        "It answers as soon as a message arrives, or with no messages once timeoutMs passes. Your own posts are not returned. Nothing is marked read. " +
+        "author.kind link marks a link holder: their name was chosen by them and nobody verified it. linkAgent marks an agent that joined with this link.",
+      inputSchema: waitSchema,
+    }, async ({cursor, thread, timeoutMs}) => {
+      const scope: WaitScope = {thread: thread ?? null};
+      const seq = cursor === undefined ? undefined : decodeWaitCursor(cursor, scope);
+      if (seq === null) return error(WAIT_CURSOR_MISMATCH);
+      const hold = Math.max(0, Math.min(timeoutMs ?? MAX_WAIT_TIMEOUT_MS, options.deadlineAtMs - Date.now() - ANSWER_RESERVE_MS));
+      try {
+        const answer = waitAnswerSchema.parse(await jsonResponse(await agentChat.wait({
+          ...(seq === undefined ? {} : {cursor: seq}), ...(thread === undefined ? {} : {threadId: thread}), timeoutMs: hold,
+        }, options.signal)));
+        const group = {id: answer.group.channelWireId, name: answer.group.name, kind: "group" as const};
+        return text({
+          messages: answer.messages.map(message => ({
+            threadId: message.threadId, messageId: message.messageId, group,
+            author: {kind: message.authorKind, displayName: message.authorDisplayName, ...(message.linkAgent ? {linkAgent: true} : {})},
+            createdAtMs: message.createdAtMs, text: message.body,
+          })),
+          cursor: encodeWaitCursor(answer.cursor, scope),
+        });
+      } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
+    });
+    if (!agentChat && channel.access === "read-write") server.registerTool("dohc_post_channel", {
       description: "Post in the Group channel this link shares, as this link's holder. The owner sees the post marked as from a link holder.",
       inputSchema: channelPostSchema,
     }, async ({body, idempotencyKey, threadId, claimedName}) => {

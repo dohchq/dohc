@@ -3625,6 +3625,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("learned_work_references.sql"),
         sets_user_version: None,
     },
+    // An agent's link message names the agent connection it signed in with.
+    Migration {
+        ordinal: 87,
+        id: "v2-chat-agent-connection-author",
+        sql: include_str!("chat_agent_connection_author.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5624,6 +5631,10 @@ mod tests {
             (
                 "v2-learned-work-references",
                 "eb375cd867263916724d5795e53d02ceb5ad6bf51ddb11e0b1692289a9c63457",
+            ),
+            (
+                "v2-chat-agent-connection-author",
+                "1566c6535a6a8ce8ef35f5c690e6ce2441c4cf95a6ae2dcf9e2642844b40b28d",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

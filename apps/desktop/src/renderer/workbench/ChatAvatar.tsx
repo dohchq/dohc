@@ -1,4 +1,4 @@
-import { useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useSyncExternalStore, type ReactNode } from "react";
 import { Link2, Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
 import { agentTextClass, presentationClasses, subscribePresentation } from "./actorPresentation";
@@ -9,6 +9,15 @@ export function useAgentInk(token: ActorPresentation | undefined): string {
 }
 
 type ChatAuthorKind = "human" | "agent" | "automation" | "link";
+
+/** The Group a chat surface shows, so an agent that joined with its link can say which. */
+export const ChatGroupNameContext = createContext<string | null>(null);
+
+/** Who an agent that joined with a link is: the link's Group, when the surface knows it. */
+export function useLinkAgentLabel(): string {
+  const group = useContext(ChatGroupNameContext);
+  return group ? `Joined with a link to ${group}` : "Joined with a link";
+}
 
 /** An author's name beside their avatar: an agent's in its avatar's hue, anyone else's as it is. */
 export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPresentation; children: ReactNode }) {
@@ -57,11 +66,30 @@ export function ChatAvatar(props: {
   presentation: ActorPresentation;
   size?: keyof typeof SIZES;
   className?: string;
+  // A link author that is an agent: the agent's square, in the default agent color.
+  linkAgent?: boolean;
 }) {
   const size = props.size ?? "post";
   const kind = props.kind;
+  const linkAgent = kind === "link" && props.linkAgent === true;
+  const linkAgentLabel = useLinkAgentLabel();
   const classes = useSyncExternalStore(subscribePresentation, () =>
     presentationClasses(props.presentation, kind === "agent" ? "agent" : "human"));
+  if (linkAgent) {
+    return (
+      <span
+        aria-hidden
+        data-author-kind="link"
+        data-link-agent=""
+        title={linkAgentLabel}
+        className={`inline-grid shrink-0 place-items-center border border-agent bg-bg font-semibold text-agent ${SIZES[size]} ${AGENT_RADIUS[size]} ${
+          props.className ?? ""
+        }`}
+      >
+        <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden />
+      </span>
+    );
+  }
   if (kind === "link") {
     // A link holder has no account, so no identity color: only their name.
     return (
@@ -108,11 +136,14 @@ export function ChatAvatar(props: {
 }
 
 // Beside a link holder's name: the share link's mark, named for screen readers.
-export function LinkHolderMark(props: { testId?: string }) {
+// An agent that joined with the link says which Group the link opens.
+export function LinkHolderMark(props: { testId?: string; linkAgent?: boolean }) {
+  const linkAgentLabel = useLinkAgentLabel();
+  const label = props.linkAgent ? linkAgentLabel : "Link holder";
   return (
-    <span data-testid={props.testId} title="Link holder" className="inline-flex shrink-0 self-center text-subtle">
+    <span data-testid={props.testId} title={label} className="inline-flex shrink-0 self-center text-subtle">
       <Link2 size={12} strokeWidth={1.9} aria-hidden />
-      <span className="sr-only">Link holder</span>
+      <span className="sr-only">{label}</span>
     </span>
   );
 }

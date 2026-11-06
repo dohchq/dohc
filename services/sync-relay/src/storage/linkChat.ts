@@ -9,6 +9,7 @@ import { commitLinkEnrollment, linkPrincipalLimitReached, linkPrincipalStorageBy
 import { appendLogBatchInTransaction, fetchChatMessage, maxOriginSeq } from "./log";
 import type { SyncRelayLogRow } from "./types";
 import { workspaceUsageBytes } from "./workspaces";
+import { activeAgentConnectionInTransaction, recordAgentConnectionActionInTransaction } from "./agentConnections";
 
 export type AppendLinkChatPostResult =
   | { ok: true; replayed: boolean; workspaceId: string; shareId: string; enrolled: boolean; row: SyncRelayLogRow }
@@ -28,6 +29,67 @@ export type AppendLinkChatPostResult =
         | "share-limit"
         | "workspace-quota";
     };
+
+// The profile's hash never leaves the relay, so nobody else can predict
+// these IDs, and a retry from the same profile still finds its post.
+function linkPostIds(principalId: string, profileTokenHash: string, idempotencyKey: string, threadId: string | null) {
+  const key = sha256Hex(JSON.stringify([principalId, profileTokenHash, idempotencyKey]));
+  return { originId: linkChatOrigin(principalId), messageId: `${LINK_CHAT_MESSAGE_ID_PREFIX}${key}`,
+    threadId: threadId ?? `${LINK_CHAT_THREAD_ID_PREFIX}${key}` };
+}
+
+// A retry answers with its first post. The same key for another post conflicts.
+function replayedLinkPost(storage: StorageContext, workspaceId: string, ids: ReturnType<typeof linkPostIds>, body: string):
+  SyncRelayLogRow | "conflict" | null {
+  const existing = fetchChatMessage(storage, { workspaceId, originId: ids.originId, messageId: ids.messageId });
+  if (!existing) return null;
+  const stored = JSON.parse(existing.payloadJson) as { body?: unknown; threadId?: unknown };
+  return stored.body === body && stored.threadId === ids.threadId ? existing : "conflict";
+}
+
+// One link principal's rate and lifetime, and every link principal's posts on the share.
+function linkPostLimitRefusal(storage: StorageContext, input: {
+  workspaceId: string; shareId: string; principalId: string | null; createdAtMs: number;
+}): "rate-limit" | "lifetime-limit" | "share-limit" | null {
+  if (input.principalId !== null) {
+    const posted = storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(recorded_at_ms > ?), 0) AS recent
+      FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ? AND op_kind = 'chat.message.append'`)
+      .get(input.createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS, input.workspaceId, linkChatOrigin(input.principalId));
+    if (Number(posted?.recent ?? 0) >= storage.options.discussionMessageRateLimit) return "rate-limit";
+    if (Number(posted?.count ?? 0) >= storage.options.discussionLifetimeMessageLimit) return "lifetime-limit";
+  }
+  const sharePosts = storage.db.prepare(`SELECT COUNT(*) AS count FROM sync_relay_log
+    WHERE workspace_id = ? AND op_kind = 'chat.message.append' AND origin_id IN (
+      SELECT ? || principal.principal_id FROM sync_relay_link_principals AS principal
+      JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
+      WHERE grant.share_id = ?)`).get(input.workspaceId, LINK_CHAT_ORIGIN_PREFIX, input.shareId)?.count;
+  return Number(sharePosts ?? 0) >= storage.options.discussionNonOwnerShareRowLimit ? "share-limit" : null;
+}
+
+type LinkPostAuthor = {
+  authorKind: "link";
+  authorDisplayName: string;
+  linkGrantId: string;
+  linkPrincipalId: string;
+  agentConnectionId?: string;
+};
+
+// The operations every desktop accepts for a link post: the link grant and
+// link principal, the agent connection when an agent posted, and no account.
+function linkPostOps(storage: StorageContext, input: {
+  workspaceId: string; originId: string; messageId: string; threadId: string; createThread: boolean;
+  channelWireId: string; body: string; createdAtMs: number; author: LinkPostAuthor;
+}) {
+  const { createdAtMs, threadId } = input;
+  const firstOriginSeq = maxOriginSeq(storage, input.workspaceId, input.originId) + 1;
+  return [
+    ...(input.createThread ? [{ opKind: "chat.thread.create", payload: {
+      threadId, title: "", channelWireId: input.channelWireId, lane: "chat", createdAtMs,
+    } }] : []),
+    { opKind: "chat.message.append", payload: { messageId: input.messageId, threadId, body: input.body, ...input.author, createdAtMs } },
+  ].map((op, index) => ({ originSeq: firstOriginSeq + index, opKind: op.opKind,
+    payloadJson: JSON.stringify(op.payload), recordedAtMs: createdAtMs }));
+}
 
 function linkChatBody(value: string): string | null {
   if (!value.isWellFormed()) return null;
@@ -82,21 +144,12 @@ export function appendLinkChatPost(storage: StorageContext, input: {
     }
 
     const { principal } = enrollment;
-    // The profile's hash never leaves the relay, so nobody else can predict
-    // these IDs, and a retry from the same profile still finds its post.
-    const ids = (principalId: string) => {
-      const key = sha256Hex(JSON.stringify([principalId, input.profileTokenHash, input.idempotencyKey]));
-      return { originId: linkChatOrigin(principalId), messageId: `${LINK_CHAT_MESSAGE_ID_PREFIX}${key}`,
-        threadId: input.threadId ?? `${LINK_CHAT_THREAD_ID_PREFIX}${key}` };
-    };
+    const ids = (principalId: string) => linkPostIds(principalId, input.profileTokenHash, input.idempotencyKey, input.threadId);
     if (principal) {
-      const { originId, messageId, threadId } = ids(principal.principalId);
-      const existing = fetchChatMessage(storage, { workspaceId, originId, messageId });
-      if (existing) {
-        const stored = JSON.parse(existing.payloadJson) as { body?: unknown; threadId?: unknown };
-        return stored.body === body && stored.threadId === threadId
-          ? { ok: true, replayed: true, workspaceId, shareId, enrolled: false, row: existing }
-          : { ok: false, reason: "idempotency-conflict" };
+      const replay = replayedLinkPost(storage, workspaceId, ids(principal.principalId), body);
+      if (replay) {
+        return replay === "conflict" ? { ok: false, reason: "idempotency-conflict" }
+          : { ok: true, replayed: true, workspaceId, shareId, enrolled: false, row: replay };
       }
     }
     const refusal = linkWriteRefusal(enrollment);
@@ -105,35 +158,15 @@ export function appendLinkChatPost(storage: StorageContext, input: {
       return { ok: false, reason: "name-already-set" };
     }
     if (linkPrincipalLimitReached(storage, enrollment)) return { ok: false, reason: "principal-limit" };
-    if (principal) {
-      const posted = storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(recorded_at_ms > ?), 0) AS recent
-        FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ? AND op_kind = 'chat.message.append'`)
-        .get(createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS, workspaceId, linkChatOrigin(principal.principalId));
-      if (Number(posted?.recent ?? 0) >= storage.options.discussionMessageRateLimit) return { ok: false, reason: "rate-limit" };
-      if (Number(posted?.count ?? 0) >= storage.options.discussionLifetimeMessageLimit) return { ok: false, reason: "lifetime-limit" };
-    }
-    const sharePosts = storage.db.prepare(`SELECT COUNT(*) AS count FROM sync_relay_log
-      WHERE workspace_id = ? AND op_kind = 'chat.message.append' AND origin_id IN (
-        SELECT ? || principal.principal_id FROM sync_relay_link_principals AS principal
-        JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
-        WHERE grant.share_id = ?)`).get(workspaceId, LINK_CHAT_ORIGIN_PREFIX, shareId)?.count;
-    if (Number(sharePosts ?? 0) >= storage.options.discussionNonOwnerShareRowLimit) return { ok: false, reason: "share-limit" };
+    const limited = linkPostLimitRefusal(storage, { workspaceId, shareId, principalId: principal?.principalId ?? null, createdAtMs });
+    if (limited) return { ok: false, reason: limited };
 
     const principalId = principal?.principalId ?? storage.newDiscussionId();
     const { originId, messageId, threadId } = ids(principalId);
     const committedName = principal?.displayName ?? claimedName;
-    const createThread = input.threadId === null;
-    const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
-    const ops = [
-      ...(createThread ? [{ opKind: "chat.thread.create", payload: {
-        threadId, title: "", channelWireId: input.channelWireId, lane: "chat", createdAtMs,
-      } }] : []),
-      { opKind: "chat.message.append", payload: {
-        messageId, threadId, body, authorKind: "link", authorDisplayName: committedName ?? "Anonymous",
-        linkGrantId: input.grantId, linkPrincipalId: principalId, createdAtMs,
-      } },
-    ].map((op, index) => ({ originSeq: firstOriginSeq + index, opKind: op.opKind,
-      payloadJson: JSON.stringify(op.payload), recordedAtMs: createdAtMs }));
+    const ops = linkPostOps(storage, { workspaceId, originId, messageId, threadId, createThread: input.threadId === null,
+      channelWireId: input.channelWireId, body, createdAtMs,
+      author: { authorKind: "link", authorDisplayName: committedName ?? "Anonymous", linkGrantId: input.grantId, linkPrincipalId: principalId } });
     const addedBytes = (principal ? 0 : linkPrincipalStorageBytes(principalId, input.grantId, input.profileTokenHash)) +
       ops.reduce((bytes, op) => bytes + Buffer.byteLength(op.payloadJson), 0);
     if (workspaceUsageBytes(storage, workspaceId) + addedBytes > storage.options.workspaceQuotaBytes) {
@@ -147,5 +180,77 @@ export function appendLinkChatPost(storage: StorageContext, input: {
     const row = fetchChatMessage(storage, { workspaceId, originId, messageId });
     if (!row) throw new Error("appended link post is missing");
     return { ok: true, replayed: false, workspaceId, shareId, enrolled, row };
+  });
+}
+
+export type AppendAgentChatPostResult =
+  | { ok: true; replayed: boolean; workspaceId: string; shareId: string; row: SyncRelayLogRow }
+  | {
+      ok: false;
+      reason: Exclude<Extract<AppendLinkChatPostResult, { ok: false }>["reason"], "name-already-set" | "principal-limit">;
+    };
+
+/**
+ * Posts one message to a Group's channel from an agent connection. The
+ * author is the connection the access token names, under its link principal,
+ * with the name its client reported. The caller names only the body, an
+ * optional thread of the link's channel, and a retry key, so it can neither
+ * choose nor forge the author. The connection, its link and the Group are
+ * read again inside the transaction that writes the post.
+ */
+export function appendAgentChatPost(storage: StorageContext, input: {
+  accessTokenHash: string;
+  threadId: string | null;
+  body: string;
+  idempotencyKey: string;
+  createdAtMs: number;
+}): AppendAgentChatPostResult {
+  const body = linkChatBody(input.body);
+  const { createdAtMs } = input;
+  if (body === null || !validLinkDiscussionIdempotencyKey(input.idempotencyKey) ||
+      (input.threadId !== null && (!input.threadId || !input.threadId.isWellFormed())) ||
+      !Number.isSafeInteger(createdAtMs) || createdAtMs < 0) {
+    return { ok: false, reason: "invalid-input" };
+  }
+  return storage.tx((): AppendAgentChatPostResult => {
+    const connection = activeAgentConnectionInTransaction(storage, input.accessTokenHash, createdAtMs);
+    if (!connection) return { ok: false, reason: "not-authorized" };
+    const authorized = authorizeLinkChatAction({ storage, grantId: connection.grantId, action: "append" });
+    if (!authorized.ok) return { ok: false, reason: authorized.reason === "denied" ? "read-only" : "not-authorized" };
+    const { workspaceId, shareId } = authorized.share;
+    const { channelWireId } = authorized.effectiveSelector;
+    const principal = storage.getLinkPrincipal(connection.principalId);
+    if (authorized.grant.generation !== connection.generation || shareId !== connection.shareId ||
+        principal?.grantId !== connection.grantId) {
+      return { ok: false, reason: "not-authorized" };
+    }
+    if (input.threadId !== null && storage.findThreadCreateChannelWireId(workspaceId, input.threadId) !== channelWireId) {
+      return { ok: false, reason: "invalid-input" };
+    }
+    const { originId, messageId, threadId } = linkPostIds(principal.principalId, principal.profileTokenHash, input.idempotencyKey, input.threadId);
+    const replay = replayedLinkPost(storage, workspaceId, { originId, messageId, threadId }, body);
+    if (replay) {
+      return replay === "conflict" ? { ok: false, reason: "idempotency-conflict" }
+        : { ok: true, replayed: true, workspaceId, shareId, row: replay };
+    }
+    if (principal.blockedAtMs !== null) return { ok: false, reason: "blocked" };
+    const paused = storage.db.prepare("SELECT link_writes_paused_at_ms FROM sync_relay_shares WHERE share_id = ?").get(shareId);
+    if (paused?.link_writes_paused_at_ms != null) return { ok: false, reason: "paused" };
+    const limited = linkPostLimitRefusal(storage, { workspaceId, shareId, principalId: principal.principalId, createdAtMs });
+    if (limited) return { ok: false, reason: limited };
+    const ops = linkPostOps(storage, { workspaceId, originId, messageId, threadId, createThread: input.threadId === null,
+      channelWireId, body, createdAtMs, author: {
+        authorKind: "link", authorDisplayName: connection.reportedName ?? "Agent",
+        linkGrantId: connection.grantId, linkPrincipalId: principal.principalId, agentConnectionId: connection.connectionId,
+      } });
+    const addedBytes = ops.reduce((bytes, op) => bytes + Buffer.byteLength(op.payloadJson), 0);
+    if (workspaceUsageBytes(storage, workspaceId) + addedBytes > storage.options.workspaceQuotaBytes) {
+      return { ok: false, reason: "workspace-quota" };
+    }
+    appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
+    recordAgentConnectionActionInTransaction(storage, connection.connectionId, createdAtMs);
+    const row = fetchChatMessage(storage, { workspaceId, originId, messageId });
+    if (!row) throw new Error("appended agent post is missing");
+    return { ok: true, replayed: false, workspaceId, shareId, row };
   });
 }

@@ -247,7 +247,7 @@ export function PostCard(props: {
       <div data-testid="chats-thread" data-thread-id={props.thread.id} className="flex items-start gap-3">
         <ChatAvatar presentation={message?.presentation ?? neutralPresentation}
           name={message?.authorDisplayName ?? "?"}
-          kind={message?.authorKind ?? "human"}
+          kind={message?.authorKind ?? "human"} linkAgent={message?.linkAgent === true}
           size="row"
         />
         <div className="min-w-0 flex-1">
@@ -263,7 +263,7 @@ export function PostCard(props: {
             {isAgent ? (
               <AgentBadge testIdPrefix="chats-post" author={message!} presentation={message!.presentation} />
             ) : null}
-            {message?.authorKind === "link" ? <LinkHolderMark testId="chats-post-link-holder" /> : null}
+            {message?.authorKind === "link" ? <LinkHolderMark testId="chats-post-link-holder" linkAgent={message?.linkAgent === true} /> : null}
             {message?.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-post"

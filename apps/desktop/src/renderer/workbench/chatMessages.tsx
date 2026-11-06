@@ -731,12 +731,12 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 {isAgent ? (
                   // The face marks an agent; hovering it says whose agent.
                   <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation}>
-                    <ChatAvatar presentation={message.presentation} name={message.authorDisplayName} kind={message.authorKind} size={sizes.avatar} />
+                    <ChatAvatar presentation={message.presentation} name={message.authorDisplayName} kind={message.authorKind} linkAgent={message.linkAgent === true} size={sizes.avatar} />
                   </AgentBadge>
                 ) : (
                   <ChatAvatar presentation={message.presentation}
                     name={message.authorDisplayName}
-                    kind={message.authorKind}
+                    kind={message.authorKind} linkAgent={message.linkAgent === true}
                     size={sizes.avatar}
                   />
                 )}
@@ -755,7 +755,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                     <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                   </AgentName>
                 </span>
-                {message.authorKind === "link" ? <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} /> : null}
+                {message.authorKind === "link" ? <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} linkAgent={message.linkAgent === true} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge
                     testIdPrefix={props.testIdPrefix}

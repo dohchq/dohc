@@ -15,7 +15,7 @@ import {
   SaveAsFileActions,
   type PostData,
 } from "./PostCard";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, ChatGroupNameContext, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { ThreadedChat } from "./ThreadedChat";
 import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
@@ -4023,8 +4023,8 @@ export function ChatsView(props: {
                   </span>
                 );
                 return (
+                  <ChatGroupNameContext.Provider key={item.message.id} value={item.channel.name}>
                   <div
-                    key={item.message.id}
                     data-testid="chats-feed-item"
                     data-author-kind={item.message.authorKind}
                     className={FEED_ROW}
@@ -4036,7 +4036,7 @@ export function ChatsView(props: {
                     >
                       <ChatAvatar presentation={item.message.presentation}
                         name={item.message.authorDisplayName}
-                        kind={item.message.authorKind}
+                        kind={item.message.authorKind} linkAgent={item.message.linkAgent === true}
                         size="row"
                       />
                       <span className="min-w-0 flex-1">
@@ -4046,7 +4046,7 @@ export function ChatsView(props: {
                               {chatAuthorLabel(item.message)}
                             </AgentName>
                           </span>
-                          {item.message.authorKind === "link" ? <LinkHolderMark testId="chats-feed-link-holder" /> : null}
+                          {item.message.authorKind === "link" ? <LinkHolderMark testId="chats-feed-link-holder" linkAgent={item.message.linkAgent === true} /> : null}
                           <span className="truncate text-[11px] tabular-nums text-subtle">{where}</span>
                           <time
                             dateTime={time.iso}
@@ -4132,6 +4132,7 @@ export function ChatsView(props: {
                         </>
                       } />
                   </div>
+                  </ChatGroupNameContext.Provider>
                 );
 
           }}
@@ -4330,6 +4331,7 @@ export function ChatsView(props: {
     const computerPausedStrip = computerDispatchPaused && dispatchState !== null &&
       dispatchState.pendingCount > 0 && liveRunId === null;
     return (
+      <ChatGroupNameContext.Provider value={nav.channel.name}>
       <div
         data-testid="chats-thread-view"
         data-variant={variant}
@@ -4567,6 +4569,7 @@ export function ChatsView(props: {
           )}
         </div>
       </div>
+      </ChatGroupNameContext.Provider>
     );
   }
 
@@ -4824,6 +4827,7 @@ export function ChatsView(props: {
       </>
     );
     return (
+      <ChatGroupNameContext.Provider value={nav.channel.name}>
       <div
         data-testid="chats-channel-view"
         data-variant={variant}
@@ -4967,6 +4971,7 @@ export function ChatsView(props: {
           </ComposerNotice>
         ) : null}
       </div>
+      </ChatGroupNameContext.Provider>
     );
   }
 

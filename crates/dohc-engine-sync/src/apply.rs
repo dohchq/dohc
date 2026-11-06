@@ -809,6 +809,10 @@ struct MessageAppend {
     link_grant_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     link_principal_id: Option<String>,
+    /// The agent connection of an agent that signed in with the link, on a
+    /// link message, which only the relay writes.
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    agent_connection_id: Option<String>,
     /// The agent that wrote an agent message.
     #[serde(default, deserialize_with = "deserialize_present_string")]
     author_agent_id: Option<String>,
@@ -1667,6 +1671,7 @@ fn apply_message(
         &payload.author_kind,
         payload.link_grant_id.as_deref(),
         payload.link_principal_id.as_deref(),
+        payload.agent_connection_id.as_deref(),
         author_user_id.is_some()
             || owner_name.is_some()
             || payload.origin.is_some()
@@ -1714,11 +1719,12 @@ fn apply_message(
     };
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
-         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id, author_reported) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+         (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms, owner_name,
             link_author.as_ref().map(|link| &link.grant_id), link_author.as_ref().map(|link| &link.principal_id), payload.author_agent_id,
-            author_reported.as_ref().map(|reported| serde_json::to_string(reported).expect("a reported agent serializes"))],
+            author_reported.as_ref().map(|reported| serde_json::to_string(reported).expect("a reported agent serializes")),
+            link_author.as_ref().and_then(|link| link.agent_connection_id.as_ref())],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {

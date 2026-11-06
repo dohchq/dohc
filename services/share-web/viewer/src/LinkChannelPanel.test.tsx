@@ -64,6 +64,25 @@ it("posts from a read-write link with the name it sets once, and marks the post 
   expect(posts[1]?.body).not.toHaveProperty("claimedName");
 });
 
+it("shows an agent that joined with the link as an agent, marked with the link and its Group", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), "https://viewer.test"), signal = init?.signal ?? new AbortController().signal;
+    if (url.pathname === "/api/view/chat/channels") return jsonResponse({shareId: "share", profileName: null,
+      channels: [{channelWireId: "wire", name: "Team", access: "read-only"}]});
+    if (url.searchParams.has("since")) return new Promise<Response>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {once: true});
+    });
+    return jsonResponse({shareId: "share", channelWireId: "wire", nextCursor: 3, olderCursor: null,
+      messages: [{...message(2, "Booked the cabin", "Claude Code", "link"), linkAgent: true}]});
+  }));
+  await render(); await settle(() => text().includes("Booked the cabin"));
+  const posted = [...container.querySelectorAll<HTMLElement>(".chat-message")].at(-1)!;
+  expect(posted.dataset.authorKind).toBe("link");
+  const marks = [...posted.querySelectorAll('[role="img"]')].map(node => node.getAttribute("aria-label"));
+  expect(marks).toEqual(["Agent", "Joined with a link to Team"]);
+  expect(posted.querySelector(".chat-agent-mark")?.getAttribute("title")).toBe("Joined with a link to Team");
+});
+
 it("shows the name this browser set on an earlier visit, with no field to change it", async () => {
   server({profileName: "Sam"}); await render(); await opened();
   expect(nameField()).toBeNull();

@@ -288,9 +288,10 @@ export function assertChatAuthorship(
       throw relayError("authorship_mismatch");
     }
     const bag = payload as Record<string, unknown>;
-    // Only the relay writes a link post, from the link holder's own session.
+    // Only the relay writes a link post, from the link holder's own session
+    // or the agent connection it signed in.
     if (opKind === "chat.message.append" && (bag.authorKind === "link" ||
-        Object.hasOwn(bag, "linkGrantId") || Object.hasOwn(bag, "linkPrincipalId"))) {
+        ["linkGrantId", "linkPrincipalId", "agentConnectionId"].some(key => Object.hasOwn(bag, key)))) {
       throw relayError("authorship_mismatch");
     }
     const claimed = bag[policy.field];
