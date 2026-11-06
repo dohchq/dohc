@@ -52,7 +52,7 @@ function RailButton(props: {
       {typeof props.count === "number" ? (
         <span
           data-testid={`${props.testId}-count`}
-          className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
+          className="absolute -right-0.5 top-0 min-w-4 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
         >
           {/* Clamp at 99+: the right-anchored pill grows leftward, and at
               four glyphs ("999+") it spanned ~36px of the 48px rail and
