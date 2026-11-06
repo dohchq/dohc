@@ -12,7 +12,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
 import type { LinksEdgesResult } from "@dohc/workspace-contracts/links";
 import { GraphView } from "./GraphView";
@@ -148,11 +148,13 @@ describe("GraphView", () => {
 
   it("names a focused node's kind, and says nothing on hover", async () => {
     stubPages(["sketch.excalidraw", "alpha.md"], [["alpha.md", "sketch.excalidraw"]]);
+    // A real size before mount, so the layout spreads the nodes apart.
+    const size = vi.spyOn(HTMLCanvasElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 400, 300));
+    onTestFinished(() => size.mockRestore());
     render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={vi.fn()} />);
     const canvas = await screen.findByTestId("graph-canvas");
     await waitFor(() => expect(canvas.dataset.nodeCount).toBe("2"));
     const description = screen.getByTestId("graph-focused-node");
-    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 400, 300));
     // Sweep the pointer until it lands on a node, so hover is proven to have lit one.
     const hoverSomeNode = (except = "") => {
       for (let y = 0; y < 300; y += 3) for (let x = 0; x < 400; x += 3) {
@@ -171,7 +173,9 @@ describe("GraphView", () => {
     expect(["sketch.excalidraw, Drawing, 1 link", "alpha.md, Page, 1 link"]).toContain(focused);
     // Hovering the other node keeps the focused node's words.
     const focusedPath = focused!.split(",")[0]!;
-    expect(hoverSomeNode(focusedPath)).not.toBe(focusedPath);
+    const other = hoverSomeNode(focusedPath);
+    expect(other).not.toBe("");
+    expect(other).not.toBe(focusedPath);
     expect(description.textContent).toBe(focused);
   });
 
