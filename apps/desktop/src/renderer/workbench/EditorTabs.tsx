@@ -16,6 +16,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
+import { shortcutTitle } from "../../shortcuts/shortcutRegistry";
 
 // A tab's name in the strip. The start surface's Recent uses it too, so the
 // two always agree.
@@ -259,7 +260,7 @@ const Tab = memo(function Tab(props: {
         <button
           type="button"
           aria-label={`Close ${name}`}
-          title="Close"
+          title={`Close (${shortcutTitle("close-tab", window.dohcDesktop?.platform)})`}
           tabIndex={-1}
           // Don't let a press on the close button arm the drag above.
           onPointerDown={(event) => event.stopPropagation()}
