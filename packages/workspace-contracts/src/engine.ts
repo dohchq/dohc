@@ -1304,7 +1304,7 @@ export interface LinkedChatStore {
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
   listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
-  listAgentUnreadRequests(workspaceId: WorkspaceId, runId: string): Promise<ChatAgentRequestRecord[]>;
+  listAgentUnreadRequests(workspaceId: WorkspaceId, runId?: string): Promise<ChatAgentRequestRecord[]>;
   // unreadByAgentOnly reads the place agents outside a run share.
   listMentionsForHandle(
     workspaceId: WorkspaceId,

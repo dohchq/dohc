@@ -1038,7 +1038,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
     .expect("send");
     let unread = |store: &mut EngineStore, run_id: &str, after: Option<(i64, String)>| {
         LinkedChatStore::new(store)
-            .list_agent_unread_requests(WS, run_id, after, 10)
+            .list_agent_unread_requests(WS, Some(run_id), after, 10)
             .map(|requests| {
                 requests
                     .into_iter()

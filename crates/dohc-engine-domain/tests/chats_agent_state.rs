@@ -104,6 +104,205 @@ fn base_chat(store: &mut EngineStore) {
         .expect("channel");
 }
 
+fn outside_requests(chats: &LinkedChatStore<'_>) -> Vec<String> {
+    chats
+        .list_agent_unread_requests(WS, None, None, 100)
+        .expect("requests")
+        .into_iter()
+        .map(|row| row.message_id)
+        .collect()
+}
+
+#[test]
+fn outside_requests_include_mentions_and_posted_thread_replies_once() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    start(&mut chats, "thread", "own", ChatActorKind::Agent, 10);
+    send(
+        &mut chats,
+        "thread",
+        "reply @agent",
+        ChatActorKind::Human,
+        Some("own"),
+        20,
+    );
+    start(
+        &mut chats,
+        "mention",
+        "hello @agent",
+        ChatActorKind::Human,
+        30,
+    );
+    send(
+        &mut chats,
+        "thread",
+        "own @agent",
+        ChatActorKind::Agent,
+        Some("own"),
+        40,
+    );
+    assert_eq!(outside_requests(&chats), ["reply @agent", "hello @agent"]);
+    send(
+        &mut chats,
+        "thread",
+        "plain reply",
+        ChatActorKind::Human,
+        Some("own"),
+        50,
+    );
+    assert_eq!(
+        outside_requests(&chats),
+        ["reply @agent", "hello @agent", "plain reply"]
+    );
+    // Reading requests leaves the shared read coordinate unchanged.
+    assert_eq!(
+        outside_requests(&chats),
+        ["reply @agent", "hello @agent", "plain reply"]
+    );
+    let page = chats
+        .list_agent_unread_requests(WS, None, Some((20, "reply @agent".into())), 1)
+        .expect("page");
+    assert_eq!(page[0].message_id, "hello @agent");
+}
+
+#[test]
+fn outside_dm_requests_survive_an_agent_reply_without_replaying_read_messages() {
+    let (_scratch, mut store) = open_store();
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_agent_channel(WS, "channel", "default", "Agent", 2, &NO_FAULTS)
+        .expect("agent chat");
+    start(&mut chats, "thread", "first", ChatActorKind::Human, 10);
+    send(
+        &mut chats,
+        "thread",
+        "own",
+        ChatActorKind::Agent,
+        Some("first"),
+        20,
+    );
+    assert_eq!(outside_requests(&chats), ["first"]);
+    chats
+        .mark_thread_read_by_agent(WS, None, "thread", 10, "first", None, 21, &NO_FAULTS)
+        .expect("read");
+    send(
+        &mut chats,
+        "thread",
+        "later",
+        ChatActorKind::Human,
+        Some("first"),
+        30,
+    );
+    assert_eq!(outside_requests(&chats), ["later"]);
+}
+
+#[test]
+fn outside_participation_excludes_prior_replies_and_named_agents() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    start(&mut chats, "thread", "root", ChatActorKind::Human, 10);
+    send(
+        &mut chats,
+        "thread",
+        "earlier",
+        ChatActorKind::Human,
+        Some("root"),
+        20,
+    );
+    let mut input = start_input("named", "named-own", ChatActorKind::Agent, 21);
+    input.author_agent_id = Some("research".into());
+    chats
+        .start_channel_thread(&input, &NO_FAULTS)
+        .expect("named post");
+    send(
+        &mut chats,
+        "named",
+        "named-reply",
+        ChatActorKind::Human,
+        Some("named-own"),
+        22,
+    );
+    send(
+        &mut chats,
+        "thread",
+        "own",
+        ChatActorKind::Agent,
+        Some("root"),
+        30,
+    );
+    send(
+        &mut chats,
+        "thread",
+        "later",
+        ChatActorKind::Human,
+        Some("root"),
+        40,
+    );
+    assert_eq!(outside_requests(&chats), ["later"]);
+    assert!(
+        chats
+            .list_agent_unread_requests(OTHER_WS, None, None, 100)
+            .expect("other workspace")
+            .is_empty()
+    );
+    chats
+        .mark_thread_read_by_agent(WS, None, "thread", 40, "later", None, 41, &NO_FAULTS)
+        .expect("read");
+    assert!(outside_requests(&chats).is_empty());
+}
+
+#[test]
+fn outside_reply_cursor_tie_breaks_by_message_id() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    start(&mut chats, "thread", "own", ChatActorKind::Agent, 10);
+    send(
+        &mut chats,
+        "thread",
+        "a",
+        ChatActorKind::Human,
+        Some("own"),
+        20,
+    );
+    send(
+        &mut chats,
+        "thread",
+        "b",
+        ChatActorKind::Human,
+        Some("own"),
+        20,
+    );
+    let first = chats
+        .list_agent_unread_requests(WS, None, None, 1)
+        .expect("first page");
+    assert_eq!(first[0].message_id, "a");
+    let second = chats
+        .list_agent_unread_requests(WS, None, Some((20, "a".into())), 1)
+        .expect("second page");
+    assert_eq!(second[0].message_id, "b");
+    chats
+        .mark_thread_read_by_agent(WS, None, "thread", 20, "a", None, 30, &NO_FAULTS)
+        .expect("read");
+    assert_eq!(outside_requests(&chats), ["b"]);
+}
+
+#[test]
+fn outside_requests_keep_mentions_from_a_named_agent() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    let mut input = start_input("named", "named-mention", ChatActorKind::Agent, 10);
+    input.author_agent_id = Some("research".into());
+    input.body = "A question for @agent".into();
+    chats
+        .start_channel_thread(&input, &NO_FAULTS)
+        .expect("mention");
+    assert_eq!(outside_requests(&chats), ["named-mention"]);
+}
+
 fn bookmark_fixture(store: &mut EngineStore) -> String {
     let mut chats = LinkedChatStore::new(store);
     start(&mut chats, "thread", "message", ChatActorKind::Human, 10);

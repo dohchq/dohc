@@ -44,7 +44,8 @@ struct ChatAgentUnreadThreadPageParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatAgentRequestPageParams {
-    run_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    run_id: Option<String>,
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
@@ -259,7 +260,7 @@ impl EngineService {
         let binding = chat_cursor_binding(
             "chats.agentReadState.listUnreadRequests",
             &workspace_id,
-            &[params.run_id.as_str()],
+            &[params.run_id.as_deref().unwrap_or("")],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor

@@ -521,13 +521,13 @@ impl ActorHandle {
     pub async fn chat_agent_unread_requests(
         &self,
         workspace_id: String,
-        run_id: String,
+        run_id: Option<String>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_agent_unread_requests(&workspace_id, &run_id, after, limit)
+                .list_agent_unread_requests(&workspace_id, run_id.as_deref(), after, limit)
                 .map_err(RuntimeError::from)
         })
         .await

@@ -2223,22 +2223,31 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return run.agentId;
   }
 
-  // The engine's rule: each message with a request for the run's agent,
-  // beyond that agent's place in its thread, oldest first.
+  // Unread requests for a run's agent, or the shared outside-run reader.
   private agentUnreadRequests(
     state: WorkspaceState,
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const runId = requiredString(params, "runId", "invalid-input");
+    const runId = optionalString(params, "runId");
     const agentId = this.agentReader(state, runId);
-    const rows = [...state.dispatches.values()]
+    const candidates = runId === undefined
+      ? [...state.messages.values()].filter(message => {
+        if (message.author.kind === "agent" && message.authorAgentId === undefined) return false;
+        const thread = state.threads.get(message.threadId);
+        if (!thread) return false;
+        if (message.author.kind === "human" && thread.channelId && state.channels.get(thread.channelId)?.kind === "agent") return true;
+        if ([...state.dispatches.values()].some(row => row.triggerMessageId === message.id)) return false;
+        return state.mentions.some(row => row.messageId === message.id && row.handle === "agent") ||
+          (message.author.kind === "human" && this.outsideAgentPostedBefore(state, message.threadId, message.id));
+      })
+      : [...state.dispatches.values()]
       .filter((dispatch) => dispatch.agentId === agentId)
       .flatMap((dispatch) => {
         const message = state.messages.get(dispatch.triggerMessageId);
         return message && state.threads.has(message.threadId) ? [message] : [];
-      })
-      .filter((message) => {
+      });
+    const rows = candidates.filter((message) => {
         const read = state.agentReads.get(agentReadKey(agentId, message.threadId));
         return !read ||
           message.createdAtMs > read.lastReadCreatedAtMs ||
@@ -2256,6 +2265,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }));
     const result = page(rows, params, `${workspace}\0agentRequests\0${runId}`);
     return jsonResult({ requests: result.values, nextCursor: result.nextCursor });
+  }
+
+  private outsideAgentPostedBefore(state: WorkspaceState, threadId: string, messageId: string): boolean {
+    const ids = state.threadMessages.get(threadId) ?? [];
+    const earlier = ids.slice(0, ids.indexOf(messageId));
+    return earlier.some(id => {
+      const posted = state.messages.get(id);
+      return posted?.author.kind === "agent" && posted.authorAgentId === undefined;
+    });
   }
 
   private agentUnreadThreads(

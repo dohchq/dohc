@@ -4099,19 +4099,21 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// The messages that asked a running run's agent and lie beyond that
-    /// agent's place in their thread, in ascending message-coordinate order.
+    /// Unread requests for a run's agent, or the shared outside-run reader.
     pub fn list_agent_unread_requests(
         &self,
         workspace_id: &str,
-        run_id: &str,
+        run_id: Option<&str>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, DomainError> {
         validate_chat_page_limit(limit)?;
+        if run_id.is_none() {
+            return self.list_outside_agent_requests(workspace_id, after, limit);
+        }
         let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
         self.store.read_with(|conn| {
-            let agent_id = agent_reader(conn, workspace_id, Some(run_id))?;
+            let agent_id = agent_reader(conn, workspace_id, run_id)?;
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms \
@@ -4154,6 +4156,62 @@ impl<'a> LinkedChatStore<'a> {
                                 author_kind,
                                 created_at_ms,
                             }
+                        }))
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    fn list_outside_agent_requests(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAgentRequest>, DomainError> {
+        let (has_after, after_ms, after_id) = chat_after(after);
+        self.store.read_with(|conn| {
+            let sql = r#"
+                SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms
+                FROM chat_messages m
+                JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
+                LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = m.workspace_id
+                  AND ars.agent_id = ?6 AND ars.thread_id = m.thread_id
+                WHERE m.workspace_id = ?1
+                  AND NOT (m.author_kind = 'agent' AND m.author_agent_id IS NULL)
+                  AND ((m.author_kind = 'human' AND EXISTS (
+                        SELECT 1 FROM chat_channels c WHERE c.workspace_id = t.workspace_id
+                          AND c.channel_id = t.channel_id AND c.kind = 'agent'))
+                    OR (NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l
+                        WHERE l.workspace_id = m.workspace_id AND l.trigger_message_id = m.message_id)
+                      AND (EXISTS (SELECT 1 FROM chat_mentions x
+                        WHERE x.workspace_id = m.workspace_id AND x.message_id = m.message_id
+                          AND x.thread_id = m.thread_id AND x.handle = 'agent')
+                        OR (m.author_kind = 'human' AND EXISTS (
+                          SELECT 1 FROM chat_messages posted
+                          WHERE posted.workspace_id = m.workspace_id AND posted.thread_id = m.thread_id
+                            AND posted.author_kind = 'agent' AND posted.author_agent_id IS NULL
+                            AND posted.message_order < m.message_order)))))
+                  AND (ars.thread_id IS NULL OR m.created_at_ms > ars.last_read_created_at_ms
+                    OR (m.created_at_ms = ars.last_read_created_at_ms AND m.message_id > ars.last_read_message_id))
+                  AND (?2 = 0 OR m.created_at_ms > ?3 OR (m.created_at_ms = ?3 AND m.message_id > ?4))
+                ORDER BY m.created_at_ms, m.message_id LIMIT ?5
+            "#;
+            let mut stmt = conn.prepare_cached(sql).map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![workspace_id, has_after, after_ms, after_id, limit, OUTSIDE_RUN_READER],
+                    |row| {
+                        let kind: String = row.get(2)?;
+                        let thread_id = row.get(0)?;
+                        let message_id = row.get(1)?;
+                        let created_at_ms = row.get(3)?;
+                        Ok(ChatActorKind::from_db(&kind).map(|author_kind| ChatAgentRequest {
+                            thread_id,
+                            message_id,
+                            author_kind,
+                            created_at_ms,
                         }))
                     },
                 )
