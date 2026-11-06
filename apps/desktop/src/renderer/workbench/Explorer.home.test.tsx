@@ -165,9 +165,13 @@ describe("Explorer Files", () => {
   });
 
   it("shows No files after an empty listing", () => {
-    render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [] })} />);
+    render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [], editorGroups: [] })} />);
 
-    expect(within(section("Files")).getByText("No files")).toBeTruthy();
+    // An empty-state line says something, so it reads in muted, not subtle.
+    for (const line of [within(section("Files")).getByText("No files"), screen.getByText("No open editors")]) {
+      expect(line.className).toContain("text-muted");
+      expect(line.className).not.toContain("text-subtle");
+    }
     expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
     expect(screen.queryByRole("tree")).toBeNull();
   });
