@@ -557,20 +557,27 @@ async function exists(path: string): Promise<boolean> {
 describe("share-view file operations through the real store", () => {
   it.skipIf(engine.missing)("keeps a Collection file apart after rebuilding its saved list", async () => {
     const written: string[][] = [];
+    const uploaded: string[] = [];
+    const collectionWritePaths: Array<string | undefined> = [];
+    const ownFileSha256 = createHash("sha256").update("my own file").digest("hex");
     const server = createServer((request, response) => {
       void (async () => {
         if (request.method === "POST" && request.url === `/sync/shares/${SHARE_ID}/collection-writes`) {
           const chunks: Buffer[] = [];
           for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { changes: Array<{ afterPath?: string }> };
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { changes: Array<{ basedOnPath?: string; afterPath?: string }> };
+          collectionWritePaths.push(...body.changes.flatMap(change => [change.basedOnPath, change.afterPath]));
           const paths = body.changes.flatMap(change => change.afterPath === undefined ? [] : [change.afterPath]);
           written.push(paths);
           response.writeHead(200, { "content-type": "application/json", connection: "close" });
           response.end(JSON.stringify({ paths }));
         } else if (request.method === "PUT" && request.url?.startsWith(`/sync/shares/${SHARE_ID}/blobs/`)) {
-          for await (const chunk of request) void chunk;
-          response.writeHead(200, { connection: "close" });
-          response.end();
+          const sha256 = request.url.slice(`/sync/shares/${SHARE_ID}/blobs/`.length);
+          uploaded.push(sha256);
+          let byteLength = 0;
+          for await (const chunk of request) byteLength += Buffer.byteLength(chunk);
+          response.writeHead(200, { "content-type": "application/json", connection: "close" });
+          response.end(JSON.stringify({ ok: true, shareId: SHARE_ID, sha256, byteLength }));
         } else {
           response.writeHead(500, { connection: "close" });
           response.end("Unexpected request");
@@ -605,6 +612,8 @@ describe("share-view file operations through the real store", () => {
       const grantedSelector = { paths: ["docs"], versionId: null, access: "edit" as const };
       await expect(view.directClient.pushDirectWrites({ shareId: SHARE_ID, grantedSelector }))
         .resolves.toEqual({ writes: [], morePending: false });
+      expect(uploaded).not.toContain(ownFileSha256);
+      expect(collectionWritePaths).not.toContain(path);
       expect(written).toEqual([]);
       expect(await readFile(join(view.rootPath, path), "utf8")).toBe("my own file");
       expect(JSON.parse(await readFile(record, "utf8"))).toEqual({ shareId: SHARE_ID, paths: [path] });
@@ -614,6 +623,8 @@ describe("share-view file operations through the real store", () => {
         text: "actions: []\n# updated\n", metadata: { origin: "api" } });
       await expect(view.directClient.pushDirectWrites({ shareId: SHARE_ID, grantedSelector }))
         .resolves.toMatchObject({ writes: [{ paths: [controlPath], result: "written" }] });
+      expect(uploaded).not.toContain(ownFileSha256);
+      expect(collectionWritePaths).not.toContain(path);
       expect(written).toEqual([[controlPath]]);
     } finally {
       errorLog.mockRestore();
