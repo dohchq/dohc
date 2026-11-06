@@ -1791,8 +1791,9 @@ describe("dirty tab close boundaries", () => {
     await user.type(await enterMarkdownSource(user, left), "Draft!");
     await within(screen.getByTestId("tab-a.md")).findByTestId("tab-dirty");
     await user.click(
-      within(left).getByRole("button", { name: "Close editor group" }),
+      within(left).getByRole("button", { name: "All tabs in editor group 1" }),
     );
+    await user.click(within(left).getByRole("menuitem", { name: "Close group" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
 
     fireEvent.contextMenu(screen.getByTestId("tab-b.md"));

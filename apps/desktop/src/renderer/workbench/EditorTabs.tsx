@@ -5,7 +5,7 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { isMacContextClick } from "../ui/keys";
-import { Menu } from "../ui/Menu";
+import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import {
   memo,
@@ -942,6 +942,12 @@ export const EditorTabs = memo(function EditorTabs(props: {
       resize?.disconnect();
     };
   }, [drag, props.tabs, props.activeTab]);
+  // The tab list ends with the group's own action. Its id starts with "/",
+  // which no tab's path does.
+  const closeGroup = props.onCloseGroup;
+  const groupActions: MenuEntry[] = closeGroup
+    ? [MENU_SEPARATOR, { id: "/close-group", label: "Close group", icon: <X size={14} aria-hidden />, onSelect: () => closeGroup(props.groupId) }]
+    : [];
   return (
     <div
       ref={frameRef}
@@ -1015,7 +1021,9 @@ export const EditorTabs = memo(function EditorTabs(props: {
         data-testid="editor-tab-actions"
         className="flex shrink-[1000] items-center justify-end gap-1 border-b border-line pl-2 pr-1 empty:hidden"
       />
-      {props.onCloseGroup ? (
+      {/* A group with tabs closes from its tab list, so this X never sits
+          beside the active tab's own. */}
+      {empty && props.onCloseGroup ? (
         <button
           type="button"
           aria-label="Close editor group"
@@ -1125,8 +1133,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
         />
       </div>
       {/* Overflow affordance: every open tab, reachable even when the strip
-          scrolls. The list is placed against the window, so the strip's
-          scroller cannot clip it. */}
+          scrolls, then Close group. The list is placed against the window,
+          so the strip's scroller cannot clip it. */}
       {!empty ? (
         <Menu
           label={`Tabs in editor group ${props.groupNumber}`}
@@ -1146,22 +1154,25 @@ export const EditorTabs = memo(function EditorTabs(props: {
               <ChevronDown size={14} aria-hidden />
             </button>
           )}
-          items={props.tabs.map((tab) => ({
-            id: tab.path,
-            label: fileName(tab.path, props.tabLabels?.get(tab.path)),
-            title: tab.path,
-            // Ink on the current row's selected fill and subtle elsewhere,
-            // as Explorer's open editors tone the same glyph.
-            icon: (
-              <TabGlyph
-                {...tabMark(tab.path, props.files, props.tabGlyphs?.get(tab.path))}
-                size={TAB_GLYPH_SIZE}
-                className={tab.path === props.activeTab ? "text-ink" : "text-subtle"}
-              />
-            ),
-            current: tab.path === props.activeTab,
-            onSelect: () => props.onActivate(props.groupId, tab.path),
-          }))}
+          items={[
+            ...props.tabs.map((tab) => ({
+              id: tab.path,
+              label: fileName(tab.path, props.tabLabels?.get(tab.path)),
+              title: tab.path,
+              // Ink on the current row's selected fill and subtle elsewhere,
+              // as Explorer's open editors tone the same glyph.
+              icon: (
+                <TabGlyph
+                  {...tabMark(tab.path, props.files, props.tabGlyphs?.get(tab.path))}
+                  size={TAB_GLYPH_SIZE}
+                  className={tab.path === props.activeTab ? "text-ink" : "text-subtle"}
+                />
+              ),
+              current: tab.path === props.activeTab,
+              onSelect: () => props.onActivate(props.groupId, tab.path),
+            })),
+            ...groupActions,
+          ]}
         />
       ) : null}
     </div>
