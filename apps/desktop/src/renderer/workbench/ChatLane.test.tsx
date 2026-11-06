@@ -17,11 +17,12 @@ let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();
 const onThreadRead = vi.fn();
 const onAgentWaitsForTrust = vi.fn();
+const onOpenAgentSettings = vi.fn();
 function lane(id = "channel-1", workspaceId = "workspace-a", kind: "channel" | "agent" = "channel") {
   return <ReactionStoreProvider workspaceId={workspaceId}>
     <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat", kind })}
       locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
-      onAgentWaitsForTrust={onAgentWaitsForTrust} />
+      onAgentWaitsForTrust={onAgentWaitsForTrust} onOpenAgentSettings={onOpenAgentSettings} />
   </ReactionStoreProvider>;
 }
 function send(body: string) {
@@ -33,6 +34,7 @@ beforeEach(() => {
   onError.mockReset();
   onThreadRead.mockReset();
   onAgentWaitsForTrust.mockReset();
+  onOpenAgentSettings.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation(callback => { activity = callback; return vi.fn(); });
   // An agent DM also lists its earlier posts; these tests have none.
   bridgeMock.listChannelThreads.mockImplementation(async ({ lane }) => ({ threads: lane === "posts" ? [] : [thread()] }));
@@ -560,7 +562,7 @@ describe("ChatLane", () => {
       failedRun: {
         ...failedRun,
         words: "Nova didn't reply. Its run ended with an error.",
-        nextStep: "Mention @Nova to ask again.",
+        nextStep: { kind: "mention", handle: "Nova" },
         retryable: false,
       },
     });
@@ -571,6 +573,23 @@ describe("ChatLane", () => {
       .toEqual(["Nova didn't reply. Its run ended with an error.", "Mention @Nova to ask again."]);
     expect(within(failed).getByTestId("chats-lane-run-next-step").textContent).toBe("Mention @Nova to ask again.");
     expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
+
+    // An agent gone from Settings: the line says to add it again, and
+    // Settings opens the Agents page.
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      ...idle,
+      failedRun: {
+        ...failedRun,
+        words: "Your agent didn't reply. Its run ended with an error.",
+        nextStep: { kind: "add-agent" },
+        retryable: false,
+      },
+    });
+    await act(async () => activity({ workspaceId: "workspace-a" }));
+    await waitFor(() => expect(screen.getByTestId("chats-lane-run-next-step").textContent)
+      .toBe("Add your agent again in Settings to ask again."));
+    fireEvent.click(screen.getByTestId("chats-lane-run-open-settings"));
+    expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
   });
 
   it("stops the agent's run from its DM", async () => {

@@ -860,23 +860,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     run: AgentRunRecord,
     outcome: FailedOutcome,
     agentName: string | undefined,
-  ): Promise<{ lead: string; reason: string; nextStep?: string }> {
+  ): Promise<{ lead: string; reason: string; nextStep?: ChatDispatchFailedRun["nextStep"] }> {
     const posted = outcome !== "no-reply" && outcome !== "not-started" && (await options.dispatchStoreFor(workspace)
       .listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
     const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
     // Running these again would repeat what they did, so the person asks
-    // the agent again instead, with the @handle the composer inserts. A run
-    // that couldn't start or needs Node.js has its own next step, and an
-    // agent no longer in Settings, or whose name has no handle, can't be
-    // mentioned.
+    // the agent again instead, with the @handle the composer inserts, or
+    // adds it again when it's gone from Settings. A run that couldn't start
+    // or needs Node.js has its own next step, and a name with no handle
+    // can't be mentioned.
     const handle = agentName === undefined ? "" : handleForName(agentName);
-    const asksAgain = handle !== "" && ASKS_AGAIN.has(outcome) && !needsNodeJs(outcome, nodeAvailable);
+    const nextStep = !ASKS_AGAIN.has(outcome) || needsNodeJs(outcome, nodeAvailable) ? undefined
+      : agentName === undefined ? { kind: "add-agent" as const }
+      : handle ? { kind: "mention" as const, handle }
+      : undefined;
     return {
       lead: `${noticeAgentName(agentName)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
-      ...(asksAgain ? { nextStep: `Mention @${handle} to ask again.` } : {}),
+      ...(nextStep ? { nextStep } : {}),
     };
   }
 

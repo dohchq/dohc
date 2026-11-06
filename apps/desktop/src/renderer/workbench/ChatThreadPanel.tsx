@@ -186,6 +186,7 @@ export function FailedRunLine(props: {
   failed: ChatDispatchFailedRun;
   busy: boolean;
   onRetry?: () => void;
+  onOpenAgentSettings?: () => void;
   className?: string;
   children?: ReactNode;
 }) {
@@ -214,7 +215,24 @@ export function FailedRunLine(props: {
       {props.failed.nextStep ? (
         <span data-testid={`${props.testIdPrefix}-run-next-step`} className="flex basis-full gap-x-2">
           <TriangleAlert size={14} aria-hidden className="invisible shrink-0" />
-          <span role="status" className="min-w-0">{props.failed.nextStep}</span>
+          <span role="status" className="min-w-0">
+            {props.failed.nextStep.kind === "mention" ? `Mention @${props.failed.nextStep.handle} to ask again.` : (
+              <>
+                Add your agent again in{" "}
+                {props.onOpenAgentSettings ? (
+                  <button
+                    type="button"
+                    data-testid={`${props.testIdPrefix}-run-open-settings`}
+                    onClick={props.onOpenAgentSettings}
+                    className="rounded-sm text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
+                  >
+                    Settings
+                  </button>
+                ) : "Settings"}{" "}
+                to ask again.
+              </>
+            )}
+          </span>
         </span>
       ) : null}
     </div>

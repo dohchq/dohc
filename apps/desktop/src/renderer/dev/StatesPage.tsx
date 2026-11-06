@@ -9,6 +9,7 @@ import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatDispatchFailedRun,
   ChatFileMentionRecord,
   ChatMessageRecord,
   ChatRunRecord,
@@ -906,7 +907,7 @@ const STOPPED_RUN: ChatRunRecord = {
   runId: "4f2a9c1e0b", threadId: "post-plain", triggerMessageId: "opening", command: "claude",
   startedAtMs: CHAT_AT, endedAtMs: CHAT_AT + 90_000, exitCode: 143,
 };
-function ChatFailedRunSpecimen(props: { words: string; nextStep?: string; posted: boolean; retryable: boolean; busy?: boolean }) {
+function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFailedRun["nextStep"]; posted: boolean; retryable: boolean; busy?: boolean }) {
   return (
     <div className="w-[560px]">
       <ThreadMessages
@@ -924,6 +925,7 @@ function ChatFailedRunSpecimen(props: { words: string; nextStep?: string; posted
         }}
         retryBusy={props.busy ?? false}
         onRetryFailedRun={noop}
+        onOpenAgentSettings={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -2632,7 +2634,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="failed before the agent posted">
           <ChatFailedRunSpecimen
             words="Claude Code didn't reply. Its run ended with an error."
-            nextStep="Mention @ClaudeCode to ask again."
+            nextStep={{ kind: "mention", handle: "ClaudeCode" }}
             posted={false}
             retryable={false}
           />
@@ -2640,8 +2642,16 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="failed after the agent posted">
           <ChatFailedRunSpecimen
             words="Claude Code stopped before finishing. Its run ended with an error."
-            nextStep="Mention @ClaudeCode to ask again."
+            nextStep={{ kind: "mention", handle: "ClaudeCode" }}
             posted
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed, its agent gone from Settings">
+          <ChatFailedRunSpecimen
+            words="Your agent didn't reply. Its run ended with an error."
+            nextStep={{ kind: "add-agent" }}
+            posted={false}
             retryable={false}
           />
         </Specimen>

@@ -475,6 +475,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   failedRun: ChatDispatchFailedRun | null;
   retryBusy: boolean;
   onRetryFailedRun?: () => void;
+  onOpenAgentSettings?: () => void;
   reactionsByMessage: Map<string, ChatReactionRecord[]>;
   decisionsByMessage: Map<string, ChatDecisionRecord>;
   attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
@@ -511,6 +512,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     failedRun,
     retryBusy,
     onRetryFailedRun,
+    onOpenAgentSettings,
     reactionsByMessage,
     decisionsByMessage,
     attachmentsByMessage,
@@ -557,6 +559,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         failed={failedRun}
         busy={retryBusy}
         onRetry={failedRun.retryable ? onRetryFailedRun : undefined}
+        onOpenAgentSettings={onOpenAgentSettings}
         className={className}
       >
         {askedBy ? <RunAskedBy message={askedBy} /> : null}
