@@ -1246,6 +1246,8 @@ export class CollectionAutomations {
   private watchedGeneration: number | null = null;
   /** The relay did not answer for a new generation's Group handover: the next sync pull asks again. */
   private handoverUnread = false;
+  /** A failed reach read waits for the next sync answer or open. */
+  private reachUnread = false;
   // The newest Group message skip of each kind the owner was told about.
   private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
   /** Serializes index loads and subscription reconciles. */
@@ -1311,6 +1313,8 @@ export class CollectionAutomations {
         await this.options.store.readReachVerdicts();
       const timeouts = await this.options.store.readTimeouts();
       if (!current()) return;
+      this.handoverUnread = false;
+      this.reachUnread = false;
       this.subscribed = new Map(subscriptions.map((entry) => [entry.automationId, entry]));
       this.groupSubscriptionsUncertain = true;
       this.timeouts = timeouts;
@@ -1572,7 +1576,10 @@ export class CollectionAutomations {
 
   /** A sync pull reached the relay: a Group handover it could not read before is asked for again. */
   relayAnswered(): void {
-    if (this.handoverUnread || this.reachPending !== null) this.hostChanged();
+    const unread = this.handoverUnread || this.reachUnread;
+    this.handoverUnread = false;
+    this.reachUnread = false;
+    if (unread || this.reachPending !== null) this.hostChanged();
     // Every definition the relay had is on this computer now: hold those,
     // in every version, whether or not this computer indexed them or they
     // can run yet, and judge the ones current editors write from here as
@@ -4709,13 +4716,17 @@ export class CollectionAutomations {
       this.clearWaits("roster");
     }
     if (generation === null || generation === 0 || generation === this.reachTakenAt) return true;
+    if (this.reachUnread) return false;
     let record: ReachRelayRecord;
     try {
       await this.markHostClaims(generation);
       record = await this.options.reachRelayRecord(generation, this.relayReads.signal);
     } catch (error) {
       // A read that the workspace close stopped is not an error.
-      if (!this.relayReads.signal.aborted) this.options.onError("read the last automation host's reach verdicts", error);
+      if (!this.relayReads.signal.aborted) {
+        this.reachUnread = true;
+        this.options.onError("read the last automation host's reach verdicts", error);
+      }
       return false;
     }
     // An answer that arrives after the workspace closed is not taken either:
@@ -4951,6 +4962,7 @@ export class CollectionAutomations {
   private async watchEngineGroups(generation: number, wanted: GroupSubscription[]): Promise<void> {
     // A watch may land even when its answer is lost.
     this.groupSubscriptionsUncertain = true;
+    if (this.handoverUnread) return;
     const input = {
       generation,
       subscriptions: wanted.map(({ automationId, groupId, startsWith }) =>
