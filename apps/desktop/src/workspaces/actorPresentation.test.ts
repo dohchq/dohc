@@ -84,6 +84,24 @@ describe("chat presentation admission", () => {
     expect(edit).toMatchObject({ connected: true });
     expect(runEdit).not.toHaveProperty("connected");
   });
+  it("marks a connected agent's post and edit from a share, whose author key is unknown", async () => {
+    // A received file share gives no issuer, so no post in it has a key. A share
+    // serves no run id either, so every agent post through one shows the plug.
+    const r = request(false);
+    const post = message({ author: { kind: "agent", displayName: "Claude" } });
+    expect(chatActorForPresentation(post, null).key.kind).toBe("unknown");
+    expect(await r.present(post, "t")).toMatchObject({ connected: true });
+    for (const row of [message({ author: { kind: "agent", displayName: "Claude" }, authorAgentId: "claude" }), message({ author: { kind: "human", displayName: "Claude" } })]) {
+      expect(await r.present(row, "t")).not.toHaveProperty("connected");
+    }
+    // A received edit by an agent on behalf of another device's person has no key either.
+    const [edit, runEdit] = createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined })([
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "local:device" },
+      { kind: "agent", agentId: "claude", onBehalfOf: "local:device" },
+    ]);
+    expect(edit).toMatchObject({ connected: true });
+    expect(runEdit).not.toHaveProperty("connected");
+  });
   it.each(["alice", "bob"])("keys a Links entry as its chat post from another device, for account %s", async (authorUserId) => {
     const r = request();
     const group = async (row: Parameters<typeof r.present>[0]) => (await r.present(row, "t")).group;
