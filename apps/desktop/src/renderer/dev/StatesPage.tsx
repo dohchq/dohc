@@ -417,7 +417,7 @@ function Row(props: {
   name: string;
   folder?: boolean;
   app?: boolean;
-  selected?: boolean;
+  picked?: boolean;
   active?: boolean;
   drop?: boolean;
   force?: string;
@@ -428,7 +428,8 @@ function Row(props: {
         row={treeRow(props.name, props.folder || props.app)}
         collection={false}
         app={props.app ?? false}
-        selected={props.selected ?? false}
+        selected={Boolean(props.picked || props.active)}
+        picked={props.picked ?? false}
         active={props.active ?? false}
         tabbable={false}
         dropPreview={props.drop ? { kind: "move", role: "target" } : null}
@@ -469,6 +470,7 @@ function KindRows(props: { label: string; selected: boolean }) {
           collection={false}
           app={false}
           selected={props.selected}
+          picked={props.selected}
           active={false}
           tabbable={false}
           dropPreview={null}
@@ -1868,10 +1870,10 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="rest" folder />
           <Row name="hover" force="hover" />
           <Row name="focused" force="focus-visible" />
-          <Row name="selected" selected />
-          <Row name="focused, selected" selected force="focus-visible" />
           <Row name="active" active />
-          <Row name="focused, hover" force="hover focus-visible" />
+          <Row name="picked" picked />
+          <Row name="picked, active" picked active />
+          <Row name="focused, picked" picked force="focus-visible" />
           <Row name="drop target" folder drop />
           <Row name="2026-07-08-meeting-notes-with-the-venue-team.md" />
           <Row name="quarterly-planning-and-budget-review-2026" folder />
@@ -3021,7 +3023,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
             <Row name="trip-planner" app />
-            <Row name="signup" app selected />
+            <Row name="signup" app picked />
             <Row name="dashboard" app force="focus-visible" />
           </ul>
         </Specimen>
