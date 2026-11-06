@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DELETED_FILE_DRAFT_NOTICE, OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, OrphanedDraftNotices, REPLACED_HISTORY_DRAFT_NOTICE, ViewActions } from "./fileInspectorUi";
+import { DELETED_FILE_DRAFT_NOTICE, DocumentControls, OPENING_TITLE, OPENING_WORDS_DELAY_MS, OpeningState, OrphanedDraftNotices, REPLACED_HISTORY_DRAFT_NOTICE, ViewActions } from "./fileInspectorUi";
 import { captureOrphanedDraft, loadLiveDraftRecovery, resetOrphanedDrafts } from "./orphanedDrafts";
 import { PENDING_SHARE_WORDS_DELAY_MS, StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
@@ -11,6 +12,25 @@ afterEach(cleanup);
 
 const noop = () => undefined;
 const NO_RECOVERY: ReadonlySet<string> = new Set();
+
+describe("DocumentControls", () => {
+  it.each(["dohc could not open this file.", "This note has parts dohc can't show.", OPENING_TITLE])(
+    "keeps a disabled toggle reachable and describes why: %s", async (reason) => {
+      const user = userEvent.setup();
+      const onClick = vi.fn();
+      render(<DocumentControls toggle={{ label: "Edit", disabled: true, title: reason, onClick }} menu={null} />);
+      const toggle = screen.getByRole("button", { name: "Edit", description: reason });
+      expect(toggle.getAttribute("title")).toBe(reason);
+      expect(toggle.getAttribute("aria-description")).toBe(reason);
+      expect(toggle.getAttribute("aria-disabled")).toBe("true");
+      await user.tab();
+      expect(document.activeElement).toBe(toggle);
+      await user.keyboard("{Enter} ");
+      await user.click(toggle);
+      expect(onClick).not.toHaveBeenCalled();
+    },
+  );
+});
 
 // One editor group as the shell lays it out: its tab row, then the view.
 function Group(props: {

@@ -43,6 +43,41 @@ describe("states page", () => {
     expect(screen.getAllByText("split: text failed beside a CSV in Raw")).toHaveLength(2);
   });
 
+  it("draws the failed-open body below its disabled document controls", () => {
+    vi.stubGlobal("dohcDesktop", {});
+    try {
+      render(<StatesPage parts={new Set(["tab-row-actions"])} />);
+      for (const theme of ["light", "dark"]) {
+        const part = within(screen.getByTestId(`states-${theme}`));
+        const body = part.getByText("dohc could not read this file.").parentElement!.parentElement!;
+        expect(within(body).getByRole("button", { name: "Try again" })).toBeTruthy();
+        expect(body.querySelector(".lucide-triangle-alert")).not.toBeNull();
+        expect(part.getByRole("button", { name: "Edit", description: "dohc could not open this file." }).getAttribute("aria-disabled")).toBe("true");
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("draws the start tiles and recent files in every empty editor group", () => {
+    vi.stubGlobal("dohcDesktop", {});
+    try {
+      render(<StatesPage parts={new Set(["editor-groups", "editor-groups-empty", "editor-group-focus"])} />);
+      const surfaces = screen.getAllByTestId("start-surface");
+      expect(surfaces).toHaveLength(6);
+      for (const surface of surfaces) {
+        const group = surface.closest("[data-editor-group-id]")!;
+        expect(group.querySelector("[role=tab]")).toBeNull();
+        for (const name of ["Page", "Collection", "Drawing", "plan.md", "notes.md"]) {
+          fireEvent.click(within(surface).getByRole("button", { name }));
+        }
+        expect(within(surface).getByRole("heading", { name: "Recent" })).toBeTruthy();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("opens only at its address and only with the dev-tools grant", () => {
     expect(statesPageRequested(STATES_PAGE_HASH, true)).toBe(true);
     expect(statesPageRequested(STATES_PAGE_HASH, false)).toBe(false);
