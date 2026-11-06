@@ -634,8 +634,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   );
 }
 
-function HomeGlyph({ row, active }: { row: HomeRowModel; active: boolean }) {
-  const tone = active ? "text-ink" : "text-subtle";
+function HomeGlyph({ row, tone }: { row: HomeRowModel; tone: string }) {
   if (row.glyph.glyph === "folder") {
     const Glyph = row.glyph.open ? FolderOpen : Folder;
     return <Glyph size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${tone}`} />;
@@ -675,11 +674,18 @@ const HomeRow = memo(function HomeRow(props: {
     ? props.dropKind === "blocked"
       ? "bg-danger/10 text-danger"
       : props.dropRole === "target"
-        ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
+        ? "bg-success/16 text-ink"
         : "bg-line/35 text-ink"
     : active
       ? "bg-selected font-medium text-ink"
       : "text-muted hover:bg-hover hover:text-ink";
+  // An allowed drop target's glyph takes the success color.
+  const glyphTone =
+    props.dropKind && props.dropKind !== "blocked" && props.dropRole === "target"
+      ? "text-success"
+      : active
+        ? "text-ink"
+        : "text-subtle";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
   const [fixMenuOpen, setFixMenuOpen] = useState(false);
@@ -745,7 +751,7 @@ const HomeRow = memo(function HomeRow(props: {
               <span aria-hidden className="w-3 shrink-0" />
             )
           ) : null}
-          <HomeGlyph row={row} active={active} />
+          <HomeGlyph row={row} tone={glyphTone} />
           {/* The folder hint gives way before the name; the title holds the whole path.
               A row with a cause keeps its sentence as the row's title, so its name has its own. */}
           <span title={cause ? row.label : undefined} className="min-w-0 flex-auto truncate">{row.label}</span>
