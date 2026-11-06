@@ -74,9 +74,9 @@ export type MenuTriggerProps = {
 
 const MENU_WIDTH_PX = 144;
 // Between the trigger and the list.
-const GAP_PX = 4;
+export const MENU_GAP_PX = 4;
 // Between the list and the window's edge, as toasts and the editor's menus keep.
-const EDGE_PX = 12;
+export const MENU_EDGE_PX = 12;
 
 type Place = { left: number; maxHeight: number; top?: number; bottom?: number; above: boolean };
 
@@ -161,7 +161,7 @@ export const MENU_SECTION = "dohc-section-label px-2 pb-1 pt-1.5";
 export const MENU_ENTER = "dohc-menu-in";
 /** The custom properties MENU_ENTER reads: where the list starts, toward its trigger. */
 export function menuEnterFrom(side: "above" | "below" | "left" | "right"): CSSProperties {
-  const offset = `${side === "below" || side === "right" ? "-" : ""}${GAP_PX}px`;
+  const offset = `${side === "below" || side === "right" ? "-" : ""}${MENU_GAP_PX}px`;
   const properties: Record<string, string> =
     side === "left" || side === "right"
       ? { "--dohc-menu-from": "0px", "--dohc-menu-from-x": offset }
@@ -292,14 +292,14 @@ export function Menu(props: {
     const height = list.current?.offsetHeight ?? 0;
     if (box && edge) {
       const left = props.align === "start"
-        ? Math.max(EDGE_PX, Math.min(box.left, window.innerWidth - EDGE_PX - width))
-        : Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
-      const below = window.innerHeight - edge.bottom - GAP_PX - EDGE_PX;
-      const above = edge.top - GAP_PX - EDGE_PX;
+        ? Math.max(MENU_EDGE_PX, Math.min(box.left, window.innerWidth - MENU_EDGE_PX - width))
+        : Math.max(MENU_EDGE_PX, Math.min(box.right, window.innerWidth - MENU_EDGE_PX) - width);
+      const below = window.innerHeight - edge.bottom - MENU_GAP_PX - MENU_EDGE_PX;
+      const above = edge.top - MENU_GAP_PX - MENU_EDGE_PX;
       setPlace(
         height > below && above > below
-          ? { left, bottom: window.innerHeight - edge.top + GAP_PX, maxHeight: above, above: true }
-          : { left, top: edge.bottom + GAP_PX, maxHeight: below, above: false },
+          ? { left, bottom: window.innerHeight - edge.top + MENU_GAP_PX, maxHeight: above, above: true }
+          : { left, top: edge.bottom + MENU_GAP_PX, maxHeight: below, above: false },
       );
     }
     // A field that took focus as it mounted keeps it.

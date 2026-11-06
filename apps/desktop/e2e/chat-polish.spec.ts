@@ -37,7 +37,9 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await expect(menu).toBeVisible();
       const openBox = await composer.boundingBox();
       const menuBox = await menu.boundingBox();
-      expect(menuBox!.y).toBeGreaterThanOrEqual(openBox!.y + openBox!.height);
+      const frameBox = await view.locator("form", { has: composer }).boundingBox();
+      expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(frameBox!.y);
+      expect(Math.abs(menuBox!.x - frameBox!.x)).toBeLessThanOrEqual(1);
       await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`mentions-${theme}.png`) });
       await composer.press("Escape");
@@ -69,7 +71,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🧑🏽‍🚀");
     await astronaut.click();
     await expect(astronautPill).toHaveCount(0);
-    // The menu opens above only when the composer has no room for it below.
+    // The menu opens above even when the composer has no room for it below.
     // A short thread leaves its composer high, so the window ends just
     // under the composer, with less room than one row of the menu.
     await page.setViewportSize({ width: 1280, height: 480 });
