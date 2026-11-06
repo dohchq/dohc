@@ -6,6 +6,7 @@ import { SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import { MiddleCutName } from "../ui/MiddleCutName";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -347,6 +348,7 @@ export const TreeRow = memo(function TreeRow(props: {
   onRowDragEnd: () => void;
 }) {
   const { row } = props;
+  const name = basenameOf(row.fullPath);
   // A drop preview colors the whole row, glyph included.
   const glyphClass = props.dropPreview ? "" : glyphTone(props.selected || props.active);
   const dropClass =
@@ -374,6 +376,10 @@ export const TreeRow = memo(function TreeRow(props: {
         aria-posinset={row.positionInSet}
         aria-setsize={row.setSize}
         aria-selected={props.selected}
+        // The whole name, read once, though MiddleCutName draws it in two
+        // parts. The tooltip shows what a cut row hides.
+        aria-label={name}
+        title={name}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
@@ -455,7 +461,7 @@ export const TreeRow = memo(function TreeRow(props: {
             />
           </>
         )}
-        <span className="min-w-0 flex-1 truncate">{basenameOf(row.fullPath)}</span>
+        <MiddleCutName name={name} />
       </button>
     </li>
   );
@@ -1922,6 +1928,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             <button
                               type="button"
                               title={tab.path}
+                              // The whole title, read once, though
+                              // MiddleCutName draws it in two parts.
+                              aria-label={dirty ? `${title}, unsaved changes` : title}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
                               className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
                             >
@@ -1930,7 +1939,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                                 size={GLYPH_SIZE}
                                 className={glyphTone(active)}
                               />
-                              <span className="min-w-0 flex-1 truncate">{title}</span>
+                              <MiddleCutName name={title} />
                               {dirty ? (
                                 <span
                                   data-testid="open-editor-dirty"

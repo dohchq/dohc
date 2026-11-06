@@ -1864,6 +1864,8 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="active" active />
           <Row name="focused, hover" force="hover focus-visible" />
           <Row name="drop target" folder drop />
+          <Row name="2026-07-08-meeting-notes-with-the-venue-team.md" />
+          <Row name="quarterly-planning-and-budget-review-2026" folder />
         </ul>
       </Section>
 
