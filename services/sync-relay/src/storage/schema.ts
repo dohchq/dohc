@@ -29,6 +29,7 @@ import { initializeAutomationPressSchema } from "./automationPresses";
 import { initializeAutomationWorkspaceSchema, initializeLiveClaimIndex } from "./automationWorkspaces";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import { initializePushSchema } from "./pushSchema";
+import { initializePushDeliveries } from "./pushDeliveries";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
   LINK_DISCUSSION_NAME_BYTE_LIMIT,
@@ -1302,6 +1303,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationPressSchema(db);
     initializeAutomationWorkspaceSchema(db);
     initializePushSchema(db);
+    initializePushDeliveries(db);
     initializeLiveClaimIndex(db);
     initializeServiceHostFeedIndex(db);
     initializeAgentConnectionSchema(db);

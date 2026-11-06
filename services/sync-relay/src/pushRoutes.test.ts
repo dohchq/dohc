@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { isPushStatus } from "@dohc/workspace-contracts/push-subscriptions";
 import { parsePushVapidPublicKey } from "./pushRoutes";
+import { DEFAULT_PUSH_HOSTS } from "./pushEndpoints";
 import { fenceAccount, initializeAccountDeletion, purgeAccountRows } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
 import { PUSH_INSTALLATIONS_PER_ACCOUNT } from "./storage/pushSubscriptions";
@@ -35,17 +36,18 @@ function sessions() {
     if (!session) throw new UnauthorizedError();
     return session;
   });
-  return {valid, resolve, signIn(token: string, userId: string, expiresAtMs = 1_000_000) {
-    valid.set(token, {userId, sessionId: `sign-in-${token}`, expiresAtMs});
+  return {valid, resolve, signIn(token: string, userId: string, expiresAtMs = 1_000_000, displayName = "Alice") {
+    valid.set(token, {userId, sessionId: `sign-in-${token}`, expiresAtMs, displayName});
   }};
 }
 
-async function fixture(options: {vapid?: string | null; storage?: SyncRelayStorage} = {}) {
+async function fixture(options: {vapid?: string | null; storage?: SyncRelayStorage; hosts?: ReadonlySet<string>} = {}) {
   const storage = options.storage ?? await testStorage();
   const auth = sessions();
   let clock = 2_000;
   const handler = testHandler(storage, {namedBrowserSessionLimits: limits, relayExchangeKey: RELAY_EXCHANGE_KEY,
     resolveAccountSession: auth.resolve, nowMs: () => clock,
+    pushHosts: options.hosts ?? new Set(["push.example.test"]),
     ...(options.vapid === null ? {} : {pushVapidPublicKey: options.vapid ?? VAPID})});
   const call = (path: string, token: string | null, init: RequestInit & {headers?: Record<string, string>} = {}) =>
     handler(new Request(`http://relay.test/sync/push/${path}`, {...init, headers: {
@@ -69,6 +71,34 @@ const rows = (storage: SyncRelayStorage) => inspect(storagePath(storage), db =>
 afterEach(async () => {await closeTestStorages();});
 
 describe("push subscriptions", () => {
+  it("refuses hosts outside the configured set with a conflict", async () => {
+    const f = await fixture();
+    f.auth.signIn("alice-1", "alice");
+    expect((await f.subscribe("alice-1", {endpoint: "https://other.example.test/send/device"})).status).toBe(409);
+    expect(rows(f.storage)).toEqual([]);
+  });
+
+  it("accepts Windows push subdomains through the default policy", async () => {
+    const f = await fixture({hosts: DEFAULT_PUSH_HOSTS});
+    f.auth.signIn("alice-1", "alice");
+    for (const host of ["notify.windows.com", "evilnotify.windows.com", "notify.windows.com.evil.test"]) {
+      expect((await f.subscribe("alice-1", {endpoint: `https://${host}/send/device`})).status).toBe(409);
+    }
+    expect((await f.subscribe("alice-1", {endpoint: "https://wns1.notify.windows.com/send/device"})).status).toBe(200);
+  });
+
+  it("stores the validated account name through subscribe and refreshes it after a rename", async () => {
+    const f = await fixture();
+    f.auth.signIn("alice-1", "alice", 1_000_000, "Alice");
+    expect((await f.subscribe("alice-1")).status).toBe(200);
+    const name = () => inspect(storagePath(f.storage), db => db.prepare(
+      "SELECT account_name FROM sync_relay_push_installation_names WHERE installation_id = ?").get(installation(1)));
+    expect(name()).toEqual({account_name: "Alice"});
+    f.auth.signIn("alice-1", "alice", 1_000_000, "Alicia");
+    expect(await body(await f.subscribe("alice-1"))).toMatchObject({generation: 1});
+    expect(name()).toEqual({account_name: "Alicia"});
+  });
+
   it("binds a subscription to the caller's sign-in and keeps it across a restart", async () => {
     const f = await fixture();
     f.auth.signIn("alice-1", "alice");

@@ -39,6 +39,7 @@ export interface AccountSession {
   userId: string;
   sessionId: string;
   expiresAtMs: number;
+  displayName?: string;
 }
 
 export type ResolveAccountSession = (request: Request) => Promise<AccountSession>;
@@ -46,14 +47,15 @@ export type ResolveAccountSession = (request: Request) => Promise<AccountSession
 // State bound to a sign-in, such as a browser's push subscription, ends with
 // it: signing out or in again gives a different session id.
 export function accountSessionFrom(session: {
-  user: { id: string };
+  user: { id: string; name?: string };
   session: { id: string; userId: string; expiresAt: Date | string | number };
 }): AccountSession {
   const expiresAtMs = new Date(session.session.expiresAt).getTime();
   if (session.session.userId !== session.user.id || !session.session.id || !Number.isSafeInteger(expiresAtMs)) {
     throw new UnauthorizedError();
   }
-  return { userId: session.user.id, sessionId: session.session.id, expiresAtMs };
+  return { userId: session.user.id, sessionId: session.session.id, expiresAtMs,
+    ...(typeof session.user.name === "string" ? {displayName: session.user.name} : {}) };
 }
 
 export function createAccountSessionResolver(auth: WorkspaceAuth): ResolveAccountSession {
