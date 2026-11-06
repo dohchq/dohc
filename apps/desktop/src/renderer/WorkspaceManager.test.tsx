@@ -522,8 +522,10 @@ describe("workspace manager", () => {
     expect(document.activeElement).toBe(change);
 
     await user.click(change);
-    expect(document.activeElement).toBe(change);
     await locationReads("/home/sam/projects/research/Personal");
+    expect(screen.queryByText("Dialog unavailable")).toBeNull();
+    expect(screen.getByRole("button", { name: "Change location" })).toBe(change);
+    expect(document.activeElement).toBe(change);
     await act(async () => slowDefault.resolve("/home/sam/dohc"));
     expect(location()).toBe("/home/sam/projects/research/Personal");
   });
