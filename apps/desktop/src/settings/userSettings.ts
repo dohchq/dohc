@@ -78,7 +78,7 @@ export const AgentSettings = z.object({
   enabled: z.boolean(),
   timeoutMinutes: z.number().int().min(1).max(1440).default(30),
   // The name this agent's messages carried before agents had ids. Only the
-  // migration writes it, so those messages stay this agent's after a rename.
+  // migration writes it, and no other agent can take it.
   nameBeforeMigration: PreferredNameForIpc.optional(),
 }).strict().refine((agent) => agent.launch !== undefined || !agent.enabled, {
   message: "Choose how dohc starts this agent before turning it on.",
@@ -137,21 +137,9 @@ export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents
   return agent?.launch ? { ...agent, launch: agent.launch } : null;
 }
 
-/**
- * Your agent that posted as `name`, for a message your own person wrote.
- * The default agent also keeps the name its messages had before agents had
- * ids. Another person's message never reaches here: whose it is comes first.
- */
-export function ownAgentNamed(settings: Pick<DesktopUserSettings, "agents">, name: string): Agent | null {
-  const agents = listAgents(settings);
-  return agents.find((agent) => agent.name === name)
-    ?? agents.find((agent) => agent.id === DEFAULT_AGENT_ID && agent.nameBeforeMigration === name)
-    ?? null;
-}
-
-/** Whether a name is one of your agents' ids or names, which only your own agents' messages carry. */
-export function namesOwnAgent(settings: Pick<DesktopUserSettings, "agents">, name: string): boolean {
-  return listAgents(settings).some(({ id }) => id === name) || ownAgentNamed(settings, name) !== null;
+/** Whether a name an agent gives itself is one of your agents' ids, which only their runs' messages carry. */
+export function isOwnAgentId(settings: Pick<DesktopUserSettings, "agents">, name: string): boolean {
+  return listAgents(settings).some(({ id }) => id === name);
 }
 
 // A message names one of your agents with @ and its name's handle: the name

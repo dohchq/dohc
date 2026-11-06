@@ -25,7 +25,7 @@ import {
 // `agentName` is the name an agent gave for itself, such as an MCP client's
 // handshake name. It is provenance, like a document edit's author; without
 // it the message is from "Agent". A name that is one of the person's agents'
-// ids or names is dropped, so no other agent passes for theirs.
+// ids is dropped, so no other agent takes that agent's place.
 // `agentId` names the agent of a run dohc dispatched, which main knows; the
 // message carries that agent's id and settings name.
 // `reported` is what the agent said about itself: its MCP client's product
@@ -93,8 +93,8 @@ export function createChatWrites(dependencies: {
   agentDisplayName(agentId: string): Promise<string>;
   // The person's agents a message names.
   agentIdsNamedIn(body: string): Promise<string[]>;
-  // Whether a name is one of the person's agents' ids or names.
-  namesOwnAgent(name: string): Promise<boolean>;
+  // Whether a name is one of the person's agents' ids.
+  isOwnAgentId(name: string): Promise<boolean>;
   // The stable per-install id a signed-out reaction is authored under.
   localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
@@ -111,7 +111,7 @@ export function createChatWrites(dependencies: {
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, agentIdsNamedIn, namesOwnAgent, localInstallationId, projectChatBookmarks,
+    localUserDisplayName, agentDisplayName, agentIdsNamedIn, isOwnAgentId, localInstallationId, projectChatBookmarks,
     queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, betweenDispatchScans,
     notifyRenderer,
   } = dependencies;
@@ -219,11 +219,10 @@ export function createChatWrites(dependencies: {
     return await personActorFor(writer);
   }
 
-  // Keeps an agent's own name unless it is one of the person's agents' ids or
-  // names. Their id would give its message that agent's key, and their name
-  // that agent's badge.
+  // Keeps an agent's own name unless it is one of the person's agents' ids,
+  // which would give its message that agent's key.
   async function admittedWriter(writer: ChatWriter): Promise<ChatWriter> {
-    if (writer.via !== "cli" || writer.agentName === undefined || !await namesOwnAgent(writer.agentName)) return writer;
+    if (writer.via !== "cli" || writer.agentName === undefined || !await isOwnAgentId(writer.agentName)) return writer;
     return { via: "cli", actor: writer.actor, ...(writer.agentId ? { agentId: writer.agentId } : {}) };
   }
 

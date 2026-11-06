@@ -22,8 +22,7 @@ import {
   newAgentHue,
   newAgentId,
   newAgentName,
-  ownAgentNamed,
-  namesOwnAgent,
+  isOwnAgentId,
   withFirstAgent,
   effectiveThemeMode,
   zoomPercent,
@@ -291,20 +290,15 @@ describe("desktop user settings model", () => {
     expect(newAgentName(agents, "Claude Code")).toBe("Claude Code");
   });
 
-  it("finds your agent by its name, or by the name its messages had before agents had ids", () => {
+  it("knows your agents by id, not by name", () => {
     const settings = {
       agents: {
         default: testAgent({ name: "Atlas", nameBeforeMigration: "Nova" }),
         "agent-b": testAgent({ name: "Bee" }),
       },
     };
-    expect(ownAgentNamed(settings, "Nova")?.id).toBe("default");
-    expect(ownAgentNamed(settings, "Atlas")?.id).toBe("default");
-    expect(ownAgentNamed(settings, "Bee")?.id).toBe("agent-b");
-    expect(ownAgentNamed(settings, "nova")).toBeNull();
-    expect(ownAgentNamed(settings, "Cursor")).toBeNull();
-    for (const name of ["default", "agent-b", "Atlas", "Nova", "Bee"]) expect(namesOwnAgent(settings, name)).toBe(true);
-    for (const name of ["nova", "Cursor", "dohc-mcp"]) expect(namesOwnAgent(settings, name)).toBe(false);
+    for (const id of ["default", "agent-b"]) expect(isOwnAgentId(settings, id)).toBe(true);
+    for (const name of ["Atlas", "Nova", "Bee", "Default", "dohc-mcp"]) expect(isOwnAgentId(settings, name)).toBe(false);
   });
 
   it("starts only an agent dohc has a launch for", () => {

@@ -110,7 +110,7 @@ function fixture() {
     // The person's agents: Nova, the default, and Codex.
     agentIdsNamedIn: async (body: string) => Object.entries({ default: "@nova", codex: "@codex" })
       .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
-    namesOwnAgent: async (name: string) => ["default", "codex", "Nova", "Codex"].includes(name),
+    isOwnAgentId: async (name: string) => ["default", "codex"].includes(name),
     localInstallationId: () => "local-id",
     // Marks where an answer holds dispatch scans off.
     async betweenDispatchScans(_workspaceId, write) {
@@ -688,7 +688,8 @@ describe("ActorKey local admission", () => {
     expect(parseActorKey(switched.authorActorKey!)).toEqual({ kind: "account", issuer: "https://cloud.test", userId: "user-2" });
   });
 
-  it.each([undefined, " Opus "])("records the actual handshake claim (%s), matching History", async (agentName) => {
+  // Nova is one of the person's agents' names. A name alone is only a claim, so it stays.
+  it.each([undefined, " Opus ", "Nova"])("records the actual handshake claim (%s), matching History", async (agentName) => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
@@ -722,7 +723,7 @@ describe("ActorKey local admission", () => {
     expect(person).not.toHaveProperty("authorReported");
   });
 
-  it.each(["default", "codex", "Nova", "Codex"])("drops a claim to the person's agent %s, so the message is an unnamed agent's", async (agentName) => {
+  it.each(["default", "codex"])("drops a claim to the person's agent id %s, so the message is an unnamed agent's", async (agentName) => {
     const test = fixture();
     const claimed = await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
