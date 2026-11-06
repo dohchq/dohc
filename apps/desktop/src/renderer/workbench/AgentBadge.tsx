@@ -56,7 +56,7 @@ export function AgentBadge(props: {
       setPlace(resolveFloatingMenuPosition({
         cursorRect: badge.getBoundingClientRect(),
         menuWidth: card.offsetWidth,
-        menuMaxHeight: card.offsetHeight,
+        menuMaxHeight: card.scrollHeight + card.offsetHeight - card.clientHeight,
         margin: 4,
         gap: 4,
       }));
