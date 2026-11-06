@@ -1660,10 +1660,16 @@ export function ChatsView(props: {
   }, []);
 
   const openChannel = useCallback(
-    async (channel: ChatChannelRecord) => {
+    async (channel: ChatChannelRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
       const refreshSeq = ++channelRefreshSeq.current;
-      setNav({ level: "channel", channel: withListedAgent(channel, latestChannels.current) });
+      setNav({
+        level: "channel",
+        channel: withListedAgent(channel, latestChannels.current),
+        ...(focusMessageId ? { focusMessageId } : {}),
+      });
+      // A message to land on at a group's level is in its chat lane.
+      if (focusMessageId) setGroupLane("chat");
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
@@ -2498,7 +2504,7 @@ export function ChatsView(props: {
       // no nav state, so the passive report alone would cancel nothing.
       props.onNavCommand?.(target);
       if (target.level === "feed") openFeed();
-      else if (target.level === "channel") void openChannel(target.channel);
+      else if (target.level === "channel") void openChannel(target.channel, target.focusMessageId);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
       } else void openDm(target.dm, target.focusMessageId);
@@ -2581,7 +2587,7 @@ export function ChatsView(props: {
     handoffReportBlocked.current = false;
     if (seed) {
       if (seed.level === "feed") openFeed();
-      else if (seed.level === "channel") void openChannel(seed.channel);
+      else if (seed.level === "channel") void openChannel(seed.channel, seed.focusMessageId);
       else if (seed.level === "thread") {
         void openThread(seed.channel, seed.thread, seed.focusMessageId);
       }

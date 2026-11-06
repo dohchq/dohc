@@ -28,7 +28,7 @@ export function chatsNavigationRequiresRemount(
   // focus target so ChatsView gets another chance to scroll (and so clicking
   // the same backlink twice remains useful after the user has scrolled away).
   return (
-    (next.level === "thread" || next.level === "dm") &&
+    (next.level === "channel" || next.level === "thread" || next.level === "dm") &&
     Boolean(next.focusMessageId)
   );
 }

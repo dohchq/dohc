@@ -185,6 +185,21 @@ describe("chat editor tabs", () => {
     expect(editor.drafts).toBe(draft);
   });
 
+  it("takes a jump to a message in an open agent conversation, keeping its draft", () => {
+    const { result } = renderHook(() => useChatEditorTabs({
+      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
+    }));
+    act(() => result.current.open(agent));
+    const editor = result.current.get(chatEditorPath(agent));
+    act(() => editor.onDraftsChange(draft));
+    const before = editor.revision;
+    const jump = { ...agent, focusMessageId: "reply" } as ChatsNav;
+    act(() => result.current.open(jump));
+    expect(editor.nav).toEqual(jump);
+    expect(editor.revision).toBe(before + 1);
+    expect(editor.drafts).toBe(draft);
+  });
+
   it("refreshes a focused DM's metadata while keeping its draft and message position", () => {
     const onOpen = vi.fn();
     const { result } = renderHook(() => useChatEditorTabs({

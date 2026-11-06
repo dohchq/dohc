@@ -877,7 +877,7 @@ export function useShellError(workspaceId: string) {
         details: [["File", recovery.path, recovery.path.length], ["Change id", recovery.momentId]],
         retry: null,
         action: { label: "Open History", run: recovery.open },
-        target: { to: "history" },
+        target: { to: "history-change", moment: recovery.momentId, path: recovery.path },
         onDismiss: recovery.dismiss,
         atMs,
         seen: false,

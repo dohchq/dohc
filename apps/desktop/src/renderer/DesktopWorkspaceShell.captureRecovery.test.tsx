@@ -124,6 +124,19 @@ describe("text kept in History", () => {
     expect(await navigator.clipboard.readText()).toBe("Typing kept here.\n");
   });
 
+  it("opens History with the recovery change from its Notices row, as its Open History does", async () => {
+    const { bridge } = recoveryBridge();
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId(NOTICE_TOAST);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = within(screen.getByTestId("notice-center")).getByText(CAPTURE_RECOVERY_TITLE).closest("li")!;
+    await user.click(row.querySelector<HTMLElement>("[data-notice-open]")!);
+    await screen.findByTestId("engine-moment-diff-page");
+    expect(screen.getByTestId("activity-history").getAttribute("aria-current")).toBe("page");
+    expect(screen.getByTestId(`tab-dohc://moment-diff/${RECOVERY.momentId}`)).toBeTruthy();
+  });
+
   it("drops the notice once its Restore clears the recovery in the engine", async () => {
     const { bridge, clear } = recoveryBridge();
     Object.assign(bridge, {

@@ -481,6 +481,41 @@ describe("a failed run's notice", () => {
     listChatMessages.mockResolvedValue({ messages: [] });
   });
 
+  it("finds a conversation in a chat lane and opens it there, and a post as its thread", async () => {
+    const group = { id: "group-1", name: "trip", slug: "trip", kind: "channel" as const, type: "both" as const,
+      createdAtMs: 0, updatedAtMs: 0, threadCount: 2, unreadCount: 0 };
+    const record = (id: string) => ({ id, channelId: group.id, title: id, createdAtMs: 0, updatedAtMs: 0,
+      messageCount: 1, lastReadSequence: 0, unreadCount: 0 });
+    listChatChannels.mockResolvedValue({ channels: [group], fileThreads: [] });
+    listChannelThreads.mockImplementation(async ({ lane }: { lane?: "posts" | "chat" }) =>
+      ({ threads: [record(lane === "chat" ? "lane-thread" : "post-thread")] }));
+    const reply = (thread: string) => notice({ store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null,
+      postedHere: true, target: { thread, message: "m-1" } });
+    const { result, openChat } = setup([reply("lane-thread")], [workspace("notes")]);
+    await expect(result.current.onOpenSentNotice(reply("lane-thread"), live())).resolves.toBeNull();
+    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: group, focusMessageId: "m-1" });
+    await expect(result.current.onOpenSentNotice(reply("post-thread"), live())).resolves.toBeNull();
+    expect(openChat).toHaveBeenLastCalledWith({ level: "thread", channel: group, thread: record("post-thread"), focusMessageId: "m-1" });
+    listChannelThreads.mockReset();
+  });
+
+  it("opens a mention in a conversation at its message, and a mention in a file at the file", async () => {
+    const dm = { id: "chat-default", name: "default", slug: "chat-default", kind: "agent" as const, agentId: "default",
+      createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0 };
+    listChatChannels.mockResolvedValue({ channels: [dm], fileThreads: [] });
+    listChannelThreads.mockResolvedValue({ threads: [{ id: "thread-1", channelId: dm.id, title: "t", createdAtMs: 0, updatedAtMs: 0,
+      messageCount: 1, lastReadSequence: 0, unreadCount: 0 }] });
+    const inChat = notice({ kind: "mention", workspaceId: "notes", recipientShareId: null, target: { thread: "thread-1", message: "m-1" } });
+    const inFile = notice({ kind: "mention", workspaceId: "notes", recipientShareId: null, target: { path: "Trip/plan.md" } });
+    const { result, openChat, openFile } = setup([inChat, inFile], [workspace("notes")]);
+    expect(result.current.sentNotices.map((row) => row.openable)).toEqual([true, true]);
+    await result.current.onOpenSentNotice(inChat, live());
+    expect(openChat).toHaveBeenCalledExactlyOnceWith({ level: "channel", channel: dm, focusMessageId: "m-1" });
+    await result.current.onOpenSentNotice(inFile, live());
+    expect(openFile).toHaveBeenCalledExactlyOnceWith("Trip/plan.md");
+    listChannelThreads.mockReset();
+  });
+
   const failed = notice({
     kind: "automation-failed", workspaceId: "notes", recipientShareId: null, postedHere: true,
     target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" },

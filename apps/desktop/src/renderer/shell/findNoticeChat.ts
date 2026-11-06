@@ -4,24 +4,26 @@ import type { NoticeTarget } from "./noticeTarget";
 
 /**
  * Where a chat target opens in this workspace, or null when no Group or
- * agent conversation here holds its thread. An agent's DM is one
- * conversation, so its threads open inside it. The message to land on is
- * the one named, or a run's last message; with neither, the conversation
- * opens at its end. A failed read throws.
+ * agent conversation here holds its thread. A thread in a chat lane, such
+ * as an agent's DM, is that conversation, so it opens there; a post opens as
+ * its thread. The message to land on is the one named, or a run's last
+ * message; with neither, the conversation opens at its end. A failed read
+ * throws.
  */
 export async function findNoticeChat(
   workspaceId: string,
   target: Extract<NoticeTarget, { to: "chat" }>,
 ): Promise<ChatsNav | null> {
   const { channels } = await bridge().listChatChannels({ workspaceId });
-  const places = await Promise.all(channels.filter((channel) => channel.kind !== "dm").map(async (channel) =>
-    ({ channel, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id })).threads })));
-  for (const { channel, threads } of places) {
+  const places = await Promise.all(channels.filter((channel) => channel.kind !== "dm").flatMap((channel) =>
+    (["chat", "posts"] as const).map(async (lane) =>
+      ({ channel, lane, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id, lane })).threads }))));
+  for (const { channel, lane, threads } of places) {
     const thread = threads.find((candidate) => candidate.id === target.thread);
     if (!thread) continue;
     const focus = target.message ?? (target.run === undefined ? undefined : await lastMessageOfRun(workspaceId, target.thread, target.run));
     const at = focus === undefined ? {} : { focusMessageId: focus };
-    return channel.kind === "agent" ? { level: "channel", channel, ...at } : { level: "thread", channel, thread, ...at };
+    return lane === "chat" ? { level: "channel", channel, ...at } : { level: "thread", channel, thread, ...at };
   }
   return null;
 }

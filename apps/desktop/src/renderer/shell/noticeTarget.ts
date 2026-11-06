@@ -17,6 +17,8 @@ export type NoticeTarget =
   | { to: "share-changes"; proposalId: string }
   | { to: "sharing-declined"; versionId: string; objectId: string }
   | { to: "history" }
+  // The timeline with one change's file open beside it.
+  | { to: "history-change"; moment: string; path: string }
   // Live documents, at a page when one is named.
   | { to: "live-documents"; reveal?: string }
   | { to: "conflicts" }

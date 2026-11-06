@@ -5351,6 +5351,9 @@ export function DesktopWorkspaceShell(props: {
         case "history":
           openHistoryView();
           return null;
+        case "history-change":
+          openCaptureRecovery(target.moment, target.path);
+          return null;
         case "live-documents":
           openLiveDocuments(owner, target.reveal ?? null);
           return null;
@@ -5369,7 +5372,7 @@ export function DesktopWorkspaceShell(props: {
       }
     },
     [
-      hasCommittedListing, refreshFiles, openAutomation, openAutomationControls, openChatsInvitation, openChatsNavInTab, openCloud, openFile,
+      hasCommittedListing, refreshFiles, openAutomation, openAutomationControls, openCaptureRecovery, openChatsInvitation, openChatsNavInTab, openCloud, openFile,
       openHistoryView, openLiveDocuments, openSettings, openSharingDeclined, privacySettingsAction, showPathInExplorer, workspaceId,
     ],
   );

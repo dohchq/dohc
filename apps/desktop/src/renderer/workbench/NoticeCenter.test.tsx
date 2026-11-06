@@ -2463,7 +2463,7 @@ describe("notices sent to you", () => {
     const onOpenSentNotice = vi.fn(async () => null);
     const onDismissSentNotice = vi.fn();
     const onOpenHistory = vi.fn();
-    const onOpenTarget = vi.fn(() => null);
+    const onOpenTarget = vi.fn(async () => null);
     renderNotices({
       agentActive: true,
       onOpenHistory,
@@ -2658,7 +2658,7 @@ describe("opening a row", () => {
     ["automation-hold-collection:Trip#task-0", { automationHolds: [hold], onAllowAutomationHold: vi.fn() }, { to: "automation", automation: "collection:Trip#task" }],
   ];
   it.each(rows)("opens the %s row where it is about", async (id, props, target) => {
-    const onOpenTarget = vi.fn(() => null);
+    const onOpenTarget = vi.fn(async () => null);
     renderNotices({ ...props, onOpenTarget });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     // The title's button stretches over the row; jsdom has no hit-testing.
@@ -2669,7 +2669,7 @@ describe("opening a row", () => {
   });
 
   it.each(["{Enter}", " "])("opens with %s on the row", async (key) => {
-    const onOpenTarget = vi.fn(() => null);
+    const onOpenTarget = vi.fn(async () => null);
     renderNotices({ agentActive: true, onOpenTarget });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     act(() => screen.getByTestId("notice-agent-active-open-row").focus());
@@ -2678,7 +2678,7 @@ describe("opening a row", () => {
   });
 
   it("lets a row's own buttons do only what they name", async () => {
-    const onOpenTarget = vi.fn(() => null);
+    const onOpenTarget = vi.fn(async () => null);
     const onRetryWorkspaceError = vi.fn();
     const onDismissWorkspaceError = vi.fn();
     renderNotices({ workspaceErrors: [failedSave], onOpenTarget, onRetryWorkspaceError, onDismissWorkspaceError });
