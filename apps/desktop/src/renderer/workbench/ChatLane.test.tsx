@@ -574,8 +574,8 @@ describe("ChatLane", () => {
     expect(within(failed).getByTestId("chats-lane-run-next-step").textContent).toBe("Mention @Nova to ask again.");
     expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
 
-    // An agent gone from Settings: the line says to add it again, and
-    // Settings opens the Agents page.
+    // An agent gone from Settings: the line says to add an agent, and
+    // Settings › Agents opens that page.
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({
       ...idle,
       failedRun: {
@@ -587,7 +587,7 @@ describe("ChatLane", () => {
     });
     await act(async () => activity({ workspaceId: "workspace-a" }));
     await waitFor(() => expect(screen.getByTestId("chats-lane-run-next-step").textContent)
-      .toBe("Add your agent again in Settings to ask again."));
+      .toBe("Add an agent in Settings › Agents to ask again."));
     fireEvent.click(screen.getByTestId("chats-lane-run-open-settings"));
     expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
   });

@@ -868,7 +868,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       : undefined;
     // Running these again would repeat what they did, so the person asks
     // the agent again instead, with the @handle the composer inserts, or
-    // adds it again when it's gone from Settings. A run that couldn't start
+    // adds an agent when it's gone from Settings. A run that couldn't start
     // or needs Node.js has its own next step, and a name with no handle
     // can't be mentioned.
     const handle = agentName === undefined ? "" : handleForName(agentName);

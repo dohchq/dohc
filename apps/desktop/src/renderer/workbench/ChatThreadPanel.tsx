@@ -218,7 +218,7 @@ export function FailedRunLine(props: {
           <span role="status" className="min-w-0">
             {props.failed.nextStep.kind === "mention" ? `Mention @${props.failed.nextStep.handle} to ask again.` : (
               <>
-                Add your agent again in{" "}
+                Add an agent in{" "}
                 {props.onOpenAgentSettings ? (
                   <button
                     type="button"
@@ -226,9 +226,9 @@ export function FailedRunLine(props: {
                     onClick={props.onOpenAgentSettings}
                     className="rounded-sm text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
                   >
-                    Settings
+                    Settings › Agents
                   </button>
-                ) : "Settings"}{" "}
+                ) : "Settings › Agents"}{" "}
                 to ask again.
               </>
             )}

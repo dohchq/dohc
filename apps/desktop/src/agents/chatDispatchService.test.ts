@@ -3227,9 +3227,9 @@ describe("chatDispatchService", () => {
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.nextStep).toEqual(nextStep);
   });
 
-  // The agent is gone, so nobody can mention it: the line says to add it
-  // again, and the row calls it your agent.
-  it("says to add the agent again when it's gone from Settings", async () => {
+  // The agent is gone, so nobody can mention it: the line says to add an
+  // agent, and the row calls it your agent.
+  it("says to add an agent when the run's agent is gone from Settings", async () => {
     const fixture = await createFixture();
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });

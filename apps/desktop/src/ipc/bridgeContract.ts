@@ -5903,7 +5903,7 @@ export const ChatDispatchFailedRun = z.object({
   nextStep: z.discriminatedUnion("kind", [
     // "Mention @Nova to ask again.", with the handle the composer inserts.
     z.object({ kind: z.literal("mention"), handle: z.string().min(1).max(200) }).strict(),
-    // "Add your agent again in Settings to ask again.", for an agent no
+    // "Add an agent in Settings › Agents to ask again.", for an agent no
     // longer in Settings.
     z.object({ kind: z.literal("add-agent") }).strict(),
   ]).optional(),
