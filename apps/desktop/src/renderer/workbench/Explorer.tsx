@@ -1964,7 +1964,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 ))}
               </ul>
             ) : (
-              <div className="px-3 py-1.5 text-[11px] text-subtle">
+              <div className="px-3 py-1.5 text-[11px] text-muted">
                 No open editors
               </div>
             )
@@ -2059,7 +2059,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             <>
               {empty ? (
                 props.listed ? (
-                  <div className="px-3 py-1.5 text-[11px] text-subtle">
+                  <div className="px-3 py-1.5 text-[11px] text-muted">
                     No files
                   </div>
                 ) : null
