@@ -218,13 +218,17 @@ describe("CloudSyncSettings", () => {
     expect(settings.onConnect).toHaveBeenCalledOnce();
   });
 
-  it("waits for the shell's read, and offers to read again after it failed", () => {
+  it("waits for the shell's read, and says the read failed beside Try again", () => {
     const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(null)} />);
     expect(screen.getByTestId("settings-cloud-checking")).toBeTruthy();
+    expect(screen.queryByTestId("settings-cloud-unreadable")).toBeNull();
     expect(screen.queryByTestId("settings-cloud-connect")).toBeNull();
 
     const settings = cloud(null, { unreadable: true });
     rerender(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+    expect(within(screen.getByTestId("settings-row-server")).getByTestId("settings-cloud-unreadable").textContent).toBe(
+      "dohc could not read this workspace's sync status.",
+    );
     fireEvent.click(within(screen.getByTestId("settings-row-server")).getByRole("button", { name: "Try again" }));
     expect(settings.onChanged).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("settings-cloud-connect")).toBeNull();

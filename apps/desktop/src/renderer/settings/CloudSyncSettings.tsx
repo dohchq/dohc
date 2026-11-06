@@ -242,9 +242,19 @@ export function CloudSyncSettings(props: {
     if (!props.cloud.unreadable) {
       return <SkeletonRows rows={2} label="Checking your server connection…" testId="settings-cloud-checking" />;
     }
-    // The shell already raised the failure, with its reason and Try again.
+    // The shell's toast and Notices row give the reason. The row says what
+    // failed, in the unconfirmed account line's look, and reads again.
     return (
-      <SettingRow title="Server" testId="settings-row-server">
+      <SettingRow
+        title="Server"
+        testId="settings-row-server"
+        description={
+          <span data-testid="settings-cloud-unreadable" className="flex gap-1 text-danger">
+            <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
+            <span>dohc could not read this workspace's sync status.</span>
+          </span>
+        }
+      >
         <SecondaryButton onClick={props.cloud.onChanged}>
           Try again
         </SecondaryButton>
