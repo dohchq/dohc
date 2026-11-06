@@ -3227,9 +3227,14 @@ describe("chatDispatchService", () => {
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.nextStep).toEqual(nextStep);
   });
 
-  // The agent is gone, so nobody can mention it: the line says to add an
-  // agent, and the row calls it your agent.
-  it("says to add an agent when the run's agent is gone from Settings", async () => {
+  // An agent the @ menu can't offer can't be mentioned, so the line gives
+  // the step in Settings. A removed agent's name is gone with it, so the row
+  // calls it your agent. The notice keeps its words.
+  it.each([
+    { agent: "removed", words: "Your agent didn't reply. Its run ended with an error.", nextStep: { kind: "add-agent" } },
+    { agent: "off", words: "Nova didn't reply. Its run ended with an error.", nextStep: { kind: "turn-on", name: "Nova" } },
+    { agent: "not set up", words: "Nova didn't reply. Its run ended with an error.", nextStep: { kind: "set-up", name: "Nova" } },
+  ] as const)("gives the step in Settings when the run's agent is now $agent", async ({ agent, words, nextStep }) => {
     const fixture = await createFixture();
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
@@ -3237,12 +3242,12 @@ describe("chatDispatchService", () => {
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     fixture.spawnCalls[0]!.process.emitExit(7);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
-    vi.spyOn(fixture.serviceOptions, "readDispatchAgents").mockResolvedValue([]);
+    const [nova] = await fixture.serviceOptions.readDispatchAgents();
+    vi.spyOn(fixture.serviceOptions, "readDispatchAgents").mockResolvedValue(agent === "removed" ? []
+      : [{ ...nova!, enabled: false, ...(agent === "not set up" ? { launch: undefined } : {}) }]);
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
-      runId: claim.run.runId, triggerMessageId: trigger.messageId,
-      words: "Your agent didn't reply. Its run ended with an error.",
-      nextStep: { kind: "add-agent" }, retryable: false,
+      runId: claim.run.runId, triggerMessageId: trigger.messageId, words, nextStep, retryable: false,
     });
     expect(fixture.notices[0]!.body).toBe("Its run ended with an error.");
   });

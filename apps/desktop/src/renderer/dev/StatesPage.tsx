@@ -2647,6 +2647,14 @@ function Pane(props: { theme: "light" | "dark" }) {
             retryable={false}
           />
         </Specimen>
+        <Specimen label="failed, its agent turned off since">
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep={{ kind: "turn-on", name: "Claude Code" }}
+            posted={false}
+            retryable={false}
+          />
+        </Specimen>
         <Specimen label="failed, its agent gone from Settings">
           <ChatFailedRunSpecimen
             words="Your agent didn't reply. Its run ended with an error."

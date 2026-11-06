@@ -837,10 +837,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<void> {
     if (!options.runNotices) return;
     const { workspaceId } = workspace;
-    const agentName = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name;
+    const agent = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId);
     const words = isFailedOutcome(outcome)
-      ? await failureWords(workspace, run, outcome, agentName)
-      : { lead: endedRunTitle(outcome, agentName), reason: "" };
+      ? await failureWords(workspace, run, outcome, agent)
+      : { lead: endedRunTitle(outcome, agent?.name), reason: "" };
     await options.runNotices.post({
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
@@ -859,7 +859,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     workspace: ChatDispatchWorkspace,
     run: AgentRunRecord,
     outcome: FailedOutcome,
-    agentName: string | undefined,
+    agent: Agent | undefined,
   ): Promise<{ lead: string; reason: string; nextStep?: ChatDispatchFailedRun["nextStep"] }> {
     const posted = outcome !== "no-reply" && outcome !== "not-started" && (await options.dispatchStoreFor(workspace)
       .listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
@@ -867,17 +867,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
     // Running these again would repeat what they did, so the person asks
-    // the agent again instead, with the @handle the composer inserts, or
-    // adds an agent when it's gone from Settings. A run that couldn't start
-    // or needs Node.js has its own next step, and a name with no handle
-    // can't be mentioned.
-    const handle = agentName === undefined ? "" : handleForName(agentName);
-    const nextStep = !ASKS_AGAIN.has(outcome) || needsNodeJs(outcome, nodeAvailable) ? undefined
-      : agentName === undefined ? { kind: "add-agent" as const }
-      : handle ? { kind: "mention" as const, handle }
+    // the agent again instead, with the @handle the composer inserts. When
+    // the @ menu can't offer the agent, the step is in Settings: add an
+    // agent, set it up or turn it on, in the order its DM checks them. A
+    // run that couldn't start or needs Node.js has its own next step, and a
+    // name with no handle can't be mentioned.
+    const handle = agent ? handleForName(agent.name) : "";
+    const nextStep: ChatDispatchFailedRun["nextStep"] = !ASKS_AGAIN.has(outcome) || needsNodeJs(outcome, nodeAvailable) ? undefined
+      : !agent ? { kind: "add-agent" }
+      : !agent.launch ? { kind: "set-up", name: noticeAgentName(agent.name) }
+      : !agent.enabled ? { kind: "turn-on", name: noticeAgentName(agent.name) }
+      : handle ? { kind: "mention", handle }
       : undefined;
     return {
-      lead: `${noticeAgentName(agentName)} ${posted ? "stopped before finishing" : "didn't reply"}`,
+      lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
       ...(nextStep ? { nextStep } : {}),
     };
@@ -1691,8 +1694,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     found ??= stopped;
     if (!found) return null;
     const { run, outcome, retryable } = found;
-    const agentName = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name;
-    const { lead, reason, nextStep } = await failureWords(workspace, run, outcome, agentName);
+    const agent = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId);
+    const { lead, reason, nextStep } = await failureWords(workspace, run, outcome, agent);
     return {
       runId: run.runId,
       triggerMessageId: run.triggerMessageId,

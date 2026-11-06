@@ -5903,9 +5903,13 @@ export const ChatDispatchFailedRun = z.object({
   nextStep: z.discriminatedUnion("kind", [
     // "Mention @Nova to ask again.", with the handle the composer inserts.
     z.object({ kind: z.literal("mention"), handle: z.string().min(1).max(200) }).strict(),
-    // "Add an agent in Settings › Agents to ask again.", for an agent no
-    // longer in Settings.
+    // For an agent the @ menu can't offer, a step in Settings: "Add an agent
+    // in Settings to ask again." when it's gone, "Turn Nova on in Settings
+    // to ask again." when it's off, and "Set up Nova in Settings to ask
+    // again." when it isn't set up.
     z.object({ kind: z.literal("add-agent") }).strict(),
+    z.object({ kind: z.literal("turn-on"), name: z.string().min(1).max(1_000) }).strict(),
+    z.object({ kind: z.literal("set-up"), name: z.string().min(1).max(1_000) }).strict(),
   ]).optional(),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),

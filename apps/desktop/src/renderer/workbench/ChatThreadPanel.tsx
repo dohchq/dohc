@@ -216,27 +216,41 @@ export function FailedRunLine(props: {
         <span data-testid={`${props.testIdPrefix}-run-next-step`} className="flex basis-full gap-x-2">
           <TriangleAlert size={14} aria-hidden className="invisible shrink-0" />
           <span role="status" className="min-w-0">
-            {props.failed.nextStep.kind === "mention" ? `Mention @${props.failed.nextStep.handle} to ask again.` : (
-              <>
-                Add an agent in{" "}
-                {props.onOpenAgentSettings ? (
-                  <button
-                    type="button"
-                    data-testid={`${props.testIdPrefix}-run-open-settings`}
-                    onClick={props.onOpenAgentSettings}
-                    className="rounded-sm text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
-                  >
-                    Settings › Agents
-                  </button>
-                ) : "Settings › Agents"}{" "}
-                to ask again.
-              </>
-            )}
+            <FailedRunNextStep
+              step={props.failed.nextStep}
+              testIdPrefix={props.testIdPrefix}
+              onOpenAgentSettings={props.onOpenAgentSettings}
+            />
           </span>
         </span>
       ) : null}
     </div>
   );
+}
+
+// What to do instead of Try again: mention the agent, or, when the @ menu
+// can't offer it, a step in Settings, which opens the Agents page.
+function FailedRunNextStep(props: {
+  step: NonNullable<ChatDispatchFailedRun["nextStep"]>;
+  testIdPrefix: string;
+  onOpenAgentSettings?: () => void;
+}) {
+  const { step } = props;
+  if (step.kind === "mention") return <>Mention @{step.handle} to ask again.</>;
+  const action = step.kind === "add-agent" ? "Add an agent"
+    : step.kind === "turn-on" ? `Turn ${step.name} on`
+    : `Set up ${step.name}`;
+  const settings = props.onOpenAgentSettings ? (
+    <button
+      type="button"
+      data-testid={`${props.testIdPrefix}-run-open-settings`}
+      onClick={props.onOpenAgentSettings}
+      className="rounded-sm text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
+    >
+      Settings
+    </button>
+  ) : "Settings";
+  return <>{action} in {settings} to ask again.</>;
 }
 
 // Where a failed run's line goes: under its last post, by when it was

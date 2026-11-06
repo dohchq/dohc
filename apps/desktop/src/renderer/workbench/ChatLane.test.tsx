@@ -574,20 +574,20 @@ describe("ChatLane", () => {
     expect(within(failed).getByTestId("chats-lane-run-next-step").textContent).toBe("Mention @Nova to ask again.");
     expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
 
-    // An agent gone from Settings: the line says to add an agent, and
-    // Settings › Agents opens that page.
-    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-      ...idle,
-      failedRun: {
-        ...failedRun,
-        words: "Your agent didn't reply. Its run ended with an error.",
-        nextStep: { kind: "add-agent" },
-        retryable: false,
-      },
-    });
-    await act(async () => activity({ workspaceId: "workspace-a" }));
-    await waitFor(() => expect(screen.getByTestId("chats-lane-run-next-step").textContent)
-      .toBe("Add an agent in Settings › Agents to ask again."));
+    // An agent the @ menu can't offer: the line gives the step, and
+    // Settings opens the Agents page.
+    for (const [nextStep, line] of [
+      [{ kind: "add-agent" }, "Add an agent in Settings to ask again."],
+      [{ kind: "turn-on", name: "Nova" }, "Turn Nova on in Settings to ask again."],
+      [{ kind: "set-up", name: "Nova" }, "Set up Nova in Settings to ask again."],
+    ] as const) {
+      bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+        ...idle,
+        failedRun: { ...failedRun, words: "Nova didn't reply. Its run ended with an error.", nextStep, retryable: false },
+      });
+      await act(async () => activity({ workspaceId: "workspace-a" }));
+      await waitFor(() => expect(screen.getByTestId("chats-lane-run-next-step").textContent).toBe(line));
+    }
     fireEvent.click(screen.getByTestId("chats-lane-run-open-settings"));
     expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
   });
