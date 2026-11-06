@@ -1,5 +1,5 @@
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Sparkles } from "lucide-react";
+import { Plug, Sparkles } from "lucide-react";
 import type { ActorPresentation, ChatReportedAgentRecord } from "../../ipc/bridgeContract";
 import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
@@ -40,7 +40,12 @@ export function AgentBadge(props: {
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
-  const ownAgent = props.presentation?.self && settings && author.authorAgentId
+  // A connected agent wrote outside a run dohc started: the plug, and a card
+  // that names it as reported.
+  const connected = props.presentation?.connected === true;
+  const label = connected ? "connected agent" : "agent";
+  const Mark = connected ? Plug : Sparkles;
+  const ownAgent = !connected && props.presentation?.self && settings && author.authorAgentId
     ? listAgents(settings).find(({ id }) => id === author.authorAgentId) ?? null
     : null;
   const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
@@ -91,7 +96,7 @@ export function AgentBadge(props: {
         data-testid={`${props.testIdPrefix}-agent-badge`}
         data-chat-escape-local="true"
         tabIndex={0}
-        aria-label="agent"
+        aria-label={label}
         aria-describedby={open ? descriptionId : undefined}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
@@ -103,8 +108,8 @@ export function AgentBadge(props: {
         }}
         className="inline-flex rounded"
       >
-        {props.children ?? <Sparkles size={12} strokeWidth={1.9} aria-hidden />}
-        <span className="sr-only">agent</span>
+        {props.children ?? <Mark size={12} strokeWidth={1.9} aria-hidden />}
+        <span className="sr-only">{label}</span>
       </span>
       {open ? (
         <span
@@ -122,9 +127,13 @@ export function AgentBadge(props: {
           }}
           className="dohc-popover dohc-pop-in fixed z-50 flex w-max max-w-72 flex-col gap-1 overflow-y-auto rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
         >
-          <span className="font-medium">{author.authorDisplayName}</span>
+          <span className="font-medium">
+            {author.authorDisplayName}
+            {connected ? <span className="text-muted"> {AS_REPORTED}</span> : null}
+          </span>
           <span className="text-muted">
-            {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
+            {connected ? "Connected agent"
+              : author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
           </span>
           {reported ? (
             <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">

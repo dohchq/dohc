@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { ACTOR_HUES, actorHueSlot, shownAgentName } from "./actorPresentation";
+import { ACTOR_HUES, actorHueSlot, isConnectedAgentId, shownAgentName } from "./actorPresentation";
 it.each([["", 2], ["alice", 6], ["A😀", 4], ["é", 0]] as const)("pins frozen code-point hue slot %s", (input, slot) => {
   expect(actorHueSlot(input)).toBe(slot);
 });
@@ -10,4 +10,8 @@ it("shows an agent's name only when no character in it can hide or reorder text"
     expect(shownAgentName(name), JSON.stringify(name)).toBeUndefined();
   }
   expect(shownAgentName(undefined)).toBeUndefined();
+});
+it("counts an agent as connected only when no run names it", () => {
+  for (const agentId of [undefined, "", "dohc-mcp"]) expect(isConnectedAgentId(agentId)).toBe(true);
+  for (const agentId of ["claude", "default"]) expect(isConnectedAgentId(agentId)).toBe(false);
 });

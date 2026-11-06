@@ -82,6 +82,22 @@ describe("History timeline rows", () => {
     expect(screen.queryByRole("button", { name: /undo/i })).toBeNull();
   });
 
+  it("draws a connected agent's change with the plug, apart from your agent of the same name", () => {
+    const claude = (connected: boolean): Partial<EngineMomentRecord> => ({ agentAuthorName: "Claude",
+      authors: [connected ? { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "alice" } : { kind: "agent", agentId: "claude", onBehalfOf: "alice" }],
+      authorPresentations: [connected ? { group: "g-connected", hue: null, self: true, connected: true } : { group: "g-claude", hue: null, self: true }] });
+    view({ entries: [file("m-connected", claude(true)), file("m-yours", claude(false))] });
+    const rows = screen.getAllByTestId("engine-moment");
+    expect(rows.map((row) => row.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark"))).toEqual(["connected", "agent"]);
+    cleanup();
+    // One request's files fold into a pass, which names its connected agent with the plug too.
+    const pass = (id: string) => file(id, { ...claude(true), path: `notes/${id}.md`, correlationId: "request-1" });
+    view({ entries: [pass("a"), pass("b")] });
+    const source = screen.getByTestId("engine-moment-group-source");
+    expect(source.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark")).toBe("connected");
+    expect(source.textContent).toBe("Connected agent Claude");
+  });
+
   it("opens a Collection's History from the keyboard", async () => {
     const user = userEvent.setup();
     const calls = view({ entries: [change(4, DAY - 2_000)] });

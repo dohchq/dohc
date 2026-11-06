@@ -1,3 +1,4 @@
+import { UNNAMED_AGENT_ID, canonicalClaimedName } from "./actorIdentity";
 // Frozen relay slots. Olive belongs to the agent default.
 export const ACTOR_HUES = ["rust", "amber", "teal", "blue", "indigo", "plum", "rose"] as const;
 
@@ -17,4 +18,12 @@ const HIDDEN_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/
  * could hide or reorder text, so it can't pass for another name. */
 export function shownAgentName(name: string | undefined): string | undefined {
   return name === undefined || HIDDEN_TEXT.test(name) ? undefined : name;
+}
+
+/** Whether an agent id is a connected agent's: one writing outside a run dohc
+ * started, which is the unnamed agent whatever name it gave. A chat post
+ * names its run's agent as `authorAgentId`, History and sync pauses as
+ * `agentId`. */
+export function isConnectedAgentId(agentId: string | undefined): boolean {
+  return canonicalClaimedName(agentId) === UNNAMED_AGENT_ID;
 }

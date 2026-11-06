@@ -12,7 +12,7 @@ import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
-import { UNNAMED_AGENT_ID } from "../agents/activeAgentRun";
+import { UNNAMED_AGENT_ID } from "@dohc/workspace-contracts/actor-identity";
 import {
   CLI_PROTOCOL_VERSION,
   CHAT_WATCH_TIMEOUT_MS,
