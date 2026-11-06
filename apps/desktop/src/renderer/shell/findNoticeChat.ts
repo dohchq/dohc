@@ -1,6 +1,6 @@
 import { bridge } from "../bridge";
 import type { ChatsNav } from "../workbench/ChatsView";
-import type { NoticeTarget } from "./noticeTarget";
+import type { NoticeTarget } from "../../notices/noticeTarget";
 
 /**
  * Where a chat target opens in this workspace, or null when no Group or

@@ -4,6 +4,7 @@ import {
   renderGroups,
   renderGrep,
   renderInbox,
+  renderNotices,
   renderShowMarkdown,
   renderThreads,
 } from "./render";
@@ -303,6 +304,27 @@ describe("markdown renderers", () => {
       "**Sam** · 1970-01-01T00:00:04.000Z · msg_4 · agent default failed (no-reply)",
       "Who is driving?",
       "",
+    ].join("\n"));
+  });
+});
+
+describe("renderNotices", () => {
+  it("prints each row with its text and where it opens, or why it has nowhere to go", () => {
+    expect(renderNotices({ notices: [
+      { id: "a", kind: "agent-run", title: "Nova replied", body: "Done", sender: { kind: "agent", label: "Nova" },
+        createdAtMs: Date.UTC(2026, 10, 6), read: false, opens: { to: "chat", thread: "th_1", message: "msg_2" } },
+      { id: "b", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
+        createdAtMs: Date.UTC(2026, 10, 5), read: true, opens: { to: "file", path: "plans/day-1.md" } },
+      { id: "c", kind: "mention", title: "Shared plan", body: "", sender: null,
+        createdAtMs: Date.UTC(2026, 10, 4), read: true, opens: null, note: "Your access to this ended." },
+    ] })).toBe([
+      "[unread] · 2026-11-06 · Nova · Nova replied",
+      "  Done",
+      "  opens: msg_2",
+      "[read] · 2026-11-05 · Bea mentioned you",
+      "  opens: plans/day-1.md",
+      "[read] · 2026-11-04 · Shared plan",
+      "  Your access to this ended.",
     ].join("\n"));
   });
 });

@@ -2534,6 +2534,18 @@
       }
     },
     {
+      "name": "dohc_list_notices",
+      "description": "List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing leaves every row unread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_list_retained_copies",
       "description": "List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.",
       "inputSchema": {
@@ -4452,6 +4464,18 @@
       }
     },
     {
+      "name": "dohc_list_notices",
+      "description": "List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing leaves every row unread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_list_workspaces",
       "description": "List the local dohc workspaces in the desktop registry.",
       "inputSchema": {
@@ -5239,6 +5263,18 @@
       }
     },
     {
+      "name": "dohc_list_notices",
+      "description": "List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing leaves every row unread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_list_workspaces",
       "description": "List the local dohc workspaces in the desktop registry.",
       "inputSchema": {
@@ -6016,6 +6052,18 @@
     {
       "name": "dohc_list_kept_copies",
       "description": "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_list_notices",
+      "description": "List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing leaves every row unread.",
       "inputSchema": {
         "type": "object",
         "properties": {},

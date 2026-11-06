@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AgentNotice } from "../notices/agentNotices";
 import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
@@ -145,6 +146,8 @@ interface DesktopCliServerDependencies<State> {
   localPersonId(): string;
   notifyRenderer(input: { workspaceId: string }): void;
   notifyNoticesChanged(): void;
+  // The signed-in person's Notices rows that open in one workspace.
+  notices(workspaceId: string): Promise<AgentNotice[]>;
   /** Runs a version change after the windows showing the workspace save their open edits (versionRounds.ts). */
   versionRound: ReturnType<typeof createVersionRounds<unknown>>["run"];
   syncSharedChannelsForChatTarget(
@@ -670,6 +673,7 @@ export function createDesktopCliServer<State>(
             readOnly: Boolean(sharedViewOf(workspaceId)),
           })),
       openWorkspace: openCliWorkspace,
+      notices: dependencies.notices,
       chatLinks: (workspace,input) => readLinks(workspace,current=>dependencies.chatLinks(current,input)),
       chatFileMentions: (workspace, input) => readLinks(workspace, current => dependencies.chatFileMentions(current, input)),
       links: {

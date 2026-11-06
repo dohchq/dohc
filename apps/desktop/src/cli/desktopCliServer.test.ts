@@ -136,6 +136,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
   });
   const dependencies: Dependencies = {
     chatFileMentions: vi.fn(async () => null),
+    notices: vi.fn(async () => []),
     chatLinks: vi.fn(async () => null),
     links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),

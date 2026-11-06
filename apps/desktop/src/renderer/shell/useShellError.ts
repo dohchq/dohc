@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
-import type { NoticeTarget } from "./noticeTarget";
+import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";

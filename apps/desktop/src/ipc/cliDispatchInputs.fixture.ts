@@ -31,6 +31,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "links edges": [],
   "links in": ['{"path":"a.md"}'],
   "links resolve": ["a.md", '[{"kind":"wikilink","literal":"b"}]'],
+  "notices list": [],
   "sync stop": [],
   "access refresh": [],
   "access object": ['{"kind":"path","path":"Notes/a.md"}'],

@@ -1,61 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isRefusalNoticeKind } from "../../notices/refusalNoticeKind";
-import { isAutomationControlsTarget, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
+import type { AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
 import type { ChatDispatchFailedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { opensForLiveEditing } from "../OpenSharedView";
 import { useAutomationRetry } from "../collections/useAutomationRetry";
 import { useRequestSequence } from "../useRequestSequence";
 import { workspaceName } from "../Titlebar";
-import { AUTOMATION_NOTICE_KINDS, type SentNotice } from "../workbench/NoticeCenter";
+import type { SentNotice } from "../workbench/NoticeCenter";
 import { inputCount } from "../ui/inputCount";
 import type { ShellErrorKind } from "./useShellError";
-import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice, type SentNoticePlace } from "./sentNoticePlace";
-import { targetLookupFailedNote, type NoticeTarget } from "./noticeTarget";
+import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice, type SentNoticePlace } from "../../notices/sentNoticePlace";
+import { ACCESS_ENDED_NOTE, AUTOMATION_NOTICE_KINDS, opensControls, sentNoticeTarget, targetLookupFailedNote, type NoticeTarget } from "../../notices/noticeTarget";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 import { chatOnScreen } from "../workbench/chatsOnScreen";
 
-export const ACCESS_ENDED_NOTE =
-  "Your access to this ended. Ask the person who shared it to share it again.";
 export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
 export const NO_OWN_WORKSPACE_NOTE =
   "This opens in Chats, in a workspace of your own. Create one from Manage workspaces, then choose Open again.";
 // The lookup failures below go to the shell's errors with their cause and Try again.
 export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
-
-/**
- * What a sent notice opens in the workspace that holds it, or null when it
- * names nothing there. `controls` opens an automation's switch rather than
- * its runs. Through a share view or shared-with-me folder, the shared panel
- * finds the automation by its automations.yaml there.
- */
-export function sentNoticeTarget(
-  notice: NoticeRow,
-  place: Extract<SentNoticePlace, { kind: "workspace" }>,
-  controls: boolean,
-): NoticeTarget | null {
-  const { thread, message, run } = notice.target ?? {};
-  // A run's notice, or one that names a conversation here and no file.
-  if (thread !== undefined && (notice.kind === "agent-run" || (place.path === null && place.mount === null))) {
-    return { to: "chat", thread, ...(message !== undefined ? { message } : run !== undefined ? { run } : {}) };
-  }
-  const automation = AUTOMATION_NOTICE_KINDS.has(notice.kind) ? notice.target?.automation : undefined;
-  const shared = place.mount !== null || place.workspace.shareView !== undefined;
-  const sharedFile = shared ? place.path ?? undefined : undefined;
-  if (controls && automation !== undefined && (!shared || sharedFile !== undefined)) {
-    return { to: "automation-controls", automation, ...(sharedFile === undefined ? {} : { sharedFile }) };
-  }
-  // Only the computer that ran a run holds it.
-  if (automation !== undefined && place.mount === null && !controls) {
-    return { to: "automation", automation, ...(notice.postedHere && run !== undefined ? { run } : {}) };
-  }
-  if (place.path !== null) return { to: "file", path: place.path };
-  return place.mount !== null ? { to: "folder", path: `shared-with-me/${place.mount}` } : null;
-}
-
-// A switched-off automation's notice opens its switch rather than its runs.
-const opensControls = (notice: NoticeRow) => notice.target !== null && isAutomationControlsTarget(notice.target);
 
 // The shell's error for a notice whose Open failed. A later Open of the
 // notice replaces it or takes it back.
