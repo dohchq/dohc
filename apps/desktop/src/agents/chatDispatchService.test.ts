@@ -3202,13 +3202,29 @@ describe("chatDispatchService", () => {
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
       runId: claim.run.runId, triggerMessageId: trigger.messageId, words,
-      nextStep: "Mention Nova to ask again.", retryable: false,
+      nextStep: "Mention @Nova to ask again.", retryable: false,
     });
     // The notice keeps its words. The mention is for the conversation only.
     expect(fixture.notices[0]!.title).toBe(`${words.split(".")[0]} in "Run the request."`);
     expect(fixture.notices[0]!.body).toBe("Its run ended with an error.");
     await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, trigger.threadId, claim.run.runId)).resolves.toBe(false);
     expect(fixture.requeues).toEqual([]);
+  });
+
+  // The line names the handle a person types, which drops spaces and
+  // punctuation. A name with no handle gets no line.
+  it.each([
+    { agentName: "Codex (Work)", nextStep: "Mention @CodexWork to ask again." },
+    { agentName: "🦊", nextStep: undefined },
+  ])("names the agent's handle in the line to ask again: %j", async ({ agentName, nextStep }) => {
+    const fixture = await createFixture({ agentName });
+    await stubRunnerPath(fixture, { node: true });
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.nextStep).toBe(nextStep);
   });
 
   it.each([

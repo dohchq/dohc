@@ -305,10 +305,9 @@ test("a runner that exits silently says why under the message and posts a notice
     // would repeat what it did, so the line offers no Try again and says to
     // ask the agent again instead.
     const words = "Nova didn't reply. Its run ended with an error.";
-    const nextStep = "Mention Nova to ask again.";
+    const nextStep = "Mention @Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
-    await expect(line.getByRole("status")).toHaveText(words);
-    await expect(line.getByTestId("chats-lane-run-next-step")).toHaveText(nextStep);
+    await expect(line.getByRole("status")).toHaveText([words, nextStep]);
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
     await waitForVisibleAnimations(page);
     if (process.env.UI_AUDIT_SHOT_DIR) {
@@ -344,8 +343,7 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-lane-reply-in-thread").click();
     const panel = page.getByTestId("chats-lane-thread-panel");
     const panelLine = panel.getByTestId("chats-lane-run-failed");
-    await expect(panelLine.getByRole("status")).toHaveText(words);
-    await expect(panelLine.getByTestId("chats-lane-run-next-step")).toHaveText(nextStep);
+    await expect(panelLine.getByRole("status")).toHaveText([words, nextStep]);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
@@ -359,8 +357,7 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     const postLine = page.getByTestId("chats-run-failed");
-    await expect(postLine.getByRole("status")).toHaveText(words);
-    await expect(postLine.getByTestId("chats-run-next-step")).toHaveText(nextStep);
+    await expect(postLine.getByRole("status")).toHaveText([words, nextStep]);
     await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {

@@ -2632,7 +2632,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="failed before the agent posted">
           <ChatFailedRunSpecimen
             words="Claude Code didn't reply. Its run ended with an error."
-            nextStep="Mention Claude Code to ask again."
+            nextStep="Mention @ClaudeCode to ask again."
             posted={false}
             retryable={false}
           />
@@ -2640,7 +2640,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="failed after the agent posted">
           <ChatFailedRunSpecimen
             words="Claude Code stopped before finishing. Its run ended with an error."
-            nextStep="Mention Claude Code to ask again."
+            nextStep="Mention @ClaudeCode to ask again."
             posted
             retryable={false}
           />
