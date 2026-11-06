@@ -50,6 +50,7 @@ describe("agent badge", () => {
       return screen.queryByTestId("chats-post-agent-reported")?.textContent ?? null;
     };
     expect(reported({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" })).toBe("Claude Code 2.1 · Claude Opus 5.5 (as reported)");
+    expect(screen.getByTestId("chats-post-agent-reported").classList.contains("wrap-anywhere")).toBe(true);
     expect(reported({ product: "Claude Code", version: "2.1" })).toBe("Claude Code 2.1 (as reported)");
     expect(reported({ model: "Claude Opus 5.5" })).toBe("Claude Opus 5.5 (as reported)");
     expect(reported()).toBeNull();

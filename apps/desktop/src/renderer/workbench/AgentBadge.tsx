@@ -81,7 +81,7 @@ export function AgentBadge(props: {
           <span className="text-muted">
             {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
           </span>
-          {reported ? <span data-testid={`${props.testIdPrefix}-agent-reported`} className="text-muted">{reported}</span> : null}
+          {reported ? <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">{reported}</span> : null}
           {command ? <span className="break-all text-[11px] text-muted">Current local command: <code className="font-mono">{command}</code></span> : null}
         </span>
       ) : null}

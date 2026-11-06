@@ -347,7 +347,7 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
         <span className="grid gap-1">
           <span className="text-[11px] text-muted">Product</span>
           <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
-            {product} {AS_REPORTED}
+            {product} <span className="text-muted">{AS_REPORTED}</span>
           </span>
         </span>
       ) : null}
@@ -355,7 +355,7 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
         <span className="grid gap-1">
           <span className="text-[11px] text-muted">Model</span>
           <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
-            {model} {AS_REPORTED}
+            {model} <span className="text-muted">{AS_REPORTED}</span>
           </span>
         </span>
       ) : null}

@@ -11,6 +11,12 @@ describe("run details", () => {
     const { container } = render(<RunDetails run={run} reported={{ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" }} />);
     expect(screen.getByTestId("chats-run-product").textContent).toBe("Claude Code 2.1 (as reported)");
     expect(screen.getByTestId("chats-run-model").textContent).toBe("Claude Opus 5.5 (as reported)");
+    for (const id of ["chats-run-product", "chats-run-model"]) {
+      const value = screen.getByTestId(id);
+      expect(value.classList.contains("text-ink")).toBe(true);
+      expect(value.querySelector("span")?.classList.contains("text-muted")).toBe(true);
+      expect(value.querySelector("span")?.textContent).toBe("(as reported)");
+    }
     // Product and Model are rows of their own, like Command, not one row split in two.
     for (const id of ["chats-run-command", "chats-run-product", "chats-run-model"]) {
       expect(screen.getByTestId(id).parentElement?.parentElement).toBe(container);
