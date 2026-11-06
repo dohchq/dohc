@@ -180,6 +180,16 @@ describe("Explorer Files", () => {
     expect(screen.queryByText("No files")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
   });
+
+  it("swaps No files for the new folder row in an empty workspace", async () => {
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [] })} />);
+
+    await user.click(within(section("Files")).getByRole("button", { name: "New folder" }));
+
+    expect((await screen.findByTestId("tree-edit-input")).getAttribute("aria-label")).toBe("New folder name");
+    expect(screen.queryByText("No files")).toBeNull();
+  });
 });
 
 describe("Explorer Home", () => {
