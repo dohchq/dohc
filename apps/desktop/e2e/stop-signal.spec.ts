@@ -77,7 +77,7 @@ async function stopsCleanlyOn(
     // The file alone would pass the editor check below: dohc imports a file that
     // differs from its store as an outside edit.
     const stored = momentTextsForPath(temp.rootPath, "stop.md");
-    expect(stored.some((text) => text.includes(EDIT)), "The store keeps the saved edit").toBe(true);
+    expect(stored.at(-1) ?? "", "The store keeps the saved edit").toContain(EDIT);
 
     reopened = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(reopened.page, temp);
@@ -85,8 +85,8 @@ async function stopsCleanlyOn(
     await explorerRow(reopened.page, "stop.md").click();
     await expect(reopened.page.getByTestId("markdown-editor"), "The next start shows the saved edit")
       .toContainText(EDIT);
-    // At start, dohc raises a notice for a crash report or for typing kept in
-    // History. Both reads here must find nothing for those notices to show.
+    // At start, dohc shows a notice for a crash report or for typing it kept in
+    // History. Both reads must find nothing, so neither notice can show.
     const startup = await reopened.page.evaluate(async (workspaceId) => {
       const api = window.dohcDesktop!;
       const [crash, kept] = await Promise.all([api.readCrashReport({}), api.getCaptureRecoveryStatus({ workspaceId })]);
