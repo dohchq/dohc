@@ -2286,14 +2286,16 @@ impl ActorHandle {
     pub async fn abandon_prepared_pull(
         &self,
         workspace_id: String,
-        token: String,
-        previous: Option<String>,
+        page: Arc<dohc_engine_sync::PreparedOrdinaryPull>,
     ) -> Result<bool, RuntimeError> {
         self.run(move |store, _cache| {
+            if page.apply_began() {
+                return Ok(false);
+            }
             match store.write_with(&NoFaults, |tx| {
                 tx.execute(
                     "UPDATE sync_identity SET ordinary_pull_token=?3 WHERE workspace_id=?1 AND ordinary_pull_token=?2",
-                    rusqlite::params![workspace_id, token, previous],
+                    rusqlite::params![workspace_id, page.pull_token(), page.previous_pull_token()],
                 )
                 .map(|changed| changed > 0)
                 .map_err(dohc_engine_storage::StorageError::persist_public)

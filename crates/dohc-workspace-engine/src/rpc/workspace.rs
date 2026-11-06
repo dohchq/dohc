@@ -95,6 +95,8 @@ pub(crate) struct OpenWorkspace {
     pub(super) session_ops: Arc<tokio::sync::Mutex<()>>,
     /// One fetched batch, bound to this open handle and replaced by the next fetch.
     pub(super) pending_pull: tokio::sync::Mutex<Option<super::relay::PendingPull>>,
+    /// Pages taken by apply requests that close must release if they have not begun.
+    pub(super) applying_pulls: Mutex<Vec<Arc<dohc_engine_sync::PreparedOrdinaryPull>>>,
     pub(super) pull_fetch_cancel: dohc_engine_protocol::cancel::CancelSignal,
     pub(super) pull_repair_retries: std::sync::atomic::AtomicUsize,
     /// How many pending cursors of each kind this handle has issued, counted
@@ -166,6 +168,7 @@ impl OpenWorkspace {
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
             pending_pull: Default::default(),
+            applying_pulls: Default::default(),
             pull_fetch_cancel: Default::default(),
             pull_repair_retries: Default::default(),
             cursors_issued: Default::default(),
@@ -1378,6 +1381,7 @@ impl EngineService {
                 capture_holds: CaptureHolds::default(),
                 session_ops,
                 pending_pull: Default::default(),
+                applying_pulls: Default::default(),
                 pull_fetch_cancel: Default::default(),
                 pull_repair_retries: Default::default(),
                 cursors_issued: Default::default(),
@@ -1514,6 +1518,7 @@ impl EngineService {
         let probe = self.capture_apply_probe.clone();
         let close_task = tokio::spawn(async move {
             let pending = removed.pending_pull.lock().await.take();
+            let applying = std::mem::take(&mut *lock(&removed.applying_pulls));
             #[cfg(feature = "harness")]
             let gate_wait = probe
                 .as_ref()
@@ -1534,6 +1539,10 @@ impl EngineService {
             clear_suppression.0.clear_workspace(&clear_suppression.1);
             if let Some(pending) = pending {
                 let _ = Self::release_fetched_pull(&removed, &pending.page).await;
+            }
+            // Restore newer pages' previous tokens before releasing older pages.
+            for page in applying.into_iter().rev() {
+                let _ = Self::release_fetched_pull(&removed, &page).await;
             }
             let finished = tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
