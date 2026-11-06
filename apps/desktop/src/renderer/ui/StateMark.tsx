@@ -86,7 +86,7 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   // invalid assets, a removal in progress) is stated by its own notice.
   "read-only-unavailable": { label: "Read-only", mark: "held" },
   "too-large": {
-    label: "Read-only",
+    label: "Too large to edit",
     mark: "held",
     title: "This file is too large to edit in dohc.",
   },
