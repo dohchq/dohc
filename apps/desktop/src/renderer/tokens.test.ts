@@ -123,6 +123,8 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "match", bg: "bg", min: 3.0 },
     { fg: "match", bg: "panel", min: 3.0 },
     { fg: "match", bg: "panel2", min: 3.0 },
+    // A link in a document is body text in the match blue, on paper.
+    { fg: "match", bg: "bg", min: 4.5 },
     // Paper-colored text sits ON the mark, at AA like any other text.
     { fg: "bg", bg: "match", min: 4.5 },
     // Labels on filled buttons use the paper color: primary on accent, and
