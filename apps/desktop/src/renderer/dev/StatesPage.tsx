@@ -299,6 +299,11 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
   );
 }
 
+function SplitGroupsSpecimen(props: Omit<ComponentProps<typeof EditorGroupLayout>, "onFocusGroup">) {
+  const [activeGroupId, setActiveGroupId] = useState(props.activeGroupId);
+  return <EditorGroupLayout {...props} activeGroupId={activeGroupId} onFocusGroup={setActiveGroupId} />;
+}
+
 // Two groups side by side, each with one file open and that file's actions
 // in its own tab row.
 function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode }; right: { path: string; actions: ReactNode } }) {
@@ -333,10 +338,9 @@ function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode
   });
   return (
     <div className="flex w-full overflow-hidden rounded-lg border border-line">
-      <EditorGroupLayout
+      <SplitGroupsSpecimen
         groups={[group("left", 1, props.left), group("right", 2, props.right)]}
         activeGroupId="left"
-        onFocusGroup={noop}
         onResizeGroups={noop}
       />
     </div>
@@ -352,13 +356,12 @@ function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
   const [first, second] = props.activeHasTabs ? [tabbed, empty] : [empty, tabbed];
   return (
     <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
-      <EditorGroupLayout
+      <SplitGroupsSpecimen
         groups={[
           { id: "first", size: 1, content: <EditorGroupSpecimen groupId="first" groupNumber={1} {...first} /> },
           { id: "second", size: 1, content: <EditorGroupSpecimen groupId="second" groupNumber={2} {...second} /> },
         ]}
         activeGroupId="first"
-        onFocusGroup={noop}
         onResizeGroups={noop}
       />
     </div>
@@ -3818,13 +3821,12 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
         <Specimen label="split: the active group's line over its fades, then the other group">
           <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
-            <EditorGroupLayout
+            <SplitGroupsSpecimen
               groups={[
                 { id: "first", size: 1, content: <OverflowStripSpecimen groupId="first" groupNumber={1} active="packing-list.md" /> },
                 { id: "second", size: 1, content: <OverflowStripSpecimen groupId="second" groupNumber={2} active="flights.md" /> },
               ]}
               activeGroupId="first"
-              onFocusGroup={noop}
               onResizeGroups={noop}
             />
           </div>
@@ -3845,13 +3847,12 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="split: the active group, then one whose active tab recedes" className="w-full">
           <div className="flex w-full overflow-hidden rounded-lg border border-line">
-            <EditorGroupLayout
+            <SplitGroupsSpecimen
               groups={[
                 { id: "first", size: 1, content: <GlyphStrip groupId="first" groupNumber={1} tabs={["trip/plan.md", "ledger.db"]} active="trip/plan.md" /> },
                 { id: "second", size: 1, content: <GlyphStrip groupId="second" groupNumber={2} tabs={[STRIP_GROUP, siteTabPath("trip-planner")]} active={STRIP_GROUP} /> },
               ]}
               activeGroupId="first"
-              onFocusGroup={noop}
               onResizeGroups={noop}
             />
           </div>
