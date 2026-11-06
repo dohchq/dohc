@@ -9,96 +9,14 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Profiler, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
 import type { LinksEdgesResult } from "@dohc/workspace-contracts/links";
-type GraphFixture = {nodes:{path:string;title:string;incoming:number;outgoing:number}[];edges:{source:string;target:string;kind:"wikilink"|"markdown"}[];[key:string]:unknown};
 import { GraphView } from "./GraphView";
 import { deferred } from "../../testing/deferred";
-
-function immediateResponse<T>() {
-  let onSuccess: ((value: T) => void) | null = null;
-  const promise = {
-    then(success: (value: T) => void) {
-      onSuccess = success;
-      return Promise.resolve();
-    },
-  } as unknown as Promise<T>;
-  return {
-    promise,
-    resolve(value: T) {
-      onSuccess?.(value);
-    },
-  };
-}
-
-function graph(path: string): GraphFixture {
-  return {
-    nodes: [{ path, title: path, incoming: 0, outgoing: 0 }],
-    edges: [],
-    unresolvedLinks: 0,
-    scannedFileCount: 1,
-    omittedFileCount: 0,
-    truncatedFileCount: 0,
-  };
-}
-
-function connectedGraph(): GraphFixture {
-  return {
-    nodes: [
-      { path: "alpha.md", title: "Alpha", incoming: 0, outgoing: 1 },
-      { path: "beta.md", title: "Beta", incoming: 1, outgoing: 0 },
-    ],
-    edges: [{ source: "alpha.md", target: "beta.md", kind: "wikilink" }],
-    unresolvedLinks: 0,
-    scannedFileCount: 2,
-    omittedFileCount: 0,
-    truncatedFileCount: 0,
-  };
-}
-
-function denseGraph(nodeCount: number, edgeCount: number): GraphFixture {
-  const nodes = Array.from({ length: nodeCount }, (_, index) => ({
-    path: `note-${index.toString().padStart(4, "0")}.md`,
-    title: `Note ${index}`,
-    incoming: 0,
-    outgoing: 0,
-  }));
-  return {
-    nodes,
-    edges: Array.from({ length: edgeCount }, (_, index) => ({
-      source: nodes[Math.floor(index / nodeCount)]!.path,
-      target: nodes[index % nodeCount]!.path,
-      kind: "wikilink" as const,
-    })),
-    unresolvedLinks: 0,
-    scannedFileCount: nodeCount,
-    omittedFileCount: 0,
-    truncatedFileCount: 0,
-  };
-}
-
-function colonPathGraph(): GraphFixture {
-  return {
-    nodes: [
-      { path: "a:b", title: "A:B", incoming: 0, outgoing: 1 },
-      { path: "c", title: "C", incoming: 1, outgoing: 0 },
-      { path: "a", title: "A", incoming: 0, outgoing: 1 },
-      { path: "b:c", title: "B:C", incoming: 1, outgoing: 0 },
-    ],
-    edges: [
-      { source: "a:b", target: "c", kind: "wikilink" },
-      { source: "a", target: "b:c", kind: "wikilink" },
-    ],
-    unresolvedLinks: 0,
-    scannedFileCount: 4,
-    omittedFileCount: 0,
-    truncatedFileCount: 0,
-  };
-}
 
 function stubAnimationFrames() {
   let nextHandle = 1;
@@ -135,11 +53,18 @@ function stubAnimationFrames() {
   };
 }
 
-function graphNodePosition(element: HTMLElement) {
-  const transform = element.parentElement?.getAttribute("transform");
-  const match = transform?.match(/^translate\(([-\d.]+) ([-\d.]+)\)$/);
-  expect(match).toBeTruthy();
-  return { x: Number(match![1]), y: Number(match![2]) };
+function rowPaths(): string[] {
+  return screen.getAllByTestId("graph-file-row").map((row) => row.dataset.path ?? "");
+}
+
+function stubPages(paths: readonly string[], links: readonly (readonly [string, string])[]) {
+  vi.stubGlobal("dohcDesktop", {
+    linksEdges: vi.fn(async () => ({
+      ...page(""),
+      files: paths.map((path) => ({ path, objectId: path, title: path })),
+      entries: links.map(([source, target], ordinal) => ({ source, target, kind: "wikilink" as const, ordinal })),
+    })),
+  });
 }
 
 afterEach(() => {
@@ -148,470 +73,115 @@ afterEach(() => {
 });
 
 describe("GraphView", () => {
-  it("bounds the panel DOM while keeping the active document reachable", async () => {
-    const nodes = Array.from({ length: 2_000 }, (_, index) => ({
-      path: `note-${index.toString().padStart(4, "0")}.md`,
-      title: `Note ${index}`,
-      incoming: index % 17,
-      outgoing: index % 11,
-    }));
-    const activePath = nodes.at(-1)!.path;
-    stubFileGraph({
-      linksEdges: vi.fn(async () => ({
-        nodes,
-        edges: [],
-        unresolvedLinks: 0,
-        scannedFileCount: nodes.length,
-        omittedFileCount: 7_000,
-        truncatedFileCount: 0,
-      })),
-    });
-
-    render(
-      <GraphView
-        workspaceId="ws-large-graph"
-        activePath={activePath}
-        refreshKey="0"
-        onOpenPath={vi.fn()}
-      />,
+  it("shows the open page's local graph in the side panel, in title order", async () => {
+    stubPages(
+      ["alpha.md", "beta.md", "gamma.md", "delta.md", "sketch.excalidraw"],
+      [["alpha.md", "beta.md"], ["beta.md", "gamma.md"], ["delta.md", "gamma.md"]],
     );
+    const view = render(<GraphView workspaceId="ws" activePath="beta.md" refreshKey="0" onOpenPath={vi.fn()} />);
+    await waitFor(() => expect(rowPaths()).toEqual(["alpha.md", "beta.md", "gamma.md"]));
+    // The open page keeps its place in the list instead of moving to the top.
+    expect(screen.getAllByTestId("graph-file-row")[1]!.dataset.active).toBe("true");
+    expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("3");
+    expect(screen.getByTestId("graph-doc-count").textContent).toBe("5 files");
 
-    await waitFor(() =>
-      expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
-    );
-    await waitFor(() => expect(screen.queryAllByTestId("graph-node")).toHaveLength(240));
-    expect(screen.getAllByTestId("graph-file-row")).toHaveLength(240);
-    expect(
-      screen.getAllByTestId("graph-node").some((node) => node.dataset.path === activePath),
-    ).toBe(true);
-    // The side panel shows the notice as its icon, named with the full words.
-    const notice = screen.getByRole("img", { name: /240 of 2000 pages shown/ });
-    expect(notice.dataset.testid).toBe("graph-unresolved-count");
-    expect(notice.title).toBe(notice.getAttribute("aria-label"));
-    expect(notice.textContent).toBe("");
-
+    view.rerender(<GraphView workspaceId="ws" activePath="nowhere.md" refreshKey="0" onOpenPath={vi.fn()} />);
+    // With no open page in the graph, the panel shows the whole workspace.
+    await waitFor(() => expect(rowPaths()).toHaveLength(5));
   });
 
-  it("uses the larger bounded slice in the full-page graph", async () => {
-    const nodes = Array.from({ length: 900 }, (_, index) => ({
-      path: `page-${index}.md`,
-      title: `Page ${index}`,
-      incoming: index % 5,
-      outgoing: 0,
-    }));
-    stubFileGraph({
-      linksEdges: vi.fn(async () => ({
-        nodes,
-        edges: [],
-        unresolvedLinks: 0,
-        scannedFileCount: nodes.length,
-        omittedFileCount: 0,
-        truncatedFileCount: 0,
-      })),
-    });
-
-    render(
-      <GraphView
-        workspaceId="ws-page-graph"
-        activePath={null}
-        refreshKey="0"
-        variant="page"
-        onOpenPath={vi.fn()}
-      />,
-    );
-
-    await waitFor(() =>
-      expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
-    );
-    await waitFor(() => expect(screen.queryAllByTestId("graph-node")).toHaveLength(500));
-    expect(screen.queryAllByTestId("graph-file-row")).toHaveLength(0);
-    const notice = screen.getByTestId("graph-unresolved-count");
-    expect(notice.getAttribute("role")).toBeNull();
-    expect(notice.textContent).toContain("500 of 900 pages shown");
+  it("widens the local graph with its depth setting", async () => {
+    stubPages(["a.md", "b.md", "c.md", "d.md"], [["a.md", "b.md"], ["b.md", "c.md"], ["c.md", "d.md"]]);
+    render(<GraphView workspaceId="ws" activePath="a.md" refreshKey="0" onOpenPath={vi.fn()} />);
+    await waitFor(() => expect(rowPaths()).toEqual(["a.md", "b.md"]));
+    fireEvent.click(screen.getByTestId("graph-settings-toggle"));
+    fireEvent.change(screen.getByRole("slider", { name: "Depth" }), { target: { value: "3" } });
+    await waitFor(() => expect(rowPaths()).toEqual(["a.md", "b.md", "c.md", "d.md"]));
   });
 
-  it.each([
-    { variant: "panel" as const, nodeCount: 240, edgeLimit: 2_000 },
-    { variant: "page" as const, nodeCount: 500, edgeLimit: 5_000 },
-  ])(
-    "reports the $variant link limit instead of implying every link is drawn",
-    async ({ variant, nodeCount, edgeLimit }) => {
-      stubFileGraph({
-        linksEdges: vi.fn(async () => denseGraph(nodeCount, edgeLimit + 1)),
-      });
-
-      render(
-        <GraphView
-          workspaceId={`ws-${variant}-edge-limit`}
-          activePath={null}
-          refreshKey="0"
-          variant={variant}
-          onOpenPath={vi.fn()}
-        />,
-      );
-
-      await waitFor(() =>
-        expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
-      );
-      expect(screen.getByTestId("graph-link-count").textContent).toBe(
-        `${edgeLimit + 1} links`,
-      );
-      const notice = screen.getByTestId("graph-unresolved-count");
-      expect(variant === "panel" ? notice.getAttribute("aria-label") : notice.textContent).toContain(
-        `${edgeLimit} of ${edgeLimit + 1} links shown`,
-      );
-    },
-  );
-
-  it("does not commit React renders during force-simulation frames", async () => {
-    const frames = stubAnimationFrames();
-    stubFileGraph({
-      linksEdges: vi.fn(async () => connectedGraph()),
-    });
-    let renderCount = 0;
-
-    render(
-      <Profiler id="graph-view" onRender={() => (renderCount += 1)}>
-        <GraphView
-          workspaceId="ws-graph"
-          activePath={null}
-          refreshKey="0"
-          onOpenPath={vi.fn()}
-        />
-      </Profiler>,
-    );
-
-    expect(await screen.findAllByTestId("graph-node")).toHaveLength(2);
-    renderCount = 0;
-    for (let frame = 0; frame < 6; frame += 1) {
-      await act(async () => frames.runNext());
-    }
-
-    expect(renderCount).toBe(0);
-  });
-
-  it("commits the final dragged position only when the drag ends", async () => {
-    stubAnimationFrames();
-    stubFileGraph({
-      linksEdges: vi.fn(async () => connectedGraph()),
-    });
-    let renderCount = 0;
+  it("opens a row's file and lights its node while the row has focus", async () => {
+    stubPages(["alpha.md", "beta.md"], [["alpha.md", "beta.md"]]);
     const onOpenPath = vi.fn();
-    const view = () => (
-      <Profiler id="graph-view" onRender={() => (renderCount += 1)}>
-        <GraphView
-          workspaceId="ws-drag"
-          activePath={null}
-          refreshKey="0"
-          onOpenPath={onOpenPath}
-        />
-      </Profiler>
-    );
-    const { rerender } = render(view());
-    const node = (await screen.findAllByTestId("graph-node")).find(
-      (element) => element.dataset.path === "alpha.md",
-    )!;
-    const map = screen.getByTestId("graph-map");
-    const edge = screen.getByTestId("graph-edge");
-
-    renderCount = 0;
-    fireEvent.pointerDown(node, {
-      button: 0,
-      pointerId: 1,
-      clientX: 130,
-      clientY: 210,
-    });
-    fireEvent.pointerMove(map, {
-      pointerId: 1,
-      clientX: 200,
-      clientY: 300,
-    });
-    expect(node.getAttribute("transform")).toBeNull();
-    expect(node.parentElement?.classList.contains("dohc-graph-node")).toBe(false);
-    expect(node.parentElement?.getAttribute("transform")).toBe(
-      "translate(200 300)",
-    );
-    expect([edge.getAttribute("x1"), edge.getAttribute("y1")]).toEqual([
-      "200",
-      "300",
-    ]);
-    expect(renderCount).toBe(0);
-
-    renderCount = 0;
-    fireEvent.pointerUp(map, {
-      pointerId: 1,
-      clientX: 200,
-      clientY: 300,
-    });
-    expect(renderCount).toBe(1);
-    expect(onOpenPath).not.toHaveBeenCalled();
-
-    rerender(view());
-    const committedNode = screen
-      .getAllByTestId("graph-node")
-      .find((element) => element.dataset.path === "alpha.md")!;
-    expect(
-      committedNode.parentElement?.getAttribute("transform"),
-    ).toBe("translate(200 300)");
+    render(<GraphView workspaceId="ws" activePath="alpha.md" refreshKey="0" onOpenPath={onOpenPath} />);
+    await waitFor(() => expect(rowPaths()).toEqual(["alpha.md", "beta.md"]));
+    const beta = screen.getAllByTestId("graph-file-row")[1]!;
+    fireEvent.focus(beta);
+    const description = screen.getByTestId("graph-focused-node");
+    expect(screen.getByTestId("graph-canvas").getAttribute("aria-describedby")).toBe(description.id);
+    expect(description.textContent).toBe("beta.md, 1 link");
+    fireEvent.click(beta);
+    expect(onOpenPath).toHaveBeenCalledWith("beta.md");
   });
 
-  it("keeps the held node at the pointer through a graph refresh", async () => {
-    const frames = stubAnimationFrames();
-    const refreshed = deferred<GraphFixture>();
-    const linksEdges = vi
-      .fn()
-      .mockResolvedValueOnce(connectedGraph())
-      .mockReturnValueOnce(refreshed.promise);
-    stubFileGraph({ linksEdges });
-    const view = (refreshKey: string) => (
-      <GraphView
-        workspaceId="ws-drag-refresh"
-        activePath={null}
-        refreshKey={refreshKey}
-        onOpenPath={vi.fn()}
-      />
-    );
-    const { rerender } = render(view("0"));
-    const node = (await screen.findAllByTestId("graph-node")).find(
-      (element) => element.dataset.path === "alpha.md",
-    )!;
-
-    fireEvent.pointerDown(node, {
-      button: 0,
-      pointerId: 1,
-      clientX: 130,
-      clientY: 210,
-    });
-    rerender(view("1"));
-    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(2));
-    await act(async () => {
-      refreshed.resolve(connectedGraph());
-      await refreshed.promise;
-    });
-    await act(async () => frames.runNext());
-
-    expect(node.parentElement?.getAttribute("transform")).toBe(
-      "translate(130 210)",
-    );
-    fireEvent.pointerUp(screen.getByTestId("graph-map"), {
-      pointerId: 1,
-      clientX: 130,
-      clientY: 210,
-    });
-  });
-
-  it("keeps one pointer as drag owner and commits when that pointer releases", async () => {
-    const frames = stubAnimationFrames();
-    stubFileGraph({
-      linksEdges: vi.fn(async () => connectedGraph()),
-    });
-    let renderCount = 0;
-    render(
-      <Profiler id="graph-view" onRender={() => (renderCount += 1)}>
-        <GraphView
-          workspaceId="ws-two-pointers"
-          activePath={null}
-          refreshKey="0"
-          onOpenPath={vi.fn()}
-        />
-      </Profiler>,
-    );
-    const nodes = await screen.findAllByTestId("graph-node");
-    const alpha = nodes.find((element) => element.dataset.path === "alpha.md")!;
-    const beta = nodes.find((element) => element.dataset.path === "beta.md")!;
-    const map = screen.getByTestId("graph-map");
-
-    fireEvent.pointerDown(alpha, {
-      button: 0,
-      pointerId: 1,
-      clientX: 120,
-      clientY: 200,
-    });
-    fireEvent.pointerDown(beta, {
-      button: 0,
-      pointerId: 2,
-      clientX: 220,
-      clientY: 100,
-    });
-    fireEvent.pointerUp(map, {
-      pointerId: 2,
-      clientX: 220,
-      clientY: 100,
-    });
-
-    renderCount = 0;
-    fireEvent.pointerMove(map, {
-      pointerId: 1,
-      clientX: 180,
-      clientY: 260,
-    });
-    expect(alpha.parentElement?.getAttribute("transform")).toBe(
-      "translate(180 260)",
-    );
-    fireEvent.pointerUp(map, {
-      pointerId: 1,
-      clientX: 180,
-      clientY: 260,
-    });
-    expect(renderCount).toBe(1);
-
-    let frameCount = 0;
-    await act(async () => {
-      while (frames.pending > 0 && frameCount < 180) {
-        frames.runNext();
-        frameCount += 1;
-      }
-    });
-    expect(frames.pending).toBe(0);
-  });
-
-  it("updates both edges when colon-bearing paths would share a delimited key", async () => {
-    stubAnimationFrames();
-    stubFileGraph({
-      linksEdges: vi.fn(async () => colonPathGraph()),
-    });
-    render(
-      <GraphView
-        workspaceId="ws-colon-paths"
-        activePath={null}
-        refreshKey="0"
-        onOpenPath={vi.fn()}
-      />,
-    );
-    const nodes = await screen.findAllByTestId("graph-node");
-    const firstSource = nodes.find((element) => element.dataset.path === "a:b")!;
-    const secondSource = nodes.find((element) => element.dataset.path === "a")!;
-    const edges = screen.getAllByTestId("graph-edge");
-    const map = screen.getByTestId("graph-map");
-
-    fireEvent.pointerDown(firstSource, {
-      button: 0,
-      pointerId: 1,
-      clientX: 130,
-      clientY: 210,
-    });
-
-    expect([edges[0]!.getAttribute("x1"), edges[0]!.getAttribute("y1")]).toEqual([
-      "130",
-      "210",
-    ]);
-    expect([
-      edges[1]!.getAttribute("x1"),
-      edges[1]!.getAttribute("y1"),
-    ]).not.toEqual(["130", "210"]);
-
-    fireEvent.pointerUp(map, { pointerId: 1, clientX: 130, clientY: 210 });
-    fireEvent.pointerDown(secondSource, {
-      button: 0,
-      pointerId: 2,
-      clientX: 60,
-      clientY: 100,
-    });
-    expect([edges[1]!.getAttribute("x1"), edges[1]!.getAttribute("y1")]).toEqual([
-      "60",
-      "100",
-    ]);
-    expect([
-      edges[0]!.getAttribute("x1"),
-      edges[0]!.getAttribute("y1"),
-    ]).not.toEqual(["60", "100"]);
-  });
-
-  it("matches a full React render after the simulation settles", async () => {
-    const frames = stubAnimationFrames();
-    stubFileGraph({
-      linksEdges: vi.fn(async () => connectedGraph()),
-    });
+  it("finds a file by search in the full graph and opens it with Enter", async () => {
+    stubPages(["alpha.md", "beta.md", "gamma.md"], [["alpha.md", "beta.md"]]);
     const onOpenPath = vi.fn();
-    const view = () => (
-      <GraphView
-        workspaceId="ws-rest"
-        activePath={null}
-        refreshKey="0"
-        onOpenPath={onOpenPath}
-      />
-    );
-    const { rerender } = render(view());
-    expect(await screen.findAllByTestId("graph-node")).toHaveLength(2);
-
-    let frameCount = 0;
-    while (frames.pending > 0 && frameCount < 1_000) {
-      await act(async () => frames.runNext());
-      frameCount += 1;
-    }
-    expect(frames.pending).toBe(0);
-    expect(frameCount).toBeLessThanOrEqual(120);
-    const settledDom = screen.getByTestId("graph-map").innerHTML;
-
-    rerender(view());
-    expect(screen.getByTestId("graph-map").innerHTML).toBe(settledDom);
+    const user = userEvent.setup();
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={onOpenPath} />);
+    await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("3"));
+    await user.type(screen.getByTestId("graph-search"), "gam");
+    await waitFor(() => expect(screen.getAllByTestId("graph-search-option").map((option) => option.dataset.path)).toEqual(["gamma.md"]));
+    expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("1");
+    expect(screen.getByTestId("graph-doc-count").textContent).toBe("1 of 3 files");
+    await user.keyboard("{Enter}");
+    expect(onOpenPath).toHaveBeenCalledWith("gamma.md");
+    await user.clear(screen.getByTestId("graph-search"));
+    await user.type(screen.getByTestId("graph-search"), "zzz");
+    expect(await screen.findByText('No files match "zzz". Try a shorter search.')).toBeTruthy();
   });
 
-  it("does not carry residual velocity past a frame-cap commit", async () => {
-    const frames = stubAnimationFrames();
-    const linksEdges = vi.fn(async () => graph("solo.md"));
-    stubFileGraph({ linksEdges });
-    const view = (refreshKey: string) => (
-      <GraphView
-        workspaceId="ws-frame-cap"
-        activePath={null}
-        refreshKey={refreshKey}
-        onOpenPath={vi.fn()}
-      />
-    );
-    const { rerender } = render(view("0"));
-    const node = await screen.findByTestId("graph-node");
-    const map = screen.getByTestId("graph-map");
-
-    await act(async () => {
-      while (frames.pending > 0) frames.runNext();
-    });
-    fireEvent.pointerDown(node, {
-      button: 0,
-      pointerId: 1,
-      clientX: 40,
-      clientY: 40,
-    });
-    fireEvent.pointerUp(map, {
-      pointerId: 1,
-      clientX: 40,
-      clientY: 40,
-    });
-
-    let frameCount = 0;
-    await act(async () => {
-      while (frames.pending > 0 && frameCount < 121) {
-        frames.runNext();
-        frameCount += 1;
-      }
-    });
-    expect(frameCount).toBe(120);
-    expect(frames.pending).toBe(0);
-
-    const capped = graphNodePosition(node);
-    rerender(view("1"));
-    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(2));
-    await waitFor(() =>
-      expect(screen.getByTestId("graph-view").getAttribute("data-state")).toBe(
-        "ready",
-      ),
-    );
-    const refreshed = graphNodePosition(node);
-    expect(refreshed.x).toBeCloseTo(capped.x, 10);
-    expect(refreshed.y).toBeCloseTo(capped.y, 10);
-
-    await act(async () => frames.runNext());
-    const afterOneFrame = graphNodePosition(node);
-    expect(afterOneFrame.x).toBeCloseTo(
-      refreshed.x + (130 - refreshed.x) * 0.014 * 0.86 * 0.84,
-      10,
-    );
-    expect(afterOneFrame.y).toBeCloseTo(
-      refreshed.y + (210 - refreshed.y) * 0.014 * 0.86 * 0.84,
-      10,
-    );
+  it("moves keyboard focus onto the graph's nodes and opens one with Enter", async () => {
+    stubPages(["alpha.md", "beta.md", "gamma.md"], [["alpha.md", "beta.md"], ["gamma.md", "beta.md"]]);
+    const onOpenPath = vi.fn();
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={onOpenPath} />);
+    const canvas = await screen.findByTestId("graph-canvas");
+    await waitFor(() => expect(canvas.dataset.nodeCount).toBe("3"));
+    canvas.focus();
+    fireEvent.keyDown(canvas, { key: "ArrowRight" });
+    // With nothing open, focus starts on the most-linked node.
+    expect(screen.getByTestId("graph-focused-node").textContent).toBe("beta.md, 2 links");
+    fireEvent.keyDown(canvas, { key: "Enter" });
+    expect(onOpenPath).toHaveBeenCalledWith("beta.md");
+    fireEvent.keyDown(canvas, { key: "Escape" });
+    expect(canvas.getAttribute("aria-describedby")).toBeNull();
   });
 
+  it("marks the open page on the full graph", async () => {
+    stubPages(["a.md", "b.md"], [["a.md", "b.md"]]);
+    render(<GraphView workspaceId="ws" activePath="b.md" refreshKey="0" variant="page" onOpenPath={vi.fn()} />);
+    const canvas = await screen.findByTestId("graph-canvas");
+    expect(canvas.dataset.activePath).toBe("b.md");
+    await waitFor(() => expect(canvas.dataset.linkCount).toBe("1"));
+  });
+
+  it("hides a kind and orphans from the settings, and says how many are shown", async () => {
+    stubPages(["a.md", "b.md", "plan.excalidraw", "alone.md"], [["a.md", "b.md"], ["a.md", "plan.excalidraw"]]);
+    render(<GraphView workspaceId="ws-filters" activePath={null} refreshKey="0" variant="page" onOpenPath={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("4"));
+    fireEvent.click(screen.getByTestId("graph-settings-toggle"));
+    fireEvent.click(screen.getByRole("switch", { name: "Show drawing nodes" }));
+    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 of 4 files"));
+    expect(screen.getByTestId("graph-link-count").textContent).toBe("1 of 2 links");
+    fireEvent.click(screen.getByRole("switch", { name: "Show files with no links" }));
+    await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("2"));
+  });
+
+  it("groups the digits of large counts", async () => {
+    stubPages(Array.from({ length: 1200 }, (_, index) => `note-${index}.md`), []);
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe(`${(1200).toLocaleString()} files`));
+  });
+
+  it("offers Try again when the first read fails", async () => {
+    const linksEdges = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue(page("a.md"));
+    const onError = vi.fn();
+    vi.stubGlobal("dohcDesktop", { linksEdges });
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={vi.fn()} onError={onError} />);
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    fireEvent.click(within(await screen.findByTestId("graph-retry")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByTestId("graph-canvas").dataset.nodeCount).toBe("1"));
+    expect(screen.queryByTestId("graph-retry")).toBeNull();
+  });
 
   it("paints the first page before continuing and deduplicates visible degrees", async () => {
     const frames = stubAnimationFrames();
@@ -628,12 +198,13 @@ describe("GraphView", () => {
       {source:"a.md",target:"b.md",kind:"wikilink",ordinal:0},
       {source:"a.md",target:"b.md",kind:"wikilink",ordinal:1},
     ] }));
-    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 pages"));
+    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 files"));
     expect(screen.getByTestId("graph-link-count").textContent).toBe("1 link");
     // The counts truncate together in a narrow panel, so their tooltip holds both.
-    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 pages · 1 link");
+    expect(screen.getByTestId("graph-doc-count").parentElement?.title).toBe("3 files · 1 link");
     const row=screen.getAllByTestId("graph-file-row").find(row=>row.dataset.path==="a.md")!;
-    expect(row.textContent).toContain("0/1");
+    // One link, counted once although the page repeats it.
+    expect(row.textContent).toBe("a.md1");
     expect(screen.queryByText("Gathering linked mentions")).toBeNull();
   });
 
@@ -790,13 +361,6 @@ describe("GraphView", () => {
 
 function page(path: string, nextCursor: string | null = null): LinksEdgesResult {
   return {versionId:"main",files:[{path,objectId:path,title:path}],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor};
-}
-function stubFileGraph(mock: { linksEdges: (...args: never[]) => Promise<GraphFixture> }) {
-  vi.stubGlobal("dohcDesktop", { linksEdges: async () => {
-    const graph = await mock.linksEdges();
-    return {...page(""),files:graph.nodes.map(node=>({path:node.path,objectId:node.path,title:node.title})),
-      entries:graph.edges.map((edge,ordinal)=>({...edge,ordinal}))};
-  }});
 }
 
 it("paints the first chat page, continues once, and deduplicates attachments across pages", async()=>{
