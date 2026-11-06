@@ -198,6 +198,14 @@ describe("chat editor tabs", () => {
     expect(editor.nav).toEqual(jump);
     expect(editor.revision).toBe(before + 1);
     expect(editor.drafts).toBe(draft);
+
+    // Naming the chat lane with no message is a command too; a plain open is not.
+    const lane = { ...agent, lane: "chat" } as ChatsNav;
+    act(() => result.current.open(lane));
+    expect(editor.nav).toEqual(lane);
+    expect(editor.revision).toBe(before + 2);
+    act(() => result.current.open(agent));
+    expect(editor.revision).toBe(before + 2);
   });
 
   it("refreshes a focused DM's metadata while keeping its draft and message position", () => {

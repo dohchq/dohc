@@ -53,6 +53,7 @@ describe("targeted chat navigation", () => {
       ({ level: "channel", channel: thread.channel, ...(focusMessageId ? { focusMessageId } : {}) });
     expect(chatsNavigationRequiresRemount(lane(), lane("message-2"))).toBe(true);
     expect(chatsNavigationRequiresRemount(lane("message-2"), lane())).toBe(false);
+    expect(chatsNavigationRequiresRemount(lane(), { ...lane(), lane: "chat" } as ChatsNav)).toBe(true);
   });
 
   it("keeps drafts for a message jump but clears them for another conversation", () => {
