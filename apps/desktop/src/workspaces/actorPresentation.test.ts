@@ -4,7 +4,7 @@ import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presen
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { RegistryEntry } from "./registryStore";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { chatLinkMessageForPresentation, chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
+import { agentKeyForGroup, chatLinkMessageForPresentation, chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
 
 // Count issuer construction while keeping its behavior.
 vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
@@ -113,6 +113,18 @@ describe("chat presentation admission", () => {
     expect(await group(entry("default"))).toBe(await group(post("default")));
     expect(await group(entry())).toBe(await group(post()));
     expect(await group(entry())).not.toBe(await group(post("default")));
+  });
+  it("keeps another person's connected agents in one group, apart from their agent with the same name", async () => {
+    const bob = (displayName: string, authorAgentId?: string) => message({ author: { kind: "agent", displayName }, authorUserId: "bob",
+      ...(authorAgentId === undefined ? {} : { authorAgentId }) });
+    const first = await request().present(bob("Nova", "nova"), "t");
+    // A color chosen for Bob's agent Nova stays with that agent.
+    const r = request(true, "w", { [agentKeyForGroup("w", first.group)]: "rose" });
+    const run = await r.present(bob("Nova", "nova"), "t");
+    const connected = [await r.present(bob("Nova"), "t"), await r.present(bob("Scout"), "t"), await r.present(bob("Helper"), "t")];
+    expect(run).toEqual({ group: first.group, hue: "rose", self: false });
+    expect(connected[0]!.group).not.toBe(run.group);
+    for (const post of connected) expect(post).toEqual({ group: connected[0]!.group, hue: null, self: false, connected: true });
   });
   it("keeps a missing key unknown despite current credentials and author id", async () => {
     const r = request(false);
