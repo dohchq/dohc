@@ -24,6 +24,9 @@ export const SYNC_OFF_KEEPS_WITH_RECEIVED =
 // Why the switch cannot turn on while nobody is signed in. Connect server sits
 // in the row above.
 export const SYNC_ON_NEEDS_SERVER = "Connect your server to turn sync on.";
+// Beside Try again when the shell could not read the status. The shell's
+// notice carries the reason.
+const SYNC_STATUS_UNREADABLE = "dohc could not read this workspace's sync status.";
 
 // The shell's own read of this workspace's server connection, so opening
 // Settings reads nothing new.
@@ -242,9 +245,8 @@ export function CloudSyncSettings(props: {
     if (!props.cloud.unreadable) {
       return <SkeletonRows rows={2} label="Checking your server connection…" testId="settings-cloud-checking" />;
     }
-    // The shell already raised the failure, with its reason and Try again.
     return (
-      <SettingRow title="Server" testId="settings-row-server">
+      <SettingRow title="Server" testId="settings-row-server" description={SYNC_STATUS_UNREADABLE}>
         <SecondaryButton onClick={props.cloud.onChanged}>
           Try again
         </SecondaryButton>
