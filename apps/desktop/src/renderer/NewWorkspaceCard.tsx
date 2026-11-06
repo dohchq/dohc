@@ -6,7 +6,7 @@ import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { FolderSheets } from "./FolderSheets";
 import { ipcErrorMessage } from "./ipcError";
-import { FieldError, GhostButton, PrimaryButton } from "./ui/controls";
+import { FieldError, GhostButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { PathLine } from "./ui/PathLine";
 import { useRequestSequence } from "./useRequestSequence";
 
@@ -153,6 +153,7 @@ export function NewWorkspaceCard(props: {
 
   const path = root ? `${displayPath(root)}${isWindows() ? "\\" : "/"}${folderName.trim()}` : null;
   const pathShown = locationTooltip.tooltipProps.open && path !== null;
+  const ChangeButton = error ? SecondaryButton : GhostButton;
 
   return (
     <form
@@ -213,14 +214,14 @@ export function NewWorkspaceCard(props: {
             </span>
             {/* It stays live when no default arrived, so the person can still
                 choose a folder by hand. */}
-            <GhostButton
+            <ChangeButton
               aria-label="Change location"
               {...locationTooltip.focusProps}
               onClick={() => void chooseFolder()}
-              className="-mr-2 shrink-0"
+              className={error ? "shrink-0" : "-mr-2 shrink-0"}
             >
               Change
-            </GhostButton>
+            </ChangeButton>
             {/* The path opens above its line, as wide as the card, so a long
                 one takes few lines and covers only the tab. Clicks go through
                 it, and it closes once the pointer leaves the line. The shared

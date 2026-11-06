@@ -65,6 +65,63 @@ afterEach(() => {
 });
 
 describe("OpenSharedView", () => {
+  function expectMissingInput(reason: string | null) {
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    expect(start.getAttribute("aria-describedby")).toBe(reason ? "open-share-missing-input" : null);
+    expect(document.getElementById("open-share-missing-input")?.textContent ?? null).toBe(reason);
+    if (reason) expect(start.disabled).toBe(true);
+  }
+
+  it.each([
+    { mounting: false, chosen: false, code: "", reason: "Paste a share code and choose a folder." },
+    { mounting: false, chosen: true, code: "", reason: "Paste a share code." },
+    { mounting: true, chosen: false, code: "", reason: "Paste a share code." },
+    { mounting: false, chosen: false, code: "entered-code", reason: "Choose an empty folder." },
+  ])("describes missing input for $reason with mounting=$mounting and chosen=$chosen", async ({ mounting, chosen, code, reason }) => {
+    const user = userEvent.setup();
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        mountInto={mounting ? { workspaceId: "ws-host", onMounted: () => {} } : undefined}
+      />,
+    );
+    await waitFor(() => expectMissingInput(mounting ? "Paste a share code." : "Paste a share code and choose a folder."));
+    if (chosen) await user.click(screen.getByTestId("open-share-choose-folder"));
+    if (code) fireEvent.change(screen.getByTestId("open-share-code"), { target: { value: code } });
+    await waitFor(() => expectMissingInput(reason));
+
+    if (!code) fireEvent.change(screen.getByTestId("open-share-code"), { target: { value: "entered-code" } });
+    if (!mounting && !chosen) await user.click(screen.getByTestId("open-share-choose-folder"));
+    await waitFor(() => expect(screen.getByTestId("open-share-start")).toHaveProperty("disabled", false));
+    expectMissingInput(null);
+  });
+
+  it("shows no missing-input reason while checking the session", async () => {
+    const session = deferred<{ connected: boolean }>();
+    bridgeMock.cloudStatus.mockReturnValue(session.promise);
+    render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
+    expect(screen.getByTestId("open-share-start")).toHaveProperty("disabled", true);
+    expectMissingInput(null);
+    await act(async () => session.resolve({ connected: false }));
+    expectMissingInput("Paste a share code and choose a folder.");
+  });
+
+  it("shows no folder reason while checking share access", async () => {
+    const lookup = deferred<GetRelayReceivedShareResult>();
+    bridgeMock.getRelayReceivedShare.mockReturnValue(lookup.promise);
+    bridgeMock.getDefaultShareRoot.mockRejectedValue(new Error("No default folder"));
+    render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
+    await waitFor(() => expectMissingInput("Paste a share code and choose a folder."));
+    fireEvent.change(screen.getByTestId("open-share-code"), {
+      target: { value: "dohc-share:share-1:http://localhost:1788" },
+    });
+    await waitFor(() => expect(screen.getByTestId("open-share-start").textContent).toBe("Checking the share…"));
+    expectMissingInput(null);
+    await act(async () => lookup.resolve({ found: false }));
+    expectMissingInput("Choose an empty folder.");
+  });
+
   it("keeps Back available while adding a share and ignores the late result after leaving", async () => {
     const pending = deferred<{
       workspace: typeof SHARED_VIEW;
@@ -99,6 +156,7 @@ describe("OpenSharedView", () => {
     expect(screen.getByTestId("open-share-start").textContent).toBe(
       "Adding the share…",
     );
+    expectMissingInput(null);
     const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
     expect(back.disabled).toBe(false);
     expect(
@@ -156,6 +214,7 @@ describe("OpenSharedView", () => {
     expect(screen.getByTestId("open-share-start").textContent).toBe(
       "Opening the share…",
     );
+    expectMissingInput(null);
     const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
     expect(back.disabled).toBe(false);
     expect(

@@ -267,6 +267,16 @@ export function OpenSharedView(props: {
     !checkingAccess &&
     shareCode.length > 0 &&
     (mounting || folder !== null);
+  const missingInputReason =
+    canOpen || gate.kind === "checking" || opening || checkingAccess
+      ? null
+      : shareCode.length === 0
+        ? !mounting && folder === null
+          ? "Paste a share code and choose a folder."
+          : "Paste a share code."
+        : !mounting && folder === null
+          ? "Choose an empty folder."
+          : null;
 
   return (
     <div
@@ -377,24 +387,32 @@ export function OpenSharedView(props: {
         )}
       </div>
 
-      <PrimaryButton
-        type="button"
-        data-testid="open-share-start"
-        disabled={!canOpen}
-        onClick={() => void open()}
-      >
-        {/* The busy label is the disabled button's reason, as it is while
-            opening, and it names no mode before the grant decides one. */}
-        {checkingAccess
-          ? "Checking the share…"
-          : opening
-          ? mounting
-            ? "Adding the share…"
-            : "Opening the share…"
-          : mounting
-            ? "Add share"
-            : "Open share"}
-      </PrimaryButton>
+      <div className="flex flex-col gap-2">
+        <PrimaryButton
+          type="button"
+          data-testid="open-share-start"
+          disabled={!canOpen}
+          aria-describedby={missingInputReason ? "open-share-missing-input" : undefined}
+          onClick={() => void open()}
+        >
+          {/* The busy label is the disabled button's reason, as it is while
+              opening, and it names no mode before the grant decides one. */}
+          {checkingAccess
+            ? "Checking the share…"
+            : opening
+            ? mounting
+              ? "Adding the share…"
+              : "Opening the share…"
+            : mounting
+              ? "Add share"
+              : "Open share"}
+        </PrimaryButton>
+        {missingInputReason ? (
+          <p id="open-share-missing-input" className="m-0 text-xs leading-relaxed text-muted">
+            {missingInputReason}
+          </p>
+        ) : null}
+      </div>
 
       {signingIn && gate.kind !== "signed-in" ? (
         <div
