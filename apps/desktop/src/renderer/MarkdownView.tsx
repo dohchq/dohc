@@ -8,6 +8,7 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
+  LOSSY_NOTE_TITLE,
   OpeningState,
   ViewActions,
   OrphanedDraftNotices,
@@ -1012,6 +1013,13 @@ export function MarkdownView(props: {
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
+  // A disabled Edit says why: the chip's words, or the cause of the notice
+  // that says it when the chip has no sentence.
+  const editReason = readOnlyWords || (props.lossyNote === "lossy" ? LOSSY_NOTE_TITLE
+    : typeof chipState === "string" && SAVE_STATE[chipState].title ? SAVE_STATE[chipState].title
+    : props.forceReadOnly ? SAVE_STATE["read-only"].title
+    : props.truncated ? SAVE_STATE["too-large"].title
+    : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
   // the flip. See writeDraftNow and the unmount flush.
@@ -2311,13 +2319,7 @@ export function MarkdownView(props: {
               label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE
-                : props.lossyNote === "lossy" ? "This note has parts dohc can't show."
-                : chipState === "read-only" ? "Your access to this document ended."
-                : readOnly && typeof chipState === "string" && SAVE_STATE[chipState].title ? SAVE_STATE[chipState].title
-                : props.forceReadOnly ? SAVE_STATE["read-only"].title
-                : props.truncated ? SAVE_STATE["too-large"].title
-                : undefined,
+              title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
               onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {
