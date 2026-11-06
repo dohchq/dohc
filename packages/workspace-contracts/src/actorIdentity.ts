@@ -139,8 +139,8 @@ export function deriveLocalActor(input: {
 /**
  * Read ingested chat with its thread-bound trusted issuer and relay-verified authorUserId.
  * Names and kinds remain claims. Missing identity never borrows the reader's credentials.
- * Until agent registration exists, another device's authorDisplayName is its claimedName.
- * That device's original handshake claim is unavailable. Do not invent a placeholder here.
+ * The caller gives an agent's claimedName: chat keys another device's agent post by its
+ * run's agent, else as the unnamed agent, as that device does. None is invented here.
  * A link holder is its link grant and link principal, which only the relay writes; it has no account.
  */
 export function deriveRelayChatActor(input: {
