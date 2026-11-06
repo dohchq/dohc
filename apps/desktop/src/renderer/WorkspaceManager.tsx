@@ -502,10 +502,10 @@ export function WorkspaceManager(props: {
           onConfirm={() => void confirmRemoval(removing.workspace)}
         >
           {removalFacts(removing.workspace).map((fact) => (
-            <p key={fact} className="m-0 mt-2 text-[13px] text-muted">{fact}</p>
+            <p key={fact} className="m-0">{fact}</p>
           ))}
           {removing.error ? (
-            <p data-testid="workspace-remove-error" role="alert" className="m-0 mt-3 text-[13px] text-danger">
+            <p data-testid="workspace-remove-error" role="alert" className="m-0 text-danger">
               {removing.error}
             </p>
           ) : null}
