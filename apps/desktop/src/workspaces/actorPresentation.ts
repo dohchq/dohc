@@ -86,9 +86,9 @@ function localPersonKeys(installationId: string, account: LocalActorIdentity["ac
   return [localPersonKey(installationId, null), ...(account ? [localPersonKey(installationId, account)] : [])].map(serializeActorKey);
 }
 // Chat and History share one rule: a group per key, a personal agent hue or a human hash, and self for this computer's person and their agents.
+// A connected agent takes the plug wherever it shows. Its post or edit decides that, since a share's key can be unknown.
 // Your agent's message from one of its runs also names its agent, so the renderer colors it as Settings does.
-// A connected agent, keyed as the unnamed agent since no run names it, takes the plug wherever it shows.
-function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>, agentId?: string): ActorPresentation {
+function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>, connected: boolean, agentId?: string): ActorPresentation {
   const serialized = serializeActorKey(key);
   const unknown = key.kind === "unknown";
   const group = groupFor(workspaceId, unknown ? unknownIdentity() : serialized, unknown);
@@ -97,7 +97,7 @@ function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: ()
   const self = (human || key.kind === "agent") && own.includes(ownerKey);
   return { group, hue: key.kind === "agent" ? colors.get(serialized) ?? null : humanHue(key), self,
     ...(self && key.kind === "agent" && agentId !== undefined ? { agentId } : {}),
-    ...(key.kind === "agent" && isConnectedAgentId(key.claimedName) ? { connected: true as const } : {}) };
+    ...(connected ? { connected: true as const } : {}) };
 }
 export function ownActorPresentation(installationId: string, credentials: CloudCredentials | null): ActorPresentation {
   return { group: "own", hue: humanHue(localPersonKey(installationId, localAccount(credentials))), self: true };
@@ -146,8 +146,10 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
     const { key } = chatActorForPresentation(message, issuer);
     const workspaceId = input.readWorkspace()?.workspaceId;
     if (workspaceId === undefined) throw new Error("Chat workspace closed.");
+    // A share serves no run id, so every agent post that comes through one is a connected agent's.
+    const connected = message.author.kind === "agent" && isConnectedAgentId(key.kind === "agent" ? key.claimedName : message.authorAgentId);
     return presentationFor(workspaceId, key,
-      () => JSON.stringify(["unknown", threadId, message.authorUserId ?? null, message.author.displayName]), own, colors(),
+      () => JSON.stringify(["unknown", threadId, message.authorUserId ?? null, message.author.displayName]), own, colors(), connected,
       message.authorAgentId);
   };
 }
@@ -180,7 +182,7 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
   return (authors) => {
     input.assertCurrent();
     return authors.map(author => presentationFor(input.workspaceId, deriveMomentActor(author, context, "").key,
-      () => JSON.stringify(["unknown", author]), own, colors()));
+      () => JSON.stringify(["unknown", author]), own, colors(), author.kind === "agent" && isConnectedAgentId(author.agentId)));
   };
 }
 

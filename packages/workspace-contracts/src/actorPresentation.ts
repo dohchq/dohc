@@ -20,6 +20,15 @@ export function shownAgentName(name: string | undefined): string | undefined {
   return name === undefined || HIDDEN_TEXT.test(name) ? undefined : name;
 }
 
+const EVERY_HIDDEN_TEXT = new RegExp(HIDDEN_TEXT.source, "gu");
+/** JSON as dohc shows it, such as a change's details: each character that could
+ * hide or reorder text written as its `\uXXXX` escape, so the text still parses
+ * as the same JSON. Line breaks stay. */
+export function escapeHiddenText(json: string): string {
+  return json.replace(EVERY_HIDDEN_TEXT, (char) => char === "\n" ? char
+    : char.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""));
+}
+
 /** Whether an agent id is a connected agent's: one writing outside a run dohc
  * started, which is the unnamed agent whatever name it gave. A chat post
  * names its run's agent as `authorAgentId`, History and sync pauses as

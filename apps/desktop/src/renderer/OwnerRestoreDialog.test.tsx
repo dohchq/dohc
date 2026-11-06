@@ -337,6 +337,28 @@ it("marks the agent the owner's change declared beside the authenticated owner",
   // The declared person stays out of the row; the server's owner is the authority it names.
   expect(row.textContent?.split("Change details")[0]).not.toContain("local-person");
 });
+it("marks a connected agent's change with the plug, and a guest's agent as the guest's", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!, base = reviewFixture();
+  // The second change is a guest's, by their run's agent. The third is a connected agent's.
+  const changes = [null, {authority: reader, agent: {kind: "agent", agentId: "trip-agent-hosted", onBehalfOf: "reader", depth: 0}},
+    {authority: owner, agent: {kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "local-person", depth: 0}}];
+  const review = {...base, acceptedEvents: base.acceptedEvents.map((event, index) => {
+    const change = changes[index];
+    return change ? {...event, metadata: {...event.metadata, accepted: {...event.metadata.accepted, authority: change.authority}, authorSnapshot: [change.agent]}} : event;
+  })};
+  f.call.mockImplementation(input => input.action === "review" ? Promise.resolve({status: f.status(), result: review}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  const badges = screen.getAllByTestId("owner-restore-change-agent-badge");
+  const plugged = badges.find(badge => badge.getAttribute("aria-label") === "connected agent")!;
+  const run = badges.find(badge => badge.getAttribute("aria-label") === "agent")!;
+  fireEvent.focus(plugged);
+  expect(screen.getByRole("tooltip").textContent).toContain("Claude (as reported)");
+  expect(screen.getByRole("tooltip").textContent).toContain("Connected agent");
+  fireEvent.blur(plugged);
+  fireEvent.focus(run);
+  expect(screen.getByRole("tooltip").textContent).toContain("Owned by Account reader");
+});
 
 it("allows declining content replacement after access stops", async () => {
   const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();
