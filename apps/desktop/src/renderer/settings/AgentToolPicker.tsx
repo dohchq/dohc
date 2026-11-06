@@ -1,3 +1,4 @@
+import { Check } from "lucide-react";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { AGENT_TOOLS, supportsAgentProfile, type AgentLaunchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import { bridge } from "../bridge";
@@ -56,8 +57,11 @@ export function AgentToolPicker(props: {
           onClick={() => {
             if (detected?.executable && (tool.id === "claude" || tool.id === "codex")) props.onChange({ tool: tool.id, executable: detected.executable });
           }}
-          className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${selected ? "border-accent bg-bg" : "border-line bg-panel hover:bg-hover"} disabled:cursor-default`}>
-          <span className="block text-[13px] font-medium text-ink">{tool.name}</span>
+          className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${selected ? "border-accent bg-selected ring-1 ring-accent" : "border-line bg-panel enabled:hover:bg-hover"} disabled:cursor-default disabled:opacity-60`}>
+          <span className="flex items-center justify-between gap-2">
+            <span className="min-w-0 text-[13px] font-medium text-ink">{tool.name}</span>
+            {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
+          </span>
           <span className="block text-[11px] text-muted">{loading ? "Detecting…" : !result ? "Not checked" : detected?.probe === "detected" ? `Detected · ${detected.version}` : detected?.executable ? "Version probe failed" : "Not found"}</span>
           <span className="block text-[11px] text-muted">{detected?.auth === "signed-in" ? "Signed in" : detected?.auth === "signed-out" ? "Signed out" : detected?.auth === "credentials-found" ? "Credentials found · sign-in unknown" : "Sign-in unknown"}</span>
           {detected?.executable ? <span title={detected.executable} className="mt-1 flex min-w-0"><PathLine path={detected.executable} className="font-mono text-[11px] text-muted" /></span> : null}
