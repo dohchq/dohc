@@ -282,7 +282,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_notices",
     {
       description:
-        "List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing leaves every row unread.",
+        "List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing does not change whether rows are read.",
       inputSchema: {},
     },
     async () => text(await listNotices(ctx)),
