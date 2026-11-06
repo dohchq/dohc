@@ -3202,7 +3202,7 @@ describe("chatDispatchService", () => {
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
       runId: claim.run.runId, triggerMessageId: trigger.messageId, words,
-      nextStep: "Mention Nova to ask again.", retryable: false,
+      nextStep: "Mention @Nova to ask again.", retryable: false,
     });
     // The notice keeps its words. The mention is for the conversation only.
     expect(fixture.notices[0]!.title).toBe(`${words.split(".")[0]} in "Run the request."`);
@@ -3211,10 +3211,26 @@ describe("chatDispatchService", () => {
     expect(fixture.requeues).toEqual([]);
   });
 
+  // The line names the @handle the composer inserts, which drops spaces and
+  // punctuation. A name with no handle can't be mentioned, so it gets no line.
+  it.each([
+    { agentName: "Codex (Work)", nextStep: "Mention @CodexWork to ask again." },
+    { agentName: "\u{1F98A}", nextStep: undefined },
+  ])("names the agent's handle in the line to ask again: %j", async ({ agentName, nextStep }) => {
+    const fixture = await createFixture({ agentName });
+    await stubRunnerPath(fixture, { node: true });
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(7);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun?.nextStep).toBe(nextStep);
+  });
+
   // A run with nothing to try again says to mention its agent. A run that
   // couldn't start, or needs Node.js, keeps its own next step instead.
   it.each([
-    { exitCode: 0, node: true, words: "Nova didn't reply. Its run ended without a reply.", nextStep: "Mention Nova to ask again." },
+    { exitCode: 0, node: true, words: "Nova didn't reply. Its run ended without a reply.", nextStep: "Mention @Nova to ask again." },
     {
       exitCode: 7,
       node: false,
@@ -3237,7 +3253,7 @@ describe("chatDispatchService", () => {
   });
 
   it.each([
-    { reason: "timed out after 30m", words: "Nova didn't reply. It ran past its 30-minute limit.", nextStep: "Mention Nova to ask again." },
+    { reason: "timed out after 30m", words: "Nova didn't reply. It ran past its 30-minute limit.", nextStep: "Mention @Nova to ask again." },
     { reason: "runner failed to start: spawn ENOENT", words: "Nova didn't reply. It couldn't start: spawn ENOENT", nextStep: undefined },
   ])("says what to do next, with no Try again, on a run that ended with %j", async ({ reason, words, nextStep }) => {
     const fixture = await createFixture();

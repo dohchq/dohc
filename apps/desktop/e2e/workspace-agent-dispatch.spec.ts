@@ -305,7 +305,7 @@ test("a runner that exits silently says why under the message and posts a notice
     // would repeat what it did, so the line offers no Try again and says to
     // ask the agent again instead.
     const words = "Nova didn't reply. Its run ended with an error.";
-    const nextStep = "Mention Nova to ask again.";
+    const nextStep = "Mention @Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
     await expect(line.getByRole("status")).toHaveText([words, nextStep]);
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);

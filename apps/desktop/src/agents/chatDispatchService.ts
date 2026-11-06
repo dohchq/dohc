@@ -28,6 +28,7 @@ import {
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
+import { handleForName } from "@dohc/workspace-contracts/chat-mentions";
 import { WorkspaceRestrictedError } from "../workspaces/workspaceTrust";
 
 // How a run ended, as its notice says it.
@@ -866,14 +867,16 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
     // Running these again would repeat what they did, so the person asks
-    // the agent again instead. A run that couldn't start or needs Node.js
-    // has its own next step, and an agent no longer in Settings can't be
+    // the agent again instead, with the @handle the composer inserts. A run
+    // that couldn't start or needs Node.js has its own next step, and an
+    // agent no longer in Settings, or whose name has no handle, can't be
     // mentioned.
-    const asksAgain = agentName !== undefined && ASKS_AGAIN.has(outcome) && !needsNodeJs(outcome, nodeAvailable);
+    const handle = agentName === undefined ? "" : handleForName(agentName);
+    const asksAgain = handle !== "" && ASKS_AGAIN.has(outcome) && !needsNodeJs(outcome, nodeAvailable);
     return {
       lead: `${noticeAgentName(agentName)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
-      ...(asksAgain ? { nextStep: `Mention ${noticeAgentName(agentName)} to ask again.` } : {}),
+      ...(asksAgain ? { nextStep: `Mention @${handle} to ask again.` } : {}),
     };
   }
 
