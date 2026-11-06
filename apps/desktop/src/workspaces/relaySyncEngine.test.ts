@@ -6,6 +6,7 @@ import {
   RelayWorkspaceUnavailableError,
   RelayIdentityMissingError,
   RelayClaimRefusedError,
+  type MaterializeRelayPullPage,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
@@ -24,14 +25,14 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 // exactly like the real capture implementation.
 const claimMock = vi.fn<() => Promise<void>>();
 const pushMock = vi.fn<RelaySyncOperations["push"]>();
-const pullMock = vi.fn<RelaySyncOperations["pull"]>();
+const pullMock = vi.fn<(materializePage: MaterializeRelayPullPage) => Promise<PullWorkspaceFromRelayResult>>();
 const recoverMock = vi.fn<RelaySyncOperations["recoverOrigin"]>();
 
 function mockOperations(): RelaySyncOperations {
   return {
     claim: claimMock,
     push: pushMock,
-    pull: pullMock,
+    pull: (runBatch) => runBatch(pullMock),
     recoverOrigin: recoverMock,
   };
 }
@@ -183,6 +184,41 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("admits capture, document opens, and History while a fetch waits", async () => {
+    const {serialCapture, enqueue} = serialCaptureFake();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const operations: RelaySyncOperations = {
+      ...mockOperations(),
+      pull: async runBatch => {
+        entered.resolve();
+        await release.promise;
+        return runBatch(async materialize => {
+          events.push("apply");
+          await materialize([]);
+          events.push("commit");
+          return pullResult();
+        });
+      },
+    };
+    const sync = engine({capture: serialCapture, operations});
+    const syncing = sync.start();
+    await entered.promise;
+    try {
+      await Promise.all(["capture write", "document open", "History"].map(action => enqueue(async () => {
+        events.push(action);
+      })));
+      expect(events).toEqual(["capture write", "document open", "History"]);
+      expect(chainHeld).toBe(0);
+    } finally {
+      release.resolve();
+      await syncing;
+      await sync.stop();
+    }
+    expect(events).toEqual(["capture write", "document open", "History", "apply", "commit"]);
+  });
+
   it("opens documents and writes while a push waits on the relay, and pulls between drain passes", async () => {
     const events: string[] = [];
     const fake = serialCaptureFake();

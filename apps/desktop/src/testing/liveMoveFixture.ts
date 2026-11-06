@@ -243,12 +243,12 @@ export async function openLiveMoveFixture(input: {
         claim: () => relay.claim(),
         push: () => relay.push(),
         recoverOrigin: () => relay.recoverOrigin(),
-        async pull(materializePage) {
+        async pull(runBatch) {
           const into = catchingUp ?? background;
           const started = performance.now();
           pullsRunning++;
           try {
-            const result = await relay.pull(materializePage);
+            const result = await relay.pull(runBatch);
             into.push({ result: "succeeded", elapsedMs: performance.now() - started });
             return result;
           } catch (error) {
@@ -283,7 +283,7 @@ export async function openLiveMoveFixture(input: {
       return {
         rootPath, capture, relay, runNative,
         targetedPasses: () => targeted,
-        pull: () => capture.runRelaySync(materializePage => relay.pull(materializePage)),
+        pull: () => relay.pull(apply => capture.runRelaySync(apply)),
         async move(fromPath, toPath, { guarded }) {
           const record: MoveRecord = { catchUps: [], endedInWait: false };
           if (guarded) lastGuarded = record;

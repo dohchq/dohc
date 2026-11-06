@@ -10,6 +10,7 @@ import {DatabaseSync} from "node:sqlite";
 import {Duplex} from "node:stream";
 import * as Y from "yjs";
 import {EngineClient, DuplexEngineClientConnection} from "@dohc/workspace-engine-client/daemon";
+import type {JsonValue} from "@dohc/workspace-engine-client";
 import {YdocLiveAdapter} from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter";
 import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {markdownToYDoc, yDocToMarkdown} from "../../../packages/ydoc-projection/src/import-export";
@@ -65,10 +66,12 @@ EngineClient.prototype.applyReplicaJournalPage = async function (...args) {
   finally {applyingPage = false; completedPages++;}
 };
 async function ordinaryInFlight() {
-  let page: Record<string, any>;
+  let page: Record<string, JsonValue>;
   do {
-    page = (await passiveClient.sendRequest({id: passiveId++, workspace: passiveWorkspace, method: "sync.pull", deadlineMs: 120_000,
-      params: {workspaceId: "workspace"}})).result as Record<string, any>;
+    const fetched = (await passiveClient.sendRequest({id: passiveId++, workspace: passiveWorkspace, method: "sync.fetchPull", deadlineMs: 120_000,
+      params: {workspaceId: "workspace"}})).result as {pageToken: string};
+    page = (await passiveClient.sendRequest({id: passiveId++, workspace: passiveWorkspace, method: "sync.applyPull", deadlineMs: 120_000,
+      params: {workspaceId: "workspace", pageToken: fetched.pageToken}})).result as Record<string, JsonValue>;
     assert.equal(page.refused, 0, JSON.stringify(page));
     await passiveClient.sendRequest({id: passiveId++, workspace: passiveWorkspace, method: "sync.commitCursor", deadlineMs: 120_000,
       params: {workspaceId: "workspace", pendingCursor: page.pendingCursor}});
@@ -253,7 +256,7 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       }
       if (mode === "device") {
         let page; do {
-          page = await rpc("sync.pull", {workspaceId: "workspace"});
+          page = await rpc("sync.applyPull", {workspaceId: "workspace", pageToken: (await rpc("sync.fetchPull", {workspaceId: "workspace"})).pageToken});
           assert.equal(page.refused, 0, JSON.stringify(page));
           await rpc("sync.commitCursor", {workspaceId: "workspace", pendingCursor: page.pendingCursor});
         } while (page.hasMore);

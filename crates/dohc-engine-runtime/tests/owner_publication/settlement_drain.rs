@@ -304,11 +304,25 @@ impl Drain {
     ) -> tokio::task::JoinHandle<Answer> {
         let (actor, feed) = (self.actor.clone(), Arc::clone(feed));
         tokio::spawn(async move {
+            let fetched = actor
+                .relay_through(
+                    Arc::clone(&feed),
+                    dohc_engine_runtime::RelayOperation::FetchPull {
+                        workspace_id: "workspace".into(),
+                        settle_repairs: false,
+                    },
+                    token.clone(),
+                )
+                .await?;
+            let dohc_engine_runtime::RelayOperationOutcome::PullFetched(page) = fetched else {
+                panic!("expected a fetched page: {fetched:?}");
+            };
             actor
                 .relay_through(
                     feed,
-                    dohc_engine_runtime::RelayOperation::Pull {
+                    dohc_engine_runtime::RelayOperation::ApplyPull {
                         workspace_id: "workspace".into(),
+                        page,
                         now_ms: 1_000_000,
                     },
                     token,

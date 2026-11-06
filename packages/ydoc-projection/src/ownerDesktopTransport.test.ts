@@ -83,6 +83,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
   let renderer: Awaited<ReturnType<typeof bindEngineYDoc>> | undefined;
   let deployment: ReturnType<typeof openRelayDeployment> | undefined;
   let child: ChildProcess | undefined;
+  let restoreOutboxRequests: (() => void) | undefined;
   let handoffEditInjected = false;
   let handoffCount = 0;
   let closeNamedPeer: (() => void) | undefined;
@@ -219,7 +220,9 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       const admissionPath = join(root,"owner-admission.json");
       writeFileSync(admissionPath,JSON.stringify({version: 1,shares: [{workspaceId: "workspace",shareId: "share"}],validation: policy,
         maxEntriesPerDrain: 10,maxBytesPerDrain: 10_000_000,maxDocumentsPerPass: 10,pollIntervalMs: 100,passDeadlineMs: 30_000}));
-      const mainPath = fileURLToPath(new URL("../../../services/sync-relay/dist/main.js",import.meta.url));
+      const mainPath = process.env.DOHC_OWNER_DESKTOP_PROOF_RELAY_MAIN
+        ? resolve(process.env.DOHC_OWNER_DESKTOP_PROOF_RELAY_MAIN)
+        : fileURLToPath(new URL("../../../services/sync-relay/dist/main.js",import.meta.url));
       for (const devicePath of ["",relayConfig]) {
         const refused = spawnSync(process.execPath,[mainPath],{windowsHide: true,timeout: 20_000,encoding: "utf8",
           env: {...process.env,NODE_ENV: "test",SYNC_RELAY_TEST_AUTH: "1",SYNC_RELAY_PORT: "0",DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
@@ -237,6 +240,8 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       child.stdout!.on("data",chunk => {childOutput += String(chunk); writeFileSync(join(root,"standalone.log"),childOutput);});
       child.stderr!.on("data",chunk => {childOutput += String(chunk); writeFileSync(join(root,"standalone.log"),childOutput);});
       await expect.poll(() => {if (child!.exitCode !== null) throw new Error(childOutput); return childOutput.includes("SYNC_RELAY_LISTENING");},{timeout: 30_000}).toBe(true);
+      const outboxRequests = vi.spyOn(singleton,"sendRequest");
+      restoreOutboxRequests = () => outboxRequests.mockRestore();
       connection = connect();
       await expect.poll(() => rendererDoc.getMap("frontmatter").get("remote"),{timeout: 30_000}).toBe("Standalone remote edit");
       const initialHandoffs = handoffCount;
@@ -244,6 +249,12 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       await expect.poll(() => readFileSync(join(workspaceRoot,"docs/a.md"),"utf8"),{timeout: 30_000}).toContain("Standalone owner edit");
       await expect.poll(() => native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries WHERE pending=1").get()!.count,{timeout: 30_000}).toBe(0);
       expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries").get()!.count).toBeGreaterThan(0);
+      for (const method of ["ydoc.ownerOutbox.readPending", "ydoc.ownerOutbox.acknowledge"]) {
+        const index = outboxRequests.mock.calls.findIndex(([request]) => request.method === method);
+        expect(index, `${method} completes after the device handshake`).toBeGreaterThanOrEqual(0);
+        await expect(outboxRequests.mock.results[index]!.value).resolves.toHaveProperty("result");
+      }
+      restoreOutboxRequests(); restoreOutboxRequests = undefined;
       expect(rendererDoc.getMap("frontmatter").get("duringHandoff")).toBe("Queued owner edit");
       expect(rendererDoc.getMap("frontmatter").get("beforeConnection")).toBe("Owner edit before first connection");
       expect(readFileSync(join(workspaceRoot,"docs/a.md"),"utf8")).toContain("Owner edit before first connection");
@@ -533,6 +544,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     await attempt(() => releaseTailAdmission?.());
     await attempt(() => closeNamedPeer?.());
     await attempt(() => captures.mockRestore());
+    await attempt(() => restoreOutboxRequests?.());
     await attempt(async () => {if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}});
     await attempt(() => closeNetwork?.());
     await attempt(() => renderer?.destroy());

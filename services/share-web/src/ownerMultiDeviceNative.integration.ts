@@ -186,7 +186,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       }
       async function pull() {
         for (let page = 0; page < 16; page++) {
-          const result = await rpc("sync.pull", {workspaceId: "workspace"});
+          const result = await rpc("sync.applyPull", {workspaceId: "workspace", pageToken: (await rpc("sync.fetchPull", {workspaceId: "workspace"})).pageToken});
           expect(result.refusals ?? []).toEqual([]);
           if (result.pendingCursor) await rpc("sync.commitCursor", {workspaceId: "workspace", pendingCursor: result.pendingCursor});
           if (!result.hasMore) return result;

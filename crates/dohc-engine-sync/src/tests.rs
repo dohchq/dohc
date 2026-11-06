@@ -472,21 +472,21 @@ impl RelayTransport for KeyConflictRelay {
     }
 }
 
-struct PagedRelay {
+pub(super) struct PagedRelay {
     relay_seq_offset: i64,
     origin_max_probe_elapsed: Mutex<Vec<std::time::Duration>>,
-    pages: BTreeMap<i64, PullResponse>,
+    pub(super) pages: BTreeMap<i64, PullResponse>,
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
-    coordinate_lookups: Mutex<Vec<(String, i64)>>,
+    pub(super) coordinate_lookups: Mutex<Vec<(String, i64)>>,
     pushes: Mutex<Vec<PushRequest>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
     push_conflicts: Mutex<usize>,
 }
 
 impl PagedRelay {
-    fn new(pages: impl IntoIterator<Item = (i64, PullResponse)>) -> Self {
+    pub(super) fn new(pages: impl IntoIterator<Item = (i64, PullResponse)>) -> Self {
         let pages = pages
             .into_iter()
             .map(|(cursor, mut page)| {
@@ -508,7 +508,7 @@ impl PagedRelay {
         }
     }
 
-    fn with_coordinate(
+    pub(super) fn with_coordinate(
         mut self,
         origin_id: &str,
         origin_seq: i64,
