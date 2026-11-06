@@ -4026,12 +4026,11 @@ impl<'a> LinkedChatStore<'a> {
     /// Mention rows for a normalized handle in ascending message-coordinate
     /// order. Inner joins fail closed over missing messages or threads. A
     /// message that already woke a dohc agent is that agent's work, so it is
-    /// left out. `unread_only` reads the place agents outside a run share.
+    /// left out.
     pub fn list_mentions_for_handle(
         &self,
         workspace_id: &str,
         handle: &str,
-        unread_only: bool,
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, DomainError> {
@@ -4050,19 +4049,13 @@ impl<'a> LinkedChatStore<'a> {
                        AND m.thread_id = x.thread_id AND m.message_id = x.message_id \
                      JOIN chat_threads t ON t.workspace_id = x.workspace_id \
                        AND t.thread_id = x.thread_id \
-                     LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = x.workspace_id \
-                       AND ars.agent_id = ?8 AND ars.thread_id = x.thread_id \
                      WHERE x.workspace_id = ?1 AND x.handle = ?2 \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
                          WHERE l.workspace_id = x.workspace_id \
                            AND l.trigger_message_id = x.message_id) \
-                       AND (?3 = 0 OR ars.thread_id IS NULL \
-                         OR x.created_at_ms > ars.last_read_created_at_ms \
-                         OR (x.created_at_ms = ars.last_read_created_at_ms \
-                           AND x.message_id > ars.last_read_message_id)) \
-                       AND (?4 = 0 OR x.created_at_ms > ?5 \
-                         OR (x.created_at_ms = ?5 AND x.message_id > ?6)) \
-                     ORDER BY x.created_at_ms, x.message_id LIMIT ?7",
+                       AND (?3 = 0 OR x.created_at_ms > ?4 \
+                         OR (x.created_at_ms = ?4 AND x.message_id > ?5)) \
+                     ORDER BY x.created_at_ms, x.message_id LIMIT ?6",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
@@ -4070,12 +4063,10 @@ impl<'a> LinkedChatStore<'a> {
                     params![
                         workspace_id,
                         handle,
-                        i64::from(unread_only),
                         has_after,
                         after_created_at_ms,
                         after_message_id,
-                        limit,
-                        OUTSIDE_RUN_READER
+                        limit
                     ],
                     |row| {
                         let thread_id: String = row.get(0)?;
@@ -4173,26 +4164,45 @@ impl<'a> LinkedChatStore<'a> {
         let (has_after, after_ms, after_id) = chat_after(after);
         self.store.read_with(|conn| {
             let sql = r#"
+                WITH posted AS MATERIALIZED (
+                  SELECT thread_id, MIN(message_order) AS first_order
+                  FROM chat_messages
+                  WHERE workspace_id = ?1 AND author_kind = 'agent' AND author_agent_id IS NULL
+                  GROUP BY thread_id
+                ), agent_threads AS MATERIALIZED (
+                  SELECT t.thread_id, (
+                    SELECT latest.author_kind FROM chat_messages latest
+                    WHERE latest.workspace_id = ?1 AND latest.thread_id = t.thread_id
+                    ORDER BY latest.created_at_ms DESC, latest.message_id DESC LIMIT 1
+                  ) AS latest_author
+                  FROM chat_channels c JOIN chat_threads t
+                    ON t.workspace_id = c.workspace_id AND t.channel_id = c.channel_id
+                  WHERE c.workspace_id = ?1 AND c.kind = 'agent'
+                ), candidates AS (
+                  SELECT m.thread_id, m.message_id FROM agent_threads a CROSS JOIN chat_messages m
+                    ON m.workspace_id = ?1 AND m.thread_id = a.thread_id
+                  WHERE a.latest_author = 'human' AND m.author_kind = 'human'
+                  UNION
+                  SELECT x.thread_id, x.message_id FROM chat_mentions x
+                  WHERE x.workspace_id = ?1 AND x.handle = 'agent'
+                    AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l
+                      WHERE l.workspace_id = x.workspace_id AND l.trigger_message_id = x.message_id)
+                  UNION
+                  SELECT m.thread_id, m.message_id FROM posted p CROSS JOIN chat_messages m
+                    ON m.workspace_id = ?1 AND m.thread_id = p.thread_id
+                      AND m.message_order > p.first_order
+                  WHERE m.author_kind = 'human'
+                )
                 SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms
-                FROM chat_messages m
+                FROM candidates candidate CROSS JOIN chat_messages m
+                  ON m.workspace_id = ?1 AND m.message_id = candidate.message_id
+                    AND m.thread_id = candidate.thread_id
                 JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
+                LEFT JOIN agent_threads a ON a.thread_id = t.thread_id
                 LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = m.workspace_id
                   AND ars.agent_id = ?6 AND ars.thread_id = m.thread_id
-                WHERE m.workspace_id = ?1
-                  AND NOT (m.author_kind = 'agent' AND m.author_agent_id IS NULL)
-                  AND ((m.author_kind = 'human' AND EXISTS (
-                        SELECT 1 FROM chat_channels c WHERE c.workspace_id = t.workspace_id
-                          AND c.channel_id = t.channel_id AND c.kind = 'agent'))
-                    OR (NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l
-                        WHERE l.workspace_id = m.workspace_id AND l.trigger_message_id = m.message_id)
-                      AND (EXISTS (SELECT 1 FROM chat_mentions x
-                        WHERE x.workspace_id = m.workspace_id AND x.message_id = m.message_id
-                          AND x.thread_id = m.thread_id AND x.handle = 'agent')
-                        OR (m.author_kind = 'human' AND EXISTS (
-                          SELECT 1 FROM chat_messages posted
-                          WHERE posted.workspace_id = m.workspace_id AND posted.thread_id = m.thread_id
-                            AND posted.author_kind = 'agent' AND posted.author_agent_id IS NULL
-                            AND posted.message_order < m.message_order)))))
+                WHERE NOT (m.author_kind = 'agent' AND m.author_agent_id IS NULL)
+                  AND (a.thread_id IS NULL OR a.latest_author = 'human')
                   AND (ars.thread_id IS NULL OR m.created_at_ms > ars.last_read_created_at_ms
                     OR (m.created_at_ms = ars.last_read_created_at_ms AND m.message_id > ars.last_read_message_id))
                   AND (?2 = 0 OR m.created_at_ms > ?3 OR (m.created_at_ms = ?3 AND m.message_id > ?4))

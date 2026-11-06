@@ -1096,7 +1096,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         ]
     );
     let mentions = chats
-        .list_mentions_for_handle(WS, "ana", false, None, 10)
+        .list_mentions_for_handle(WS, "ana", None, 10)
         .expect("mentions");
     assert_eq!(
         mentions

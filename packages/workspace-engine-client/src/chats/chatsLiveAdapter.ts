@@ -605,7 +605,6 @@ export class ChatsLiveAdapter {
   async listMentionsForHandle(
     workspaceId: string,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMention[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatMention[] = [];
@@ -613,9 +612,6 @@ export class ChatsLiveAdapter {
     do {
       const page = await this.request(CHATS_METHOD.mentionsListForHandle, {
         handle,
-        ...(options?.unreadByAgentOnly !== undefined
-          ? { unreadByAgentOnly: options.unreadByAgentOnly }
-          : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });

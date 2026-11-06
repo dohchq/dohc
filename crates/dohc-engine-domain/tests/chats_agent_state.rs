@@ -167,13 +167,14 @@ fn outside_requests_include_mentions_and_posted_thread_replies_once() {
 }
 
 #[test]
-fn outside_dm_requests_survive_an_agent_reply_without_replaying_read_messages() {
+fn outside_dm_requests_require_a_human_latest_message() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .ensure_agent_channel(WS, "channel", "default", "Agent", 2, &NO_FAULTS)
         .expect("agent chat");
     start(&mut chats, "thread", "first", ChatActorKind::Human, 10);
+    assert_eq!(outside_requests(&chats), ["first"]);
     send(
         &mut chats,
         "thread",
@@ -182,7 +183,7 @@ fn outside_dm_requests_survive_an_agent_reply_without_replaying_read_messages() 
         Some("first"),
         20,
     );
-    assert_eq!(outside_requests(&chats), ["first"]);
+    assert!(outside_requests(&chats).is_empty());
     chats
         .mark_thread_read_by_agent(WS, None, "thread", 10, "first", None, 21, &NO_FAULTS)
         .expect("read");
@@ -195,6 +196,56 @@ fn outside_dm_requests_survive_an_agent_reply_without_replaying_read_messages() 
         30,
     );
     assert_eq!(outside_requests(&chats), ["later"]);
+    send(
+        &mut chats,
+        "thread",
+        "answered",
+        ChatActorKind::Agent,
+        Some("later"),
+        40,
+    );
+    assert!(outside_requests(&chats).is_empty());
+}
+
+#[test]
+fn outside_posted_thread_reply_still_counts_when_it_names_a_dohc_agent() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    start(&mut chats, "thread", "own", ChatActorKind::Agent, 10);
+    chats
+        .send_message(
+            &SendMessage {
+                workspace_id: WS.to_owned(),
+                thread_id: "thread".to_owned(),
+                message_id: "reply".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_user_id: Some("ada".to_owned()),
+                author_owner_display_name: None,
+                author_agent_id: None,
+                parent_message_id: Some("own".to_owned()),
+                origin: None,
+                body: "@Research, please also look".to_owned(),
+                named_agent_ids: vec!["research".to_owned()],
+                automation: None,
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("reply");
+    assert_eq!(
+        chats
+            .list_pending_dispatches(WS, None, 10)
+            .expect("dispatch")
+            .len(),
+        1
+    );
+    assert_eq!(outside_requests(&chats), ["reply"]);
 }
 
 #[test]

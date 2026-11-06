@@ -1110,7 +1110,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         &handle,
         &mut id,
         "chats.mentions.listForHandle",
-        json!({ "handle": "AGENT", "unreadByAgentOnly": false, "pageLimit": 10 }),
+        json!({ "handle": "AGENT", "pageLimit": 10 }),
     )
     .await;
     assert_eq!(
@@ -1136,7 +1136,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
             &handle,
             &mut id,
             "chats.mentions.listForHandle",
-            json!({ "handle": query, "unreadByAgentOnly": false, "pageLimit": 10 }),
+            json!({ "handle": query, "pageLimit": 10 }),
         )
         .await;
         assert_eq!(
@@ -1164,7 +1164,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         &reopened,
         &mut id,
         "chats.mentions.listForHandle",
-        json!({ "handle": "raw", "unreadByAgentOnly": false, "pageLimit": 10 }),
+        json!({ "handle": "raw", "pageLimit": 10 }),
     )
     .await;
     assert!(

@@ -454,8 +454,43 @@ function loopbackAdapter(): {
 }
 
 describe("ChatsLiveAdapter", () => {
-  it("encodes every one of the 62 chats methods with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(62);
+  it("keeps a posted-thread reply that also requests a dohc agent", async () => {
+    const { adapter } = loopbackAdapter();
+    const channel = await adapter.ensureGeneralChannel({ workspaceId: "workspace" });
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.id,
+      author: { kind: "agent", displayName: "Connected agent" }, body: "Joining the thread",
+    });
+    const reply = await adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      author: { kind: "human", displayName: "Sam" }, body: "@Research please also look",
+      namedAgentIds: ["research"],
+    });
+    expect((await adapter.listAgentUnreadRequests("workspace")).map(row => row.messageId)).toEqual([reply.id]);
+  });
+
+  it("keeps agent DMs out of outside requests when their latest message is an agent reply", async () => {
+    const { adapter } = loopbackAdapter();
+    const channel = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "default", name: "Nova" });
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.id,
+      author: { kind: "human", displayName: "Sam" }, body: "Please look", origin: "cli",
+    });
+    expect((await adapter.listAgentUnreadRequests("workspace")).map(row => row.messageId)).toEqual([started.message.id]);
+    const send = (kind: "human" | "agent", body: string) => adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      author: { kind, displayName: kind }, body, origin: "cli",
+    });
+    await send("agent", "Answered");
+    expect(await adapter.listAgentUnreadRequests("workspace")).toEqual([]);
+    await send("human", "@agent one more question");
+    expect(await adapter.listAgentUnreadRequests("workspace")).toHaveLength(2);
+    await send("agent", "Answered again");
+    expect(await adapter.listAgentUnreadRequests("workspace")).toEqual([]);
+  });
+
+  it("encodes every chats request case with the workspace handle and exact params", async () => {
+    expect(CHAT_REQUEST_CASES).toHaveLength(63);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),

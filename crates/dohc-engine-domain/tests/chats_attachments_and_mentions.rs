@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
     ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, LinkedChatStore,
-    LocalAttachmentInput, MentionCursor, NoFaults, SendMessage, StartChannelThread,
-    attachment_id_for, parse_mention_handles,
+    LocalAttachmentInput, NoFaults, SendMessage, StartChannelThread, attachment_id_for,
+    parse_mention_handles,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -799,7 +799,7 @@ fn mention_backfill_completes_before_first_read() {
         .backfill_mentions(WS, &NO_FAULTS)
         .expect("readiness backfill");
     let mentions = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", false, None, 10)
+        .list_mentions_for_handle(WS, "agent", None, 10)
         .expect("read");
     assert_eq!(
         mentions.len(),
@@ -831,60 +831,11 @@ fn mention_read_requires_present_message_and_thread() {
         })
         .expect("orphan index");
     let rows = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", false, None, 10)
+        .list_mentions_for_handle(WS, "agent", None, 10)
         .expect("list");
     assert!(
         rows.is_empty(),
         "dropping either inner join leaks a local derived orphan."
-    );
-}
-
-#[test]
-fn mention_unread_filter_uses_agent_coordinate_tie_break() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "a-message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    send_text(
-        &mut store,
-        "thread",
-        "b-message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    LinkedChatStore::new(&mut store)
-        .mark_thread_read_by_agent(WS, None, "thread", 20, "a-message", None, 30, &NO_FAULTS)
-        .expect("mark read");
-    let rows = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(
-            WS,
-            "agent",
-            true,
-            Some(MentionCursor {
-                created_at_ms: 19,
-                message_id: "z".to_owned(),
-            }),
-            10,
-        )
-        .expect("unread mentions");
-    assert_eq!(
-        rows.iter()
-            .map(|row| row.message_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["b-message"],
-        "timestamp-only unread comparison hides the equal-time later id.",
     );
 }
 
@@ -1339,7 +1290,7 @@ fn a_mention_that_woke_a_dohc_agent_is_not_in_the_agent_inbox() {
         "the named agent wakes exactly once."
     );
     let inbox = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", true, None, 10)
+        .list_agent_unread_requests(WS, None, None, 10)
         .expect("inbox");
     assert!(
         inbox.is_empty(),
@@ -1364,7 +1315,7 @@ fn a_plain_agent_mention_stays_in_the_agent_inbox() {
     );
     assert!(requests(&store).is_empty(), "@agent wakes no dohc agent.");
     let inbox = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", true, None, 10)
+        .list_agent_unread_requests(WS, None, None, 10)
         .expect("inbox");
     assert_eq!(
         inbox
@@ -1392,7 +1343,7 @@ fn windows_reserved_names_are_mention_lookup_keys() {
     );
     for handle in ["con", "NUL", "aux.txt"] {
         let mentions = LinkedChatStore::new(&mut store)
-            .list_mentions_for_handle(WS, handle, false, None, 10)
+            .list_mentions_for_handle(WS, handle, None, 10)
             .expect("reserved filename is a valid mention key");
         assert_eq!(mentions.len(), 1);
         assert_eq!(mentions[0].message_id, "message");

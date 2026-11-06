@@ -749,7 +749,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.attachmentsListFileMentions:
       return ["objectId", "pathHint", "pageLimit", "cursor"];
     case CHATS_METHOD.mentionsListForHandle:
-      return ["handle", "unreadByAgentOnly", "pageLimit", "cursor"];
+      return ["handle", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadListUnreadRequests:
     case CHATS_METHOD.agentReadListUnreadThreads:
       return ["runId", "pageLimit", "cursor"];
@@ -2192,25 +2192,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const token = scanMentionTokens("@" + input)[0];
     if (!token || token.end !== 1 + input.replace(/[._-]+$/u, "").length || !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)) throw new Error("invalid-message-body");
     const handle = normalizeHandle(token.handle);
-    const unreadOnly = optionalBoolean(params, "unreadByAgentOnly") ?? false;
     const rows = state.mentions
       .filter((mention) => mention.handle === handle)
       .filter((mention) => state.messages.has(mention.messageId) && state.threads.has(mention.threadId))
       // A message that woke a dohc agent is that agent's work.
       .filter((mention) =>
         ![...state.dispatches.values()].some((dispatch) => dispatch.triggerMessageId === mention.messageId))
-      .filter((mention) => {
-        if (!unreadOnly) return true;
-        const read = state.agentReads.get(agentReadKey(OUTSIDE_RUN_READER, mention.threadId));
-        return !read ||
-          mention.createdAtMs > read.lastReadCreatedAtMs ||
-          (
-            mention.createdAtMs === read.lastReadCreatedAtMs &&
-            compareText(mention.messageId, read.lastReadMessageId) > 0
-          );
-      })
       .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.messageId, right.messageId));
-    const result = page(rows, params, `${workspace}\0mentions\0${handle}\0${unreadOnly}`);
+    const result = page(rows, params, `${workspace}\0mentions\0${handle}`);
     return jsonResult({ mentions: result.values, nextCursor: result.nextCursor });
   }
 
@@ -2232,15 +2221,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const runId = optionalString(params, "runId");
     const agentId = this.agentReader(state, runId);
     const candidates = runId === undefined
-      ? [...state.messages.values()].filter(message => {
-        if (message.author.kind === "agent" && message.authorAgentId === undefined) return false;
-        const thread = state.threads.get(message.threadId);
-        if (!thread) return false;
-        if (message.author.kind === "human" && thread.channelId && state.channels.get(thread.channelId)?.kind === "agent") return true;
-        if ([...state.dispatches.values()].some(row => row.triggerMessageId === message.id)) return false;
-        return state.mentions.some(row => row.messageId === message.id && row.handle === "agent") ||
-          (message.author.kind === "human" && this.outsideAgentPostedBefore(state, message.threadId, message.id));
-      })
+      ? this.outsideAgentRequests(state)
       : [...state.dispatches.values()]
       .filter((dispatch) => dispatch.agentId === agentId)
       .flatMap((dispatch) => {
@@ -2267,12 +2248,32 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult({ requests: result.values, nextCursor: result.nextCursor });
   }
 
-  private outsideAgentPostedBefore(state: WorkspaceState, threadId: string, messageId: string): boolean {
-    const ids = state.threadMessages.get(threadId) ?? [];
-    const earlier = ids.slice(0, ids.indexOf(messageId));
-    return earlier.some(id => {
-      const posted = state.messages.get(id);
-      return posted?.author.kind === "agent" && posted.authorAgentId === undefined;
+  private outsideAgentRequests(state: WorkspaceState): ChatMessage[] {
+    const postedReplies = new Set<string>();
+    const latestHumanThreads = new Set<string>();
+    for (const [threadId, ids] of state.threadMessages) {
+      let posted = false;
+      let latest: ChatMessage | undefined;
+      for (const id of ids) {
+        const message = state.messages.get(id);
+        if (!message) continue;
+        if (posted && message.author.kind === "human") postedReplies.add(id);
+        if (message.author.kind === "agent" && message.authorAgentId === undefined) posted = true;
+        if (!latest || message.createdAtMs > latest.createdAtMs ||
+          (message.createdAtMs === latest.createdAtMs && compareText(message.id, latest.id) > 0)) latest = message;
+      }
+      if (latest?.author.kind === "human") latestHumanThreads.add(threadId);
+    }
+    const mentions = new Set(state.mentions.filter(row => row.handle === "agent").map(row => `${row.threadId}\0${row.messageId}`));
+    const dispatched = new Set([...state.dispatches.values()].map(row => row.triggerMessageId));
+    return [...state.messages.values()].filter(message => {
+      if (message.author.kind === "agent" && message.authorAgentId === undefined) return false;
+      const thread = state.threads.get(message.threadId);
+      if (!thread) return false;
+      const agentChat = thread.channelId && state.channels.get(thread.channelId)?.kind === "agent";
+      if (agentChat && !latestHumanThreads.has(thread.id)) return false;
+      return (agentChat && message.author.kind === "human") || postedReplies.has(message.id) ||
+        (mentions.has(`${message.threadId}\0${message.id}`) && !dispatched.has(message.id));
     });
   }
 

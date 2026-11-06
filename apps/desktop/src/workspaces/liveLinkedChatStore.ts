@@ -234,10 +234,10 @@ export function createLiveLinkedChatStore(
         async (adapter) =>
           await adapter.listAgentUnreadRequests(workspaceId, runId),
       ),
-    listMentionsForHandle: async (workspaceId, handle, options) =>
+    listMentionsForHandle: async (workspaceId, handle) =>
       await invokeRead(
         async (adapter) =>
-          await adapter.listMentionsForHandle(workspaceId, handle, options),
+          await adapter.listMentionsForHandle(workspaceId, handle),
       ),
     setReaction: async (input) =>
       await invoke(

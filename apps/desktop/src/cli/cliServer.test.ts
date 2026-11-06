@@ -683,7 +683,7 @@ describe("CLI socket server", () => {
     expect(batch.messages.map(message => message.text)).toEqual(["Later"]);
   });
 
-  it.each(["mention", "posted-thread reply"])("wakes after a workspace cloud pull for a %s that predates the cursor", async (kind) => {
+  it.each(["mention", "posted-thread reply"])("uses the cloud-pull wake mechanism for a %s that predates the cursor", async (kind) => {
     const first = await post({ group: "general", actor: "human", body: "@agent first" });
     if (kind === "posted-thread reply") await invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: first.threadId, body: "Joining the thread", attachments: [], needsDecision: false });
     const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });

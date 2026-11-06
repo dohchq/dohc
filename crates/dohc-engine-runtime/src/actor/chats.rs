@@ -325,13 +325,12 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         handle: String,
-        unread_only: bool,
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
+                .list_mentions_for_handle(&workspace_id, &handle, after, limit)
                 .map_err(RuntimeError::from)
         })
         .await
