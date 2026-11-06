@@ -12,6 +12,7 @@ import {
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
+  pinnedChatDay,
 } from "./chatMessages";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
@@ -554,6 +555,26 @@ describe("formatChatTime", () => {
       }),
       iso: new Date(at).toISOString(),
     });
+  });
+});
+
+describe("pinnedChatDay", () => {
+  it("hides the label while the top row's day divider is fully visible", () => {
+    expect(pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: true })).toBeNull();
+  });
+
+  it("shows the day while the top row's divider crosses or sits above the top edge", () => {
+    expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: false })).toBe("Today");
+  });
+
+  it("shows the day for a top row whose divider is further up", () => {
+    expect(pinnedChatDay({ day: "Today", startsDay: false, dividerFullyVisible: true })).toBe("Today");
+  });
+
+  it("hides the label when the conversation fits without scrolling", () => {
+    // The first message is the top row, and its divider is in full view.
+    expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: true })).toBeNull();
+    expect(pinnedChatDay(null)).toBeNull();
   });
 });
 
