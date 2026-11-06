@@ -200,6 +200,8 @@ describe("work reference registration and resolution", () => {
     expect(mixed.references).toEqual(one.references);
     expect(mixed.hasMore).toBe(false);
     const repeated = await read();
+    expect(repeated.nextAfter).toBeTypeOf("string");
+    expect(repeated.nextAfter).toHaveLength(mixed.nextAfter.length);
     expect(repeated.references).toEqual(mixed.references);
     expect(repeated.hasMore).toBe(mixed.hasMore);
     expect(mixed.nextAfter.length).toBe(one.nextAfter.length);
@@ -230,9 +232,14 @@ describe("work reference registration and resolution", () => {
     expect(await json(await register(handler, [{reference: ref, target, createdAtMs: 1}])))
       .toMatchObject({registeredReferences: [ref]});
     const hidden = await read(after);
+    const hiddenAgain = await read(after);
     expect(hidden).toMatchObject({references: [], hasMore: false});
+    expect(hiddenAgain).toMatchObject({references: [], hasMore: false});
     expect(hidden.nextAfter).toBeTypeOf("string");
+    expect(hiddenAgain.nextAfter).toBeTypeOf("string");
     expect(hidden.nextAfter).toHaveLength(first.nextAfter.length);
+    expect(hiddenAgain.nextAfter).toHaveLength(first.nextAfter.length);
+    expect(hiddenAgain.nextAfter).not.toBe(hidden.nextAfter);
   });
 
   it("caps a recipient scan at 1024 rows and continues from its hidden tail", async () => {
