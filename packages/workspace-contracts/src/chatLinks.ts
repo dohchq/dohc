@@ -58,6 +58,8 @@ export const ChatLinksEnginePage = z.object({
         authorOwnerDisplayName: z.string().optional(),
         authorUserId: z.string().optional(),
         authorActorKey: z.string().optional(),
+        // The agent that wrote the message in one of its runs.
+        authorAgentId: z.string().optional(),
       }).strict(),
       // A link holder names a link and no account.
       z.object({

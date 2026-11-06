@@ -48,9 +48,35 @@ describe("chat presentation admission", () => {
   ] as const)("preserves admission assurance %#", (row, assurance, origin) => {
     expect(chatActorForPresentation(row, issuer)).toMatchObject({ assurance, origin });
   });
-  it("uses the ingested agent's claimed name", () => {
+  it("keys an ingested agent post by its run's agent, else as the unnamed agent", () => {
     expect(chatActorForPresentation(message({ author: { kind: "agent", displayName: "claimed" } }), issuer).key)
-      .toMatchObject({ kind: "agent", claimedName: "claimed" });
+      .toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
+    expect(chatActorForPresentation(message({ author: { kind: "agent", displayName: "claimed" }, authorAgentId: "default" }), issuer).key)
+      .toMatchObject({ kind: "agent", claimedName: "default" });
+  });
+  it("keeps a connected agent that uses your agent's name out of that agent's group on another device", async () => {
+    const r = request();
+    // The posts as this device wrote them, with their keys, and as another device reads them.
+    const written = (claimedName: string) => message({ author: { kind: "agent", displayName: "Nova" }, authorActorKey: serializeActorKey(
+      deriveLocalActor({ identity, workspaceId: "w", displayName: "Nova", origin: "cli", author: { kind: "agent", claimedName } }).key) });
+    const yours = message({ author: { kind: "agent", displayName: "Nova" }, authorAgentId: "default" });
+    const connected = message({ author: { kind: "agent", displayName: "Nova" } });
+    const group = async (row: Parameters<typeof r.present>[0]) => (await r.present(row, "t")).group;
+    expect(await group(connected)).not.toBe(await group(yours));
+    expect(await group(yours)).toBe(await group(written("default")));
+    expect(await group(connected)).toBe(await group(written("dohc-mcp")));
+  });
+  it.each(["alice", "bob"])("keys a Links entry as its chat post from another device, for account %s", async (authorUserId) => {
+    const r = request();
+    const group = async (row: Parameters<typeof r.present>[0]) => (await r.present(row, "t")).group;
+    const post = (authorAgentId?: string) => message({ author: { kind: "agent", displayName: "Nova" }, authorUserId,
+      ...(authorAgentId === undefined ? {} : { authorAgentId }) });
+    const entry = (authorAgentId?: string) => chatLinkMessageForPresentation({
+      authorKind: "agent", authorDisplayName: "Nova", authorUserId, ...(authorAgentId === undefined ? {} : { authorAgentId }),
+    });
+    expect(await group(entry("default"))).toBe(await group(post("default")));
+    expect(await group(entry())).toBe(await group(post()));
+    expect(await group(entry())).not.toBe(await group(post("default")));
   });
   it("keeps a missing key unknown despite current credentials and author id", async () => {
     const r = request(false);

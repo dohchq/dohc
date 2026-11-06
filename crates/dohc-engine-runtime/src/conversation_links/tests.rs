@@ -118,6 +118,28 @@ fn conversation_links_seed_collapses_heading_mentions_and_excludes_standalone_an
 }
 
 #[test]
+fn conversation_links_name_the_agent_whose_run_wrote_the_post() {
+    let (_scratch, mut s) = fixture();
+    alias(&mut s, "f", "notes/run.md");
+    alias(&mut s, "g", "notes/connected.md");
+    exec(
+        &mut s,
+        "INSERT INTO chat_messages(workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms,author_agent_id) VALUES('ws','t',1,'run','agent','Nova','',2,'default'),('ws','t',2,'connected','agent','Nova','',3,NULL);",
+    );
+    attach(&mut s, "from-run", Some("f"), 2, "t", "run");
+    attach(&mut s, "from-connected", Some("g"), 3, "t", "connected");
+    demand(&mut s, "a");
+    drain(&mut s);
+    let rows = entries(&s, "a");
+    let author = |id: &str| {
+        let row = rows.iter().find(|r| r["attachmentId"] == id);
+        row.expect("the entry")["author"].clone()
+    };
+    assert_eq!(author("from-run")["authorAgentId"], "default");
+    assert!(author("from-connected").get("authorAgentId").is_none());
+}
+
+#[test]
 fn conversation_links_pages_ties_scope_revision_and_byte_budget() {
     let (_scratch, mut s) = fixture();
     demand(&mut s, "a");

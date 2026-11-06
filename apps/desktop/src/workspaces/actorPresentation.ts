@@ -1,6 +1,6 @@
 import type { ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
 import { createHmac, randomBytes } from "node:crypto";
-import { actorHueInput, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, parseActorKey, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import { actorHueInput, canonicalClaimedName, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, parseActorKey, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ActorIssuer, ActorRef, ActorKey, LocalActorIdentity } from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
@@ -9,7 +9,7 @@ import type { AgentColors } from "../settings/userSettings";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { readLocalChatActor, resolveThreadActorIssuer } from "./chatRelayIdentity";
 
-type DisplayMessage = Pick<ChatMessage, "author" | "authorActorKey" | "authorUserId" | "origin">;
+type DisplayMessage = Pick<ChatMessage, "author" | "authorActorKey" | "authorUserId" | "origin" | "authorAgentId">;
 const groups = new Map<string, { known: Map<string, string>; unknownSecret: Buffer }>();
 let nextGroup = 0;
 
@@ -107,8 +107,10 @@ export function chatActorForPresentation(message: DisplayMessage, issuer: ActorI
   return readLocalChatActor(message) ?? deriveRelayChatActor({
     issuer, authorUserId: message.authorUserId, displayName: message.author.displayName,
     ...(message.origin ? { origin: message.origin } : {}),
+    // Another device's agent post names its run's agent and no key. It is keyed
+    // as that device keys it: the run's agent, else the unnamed agent.
     ...(message.author.kind === "agent"
-      ? { kind: "agent", claimedName: message.author.displayName }
+      ? { kind: "agent", claimedName: canonicalClaimedName(message.authorAgentId) }
       : { kind: message.author.kind }),
   });
 }
@@ -187,5 +189,6 @@ export function chatLinkMessageForPresentation(
     author: { kind: author.authorKind, displayName: author.authorDisplayName },
     ...(author.authorUserId === undefined ? {} : { authorUserId: author.authorUserId }),
     ...(author.authorActorKey === undefined ? {} : { authorActorKey: author.authorActorKey }),
+    ...(author.authorAgentId === undefined ? {} : { authorAgentId: author.authorAgentId }),
   };
 }
