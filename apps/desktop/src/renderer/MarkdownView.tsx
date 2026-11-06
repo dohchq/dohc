@@ -24,6 +24,7 @@ import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import { prepareArtifactSource, projectArtifactSource } from "./editor/artifactSource";
 import { canPreserveMarkdownSource } from "@dohc/ydoc-projection/artifact-markdown-guard";
 import type { PendingTextUndo } from "./fileEditorUndo";
+import { readOnlyReasons } from "./readOnlyReasons";
 import {
   AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
@@ -2178,8 +2179,16 @@ export function MarkdownView(props: {
           // the top-matter zone (which renders the same metadata as chrome)
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-subtle">
-              <span>{readOnly ? "Read-only markdown source" : "Read-only markdown source — switch back to Editor to make changes."}</span>
+            <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-muted">
+              <span>
+                {readOnly
+                  ? readOnlyReasons({
+                      accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
+                      shared: !!props.forceReadOnly,
+                      tooLarge: !!props.truncated && !engine.available,
+                    }).join(" ") || "Read-only markdown source"
+                  : "Read-only markdown source — switch back to Editor to make changes."}
+              </span>
               <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
             </div>
             {sourceMarkdown === null ? (
