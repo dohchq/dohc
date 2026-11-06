@@ -540,6 +540,24 @@ it("routes owner publication with a bearer warning and a stable link operation i
   expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
 });
 
+it("names the run it works for on every chat write, over a run the caller names", async () => {
+  vi.stubEnv("DOHC_RUN_ID", "run_env");
+  try {
+    expect(parseArgs(["--workspace", "/w", "--home", "/h"])).toMatchObject({ runId: "run_env" });
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  const sent: Array<{ verb: string; runId?: unknown }> = [];
+  const { client } = await connectedToolNames({ root: await workspaceRoot(), home: "/home", runId: "run_env", request: async (request) => {
+    sent.push({ verb: request.verb, runId: (request.args as { runId?: unknown }).runId });
+    return {};
+  } });
+  await client.callTool({ name: "dohc_start_group_chat", arguments: { group: "general", body: "Done." } });
+  await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", body: "Done.", runId: "run_named" } });
+  await client.callTool({ name: "dohc_start_file_chat", arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", runId: "run_named" } });
+  expect(sent).toEqual([{ verb: "post", runId: "run_env" }, { verb: "reply", runId: "run_env" }, { verb: "fileChatStart", runId: "run_env" }]);
+});
+
 
 describe("share copy profile admission", () => {
   const input = { shareId: "share", grantId: "grant" };

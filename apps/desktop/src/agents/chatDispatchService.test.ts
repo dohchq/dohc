@@ -2462,6 +2462,20 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
   });
 
+  it("keeps the workspace of a run it started after the run ends, and of no other id", async () => {
+    const fixture = await createFixture();
+    await createAgentThread(fixture, { body: "Publish the trip app.", authorUserId: "user_local" });
+    await activate(fixture);
+    const runId = fixture.spawnCalls[0]!.options.env.DOHC_RUN_ID!;
+    expect(fixture.service.runWorkspace(runId)).toBe(WORKSPACE_ID);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false);
+    expect(fixture.service.runWorkspace(runId)).toBe(WORKSPACE_ID);
+    expect(fixture.service.runWorkspace("run_never_issued")).toBeUndefined();
+  });
+
   it("mutation proof: retains a finalized run until attribution teardown succeeds", async () => {
     let clearAttempts = 0;
     const teardownError = new Error("capture author clear failed");
