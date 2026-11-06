@@ -71,7 +71,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     warning: "#855f1e",
     // AA as text on a menu row's 14% fill, its tightest surface (see the
     // contrast test).
-    danger: "#a43e2a",
+    danger: "#9d3c28",
     selection: "rgba(58, 126, 233, 0.22)",
   },
   dark: {
@@ -89,17 +89,17 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // Black dims a near-black page far less than a paper one, so dark needs
     // more of it for the page behind a dialog to recede.
     scrim: "rgba(0, 0, 0, 0.65)",
-    muted: "#a9a599",
+    muted: "#aba79b",
     subtle: "#7d7a6e",
     accent: "#d7d0c0",
     focus: "color-mix(in srgb, var(--dohc-accent) 50%, transparent)",
     agent: "#c0c585",
     // Dark variant: 3:1+ vs every surface and the 14% selected-row fill,
     // with paper (bg) text on it at AA.
-    match: "#377afa",
+    match: "#4382fa",
     success: "#82c29b",
     warning: "#d9a94e",
-    danger: "#e08065",
+    danger: "#e1866c",
     selection: "rgba(102, 148, 245, 0.30)",
   },
 };
