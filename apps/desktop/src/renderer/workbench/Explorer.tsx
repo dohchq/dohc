@@ -225,6 +225,10 @@ function glyphTone(selected: boolean): string {
   return selected ? "text-ink" : "text-subtle";
 }
 
+// Disclosure chevrons and the section toolbars take the secondary voice in
+// dark, where the hint voice reads too dim on the panel. Light keeps it.
+const CHEVRON_TONE = "text-subtle dark:text-muted";
+
 type DropPreview = {
   targetPath: string | null;
   targetDir: string;
@@ -276,7 +280,7 @@ function SectionActionButton(props: {
       title={props.label}
       disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-30"
+      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink dark:text-muted dark:hover:text-ink disabled:pointer-events-none disabled:opacity-30"
     >
       {props.children}
     </button>
@@ -435,7 +439,7 @@ export const TreeRow = memo(function TreeRow(props: {
               <ChevronRight
                 size={12}
                 aria-hidden
-                className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 ${CHEVRON_TONE} transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
               />
             </span>
             {props.app ? (
@@ -1575,7 +1579,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           <ChevronRight
             size={12}
             aria-hidden
-            className={`shrink-0 text-subtle transition-transform ${folderEditExpanded ? "rotate-90" : ""}`}
+            className={`shrink-0 ${CHEVRON_TONE} transition-transform ${folderEditExpanded ? "rotate-90" : ""}`}
           />
         ) : (
           <span aria-hidden className="w-3 shrink-0" />
@@ -1839,7 +1843,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <ChevronRight
                 size={11}
                 aria-hidden
-                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 dark:text-muted transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
@@ -2033,7 +2037,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <ChevronRight
                 size={11}
                 aria-hidden
-                className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 dark:text-muted transition-transform ${filesExpanded ? "rotate-90" : ""}`}
               />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
