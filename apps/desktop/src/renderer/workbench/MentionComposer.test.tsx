@@ -189,22 +189,27 @@ describe("MentionComposer autocomplete", () => {
     expect(composer.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
   });
 
-  // jsdom's viewport is 1024 by 768. The menu is a fixed popover anchored to
-  // the composer: below it when there is room, otherwise above.
+  // jsdom's viewport is 1024 by 768. The menu is a fixed popover off the
+  // composer's frame and the bar stacked on it, 30px tall: above them when
+  // the list fits there, otherwise on the side with more room.
   it.each([
-    { name: "below a composer near the top", top: 500, menuTop: 566 },
-    { name: "above a composer at the bottom", top: 700, menuTop: 692 },
-  ])("floats the roster $name", async ({ top, menuTop }) => {
+    { name: "above a composer with room over it", frameTop: 500, side: "bottom", at: "302px" },
+    { name: "below a composer with no room over it", frameTop: 70, side: "top", at: "134px" },
+  ] as const)("floats the roster $name", async ({ frameTop, side, at }) => {
+    const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
     render(<Harness />);
     const composer = screen.getByTestId("chats-composer");
-    vi.spyOn(composer, "getBoundingClientRect").mockReturnValue(new DOMRect(40, top, 300, 60));
+    const frame = composer.closest("form")!;
+    vi.spyOn(frame, "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop, 300, 60));
+    vi.spyOn(frame.parentElement!, "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop - 30, 300, 90));
     await userEvent.type(composer, "@");
     const menu = await screen.findByTestId("chats-mention-menu");
     expect(menu.getAttribute("popover")).toBe("manual");
     expect(menu.className).toContain("fixed");
     expect(menu.style.left).toBe("40px");
-    expect(menu.style.top).toBe(`${menuTop}px`);
+    expect(menu.style[side]).toBe(at);
     expect(menu.style.maxHeight).toBe("192px");
+    listHeight.mockRestore();
   });
 
   it("tracks the active file and heading option for assistive tech", async () => {
