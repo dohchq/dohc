@@ -2295,17 +2295,20 @@ it("hands Edit > Find to the editor that has focus, including its find bar", asy
 it.each(["local", "collaboration"])("leaves inline code out of the spellcheck (%s)", async (mode) => {
   const markdown = "Booking `QX7-41` for two.";
   const ydoc = mode === "collaboration" ? markdownToYDoc(markdown) : undefined;
-  render(createElement(MarkdownEditor, {
-    value: markdown, onDirty: vi.fn(), workspaceId: "workspace-1", path: "booking.md", knownFiles: [],
-    collab: ydoc ? { ydoc, status: "connected", peerCount: 0, synced: true } : undefined,
-  }));
-  const surface = await screen.findByTestId("markdown-editor");
-  const code = await waitFor(() => {
-    const element = surface.querySelector("code");
-    expect(element?.textContent).toBe("QX7-41");
-    return element!;
-  });
-  expect(code.getAttribute("spellcheck")).toBe("false");
-  cleanup();
-  ydoc?.destroy();
+  try {
+    render(createElement(MarkdownEditor, {
+      value: markdown, onDirty: vi.fn(), workspaceId: "workspace-1", path: "booking.md", knownFiles: [],
+      collab: ydoc ? { ydoc, status: "connected", peerCount: 0, synced: true } : undefined,
+    }));
+    const surface = await screen.findByTestId("markdown-editor");
+    const code = await waitFor(() => {
+      const element = surface.querySelector("code");
+      expect(element?.textContent).toBe("QX7-41");
+      return element!;
+    });
+    expect(code.getAttribute("spellcheck")).toBe("false");
+  } finally {
+    cleanup();
+    ydoc?.destroy();
+  }
 });
