@@ -2079,9 +2079,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The capture opens the first part's tab list. Opening a group's tab
-          list makes that group active, so the empty-group part is captured
-          with its menus closed. */}
+      {/* The first part opens its tab list. The empty active group is
+          captured with menus closed. */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
