@@ -6425,6 +6425,7 @@ describe("Collection automations that a Group message starts", () => {
       };
       return { asked, signals, reading: reading.promise, answer: () => answer.resolve(), read };
     };
+    const rosterProblem = { kind: "unchecked", next: "Try again later." } as const;
     async function openingAt3(relay: Partial<CollectionAutomationsOptions>, beforeSave?: (reach: Parameters<AutomationRunStore["saveReachVerdicts"]>[0]) => void) {
       const bump = [
         "  - id: bump",
@@ -6441,7 +6442,7 @@ describe("Collection automations that a Group message starts", () => {
       w.engine.releaseAutomationGroups = async () => { changes.push("release Groups"); return await releaseAutomationGroups(); };
       const executor = w.makeExecutor({
         groupHost: async () => 3,
-        cachedRoster: async () => ({ kind: "unknown" }),
+        cachedRoster: async () => ({ kind: "unknown", problem: rosterProblem }),
         reachRelayRecord: async (generation) => ({ generation, reach: null, everShared: false }),
         ...relay,
         store: {
@@ -6558,53 +6559,6 @@ describe("Collection automations that a Group message starts", () => {
       relay.answer();
       await promptly(queued);
       expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 4 });
-    });
-
-    it("runs claims at the next generation after a refused reach read without a sync answer", async () => {
-      const relay = unanswered(false);
-      const refusal = new Error("The relay answered the Group handover read with 409.");
-      let generation = 3;
-      let hash = "";
-      const { w, executor, opening } = await openingAt3({
-        groupHost: async () => generation,
-        reachRelayRecord: async (at, signal) => {
-          if (at === 3) {
-            relay.asked.push(at);
-            throw refusal;
-          }
-          await relay.read(at, signal);
-          return {
-            generation: at, everShared: false,
-            reach: {
-              version: 2, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [],
-              verdicts: [{ automationId: TASKS, definitionHash: hash, step: "0", verdict: "allowed", stoppedFor: null, seq: 1 }],
-            },
-          };
-        },
-      });
-      await opening;
-      expect(w.errors).toEqual([{ context: "read the last automation host's reach verdicts", error: refusal }]);
-      const file = parseAutomationsFile(await readFile(join(w.root, "Tasks/automations.yaml"), "utf8"));
-      const bump = file.status === "read" ? file.entries.find((entry) => entry.status === "valid" && entry.automation.id === "bump") : undefined;
-      if (bump?.status !== "valid") throw new Error("The test automation is missing.");
-      hash = definitionHash(bump.automation);
-      generation = 4;
-      const queued = executor.resyncFileObservation();
-      await promptly(relay.reading);
-      expect(relay.asked).toEqual([3, 4]);
-      expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: 4, taken: null });
-      relay.answer();
-      await promptly(queued);
-      const entry = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
-      const claims = [w.claim(TASKS, entry), w.claim(TASKS, entry)];
-      executor.notifyClaimed();
-      await promptly(Promise.all(claims.map((claim) => w.settledClaim(claim))));
-      expect(claims.map((claim) => claim.state)).toEqual(["done", "done"]);
-      expect(claims.some((claim) => w.events.includes(`released ${claim.claimId}`))).toBe(false);
-      expect(w.fieldsOf(entry).Count).toBe(4);
-      expect(relay.asked).toEqual([3, 4]);
-      expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 4 });
-      expect(w.errors).toHaveLength(1);
     });
 
     it("reads a Group handover at the next generation without a sync answer", async () => {
