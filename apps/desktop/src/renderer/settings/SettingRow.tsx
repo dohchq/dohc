@@ -65,7 +65,7 @@ export function SettingRow(props: {
       ) : (
         text
       )}
-      <div className={`ml-auto flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
+      <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
         {/* A row that can reset keeps Reset's place left of the controls, so
             they share the right edge and never move or wrap when it appears. */}
         {props.onReset && !props.modified ? <span aria-hidden className={resetPlace} /> : null}
@@ -135,12 +135,12 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
             key={option.value}
             {...group.radio(index)}
             className={`group flex flex-col items-center gap-1.5 rounded-lg text-[11px] transition-colors ${
-              checked ? "text-ink" : "text-muted hover:text-ink"
+              checked ? "text-ink" : "text-muted"
             }`}
           >
             <span
               aria-hidden
-              className={`relative h-[50px] w-[76px] overflow-hidden rounded-lg border border-line ${
+              className={`relative h-[50px] w-[76px] overflow-hidden rounded-lg border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_50%)] transition-colors group-hover:border-muted ${
                 checked ? "outline-2 outline-offset-2 outline-accent" : ""
               }`}
             >
@@ -230,7 +230,7 @@ export function StepperControl(props: {
               setDismissed(name);
             }
           }}
-          className={`grid h-[26px] place-items-center transition-colors focus-visible:-outline-offset-2 enabled:hover:bg-hover enabled:hover:text-ink disabled:opacity-50 ${className}`}
+          className={`grid h-[26px] place-items-center transition-colors focus-visible:-outline-offset-2 enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle disabled:opacity-50 ${className}`}
         >
           {content}
         </button>
@@ -253,9 +253,9 @@ export function StepperControl(props: {
   };
   return (
     <div className="flex h-7 items-center rounded-md border border-line">
-      {part("decrease", "w-7 rounded-l-[5px] text-subtle", <Minus size={14} strokeWidth={1.9} aria-hidden />)}
+      {part("decrease", "w-7 rounded-l-[5px] text-muted", <Minus size={14} strokeWidth={1.9} aria-hidden />)}
       {part("reset", "w-[52px] border-x border-line font-mono text-[12px] text-ink", props.value)}
-      {part("increase", "w-7 rounded-r-[5px] text-subtle", <Plus size={14} strokeWidth={1.9} aria-hidden />)}
+      {part("increase", "w-7 rounded-r-[5px] text-muted", <Plus size={14} strokeWidth={1.9} aria-hidden />)}
     </div>
   );
 }
@@ -447,7 +447,7 @@ export function ColorControl(props: {
         type="color"
         aria-label={props.label}
         defaultValue={props.value}
-        className="h-6 w-8 cursor-pointer rounded-md border border-line bg-bg p-0.5"
+        className="h-6 w-8 cursor-pointer rounded-md border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_50%)] bg-bg p-0.5"
       />
       <span className="font-mono text-[11px] text-muted">{props.value}</span>
     </label>
