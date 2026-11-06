@@ -103,6 +103,7 @@ export function OpenSharedView(props: {
   // share. `chosen` wins; `suggested` counts only for the share it answers.
   const [chosen, setChosen] = useState<string | null>(null);
   const [suggested, setSuggested] = useState<{ shareId: string; root: string } | null>(null);
+  const [settledSuggestionShareId, setSettledSuggestionShareId] = useState<string | null>(null);
   // The mode the person chose. Until they choose, the grant decides.
   const [pickedMode, setPickedMode] = useState<"mount" | "separate" | null>(null);
   // Whether each pasted share opens for live editing, asked once per share
@@ -197,6 +198,7 @@ export function OpenSharedView(props: {
   // retires the request in flight, so an old answer never lands.
   useEffect(() => {
     const request = suggestRequestRef.next();
+    setSettledSuggestionShareId(null);
     if (mounting || shareId === null) return;
     void bridge()
       .getDefaultShareRoot({ shareId })
@@ -205,6 +207,9 @@ export function OpenSharedView(props: {
       })
       .catch(() => {
         if (suggestRequestRef.isCurrent(request)) setSuggested(null);
+      })
+      .finally(() => {
+        if (suggestRequestRef.isCurrent(request)) setSettledSuggestionShareId(shareId);
       });
     // suggestRequestRef is a stable ref holder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -212,6 +217,8 @@ export function OpenSharedView(props: {
 
   const folder =
     chosen ?? (!mounting && suggested?.shareId === shareId ? suggested.root : null);
+  const checkingDefaultFolder =
+    !mounting && shareId !== null && settledSuggestionShareId !== shareId;
 
   async function chooseFolder() {
     const request = folderRequestRef.next();
@@ -268,7 +275,7 @@ export function OpenSharedView(props: {
     shareCode.length > 0 &&
     (mounting || folder !== null);
   const missingInputReason =
-    canOpen || gate.kind === "checking" || opening || checkingAccess
+    canOpen || gate.kind === "checking" || opening || checkingAccess || checkingDefaultFolder
       ? null
       : shareCode.length === 0
         ? !mounting && folder === null
