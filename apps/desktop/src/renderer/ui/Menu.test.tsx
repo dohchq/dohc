@@ -259,7 +259,9 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(forget);
     // The current row keeps the selected fill after focus leaves it.
     expect(current.className.split(" ")).toContain("bg-selected");
+    expect(current.className.split(" ")).toContain("font-medium");
     expect(forget.className.split(" ")).not.toContain("bg-selected");
+    expect(forget.className.split(" ")).not.toContain("font-medium");
   });
 
   it("adds the keyboard's row line only beside a current or checked row", async () => {
@@ -297,7 +299,9 @@ describe("Menu", () => {
     await user.keyboard("{ArrowUp}");
     expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Main" }));
     expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("font-medium");
     expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("font-medium");
   });
 
   // Opened with the mouse, a menu on its first row showed two active-looking
