@@ -19,6 +19,7 @@ fn padded_relay(pages: i64) -> PagedRelay {
     let end = PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: Vec::new(),
         next_cursor: pages,
         has_more: false,
@@ -31,6 +32,7 @@ fn padded_relay(pages: i64) -> PagedRelay {
                     PullResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![envelope("padding-peer", seq, "probe.padding", json!({}))],
                         next_cursor: seq + 1,
                         has_more: seq + 1 < pages,

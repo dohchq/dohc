@@ -146,14 +146,14 @@ export function createNamedShareTransportRoutes(
       // the page was assembled) must abort the response, not leak a final
       // filtered page. Re-loading the share throws the same generic 404.
       requireShareAction(route.shareId, actor.userId, "read");
-      const mappings = await storage.listWorkReferences({workspaceId: share.workspaceId,
+      const mappings = url.searchParams.get("includeReferences") === "false" ? {references: [], nextAfter: null, hasMore: false} : await storage.listWorkReferences({workspaceId: share.workspaceId,
         reader: {kind: "user", userId: actor.userId, grantId: authorized.grant.grantId}, identityKey,
         after: url.searchParams.get("referenceAfter") ?? undefined});
       const latest = requireShareAction(route.shareId, actor.userId, "read");
       if (JSON.stringify(latest.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)) throw notFound();
       return jsonResponse({
         ok: true,
-        ...(mappings.references.length || mappings.nextAfter ? {workReferences: mappings.references, nextReferenceAfter: mappings.nextAfter} : {}),
+        ...(mappings.references.length || mappings.nextAfter ? {workReferences: mappings.references, nextReferenceAfter: mappings.nextAfter, referenceHasMore: mappings.hasMore} : {}),
         ...page,
         ownOriginId,
       });

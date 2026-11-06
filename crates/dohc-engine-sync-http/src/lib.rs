@@ -801,6 +801,7 @@ impl RelayTransport for HttpRelayTransport {
             &[
                 ("since", req.cursor.to_string()),
                 ("limit", req.limit.to_string()),
+                ("includeReferences", req.include_work_references.to_string()),
                 (
                     "referenceAfter",
                     req.reference_after.clone().unwrap_or_default(),
@@ -817,6 +818,7 @@ impl RelayTransport for HttpRelayTransport {
         Ok(PullResponse {
             work_references: wire.work_references,
             next_reference_after: wire.next_reference_after,
+            reference_has_more: wire.reference_has_more,
             ops: workspace_envelopes(wire.ops, &req.workspace_id)?,
             next_cursor: wire.next_cursor,
             has_more: wire.has_more,
@@ -881,6 +883,7 @@ impl RelayTransport for HttpRelayTransport {
 
     fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
         let page = self.pull(PullRequest {
+            include_work_references: false,
             reference_after: None,
             workspace_id: req.workspace_id,
             replication_epoch: req.replication_epoch,
@@ -1092,6 +1095,7 @@ impl RelayTransport for HttpRelayTransport {
         Ok(SharedChannelResponse {
             work_references: page.work_references,
             next_reference_after: page.next_reference_after,
+            reference_has_more: page.reference_has_more,
             own_origin_id: page.own_origin_id,
             ops: page
                 .ops
@@ -1140,6 +1144,7 @@ impl RelayTransport for HttpRelayTransport {
         Ok(ShareViewResponse {
             work_references: page.work_references,
             next_reference_after: page.next_reference_after,
+            reference_has_more: page.reference_has_more,
             ops: page
                 .ops
                 .into_iter()
@@ -1747,6 +1752,8 @@ struct WireLogPage {
     #[serde(default)]
     work_references: Vec<dohc_engine_sync::WorkReferenceMapping>,
     next_reference_after: Option<String>,
+    #[serde(default)]
+    reference_has_more: bool,
     own_origin_id: Option<String>,
     ops: Vec<WireLogRow>,
     next_cursor: i64,
@@ -2119,6 +2126,7 @@ mod tests {
                 HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
             let pulled = transport
                 .pull(PullRequest {
+                    include_work_references: true,
                     reference_after: None,
                     workspace_id: "ws".into(),
                     replication_epoch: "epoch".into(),

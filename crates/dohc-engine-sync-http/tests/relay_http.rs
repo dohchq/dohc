@@ -286,11 +286,12 @@ fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
             )
         } else {
             assert!(request.target.contains("referenceAfter=page-cursor"));
+            assert!(request.target.contains("includeReferences=true"));
             TestResponse::json(
                 200,
                 json!({
                     "ops":[], "nextCursor":0, "hasMore":false,
-                    "workReferences":[expected], "nextReferenceAfter":"next-page",
+                    "workReferences":[expected], "nextReferenceAfter":"next-page", "referenceHasMore":true,
                 }),
             )
         }
@@ -310,6 +311,7 @@ fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
     assert_eq!(pushed.registered_references, vec![reference]);
     let pulled = relay
         .pull(PullRequest {
+            include_work_references: true,
             workspace_id: "ws".into(),
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
@@ -320,6 +322,7 @@ fn work_reference_mappings_round_trip_with_log_registration_and_pagination() {
         .unwrap();
     assert_eq!(pulled.work_references, vec![mapping]);
     assert_eq!(pulled.next_reference_after.as_deref(), Some("next-page"));
+    assert!(pulled.reference_has_more);
 }
 
 fn batch_uploads() -> Vec<BlobUploadRequest> {
@@ -970,6 +973,7 @@ fn pull_rejects_rows_without_the_mandatory_relay_sequence() {
     });
     let error = transport(&server)
         .pull(PullRequest {
+            include_work_references: true,
             reference_after: None,
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
@@ -992,6 +996,7 @@ fn pull_captures_the_relay_sequence() {
     });
     let response = transport(&server)
         .pull(PullRequest {
+            include_work_references: true,
             reference_after: None,
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
@@ -1089,6 +1094,7 @@ fn direct_transport_rejects_fractional_wire_timestamps_without_rounding() {
 
     let error = transport(&server)
         .pull(PullRequest {
+            include_work_references: true,
             reference_after: None,
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
@@ -1548,6 +1554,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     let (workspace_id, replication_epoch, stream_identity) = coordinate();
     transport
         .pull(PullRequest {
+            include_work_references: true,
             reference_after: None,
             workspace_id,
             replication_epoch,
@@ -2349,6 +2356,7 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
             .map(drop),
         hosted
             .pull(PullRequest {
+                include_work_references: true,
                 reference_after: None,
                 workspace_id: "ws".to_owned(),
                 replication_epoch: "epoch".to_owned(),

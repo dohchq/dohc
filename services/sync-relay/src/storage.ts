@@ -365,7 +365,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   workReferenceDatasetAccess?: import("./storage/context").StorageContext["workReferenceDatasetAccess"];
   prepareWorkReferenceRegistration(input: Parameters<SyncRelayStorage["prepareWorkReferenceRegistration"]>[0]) { return workReferenceStorage.prepareWorkReferenceRegistration(this, input); }
   indexReceivedWorkTargets(rows: Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0]) { workReferenceStorage.indexReceivedWorkTargets(this, rows); }
-  registerWorkReferences(input: Parameters<SyncRelayStorage["registerWorkReferences"]>[0]) { return workReferenceStorage.registerWorkReferences(this, input); }
   makeWorkReference(input: Parameters<SyncRelayStorage["makeWorkReference"]>[0]) { return workReferenceStorage.makeWorkReference(this, input); }
   resolveWorkReference(input: Parameters<SyncRelayStorage["resolveWorkReference"]>[0]) { return workReferenceStorage.resolveWorkReference(this, input); }
   listWorkReferences(input: Parameters<SyncRelayStorage["listWorkReferences"]>[0]) { return workReferenceStorage.listWorkReferences(this, input); }

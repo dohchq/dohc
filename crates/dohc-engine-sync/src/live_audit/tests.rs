@@ -327,6 +327,7 @@ fn length_claim_pull(
     *relay.pull.lock().unwrap() = Some(crate::PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: pending,
         next_cursor: final_seq + 1,
         has_more: false,
@@ -1065,6 +1066,7 @@ fn origin_recovery_keeps_pending_live_exports_publishable() {
     *relay.pull.lock().unwrap() = Some(crate::PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         next_cursor: ops.len() as i64,
         ops,
         has_more: false,
@@ -4358,6 +4360,7 @@ fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope
     *relay.pull.lock().unwrap() = Some(crate::PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: vec![audit, later],
         next_cursor: 101,
         has_more: false,

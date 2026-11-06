@@ -98,6 +98,7 @@ pub struct HostedPushRefusal {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
+    pub include_work_references: bool,
     pub reference_after: Option<String>,
     pub workspace_id: String,
     pub replication_epoch: String,
@@ -110,6 +111,7 @@ pub struct PullRequest {
 pub struct PullResponse {
     pub work_references: Vec<WorkReferenceMapping>,
     pub next_reference_after: Option<String>,
+    pub reference_has_more: bool,
     pub ops: Vec<ReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -342,6 +344,7 @@ pub struct SharedChannelRequest {
 pub struct SharedChannelResponse {
     pub work_references: Vec<WorkReferenceMapping>,
     pub next_reference_after: Option<String>,
+    pub reference_has_more: bool,
     pub own_origin_id: Option<String>,
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
@@ -368,6 +371,7 @@ pub struct ShareViewRequest {
 pub struct ShareViewResponse {
     pub work_references: Vec<WorkReferenceMapping>,
     pub next_reference_after: Option<String>,
+    pub reference_has_more: bool,
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
@@ -1045,7 +1049,7 @@ enum BaseRepairPhase<'a> {
 
 /// What an ordinary pass fetched and read before it applied.
 struct OrdinaryFetch {
-    reference_page: (Vec<WorkReferenceMapping>, Option<String>),
+    reference_page: (Vec<WorkReferenceMapping>, Option<String>, bool),
     identity: crate::SyncIdentity,
     queued: Vec<ReplicationEnvelope>,
     ordered: Vec<ReplicationEnvelope>,
@@ -2415,14 +2419,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             && !references.is_empty()
         {
             let mut request = push_probe_request(workspace_id, &identity, &identity.origin_id, -1);
-            request.work_references = references.clone();
-            let response = self.transport.push(request)?;
-            validate_probe_response(&response)?;
-            confirm_reference_registration(
-                references,
-                &mut progress.registered_references,
-                &response,
-            )?;
+            request.work_references = references
+                .iter()
+                .filter(|mapping| !progress.registered_references.contains(&mapping.reference))
+                .cloned()
+                .collect();
+            if !request.work_references.is_empty() {
+                let response = self.transport.push(request.clone())?;
+                validate_probe_response(&response)?;
+                confirm_reference_registration(
+                    &request.work_references,
+                    &mut progress.registered_references,
+                    &response,
+                )?;
+            }
             let registered: Vec<_> = progress.registered_references.iter().cloned().collect();
             for batch in
                 registered.chunks(dohc_engine_domain::work_references::WORK_REFERENCE_BATCH)
@@ -2500,7 +2510,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(error);
             }
         };
-        let reference_pages_remaining = fetch.reference_page.1.is_some();
+        let reference_pages_remaining = fetch.reference_page.2;
         learn_work_reference_page(
             store,
             workspace_id,
@@ -2807,13 +2817,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut ops = Vec::new();
         let reference_after =
             work_reference_page_after(store, workspace_id, "owner").map_err(reference_error)?;
-        let mut reference_page;
+        let mut reference_page = (Vec::new(), reference_after.clone(), false);
         let has_more = loop {
             let remaining = crate::model::MAX_PULL_OPS_PER_PASS
                 .checked_sub(fetched)
                 .ok_or(RelayError::InvalidResponse)?;
             let limit = remaining.min(crate::MAX_PULL_OPS);
             let response = self.transport.pull(PullRequest {
+                include_work_references: pages == 0,
                 reference_after: reference_after.clone(),
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
@@ -2822,7 +2833,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 limit,
             })?;
             validate_pull_page(&response, workspace_id, cursor)?;
-            reference_page = (response.work_references, response.next_reference_after);
+            if pages == 0 {
+                reference_page = (
+                    response.work_references,
+                    response.next_reference_after,
+                    response.reference_has_more,
+                );
+            }
             if response.ops.len() > limit {
                 return Err(RelayError::InvalidResponse);
             }
@@ -4219,6 +4236,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut cursor = 0;
         'pages: loop {
             let page = self.transport.pull(PullRequest {
+                include_work_references: false,
                 reference_after: None,
                 workspace_id: workspace_id.to_owned(),
                 replication_epoch: identity.replication_epoch.clone(),
@@ -4562,17 +4580,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         if matches!(committed, TxnOutcome::Crashed { .. }) {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
-        learn_work_reference_page(
-            store,
-            workspace_id,
-            &format!("channel:{share_id}"),
-            &received_work_reference_mappings(&page.work_references),
-            page.next_reference_after.as_deref(),
-        )
-        .map_err(reference_error)?;
+        if !page.has_more {
+            let mappings = received_work_reference_mappings(
+                store,
+                workspace_id,
+                &boundary,
+                &page.work_references,
+            )?;
+            learn_work_reference_page(
+                store,
+                workspace_id,
+                &format!("channel:{share_id}"),
+                &mappings,
+                page.next_reference_after.as_deref(),
+            )
+            .map_err(reference_error)?;
+        }
         Ok(SharedChannelPullOutcome {
             fetched,
-            has_more: page.has_more || page.next_reference_after.is_some(),
+            has_more: page.has_more || page.reference_has_more,
             applied,
             refused,
             rejections,
@@ -5035,17 +5061,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // `refuse_replay_unit`. What reaches here is only what must abort.
             replay_share_view_op(&mut replay, &envelope)?;
         }
-        learn_work_reference_page(
-            store,
-            workspace_id,
-            &format!("view:{share_id}"),
-            &received_work_reference_mappings(&page.work_references),
-            page.next_reference_after.as_deref(),
-        )
-        .map_err(reference_error)?;
+        if !page.has_more {
+            let mappings = received_work_reference_mappings(
+                store,
+                workspace_id,
+                &boundary,
+                &page.work_references,
+            )?;
+            learn_work_reference_page(
+                store,
+                workspace_id,
+                &format!("view:{share_id}"),
+                &mappings,
+                page.next_reference_after.as_deref(),
+            )
+            .map_err(reference_error)?;
+        }
         Ok(ShareViewPullOutcome {
             fetched,
-            has_more: page.has_more || page.next_reference_after.is_some(),
+            has_more: page.has_more || page.reference_has_more,
             applied,
             skipped,
             refusals,
@@ -6356,35 +6390,73 @@ fn register_reference_probe(
     let response = transport.push(request)?;
     validate_probe_response(&response)?;
     confirm_reference_registration(references, registered, &response)?;
-    if references
-        .iter()
-        .any(|mapping| !registered.contains(&mapping.reference))
-    {
-        return Err(RelayError::Conflict);
-    }
     Ok(())
 }
 
 fn received_work_reference_mappings(
+    store: &EngineStore,
+    workspace_id: &str,
+    boundary: &crate::ShareBoundary,
     mappings: &[WorkReferenceMapping],
-) -> Vec<WorkReferenceMapping> {
+) -> Result<Vec<WorkReferenceMapping>, RelayError> {
     use dohc_engine_domain::work_references::WorkTarget;
-    mappings
-        .iter()
-        .cloned()
-        .map(|mut mapping| {
-            match &mut mapping.target {
-                WorkTarget::File { version_id, .. }
-                | WorkTarget::App { version_id, .. }
-                | WorkTarget::DocumentRecord { version_id, .. }
-                | WorkTarget::DocumentCollection { version_id, .. } => {
-                    *version_id = "main".to_owned();
+    store.read_with(|conn| -> Result<_, SyncError> {
+        let mut received = Vec::new();
+        for mapping in mappings {
+            let mut mapping = mapping.clone();
+            let admitted = match &mut mapping.target {
+                WorkTarget::File { version_id, object_id }
+                | WorkTarget::App { version_id, object_id }
+                | WorkTarget::DocumentCollection { version_id, object_id } => {
+                    let grant = boundary.granted.as_ref();
+                    if let Some(grant) = grant.filter(|grant| version_id.as_str() == grant.version_id.as_deref().unwrap_or("main")) {
+                        let path = crate::share::object_main_path(conn, workspace_id, object_id)?;
+                        let admitted = received_object_token(object_id) && path.as_deref()
+                            .is_some_and(|path| crate::share::tracked_path_within_grant(path, grant));
+                        if admitted { *version_id = "main".to_owned(); }
+                        admitted
+                    } else { false }
                 }
-                _ => {}
-            }
-            mapping
-        })
-        .collect()
+                WorkTarget::DocumentRecord { version_id, record_id } => {
+                    if let Some(grant) = boundary.granted.as_ref().filter(|grant| version_id.as_str() == grant.version_id.as_deref().unwrap_or("main")) {
+                        let row: Option<(String, String)> = conn.query_row(
+                            "SELECT s.path,s.object_id FROM collection_records r JOIN snapshots s \
+                             ON s.workspace_id=r.workspace_id AND s.version_id=r.version_id AND s.object_id=r.object_id \
+                             WHERE r.workspace_id=?1 AND r.version_id='main' AND r.record_id=?2",
+                            params![workspace_id, record_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?)))
+                            .optional().map_err(SyncError::corrupt)?;
+                        let admitted = row.is_some_and(|(path, object)| received_object_token(&object) &&
+                            crate::share::tracked_path_within_grant(&path, grant));
+                        if admitted { *version_id = "main".to_owned(); }
+                        admitted
+                    } else { false }
+                }
+                WorkTarget::Message { message_id, thread_id, channel_id } => {
+                    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn.query_row(
+                        "SELECT t.channel_id,w.wire_id,t.linked_object_id FROM chat_messages m \
+                         JOIN chat_threads t ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id \
+                         LEFT JOIN chat_channel_wire_ids w ON w.workspace_id=t.workspace_id AND w.channel_id=t.channel_id \
+                         WHERE m.workspace_id=?1 AND m.message_id=?2 AND m.thread_id=?3",
+                        params![workspace_id, message_id.as_str(), thread_id.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+                        .optional().map_err(SyncError::corrupt)?;
+                    if let Some((local_channel, wire, object)) = row {
+                        let admitted = if boundary.surface == crate::ShareSurface::SharedChannel {
+                            boundary.channel_wire_id.is_some() && wire == boundary.channel_wire_id
+                        } else if let (Some(grant), Some(object)) = (&boundary.granted, object) {
+                            crate::share::object_main_path(conn, workspace_id, &object)?.as_deref()
+                                .is_some_and(|path| crate::share::selected_path_within_grant(path, grant))
+                        } else { false };
+                        if admitted { *channel_id = local_channel; }
+                        admitted
+                    } else { false }
+                }
+                // Dataset targets need the dataset host's admission contract.
+                WorkTarget::TransactionalCollection { .. } | WorkTarget::TransactionalRecord { .. } => false,
+            };
+            if admitted { received.push(mapping); }
+        }
+        Ok(received)
+    }).map_err(local)
 }
 
 fn references_for_batch(
@@ -6410,6 +6482,12 @@ fn references_for_batch(
                 continue;
             };
             if !matches!(token.as_bytes().get(43), Some(b']' | b'#')) {
+                continue;
+            }
+            let local_binding = store.read_with(|conn| conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM work_references WHERE workspace_id=?1 AND reference=?2)",
+                params![workspace_id, reference], |row| row.get::<_, bool>(0))).map_err(|error| local(SyncError::corrupt(error)))?;
+            if !local_binding {
                 continue;
             }
             if let WorkReferenceResolution::Found {
@@ -8451,6 +8529,7 @@ mod pull_page_validation_tests {
             &PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12)), op(Some(15))],
                 next_cursor: 15,
                 has_more: false,
@@ -8464,6 +8543,7 @@ mod pull_page_validation_tests {
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(None)],
                 next_cursor: 11,
                 has_more: false,
@@ -8471,6 +8551,7 @@ mod pull_page_validation_tests {
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(10))],
                 next_cursor: 10,
                 has_more: false,
@@ -8478,6 +8559,7 @@ mod pull_page_validation_tests {
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12)), op(Some(11))],
                 next_cursor: 11,
                 has_more: false,
@@ -8485,6 +8567,7 @@ mod pull_page_validation_tests {
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12))],
                 next_cursor: 11,
                 has_more: false,
@@ -8492,6 +8575,7 @@ mod pull_page_validation_tests {
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(Some(12))],
                 next_cursor: 13,
                 has_more: false,
@@ -8522,6 +8606,7 @@ mod pull_page_validation_tests {
             let ordinary = PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops,
                 next_cursor,
                 has_more: false,

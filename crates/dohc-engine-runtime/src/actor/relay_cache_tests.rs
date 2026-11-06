@@ -215,6 +215,7 @@ async fn pull_of_own_echo_keeps_writer_cache_warm() {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![own_echo],
                             next_cursor: 2,
                             has_more: false,
@@ -316,6 +317,7 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![own_echo, foreign],
                             next_cursor: 3,
                             has_more: false,
@@ -650,6 +652,7 @@ async fn full_cycle(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
                                 Ok(RelayIoResponse::Pull(PullResponse {
                                     work_references: Vec::new(),
                                     next_reference_after: None,
+                                    reference_has_more: false,
                                     ops,
                                     next_cursor: next,
                                     has_more,
@@ -903,6 +906,7 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![own],
                             next_cursor: 1,
                             has_more: false,

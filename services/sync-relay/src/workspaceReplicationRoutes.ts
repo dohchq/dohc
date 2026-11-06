@@ -153,6 +153,7 @@ export function createWorkspaceReplicationRoutes(
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, accountNames);
       const workReferences = input.workReferences === undefined ? [] : input.workReferences;
       if (!Array.isArray(workReferences) || workReferences.length > 128 || route.serviceHost && workReferences.length) throw notFound();
+      if (workReferences.length && !storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
       let references;
       try { references = workReferences.map(row => decodeWorkReferenceMapping(row)); } catch { throw notFound(); }
       await route.serviceHost?.screen(originId, ops);
@@ -192,7 +193,7 @@ export function createWorkspaceReplicationRoutes(
         inserted: result.inserted,
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
-        ...(result.registeredReferences?.length ? {registeredReferences: result.registeredReferences} : {}),
+        ...(input.workReferences === undefined ? {} : {registeredReferences: result.registeredReferences ?? []}),
         ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
         ...(result.redundantRecoveries ? {redundantRecoveries: result.redundantRecoveries} : {}),
         ...(refusals.length ? {refusals} : {}),
@@ -229,12 +230,12 @@ export function createWorkspaceReplicationRoutes(
         sinceRelaySeq: since,
         limit,
       });
-      const mappings = await storage.listWorkReferences({workspaceId: route.workspaceId, reader: {kind: "user", userId: actor.userId},
+      const mappings = url.searchParams.get("includeReferences") === "false" ? {references: [], nextAfter: null, hasMore: false} : await storage.listWorkReferences({workspaceId: route.workspaceId, reader: {kind: "user", userId: actor.userId},
         after: url.searchParams.get("referenceAfter") ?? undefined});
       guard();
       const response = jsonResponse({
         ok: true,
-        ...(mappings.references.length || mappings.nextAfter ? {workReferences: mappings.references, nextReferenceAfter: mappings.nextAfter} : {}),
+        ...(mappings.references.length || mappings.nextAfter ? {workReferences: mappings.references, nextReferenceAfter: mappings.nextAfter, referenceHasMore: mappings.hasMore} : {}),
         ops: page.rows.map(servedLogOp),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the

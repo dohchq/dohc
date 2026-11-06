@@ -1,6 +1,6 @@
 import {commitHostedSettlement,settlementResponseIdentifier} from "./hostedSettlement";
 import {indexWorkReferenceSnapshot} from "./workReferenceSchema";
-import {assertMessageWorkReferences, registerWorkReferencesInTransaction, updateWorkReferenceScopes} from "./workReferences";
+import {registerWorkReferencesInTransaction, updateWorkReferenceScopes} from "./workReferences";
 import { type StorageContext } from "./context";
 import { enforceWorkspaceIdentityInTransaction, assertWorkspaceQuota } from "./workspaces";
 import {
@@ -342,7 +342,6 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       const registeredReferences = input.workReferences ? registerWorkReferencesInTransaction(storage, {
         workspaceId: input.workspaceId, ...input.workReferences, deferMissing: true,
       }) : [];
-      assertMessageWorkReferences(storage, input.workspaceId, newOps);
       return { inserted, skipped, currentMaxOriginSeq: currentMax, ...(registeredReferences.length ? {registeredReferences} : {}), ...(settlementRefusals.length?{settlementRefusals}:{}),
         ...(redundant.size ? {redundantRecoveries: [...redundant.values()]} : {}) };
   }

@@ -64,6 +64,7 @@ export function createLinkReadRoutes(
   linkKey?: string | Uint8Array,
   replica?:ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
 ) {
+  const identity = createReceivedIdentity(linkKey);
 
   // A Group link also reads, or with read-write access posts in, the Group's
   // channel. The share's answer and its files' answer both name it.

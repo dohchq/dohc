@@ -400,6 +400,7 @@ impl dohc_engine_sync::RelayTransport for QuietFeed {
         Ok(dohc_engine_sync::PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: Vec::new(),
             next_cursor: req.cursor,
             has_more: false,

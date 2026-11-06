@@ -73,16 +73,17 @@ type SyncRelayRoute =
 
 export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   const parts = relayPathSegments(new URL(request.url).pathname);
-  if (parts[0] === "sync" && parts[1] === "shares" && parts[3] === "work-references" &&
-      (parts.length === 4 || parts.length === 5 && parts[4] === "make")) {
-    return {route: "share-work-references", shareId: parseShareId(parts[2]), make: parts.length === 5};
+  if (parts.length === 3 && parts[0] === "sync" && parts[1] === "internal" && parts[2] === "work-references") {
+    return {route: "internal-work-reference"};
+  }
+  if (parts.length === 4 && parts[0] === "sync" && parts[1] === "shares" && parts[3] === "work-references") {
+    return {route: "share-work-references", shareId: parseShareId(parts[2])};
   }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "work-references") {
     return {route: "work-reference", reference: parts[2]!};
   }
-  if (parts[0] === "sync" && parts[2] === "work-references" &&
-      (parts.length === 3 || parts.length === 4 && parts[3] === "make")) {
-    return {route: "work-references", workspaceId: parseWorkspaceId(parts[1]), make: parts.length === 4};
+  if (parts.length === 3 && parts[0] === "sync" && parts[2] === "work-references") {
+    return {route: "work-references", workspaceId: parseWorkspaceId(parts[1])};
   }
   if (parts[0] === "sync" && parts[1] === "link" && parts[2] === "app-publications") {
     if (parts.length === 3) return {route: "link-app-publication"};

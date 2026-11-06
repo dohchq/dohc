@@ -166,6 +166,7 @@ fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&s
         PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: ops.to_vec(),
             next_cursor: next,
             has_more: false,
@@ -1304,6 +1305,7 @@ fn conflict_held_work_past_the_retention_limit_names_the_conflict() {
         PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: vec![gemini],
             next_cursor: 5,
             has_more: false,

@@ -2304,6 +2304,7 @@ mod tests {
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             next_cursor: ops.len() as i64,
             ops,
             has_more: false,
@@ -2349,6 +2350,7 @@ mod tests {
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             next_cursor: ops.len() as i64,
             ops: ops.into_iter().skip(1).collect(),
             has_more: false,
@@ -2384,6 +2386,7 @@ mod tests {
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             next_cursor: 2,
             ops: Vec::new(),
             has_more: false,

@@ -1431,6 +1431,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: vec![future_moment.clone(), unrelated],
         next_cursor: 2,
         has_more: false,
@@ -1538,6 +1539,7 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: vec![],
         next_cursor: 2,
         has_more: false,
@@ -2623,6 +2625,7 @@ fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: vec![],
         next_cursor: 0,
         has_more: false,

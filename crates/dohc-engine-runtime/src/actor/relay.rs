@@ -1220,6 +1220,7 @@ mod deferred_relay_tests {
                         RelayIoRequest::Pull(_) => RelayIoResponse::Pull(PullResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: Vec::new(),
                             next_cursor: 0,
                             has_more: false,
@@ -1486,6 +1487,7 @@ mod deferred_relay_tests {
     fn completed_pull_page_remains_available_for_replay() {
         let transport = DeferredRelayTransport::default();
         let request = PullRequest {
+            include_work_references: true,
             reference_after: None,
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
@@ -1496,6 +1498,7 @@ mod deferred_relay_tests {
         let response = PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: Vec::new(),
             next_cursor: 1,
             has_more: false,
@@ -1736,6 +1739,7 @@ mod deferred_relay_tests {
     fn deferred_multi_page_pull_schedules_each_http_request_once() {
         let transport = DeferredRelayTransport::default();
         let request = |cursor| PullRequest {
+            include_work_references: true,
             reference_after: None,
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
@@ -1757,6 +1761,7 @@ mod deferred_relay_tests {
                         Ok(RelayIoResponse::Pull(PullResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: Vec::new(),
                             next_cursor: cursor + 1,
                             has_more: cursor < 3,

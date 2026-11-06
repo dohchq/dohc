@@ -293,6 +293,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 1,
@@ -305,6 +306,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 2,
@@ -383,6 +385,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: vec![rejected],
                     next_cursor: 1,
@@ -395,6 +398,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: vec![admitted],
                     next_cursor: 2,
@@ -675,6 +679,7 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: vec![
                         share_op(
@@ -710,6 +715,7 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: vec![message(2, "m-task", "/task Book"), message(3, "m-hi", "Hi")],
                     next_cursor: 4,
@@ -780,6 +786,7 @@ fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: vec![
                         share_op(
@@ -815,6 +822,7 @@ fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
                 SharedChannelResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     own_origin_id: None,
                     ops: vec![ShareReplicationEnvelope {
                         origin_id: format!(
@@ -1010,4 +1018,94 @@ fn a_shared_link_thread_and_post_apply_only_from_the_link_origin() {
             Some("p".to_owned())
         )]
     );
+}
+
+#[test]
+fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
+    use dohc_engine_domain::work_references::{WorkReferenceResolution, resolve_work_reference};
+    let (_scratch, _path, mut engine) = open_store();
+    let response = |wire: &str, channel: &str, thread: &str, message: &str, mappings| {
+        SharedChannelResponse {
+            work_references: mappings,
+            next_reference_after: Some("tail".into()),
+            reference_has_more: false,
+            own_origin_id: None,
+            ops: vec![
+                share_op(
+                    0,
+                    "chat.channel.create",
+                    json!({"channelId":channel,"wireId":wire,"name":wire,"slug":wire,"kind":"channel","createdAtMs":1}),
+                ),
+                share_op(
+                    1,
+                    "chat.thread.create",
+                    json!({"threadId":thread,"channelWireId":wire,"title":"Plans","createdAtMs":2}),
+                ),
+                share_op(
+                    2,
+                    "chat.message.append",
+                    json!({"messageId":message,"threadId":thread,"authorKind":"human","authorDisplayName":"Reader","body":"Plans","createdAtMs":3}),
+                ),
+            ],
+            next_cursor: 3,
+            has_more: false,
+            push: None,
+        }
+    };
+    let first = RelaySyncClient::new(PagedShareRelay::new(
+        [(
+            0,
+            response("wire-other", "c-other", "t-other", "m-other", vec![]),
+        )],
+        [],
+    ));
+    first
+        .pull_shared_channel(&mut engine, "ws", "other-share", "wire-other", &NoFaults)
+        .unwrap();
+    let mappings = [("A","m-allowed","t-allowed"),("B","m-other","t-other")].map(|(r,m,t)|
+        serde_json::from_value(json!({"reference":r.repeat(43),"createdAtMs":1,"target":{"kind":"message","messageId":m,"threadId":t,"channelId":"owner-coordinate"}})).unwrap()).to_vec();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [(
+            0,
+            response(
+                "wire-allowed",
+                "c-allowed",
+                "t-allowed",
+                "m-allowed",
+                mappings,
+            ),
+        )],
+        [],
+    ));
+    client
+        .pull_shared_channel(
+            &mut engine,
+            "ws",
+            "allowed-share",
+            "wire-allowed",
+            &NoFaults,
+        )
+        .unwrap();
+    assert!(matches!(
+        resolve_work_reference(&engine, "ws", &"A".repeat(43)).unwrap(),
+        WorkReferenceResolution::Found { .. }
+    ));
+    assert!(matches!(
+        resolve_work_reference(&engine, "ws", &"B".repeat(43)).unwrap(),
+        WorkReferenceResolution::Unknown
+    ));
+    engine
+        .read_with(|conn| {
+            let target: String = conn.query_row(
+                "SELECT target_json FROM learned_work_references WHERE reference=?1",
+                ["A".repeat(43)],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&target).unwrap()["channelId"],
+                "c-allowed"
+            );
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
 }

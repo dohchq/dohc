@@ -1902,6 +1902,7 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
         PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: vec![operation],
             next_cursor: 1,
             has_more: false,

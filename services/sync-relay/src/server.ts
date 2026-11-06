@@ -785,8 +785,10 @@ export function createSyncRelayHandler({
         return push ? await push(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
-      if (route.route === "work-reference" || route.route === "work-references" || route.route === "share-work-references") {
+      if (route.route === "work-reference" || route.route === "work-references" || route.route === "share-work-references" || route.route === "internal-work-reference") {
         if (request.headers.has("cookie")) throw notFound();
+        if (route.route === "internal-work-reference" &&
+            (!relayExchangeKeyHash || !hasValidRelayExchangeKey(request))) throw notFound();
         const respond = createWorkReferenceRoutes(storage, linkKey, nowMs);
         if (request.headers.get("authorization")?.startsWith("LinkCapability ")) {
           const {capabilityToken, capability} = requireLinkCapability(request);

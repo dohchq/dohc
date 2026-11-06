@@ -484,6 +484,7 @@ pub(super) struct PagedRelay {
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
+    reference_pulls: Mutex<Vec<(Option<String>, bool)>>,
     pub(super) coordinate_lookups: Mutex<Vec<(String, i64)>>,
     pushes: Mutex<Vec<PushRequest>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
@@ -506,6 +507,7 @@ impl PagedRelay {
             blobs: BTreeMap::new(),
             coordinates: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(Vec::new()),
+            reference_pulls: Mutex::new(Vec::new()),
             coordinate_lookups: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
             download_batches: Mutex::new(Vec::new()),
@@ -612,10 +614,21 @@ impl RelayTransport for PagedRelay {
             .lock()
             .expect("pull calls")
             .push((req.cursor, req.limit));
-        self.pages
+        self.reference_pulls
+            .lock()
+            .unwrap()
+            .push((req.reference_after.clone(), req.include_work_references));
+        let mut page = self
+            .pages
             .get(&req.cursor)
             .cloned()
-            .ok_or(RelayError::InvalidResponse)
+            .ok_or(RelayError::InvalidResponse)?;
+        if !req.include_work_references {
+            page.work_references.clear();
+            page.next_reference_after = None;
+            page.reference_has_more = false;
+        }
+        Ok(page)
     }
 
     fn lookup_log_coordinate(
@@ -1094,6 +1107,136 @@ fn work_reference_outbox_drains_in_bounded_passes_without_new_log_operations() {
     );
 }
 
+#[test]
+fn restored_backup_drains_its_older_reference_outbox() {
+    use dohc_engine_domain::work_references::{
+        WorkTargetInput, make_work_reference, pending_work_references,
+    };
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let made = make_work_reference(
+        &mut engine,
+        "ws",
+        &WorkTargetInput::TransactionalCollection {
+            dataset_id: "00000000-0000-4000-8000-000000000001".into(),
+            table_id: "00000000-0000-4000-8000-000000000002".into(),
+        },
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    drop(engine);
+    let backup = path.with_file_name("backup.db");
+    std::fs::copy(&path, &backup).unwrap();
+    let mut engine = EngineStore::open(&path, 2).unwrap();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3, 0)
+        .unwrap();
+    assert!(pending_work_references(&engine, "ws").unwrap().is_empty());
+    drop(engine);
+    let mut restored = EngineStore::open(&backup, 4).unwrap();
+    assert_eq!(
+        pending_work_references(&restored, "ws").unwrap()[0].reference,
+        made.reference
+    );
+    client
+        .push_workspace(&mut restored, "ws", &NoFaults, &NoLiveLeases, 5, 0)
+        .unwrap();
+    assert!(pending_work_references(&restored, "ws").unwrap().is_empty());
+    let sent = client.transport().pushed_requests();
+    assert!(
+        sent.iter()
+            .filter(|request| request
+                .work_references
+                .iter()
+                .any(|m| m.reference == made.reference))
+            .count()
+            >= 2
+    );
+}
+
+#[test]
+fn one_message_registers_more_than_one_reference_page_without_resending_acknowledged_bindings() {
+    use dohc_engine_domain::work_references::{
+        TransactionalRecordId, WorkTargetInput, make_work_reference, pending_work_references,
+    };
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let mut body = String::new();
+    for record in 0..129 {
+        let made = make_work_reference(
+            &mut engine,
+            "ws",
+            &WorkTargetInput::TransactionalRecord {
+                dataset_id: "00000000-0000-4000-8000-000000000001".into(),
+                table_id: "00000000-0000-4000-8000-000000000002".into(),
+                record_id: TransactionalRecordId::Number(record),
+            },
+            1,
+            &NoFaults,
+        )
+        .unwrap();
+        body.push_str(&format!("@[work:{}] ", made.reference));
+    }
+    dohc_engine_domain::work_references::learn_work_references(&mut engine,"ws",&[
+        serde_json::from_value(json!({"reference":"Z".repeat(43),"createdAtMs":1,"target":{
+            "kind":"transactionalCollection","datasetId":"00000000-0000-4000-8000-000000000009","tableId":"00000000-0000-4000-8000-000000000008"}})).unwrap()
+    ]).unwrap();
+    body.push_str(&format!("@[work:{}]", "Z".repeat(43)));
+    let channel = LinkedChatStore::new(&mut engine)
+        .ensure_general_channel("ws", "general", 2, &NoFaults)
+        .unwrap();
+    LinkedChatStore::new(&mut engine)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: "ws".into(),
+                channel_id: channel.channel_id,
+                thread_id: "references".into(),
+                message_id: "many".into(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                own_thread: false,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Owner".into(),
+                author_owner_display_name: None,
+                author_user_id: Some("owner".into()),
+                origin: None,
+                body,
+                needs_decision: false,
+                options: vec![],
+                attachments: vec![],
+                automation: None,
+                author_agent_id: None,
+                named_agent_ids: vec![],
+                now_ms: 3,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let client = RelaySyncClient::new(FakeRelay::default());
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 4, 0)
+        .unwrap();
+    assert!(pending_work_references(&engine, "ws").unwrap().is_empty());
+    let requests = client.transport().pushed_requests();
+    let mut sent = BTreeSet::new();
+    for request in &requests {
+        assert!(request.work_references.len() <= 128);
+        for mapping in &request.work_references {
+            assert!(sent.insert(mapping.reference.clone()));
+        }
+    }
+    assert_eq!(sent.len(), 129);
+    assert!(requests.iter().any(|request| {
+        request
+            .ops
+            .iter()
+            .any(|op| op.op_kind == "chat.message.append")
+    }));
+}
+
 fn seed_replication_version(engine: &mut EngineStore, version_id: &str, kind: &str) {
     seed_replication_version_in_workspace(engine, "ws", version_id, kind);
 }
@@ -1244,6 +1387,7 @@ fn refused_malformed_proof_with_phantom_blobs_does_not_block_the_next_pull_opera
             pull: Mutex::new(Some(PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![refused, next],
                 next_cursor: 2,
                 has_more: false,

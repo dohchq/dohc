@@ -867,6 +867,7 @@ fn lane_recovery_copies_unpushed_export_and_next_preimage_follows_it() {
         PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: shared.clone(),
             next_cursor: 1,
             has_more: false,
@@ -1988,6 +1989,7 @@ fn lane_open_recipient_retains_pending_pull_across_restart_and_local_edits_survi
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![exports(&source)[1].clone()],
                 next_cursor: 2,
                 has_more: false,
@@ -1998,6 +2000,7 @@ fn lane_open_recipient_retains_pending_pull_across_restart_and_local_edits_survi
             PullResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: Vec::new(),
                 next_cursor: 2,
                 has_more: false,

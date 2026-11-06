@@ -454,6 +454,7 @@ fn a_fresh_unavailable_mark_pushes_retries_and_echoes_exactly() {
     *client.transport().pull.lock().unwrap() = Some(PullResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: first,
         next_cursor: 2,
         has_more: false,
@@ -550,6 +551,7 @@ fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: first,
             next_cursor: 2,
             has_more: false,
@@ -586,6 +588,7 @@ fn queued_agent_and_automation_authors_push_and_echo_unchanged() {
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: stored,
             next_cursor: 2,
             has_more: false,
@@ -775,6 +778,7 @@ fn assert_unproven_authors_marked_before_first_push(authors: serde_json::Value) 
         *client.transport().pull.lock().unwrap() = Some(PullResponse {
             work_references: Vec::new(),
             next_reference_after: None,
+            reference_has_more: false,
             ops: pushed,
             next_cursor: 2,
             has_more: false,

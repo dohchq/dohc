@@ -178,6 +178,7 @@ fn relay_large_blob_pull_benchmark() {
                 PullResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op.clone()],
                     next_cursor: 1,
                     has_more: false,

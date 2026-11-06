@@ -621,7 +621,6 @@ export type CommittedLiveUpdateResult =
 export interface SyncRelayStorage {
   indexReceivedWorkTargets(rows: Parameters<typeof import("./workReferences").indexReceivedWorkTargets>[1]): void;
   prepareWorkReferenceRegistration(input: Parameters<typeof import("./workReferences").prepareWorkReferenceRegistration>[1]): ReturnType<typeof import("./workReferences").prepareWorkReferenceRegistration>;
-  registerWorkReferences(input: Parameters<typeof import("./workReferences").registerWorkReferences>[1]): ReturnType<typeof import("./workReferences").registerWorkReferences>;
   makeWorkReference(input: Parameters<typeof import("./workReferences").makeWorkReference>[1]): ReturnType<typeof import("./workReferences").makeWorkReference>;
   resolveWorkReference(input: Parameters<typeof import("./workReferences").resolveWorkReference>[1]): ReturnType<typeof import("./workReferences").resolveWorkReference>;
   listWorkReferences(input: Parameters<typeof import("./workReferences").listWorkReferences>[1]): ReturnType<typeof import("./workReferences").listWorkReferences>;

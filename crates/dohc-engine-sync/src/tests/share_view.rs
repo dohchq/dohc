@@ -22,6 +22,7 @@ fn text_keep_received_share_continues_through_the_filtered_effect() {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![share_view_write_op(0, "docs/trip.txt", &kept_sha)],
                         next_cursor: 1,
                         has_more: false,
@@ -32,6 +33,7 @@ fn text_keep_received_share_continues_through_the_filtered_effect() {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![effect],
                         next_cursor: 2,
                         has_more: false,
@@ -42,6 +44,7 @@ fn text_keep_received_share_continues_through_the_filtered_effect() {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![edit],
                         next_cursor: 3,
                         has_more: false,
@@ -114,6 +117,7 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
                         ShareViewResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![
                                 share_view_write_op(
                                     0,
@@ -142,6 +146,7 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
                         ShareViewResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![share_view_write_op(5, "docs/tasks/a.md", &hash(&second))],
                             next_cursor: 6,
                             has_more: false,
@@ -372,6 +377,7 @@ fn received_collection_projection_tracks_incremental_removals_renames_and_duplic
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op(0, "docs/tasks/collection.yaml", &hash(&schema)),
                         share_view_write_op(1, "docs/tasks/a.md", &hash(&record)),
@@ -388,6 +394,7 @@ fn received_collection_projection_tracks_incremental_removals_renames_and_duplic
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: ops.clone(),
                         next_cursor,
                         has_more: false,
@@ -742,6 +749,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: Vec::new(),
                     next_cursor: 1,
                     has_more: true,
@@ -752,6 +760,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: Vec::new(),
                     next_cursor: 2,
                     has_more: false,
@@ -826,6 +835,7 @@ fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op(0, "docs/a.md"), op(1, "projects/b.md")],
                 next_cursor: 2,
                 has_more: false,
@@ -913,6 +923,7 @@ fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops,
                     next_cursor: 6,
                     has_more: false,
@@ -1034,6 +1045,7 @@ fn share_view_replay_discards_invalid_or_oversized_provenance_without_losing_con
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops,
                     next_cursor: 8,
                     has_more: false,
@@ -1096,6 +1108,7 @@ fn share_view_fork_snapshots_do_not_inherit_an_unrelated_agent_declaration() {
     let client = RelaySyncClient::new(PagedShareRelay::new([], [(0, ShareViewResponse {
         work_references: Vec::new(),
         next_reference_after: None,
+        reference_has_more: false,
         ops: vec![ShareReplicationEnvelope {
             origin_id: "peer".to_owned(), origin_seq: 0, op_kind: "version.create".to_owned(),
             payload: json!({"versionId":"shared-version", "authors":[{"kind":"agent","agentId":"unrelated-agent"}],
@@ -1166,6 +1179,7 @@ fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op(0, "docs/versioned.md", &versioned_sha),
                         stripped_op,
@@ -1367,6 +1381,7 @@ fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![bootstrap, share_view_write_op(1, "docs/a.md", &sha)],
                     next_cursor: 2,
                     has_more: false,
@@ -1411,6 +1426,7 @@ fn a_share_view_replay_counts_as_a_change_from_elsewhere_once() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_write_op(1, "docs/a.md", &sha)],
                     next_cursor: 2,
                     has_more: false,
@@ -1458,6 +1474,7 @@ fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours(
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         ShareReplicationEnvelope {
                             origin_id: "peer".to_owned(),
@@ -1518,6 +1535,7 @@ fn share_view_pull_files_a_coordinateless_skip_under_a_stable_page_position() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![ShareReplicationEnvelope {
                     origin_id: String::new(),
                     origin_seq: 0,
@@ -1625,6 +1643,7 @@ fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![
                     ShareReplicationEnvelope {
                         origin_id: "peer".to_owned(),
@@ -1715,6 +1734,7 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![
                     ShareReplicationEnvelope {
                         origin_id: "peer".to_owned(),
@@ -1806,6 +1826,7 @@ fn a_refused_origin_id_names_the_clause_it_broke() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![
                     malformed(String::new()),
                     malformed(oversized),
@@ -1881,6 +1902,7 @@ fn a_refused_origin_seq_names_the_range_and_what_was_offered() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![
                     out_of_range(-1),
                     out_of_range(crate::model::MAX_WIRE_INTEGER + 1),
@@ -1954,6 +1976,7 @@ fn a_relay_origin_named_like_a_page_position_stays_a_separate_refusal() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![
                     // A valid relay origin id spelled like the readable part of
                     // a page position, at the sequence the op below sits at.
@@ -2025,6 +2048,7 @@ fn share_view_pull_reports_why_it_skipped_a_version_refused_op() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![mismatched, unusable],
                     next_cursor: 2,
                     has_more: false,
@@ -2101,6 +2125,7 @@ fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![granted_op, ungranted_op],
                     next_cursor: 2,
                     has_more: false,
@@ -2176,6 +2201,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op(0, "docs/a.md", &tracked_sha),
                         share_view_write_op(1, "app/.env", &secret_sha),
@@ -2254,6 +2280,7 @@ fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![ShareReplicationEnvelope {
                     origin_id: "peer".to_owned(),
                     origin_seq: 0,
@@ -2349,6 +2376,7 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op(0, "docs/a.md", &granted_sha),
                         share_view_write_op(1, "private/hr.md", &ungranted_sha),
@@ -2430,6 +2458,7 @@ fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_version_gr
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op_on(0, "docs/a.md", &first_sha, "shared-version"),
                         share_view_write_op_on(1, "projects/b.md", &second_sha, "shared-version"),
@@ -2482,6 +2511,7 @@ fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_write_op(0, "docs/a.md", &sha)],
                     next_cursor: 1,
                     has_more: false,
@@ -2571,6 +2601,7 @@ fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op(0, "docs/a.md", &shas[0]),
                         share_view_write_op(1, "projects/b.md", &shas[1]),
@@ -2648,6 +2679,7 @@ fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_version_create_op(0, "v1", "docs/a.md", &granted_sha),
                         share_view_version_create_op(1, "v2", "docs/b.md", &other_sha),
@@ -2707,6 +2739,7 @@ fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths()
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_version_create_op(0, "v1", "docs/a.md", &sha)],
                     next_cursor: 1,
                     has_more: false,
@@ -2772,6 +2805,7 @@ fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
             ShareViewResponse {
                 work_references: Vec::new(),
                 next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op],
                 next_cursor: 1,
                 has_more: false,
@@ -2850,6 +2884,7 @@ fn share_view_binary_pull(
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_binary_write_op(0, path, &sha256)],
                     next_cursor: 1,
                     has_more: false,
@@ -2952,6 +2987,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_binary_write_op(0, "docs/over-cap.bin", &over_cap_sha),
                         share_view_write_op(1, "docs/later.md", &later_sha),
@@ -3059,6 +3095,7 @@ fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op(0, "docs/corrupt.md", &claimed_sha),
                         share_view_write_op(1, "docs/later.md", &later_sha),
@@ -3115,6 +3152,7 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         share_view_write_op(0, "docs/unusable.md", "not-a-sha256"),
                         share_view_write_op(1, "docs/later.md", &later_sha),
@@ -3228,6 +3266,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -3328,6 +3367,7 @@ fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_write_op(0, "docs/old.md", &original_sha), rename],
                     next_cursor: 2,
                     has_more: false,
@@ -3400,6 +3440,7 @@ fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_binary_write_op(0, "docs/small.bin", &named_sha)],
                     next_cursor: 1,
                     has_more: false,
@@ -3470,6 +3511,7 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -3559,6 +3601,7 @@ fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_write_op(0, "docs/small.md", &named_sha)],
                     next_cursor: 1,
                     has_more: false,
@@ -3630,6 +3673,7 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![share_view_binary_write_op(0, &long_path, &over_cap_sha)],
                     next_cursor: 1,
                     has_more: false,
@@ -3733,6 +3777,7 @@ fn a_long_path_does_not_cost_the_next_refusals_measurements() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -3816,6 +3861,7 @@ fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -3913,6 +3959,7 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -4025,6 +4072,7 @@ fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -4096,6 +4144,7 @@ fn invalid_text_shared_blob_is_fetched_once_for_two_rows() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -4186,6 +4235,7 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -4276,6 +4326,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![
                             share_view_write_op(0, bad_path, &refused_sha),
                             share_view_write_op(1, "docs/later.md", &later_sha),
@@ -6056,6 +6107,7 @@ fn received_token_survives_rename_delete_restore_and_visible_half_reentry() {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops,
                         next_cursor: cursor,
                         has_more: false,
@@ -6142,6 +6194,7 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![op],
                     next_cursor: 1,
                     has_more: false,
@@ -6216,8 +6269,13 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
                             "target": {"kind":"file", "versionId":"v", "objectId":token},
                         }))
                         .unwrap(),
+                        serde_json::from_value(json!({"reference":"W".repeat(43),"createdAtMs":1,
+                            "target":{"kind":"file","versionId":"wrong-version","objectId":token}})).unwrap(),
+                        serde_json::from_value(json!({"reference":"F".repeat(43),"createdAtMs":1,
+                            "target":{"kind":"file","versionId":"v","objectId":"private-owner-object"}})).unwrap(),
                     ],
                     next_reference_after: Some("mapping-page".into()),
+                    reference_has_more: true,
                     ops: vec![snapshot],
                     next_cursor: 1,
                     has_more: false,
@@ -6240,6 +6298,17 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
         )
         .unwrap();
     version_engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
+    for reference in ["W", "F"] {
+        assert!(matches!(
+            dohc_engine_domain::work_references::resolve_work_reference(
+                &version_engine,
+                "ws",
+                &reference.repeat(43)
+            )
+            .unwrap(),
+            dohc_engine_domain::work_references::WorkReferenceResolution::Unknown
+        ));
+    }
     assert!(pull.has_more);
     assert!(matches!(
         dohc_engine_domain::work_references::resolve_work_reference(&version_engine, "ws", &"V".repeat(43)).unwrap(),
@@ -6270,6 +6339,7 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![initial],
                         next_cursor: 1,
                         has_more: false,
@@ -6280,6 +6350,7 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![rename],
                         next_cursor: 2,
                         has_more: false,
@@ -6290,6 +6361,7 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
                     ShareViewResponse {
                         work_references: Vec::new(),
                         next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![],
                         next_cursor: 2,
                         has_more: false,
@@ -6425,6 +6497,7 @@ fn received_chat_survives_source_rename_on_fresh_pull() {
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         initial,
                         ShareReplicationEnvelope {
@@ -6502,6 +6575,7 @@ fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) 
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![write(0, "docs/a.md", &sha, &token)],
                     next_cursor: 1,
                     has_more: false,
@@ -6512,6 +6586,7 @@ fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) 
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![
                         rename,
                         write(2, "docs/a.md", &recreated_sha, &new_token),
@@ -6526,6 +6601,7 @@ fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) 
                 ShareViewResponse {
                     work_references: Vec::new(),
                     next_reference_after: None,
+                    reference_has_more: false,
                     ops: vec![],
                     next_cursor: 4,
                     has_more: false,
@@ -6671,6 +6747,7 @@ fn received_fallback_rename_commits_write_and_delete_together() {
                         ShareViewResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![initial],
                             next_cursor: 1,
                             has_more: false,
@@ -6681,6 +6758,7 @@ fn received_fallback_rename_commits_write_and_delete_together() {
                         ShareViewResponse {
                             work_references: Vec::new(),
                             next_reference_after: None,
+                            reference_has_more: false,
                             ops: vec![rename],
                             next_cursor: 2,
                             has_more: false,

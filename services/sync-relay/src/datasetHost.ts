@@ -23,7 +23,6 @@ import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "./shareFilter";
 import { notFound, relayError } from "./errors";
-import {stableJsonStringify} from "./canonicalJson";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 import { collectionFilePresent } from "./storage/collectionFilePresence";
@@ -44,6 +43,16 @@ export interface RelayDatasetHostOptions {
   onShutdownError(error: unknown): void;
   /** The deployment writer lock must be held before startup stage maintenance runs. */
   startupExclusive?: boolean;
+}
+
+export function datasetReferenceReadContainsRecord(result: unknown, primaryKeyFieldId: string, recordId: string | number): boolean {
+  if (!result || typeof result !== "object" || !("rows" in result) || !Array.isArray(result.rows)) return false;
+  return result.rows.some(row => {
+    if (!row || typeof row !== "object" || !("values" in row)) return false;
+    const values = row.values;
+    return !!values && typeof values === "object" && !Array.isArray(values) &&
+      (values as Record<string, unknown>)[primaryKeyFieldId] === recordId;
+  });
 }
 
 /** The existing relay connection owns every authoritative dataset transaction. */
@@ -362,16 +371,12 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         if (!request) return null;
         const readRequest = request;
         const authorization = host.authorize(auth, readRequest);
-        if (input.target.kind === "transactionalRecord" && !generatedRevision(authorization.revision)) return null;
+        if (input.target.kind === "transactionalRecord" && !generatedRevision(authorization.revision)) return () => false;
         const admitted = JSON.stringify(authorization);
         const recordId = input.target.kind === "transactionalRecord" ? input.target.recordId : undefined;
         return await host.readOperation(auth, {...readRequest, idempotencyKey: randomUUID(), signal: storage.unavailable,
           input: recordId === undefined ? {limit: 1} : {limit: 1, filters: [{fieldId: primaryKeyFieldId!, value: recordId}]}}, (result, revision) => {
-          const found = recordId === undefined || !!result && typeof result === "object" && !Array.isArray(result) &&
-            Array.isArray(result.rows) && result.rows.some(row => row !== null && typeof row === "object" && !Array.isArray(row) && row.id === recordId);
-          storage.db.prepare(`UPDATE sync_relay_work_reference_scopes SET deleted=? WHERE reference IN
-            (SELECT reference FROM sync_relay_work_references WHERE workspace_id=? AND target_json=?)`)
-            .run(found ? 0 : 1, key.workspaceId, stableJsonStringify(input.target));
+          const found = recordId === undefined || datasetReferenceReadContainsRecord(result, primaryKeyFieldId!, recordId);
           return () => {
             try {
               current();
