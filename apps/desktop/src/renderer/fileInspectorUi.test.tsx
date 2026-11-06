@@ -77,6 +77,8 @@ describe("ViewActions", () => {
   it("puts the document's actions in its group's tab row, not above the page", () => {
     render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} />);
     const row = screen.getByTestId("editor-tabs");
+    expect(row.classList.contains("@container/file-row")).toBe(true);
+    expect(row.classList.contains("w-full")).toBe(true);
     const actions = within(row).getByTestId("editor-tab-actions");
     const share = within(actions).getByRole("button", { name: "Share file" });
     const toggle = within(actions).getByRole("button", { name: "Source" });
