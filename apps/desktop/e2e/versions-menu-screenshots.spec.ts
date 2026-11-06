@@ -353,31 +353,30 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await writeCaptured(page, temp.rootPath, "Main", "notes.md", "# Notes\n\nMain's notes, again.\n");
     await switchTo(page, "Draft");
     await closeWhileMerging("hold");
-    const decideAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merged Draft into Main" });
+    const decideAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merging Draft into Main needs a decision" });
     await expect(decideAway).toBeVisible({ timeout: 30_000 });
     await expect(decideAway).toContainText("One file has two copies.");
     await shootWindow(page, "merge-closed-decide");
     await page.getByTestId("notice-center-toggle").click();
-    const decideRow = page.locator("[data-notice-row]").filter({ hasText: "Merged Draft into Main" });
+    const decideRow = page.locator("[data-notice-row]").filter({ hasText: "Merging Draft into Main needs a decision" });
     await expect(decideRow).toBeVisible();
     await shootWindow(page, "merge-closed-decide-notices");
     await page.getByTestId("notice-center-toggle").click();
 
-    // The Versions page with the conflict waiting, then its "1 to decide"
-    // under the pointer. The tab closes again, so the shots after it match.
+    // The Versions page with the conflict waiting, then its row's "Decide
+    // what to keep" under the pointer. The tab closes again, so the shots
+    // after it match.
     await openMenu(page);
     await page.getByTestId("version-all").click();
-    const toDecide = page
+    const draftRow = page
       .getByTestId("versions-page-row")
-      .filter({ has: page.getByTestId("versions-page-name").getByText("Draft", { exact: true }) })
-      .getByTestId("versions-page-conflicts");
-    await expect(toDecide).toHaveText("1 to decide", { timeout: 30_000 });
-    await expect(toDecide).toHaveAttribute("title", "Open the conflicts");
+      .filter({ has: page.getByTestId("versions-page-name").getByText("Draft", { exact: true }) });
+    await expect(draftRow.getByTestId("versions-page-conflicts")).toHaveText("1 to decide", { timeout: 30_000 });
+    await expect(draftRow.getByTestId("versions-page-merge")).toHaveCount(0);
     await page.mouse.move(4, 400);
+    await expect(draftRow.getByTestId("versions-page-decide")).toBeVisible();
     await shootWindow(page, "versions-page-conflicts");
-    // The button under the pointer. Its native tooltip never shows here,
-    // because e2e windows take no OS mouse input.
-    await toDecide.hover();
+    await draftRow.getByTestId("versions-page-decide").hover();
     await shootWindow(page, "versions-page-conflicts-hover");
     await page.mouse.move(4, 400);
     const versionsTab = page.getByTestId(editorTabTestId("tab://versions"));
