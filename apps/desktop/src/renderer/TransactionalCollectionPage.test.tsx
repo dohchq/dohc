@@ -437,6 +437,44 @@ describe("transactional Collection page", () => {
     expect(invoke.mock.calls.find(([request]) => request.operationId === create)![0].input).toEqual({ values: { [name]: "Bob", [amount]: 12.5, [status]: "New" } });
   });
 
+  it("shows a field's error under the field, marks the field, and moves focus to it", async () => {
+    setup(); await screen.findByText("Alice");
+    fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
+    const row = screen.getByRole("row", { name: "New record" });
+    const field = within(row).getByLabelText("Name"), status = within(row).getByLabelText("Status");
+    fireEvent.change(status, { target: { value: "" } });
+    const createButton = screen.getByRole("button", { name: "Create record" });
+    createButton.focus(); fireEvent.click(createButton);
+    const [error, statusError] = await screen.findAllByRole("alert");
+    expect(screen.getAllByRole("alert").map(alert => alert.textContent)).toEqual(["Enter Name.", "Enter Status."]);
+    expect(error!.querySelector("svg")).not.toBeNull();
+    expect(field.closest("td")!.contains(error!)).toBe(true);
+    expect(status.closest("td")!.contains(statusError!)).toBe(true);
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.getAttribute("aria-describedby")).toBe(error!.id);
+    expect(status.getAttribute("aria-describedby")).toBe(statusError!.id);
+    expect(document.activeElement).toBe(field);
+    // Changing a field clears only its own error.
+    fireEvent.change(field, { target: { value: "Bob" } });
+    expect(screen.getAllByRole("alert").map(alert => alert.textContent)).toEqual(["Enter Status."]);
+    expect(field.getAttribute("aria-invalid")).toBeNull();
+    expect(status.getAttribute("aria-invalid")).toBe("true");
+
+    // The one-field edit form does the same.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    const input = screen.getByLabelText("Name");
+    fireEvent.change(input, { target: { value: "" } });
+    const save = screen.getByRole("button", { name: "Save" });
+    save.focus(); fireEvent.click(save);
+    const editError = await screen.findByRole("alert");
+    expect(editError.textContent).toBe("Enter Name.");
+    expect(input.parentElement!.contains(editError)).toBe(true);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(editError.id);
+    expect(document.activeElement).toBe(input);
+  });
+
   it("shows an empty Collection's columns and adds a record in the table's New record row", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? { rows: [], nextCursor: null } : { id: 1, version: 1 } }));
     setup({ invoke });

@@ -1,18 +1,18 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Archive, CalendarDays, Check, CheckSquare, ChevronLeft, ChevronRight, Clock, Download, Expand, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, SlidersHorizontal, Square, Table2, Trash2, Undo2, X } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
 import type { CollectionTableView } from "./collectionTableViews";
 import { readCollectionReopenWait } from "../ipc/errorWords";
-import { EmptyState, IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { EmptyState, FieldError, IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { isComposingKey } from "./ui/keys";
 import { FieldTypeIcon } from "./collections/FieldTypeIcon";
 import { AutomationFieldMark, type FieldMarks } from "./collections/collectionFieldMarks";
 import { inputClass, selectClass } from "./collections/FieldForm";
 import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
-import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
+import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput, invalidField } from "./CollectionResourceInputs";
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
 import {
@@ -95,16 +95,17 @@ function undoFromReceipt(change: Mutation, raw: AppBackendJson): Undo | null {
   } catch { return null; }
 }
 
-function ValueInput({ field, value, disabled, onChange }: { field: TransactionalField; value: AppBackendJson; disabled: boolean; onChange(value: AppBackendJson): void }) {
-  if (field.type === "checkbox") return <input aria-label={field.name} type="checkbox" checked={value === true} disabled={disabled} onChange={event => onChange(event.target.checked)} />;
-  if (field.type === "select") return <select aria-label={field.name} value={display(value)} disabled={disabled} onChange={event => onChange(event.target.value || null)} className={selectClass}>
+function ValueInput({ field, value, disabled, describedBy, onChange }: { field: TransactionalField; value: AppBackendJson; disabled: boolean; describedBy?: string; onChange(value: AppBackendJson): void }) {
+  const marked = invalidField(describedBy);
+  if (field.type === "checkbox") return <input aria-label={field.name} {...marked} type="checkbox" checked={value === true} disabled={disabled} onChange={event => onChange(event.target.checked)} />;
+  if (field.type === "select") return <select aria-label={field.name} {...marked} value={display(value)} disabled={disabled} onChange={event => onChange(event.target.value || null)} className={selectClass}>
     <option value="">Choose an option</option>{field.options?.map(option => <option key={option} value={option}>{option}</option>)}</select>;
-  if (field.type === "multi-select") return <fieldset disabled={disabled} aria-label={field.name} className="m-0 flex flex-wrap gap-3 border-0 p-0">
-    {field.options?.map(option => <label key={option} className="flex items-center gap-1 text-[13px] text-ink"><input type="checkbox" checked={Array.isArray(value) && value.includes(option)} onChange={event => {
+  if (field.type === "multi-select") return <fieldset disabled={disabled} aria-label={field.name} aria-describedby={describedBy} className="m-0 flex flex-wrap gap-3 border-0 p-0">
+    {field.options?.map(option => <label key={option} className="flex items-center gap-1 text-[13px] text-ink"><input type="checkbox" aria-invalid={describedBy === undefined ? undefined : true} checked={Array.isArray(value) && value.includes(option)} onChange={event => {
       const prior = Array.isArray(value) ? value : [];
       onChange(event.target.checked ? [...prior, option] : prior.filter(entry => entry !== option));
     }} />{option}</label>)}</fieldset>;
-  return <input aria-label={field.name} disabled={disabled} type={field.type === "number" ? "number" : field.type === "date" ? "date" : field.type === "url" ? "url" : "text"}
+  return <input aria-label={field.name} {...marked} disabled={disabled} type={field.type === "number" ? "number" : field.type === "date" ? "date" : field.type === "url" ? "url" : "text"}
     step={field.type === "number" ? "any" : undefined} value={display(value)} className={inputClass} onChange={event => {
       const raw = event.target.value;
       onChange(field.type === "number" ? raw === "" ? null : Number(raw) : raw === "" && field.type !== "text" ? null : raw);
@@ -172,7 +173,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   useEffect(() => { if (!detailsOpen) setDetailsUnavailable(null); }, [detailsOpen]);
   const editorForm = useRef<HTMLFormElement>(null), createRow = useRef<HTMLTableRowElement>(null), addRow = useRef<HTMLButtonElement>(null);
   const [draft, setDraft] = useState<Record<string, AppBackendJson>>({});
-  const [invalid, setInvalid] = useState<string | null>(null);
+  // What is wrong with each field the person tried to save, by field id.
+  const [invalid, setInvalid] = useState<Readonly<Record<string, string>>>({});
+  const errorIds = useId(), focusInvalid = useRef(false);
   const [pending, setPending] = useState<Mutation | null>(null);
   const [undo, setUndo] = useState<Undo | null>(null);
   const [resourceBusy, setResourceBusy] = useState(false);
@@ -336,7 +339,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     else void reread();
   }, [props.recordsChanged, busy, visualBusy, resourceBusy]);
 
-  function closeEditor(): void { setEditor(null); setInvalid(null); }
+  function closeEditor(): void { setEditor(null); setInvalid({}); }
   const currentExecute = useRef(execute);
   useLayoutEffect(() => { currentExecute.current = execute; });
   async function execute(change: Mutation): Promise<void> {
@@ -369,10 +372,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     // The row has no form to stop a value the browser rejects, such as a half-typed number.
     if (createRow.current && !Array.from(createRow.current.querySelectorAll("input")).every(input => input.reportValidity())) return;
     const editable = editor.kind === "edit" ? [editor.field] : createFields;
-    for (const field of editable) {
-      const problem = inputProblem(field, draft[field.fieldId] ?? null);
-      if (problem) { setInvalid(problem); return; }
-    }
+    const problems = editable.flatMap(field => { const problem = inputProblem(field, draft[field.fieldId] ?? null); return problem ? [[field.fieldId, problem] as const] : []; });
+    if (problems.length > 0) { focusInvalid.current = true; setInvalid(Object.fromEntries(problems)); return; }
     const values = Object.fromEntries(editable.map(field => [field.fieldId, draft[field.fieldId] ?? null]));
     const input: AppBackendJson = editor.kind === "edit" ? { id: editor.row.id, expectedVersion: editor.row.version, values } : { values };
     void execute({ operation: editor.operation, input, key: crypto.randomUUID(), label: editor.kind === "edit" ? "Saved the edit" : "Created a record" });
@@ -403,16 +404,27 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     returningFocus.current = false;
     if (document.activeElement === null || document.activeElement === document.body) target?.focus();
   }, [editor, writeDisabled]);
+  // Pressing the check mark or Save with a wrong field moves focus to the first one.
+  useLayoutEffect(() => {
+    if (!focusInvalid.current) return;
+    focusInvalid.current = false;
+    (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+  }, [invalid]);
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   const createInRow = editor?.kind === "create" && !visual && page !== null && createsInRow;
   const columns = fields.length + (props.buttons?.fields.length ?? 0) + 1;
   const openCreate = (opener: HTMLElement) => {
     if (!create) return;
-    trigger.current = opener; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create });
+    trigger.current = opener; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid({}); setEditor({ kind: "create", operation: create });
   };
+  const errorId = (field: TransactionalField) => invalid[field.fieldId] === undefined ? undefined : `${errorIds}-${encodeURIComponent(field.fieldId)}`;
+  const fieldError = (field: TransactionalField) => invalid[field.fieldId] === undefined ? null : <FieldError id={errorId(field)!}>{invalid[field.fieldId]}</FieldError>;
   const valueInput = (field: TransactionalField) => {
-    const input = { field, value: draft[field.fieldId] ?? null, disabled, onChange: (value: AppBackendJson) => { setDraft(current => ({ ...current, [field.fieldId]: value })); setInvalid(null); } };
+    const input = { field, value: draft[field.fieldId] ?? null, disabled, describedBy: errorId(field), onChange: (value: AppBackendJson) => {
+      setDraft(current => ({ ...current, [field.fieldId]: value }));
+      setInvalid(current => current[field.fieldId] === undefined ? current : Object.fromEntries(Object.entries(current).filter(([fieldId]) => fieldId !== field.fieldId)));
+    } };
     return field.type === "attachment" && props.uploadFile ? <CollectionAttachmentInput {...input} scope={scope} upload={props.uploadFile} onError={onError} onBusy={value => {
       if (value) pendingResources.current.add(field.fieldId); else pendingResources.current.delete(field.fieldId);
       resourceLock.current = pendingResources.current.size > 0; setResourceBusy(resourceLock.current);
@@ -485,7 +497,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
         return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
-          trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation: edit, row, field });
+          trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation: edit, row, field });
         }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
       })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className="max-w-72 px-3 py-2">{props.buttons!.render(field, row)}</td>)}<td className="px-3 py-2"><div className="flex justify-end gap-2"><IconButton title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>)}
       {page.rows.length === 0 && (query.search || !canCreate) ? <tr><td colSpan={columns} className="px-3 py-2 text-muted">{query.search ? "No records match. Try a shorter search." : "No records yet. Refresh to check for new submissions."}</td></tr> : null}
@@ -493,22 +505,21 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         if (event.defaultPrevented || isComposingKey(event)) return;
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeEditor(); }
         else if (event.key === "Enter" && event.target instanceof HTMLInputElement && event.target.type !== "checkbox" && event.target.type !== "file") { event.preventDefault(); submitEditor(); }
-      }}>{fields.map(field => <td key={field.fieldId} className="max-w-72 px-3 py-1.5 align-top">{createFields.includes(field) ? valueInput(field) : null}</td>)}{props.buttons?.fields.map(field => <td key={`button:${field}`} />)}<td className="px-3 py-1.5 align-top"><div className="flex justify-end gap-2">
+      }}>{fields.map(field => <td key={field.fieldId} className="max-w-72 px-3 py-1.5 align-top">{createFields.includes(field) ? <div className="flex flex-col gap-1">{valueInput(field)}{fieldError(field)}</div> : null}</td>)}{props.buttons?.fields.map(field => <td key={`button:${field}`} />)}<td className="px-3 py-1.5 align-top"><div className="flex justify-end gap-2">
         <IconButton title="Cancel" aria-label="Cancel" disabled={disabled} onClick={closeEditor}><X size={15} strokeWidth={1.9} aria-hidden /></IconButton>
         <IconButton title="Create record" aria-label="Create record" disabled={disabled} onClick={submitEditor}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
       </div></td></tr> : null}
-      {createInRow && invalid ? <tr><td colSpan={columns} role="alert" className="px-3 py-1.5 text-[12px] text-danger">{invalid}</td></tr> : null}
       {canCreate && !createInRow ? <tr><td colSpan={columns} className="p-0"><button ref={addRow} type="button" disabled={writeDisabled || editor !== null} className="flex h-9 w-full items-center gap-1.5 px-3 text-left text-[13px] text-subtle transition-colors hover:text-ink dohc-focus-row disabled:cursor-not-allowed disabled:opacity-50" onClick={event => openCreate(event.currentTarget)}><Plus size={14} strokeWidth={1.9} aria-hidden />New record</button></td></tr> : null}
     </tbody>
     </table></div> : null}
     {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="tabular-nums">{page.rows.length} {page.rows.length === 1 ? "record" : "records"} on this page</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
     {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} unavailable={detailsUnavailable?.id === JSON.stringify(details.id) ? detailsUnavailable.text : undefined} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
       onClose={() => setDetails(null)}
-      onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation, row: details, field }); }}
+      onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation, row: details, field }); }}
       onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}
     {editor && !createInRow ? <form ref={editorForm} aria-label={editor.kind === "edit" ? `Edit ${editor.field.name}` : "New record"} className="rounded-lg border border-line bg-panel p-3" onSubmit={event => { event.preventDefault(); submitEditor(); }}>
-      <div className="flex flex-wrap gap-3">{editorFields.map(field => <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{valueInput(field)}</div>)}</div>
-      {invalid ? <p role="alert" className="text-[12px] text-danger">{invalid}</p> : null}<div className="mt-3 flex justify-end gap-2"><SecondaryButton disabled={disabled} onClick={closeEditor}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={disabled}>{editor.kind === "create" ? "Create record" : "Save"}</PrimaryButton></div>
+      <div className="flex flex-wrap gap-3">{editorFields.map(field => <div key={field.fieldId} className="flex min-w-40 flex-1 flex-col gap-1 text-[12px] text-muted"><span>{field.name}</span>{valueInput(field)}{fieldError(field)}</div>)}</div>
+      <div className="mt-3 flex justify-end gap-2"><SecondaryButton disabled={disabled} onClick={closeEditor}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={disabled}>{editor.kind === "create" ? "Create record" : "Save"}</PrimaryButton></div>
     </form> : null}
   </section>;
 }
