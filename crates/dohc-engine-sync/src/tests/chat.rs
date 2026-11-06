@@ -2064,6 +2064,7 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let pull = |engine: &mut EngineStore| {
         client.pull_chat_workspace(

@@ -3918,6 +3918,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let SyncPassOutcome::Complete {
         changed_paths: asset_first_changes,
@@ -3952,6 +3953,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let SyncPassOutcome::Complete {
         changed_paths: scene_first_changes,

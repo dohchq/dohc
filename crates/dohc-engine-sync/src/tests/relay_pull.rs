@@ -2455,6 +2455,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
                 next_cursor: 1,
                 has_more: false,
             })),
+            ..Default::default()
         });
 
         assert_eq!(
@@ -2602,6 +2603,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     };
     let client = RelaySyncClient::new(fake);
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
@@ -2800,6 +2802,7 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let first = client
@@ -3057,6 +3060,7 @@ fn pull_rejects_op_for_foreign_workspace() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     };
     let client = RelaySyncClient::new(fake);
     assert!(matches!(
@@ -4177,6 +4181,7 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let pull = client
@@ -4872,6 +4877,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let outcome = client
@@ -4996,6 +5002,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(
@@ -5093,6 +5100,7 @@ fn pull_keeps_a_genuine_origin_gap_hard() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(
@@ -5203,6 +5211,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
             next_cursor: 4,
             has_more: false,
         })),
+        ..Default::default()
     });
     let leases = FirstLeaseCheckLive(AtomicUsize::new(0));
 
@@ -5327,6 +5336,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(
@@ -5416,6 +5426,7 @@ fn committed_pull_cursor_retains_persisted_refusals() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let outcome = client
@@ -5528,6 +5539,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
     let first = first_client
         .pull_chat_workspace(
@@ -5640,6 +5652,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let second = second_client
         .pull_chat_workspace(
@@ -6005,6 +6018,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let outcome = client
@@ -6083,6 +6097,7 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
             next_cursor: 3,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(

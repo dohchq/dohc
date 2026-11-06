@@ -1177,8 +1177,9 @@ fn restored_backup_drains_its_older_reference_outbox() {
             tx.execute(
                 "DELETE FROM work_references WHERE reference=?1",
                 [&made.reference],
-            )?;
-            Ok::<_, rusqlite::Error>(())
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
         })
         .unwrap();
     let newer = make_work_reference(
