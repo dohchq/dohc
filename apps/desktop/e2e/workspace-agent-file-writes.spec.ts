@@ -29,8 +29,9 @@ test("dashboard-03: four MCP file writes show the agent in History", async () =>
     await openHistoryView(page);
     const rows = page.locator('[data-testid="engine-moment-open"][data-moment-path^="dashboard/"]');
     await expect(rows).toHaveCount(4);
-    // History shows a connected agent as the unnamed agent, whatever name it gives.
-    await expect(rows.getByTestId("engine-moment-source")).toHaveText(Array(4).fill("Agent"));
+    // History shows the name a connected agent gave, beside the plug.
+    await expect(rows.getByTestId("engine-moment-source")).toHaveText(Array(4).fill("Dashboard agent"));
+    await expect(rows.locator('[data-agent-mark="connected"]')).toHaveCount(4);
     for (const label of ["Local file edit", "Changed while dohc was closed", "Added existing files", "Found changes in the folder", "dohc-mcp"]) {
       await expect(rows.filter({ hasText: label })).toHaveCount(0);
     }
@@ -40,7 +41,7 @@ test("dashboard-03: four MCP file writes show the agent in History", async () =>
     await waitForWorkspaceFile(page, workspace.workspaceId, "capture-barrier.txt");
     await expect(rows).toHaveCount(4);
     await rows.first().click();
-    await expect(page.getByTestId("engine-diff-source")).toHaveText("Agent");
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Dashboard agent");
     await expect(page.getByTestId("engine-diff-restore-file")).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
