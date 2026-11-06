@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import { Sparkles, TriangleAlert } from "lucide-react";
+import { shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
@@ -419,7 +420,7 @@ function SyncPausedLine(props: { pause: SyncPause }) {
     <span className="text-agent">
       <Sparkles size={12} strokeWidth={1.9} aria-hidden className="mr-0.5 inline align-[-2px]" />
       <span className="sr-only">agent </span>
-      {author.agentName ?? author.agentId}
+      {shownAgentName(author.agentName) ?? author.agentId}
     </span>
   ) : author.self ? "you" : null;
   return (
