@@ -3243,7 +3243,8 @@ describe("the move guard over a real relay and live host", () => {
   }
 
   // The link holder's edit is accepted, saved and published; nothing on the
-  // device has pulled it. Times only the move. This computer owns no page it
+  // device has pulled it. Times only the move, and checks the guard's own wait
+  // apart from the move's other work. This computer owns no page it
   // moves here: a bound move is refused (editThenRefusedMove).
   // `unbound` decides what a guarded move must show:
   // - backlog: its pull either carries the edit, or answers retry later and
@@ -3281,10 +3282,11 @@ describe("the move guard over a real relay and live host", () => {
       return false;
     }
     expect(device.targetedPasses()).toBe(requested + 1);
-    const carriedInTime = elapsedMs <= MOVE_ACCEPTED_EDITS_WAIT_MS && moved !== undefined && moved.includes(text);
+    // The guard's wait, not the whole move: the rename and its capture come after it.
+    const carriedInTime = guardPulls.endedInWait && moved !== undefined && moved.includes(text);
     if (!input.unbound) throw new Error("A guarded move here says what its pull must show.");
-    if (input.unbound === "drained" && elapsedMs > MOVE_ACCEPTED_EDITS_WAIT_MS) {
-      throw new Error(`The move ran over the wait: ${Math.round(elapsedMs)} ms. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
+    if (input.unbound === "drained" && !guardPulls.endedInWait) {
+      throw new Error(`The guard's wait ran out before its pulls ended, ${Math.round(elapsedMs)} ms into the move. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
     }
     expect(guardPulls.shared, "another pass was running when the guard's catch-up began").toBe(false);
     if (pull === undefined) throw new Error(`The guard's catch-up ran no pull, ${Math.round(elapsedMs)} ms into the move.`);
