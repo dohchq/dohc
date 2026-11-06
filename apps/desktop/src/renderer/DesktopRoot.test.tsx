@@ -11,6 +11,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import type { ReactionStore } from "./workbench/reactionStore";
 import { deferred, type Deferred } from "../testing/deferred";
+import type { NoticeTarget } from "./shell/noticeTarget";
 
 const shellRenders = vi.hoisted(() => ({ count: 0 }));
 const shellCommits = vi.hoisted(() => ({ onCommit: null as ((workspace: Workspace) => void) | null }));
@@ -57,8 +58,8 @@ vi.mock("./DesktopWorkspaceShell", async () => {
     handoffStatus: ShareHandoffStatus;
     onDismissShareHandoff: () => void;
     onShareHandoffOpened: () => void;
-    onSwitchWorkspace: (workspace: Workspace, open?: string | { automationControls: string }) => void;
-    openOnReady?: string | { automationControls: string };
+    onSwitchWorkspace: (workspace: Workspace, open?: NoticeTarget) => void;
+    openOnReady?: NoticeTarget;
   }) => {
     shellRenders.count += 1;
     shellReactions.current = useReactions();
@@ -76,10 +77,10 @@ vi.mock("./DesktopWorkspaceShell", async () => {
           <button type="button" onClick={() => props.onSwitchWorkspace(next)}>
             {`Switch to ${next.workspaceId}`}
           </button>
-          <button type="button" onClick={() => props.onSwitchWorkspace(next, "trip/day-1.md")}>
+          <button type="button" onClick={() => props.onSwitchWorkspace(next, { to: "file", path: "trip/day-1.md" })}>
             {`Open a notice in ${next.workspaceId}`}
           </button>
-          <button type="button" onClick={() => props.onSwitchWorkspace(next, { automationControls: "collection:tasks#stamp" })}>
+          <button type="button" onClick={() => props.onSwitchWorkspace(next, { to: "automation-controls", automation: "collection:tasks#stamp" })}>
             {`Open an automation in ${next.workspaceId}`}
           </button>
         </span>
@@ -1001,7 +1002,7 @@ describe("opening a notice in another workspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open a notice in b" }));
     expect(screen.getByTestId("active-workspace").textContent).toBe("b");
-    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify("trip/day-1.md"));
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ to: "file", path: "trip/day-1.md" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
@@ -1011,7 +1012,7 @@ describe("opening a notice in another workspace", () => {
     // A switched-off automation's switch, asked for from another workspace.
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Open an automation in b" }));
-    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ automationControls: "collection:tasks#stamp" }));
+    expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ to: "automation-controls", automation: "collection:tasks#stamp" }));
   });
 });
 

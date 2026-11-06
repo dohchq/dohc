@@ -227,7 +227,9 @@ import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./setti
 import { NoticeCenter } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { AUTOMATION_NOT_HERE_NOTE, useSentNoticeProps, type NoticeShare, type OpenOnSwitch } from "./shell/useSentNoticeProps";
+import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
+import { AUTOMATION_NOT_HERE_NOTE, CHAT_NOT_FOUND_NOTE, FILE_NOT_FOUND_NOTE, targetLookupFailedNote, type NoticeTarget } from "./shell/noticeTarget";
+import { findNoticeChat } from "./shell/findNoticeChat";
 import type { AutomationFocus } from "./collections/AutomationsPanel";
 import { serverHoldNoticesKey } from "./shell/sentNoticePlace";
 import type { SentNotices } from "./shell/useSentNotices";
@@ -638,7 +640,7 @@ export function DesktopWorkspaceShell(props: {
   userSettings: DesktopUserSettingsResult | null;
   refreshWorkspaceRegistry: () => Promise<Workspace[]>;
   // A notice's Open passes what to open once the workspace is ready.
-  onSwitchWorkspace: (workspace: Workspace, open?: OpenOnSwitch) => void;
+  onSwitchWorkspace: (workspace: Workspace, open?: NoticeTarget) => void;
   // May reject: the shell shows why, with a retry.
   onManageWorkspaces?: () => void | Promise<void>;
   handoffStatus?: ShareHandoffStatus;
@@ -648,7 +650,7 @@ export function DesktopWorkspaceShell(props: {
   sentNotices?: SentNotices;
   // The account deletion review, owned above the shell.
   accountDeletion: AccountDeletion;
-  openOnReady?: OpenOnSwitch;
+  openOnReady?: NoticeTarget;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const {
@@ -1068,7 +1070,8 @@ export function DesktopWorkspaceShell(props: {
       const id = workspaceId, reveal = livePage?.path ?? null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
         ...(livePage ? { title: livePageTitle(livePage.path, livePage.action), message: livePageBody(livePage.action) } : { message }),
-        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } } });
+        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, reveal); } },
+        target: { to: "live-documents", ...(reveal === null ? {} : { reveal }) } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
@@ -1080,7 +1083,8 @@ export function DesktopWorkspaceShell(props: {
       const id = workspaceId, { title, words } = readError(cause);
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(title ? { title } : {}), message: words ?? message,
         ...(refusedPage !== undefined ? { identity: archiveRefusalIdentity(id, refusedPage) } : {}),
-        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, refusedPage ?? null); } } });
+        action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, refusedPage ?? null); } },
+        target: { to: "live-documents", ...(refusedPage === undefined ? {} : { reveal: refusedPage }) } });
     },
     [reportFailureMessage, reportShellFailure, openLiveDocuments, workspaceId],
   );
@@ -1159,7 +1163,7 @@ export function DesktopWorkspaceShell(props: {
           : liveStopMessage(refusal).slice("Live editing didn't stop. ".length),
         ...(refusal.sessionHost ? {details: [["Server", refusal.sessionHost]]} : {}),
         ...(withheld
-          ? {action: {label: "Open Live documents", run: () => {if (current()) openLiveDocuments(id, listPath);}}}
+          ? {action: {label: "Open Live documents", run: () => {if (current()) openLiveDocuments(id, listPath);}}, target: {to: "live-documents", reveal: listPath} as const}
           : needsResume ? {action: {label: "Resume live editing", run: resume}} : liveStopAction(refusal) === "retry" ? {retry} : {})});
     };
     const resume = () => {
@@ -2145,6 +2149,7 @@ export function DesktopWorkspaceShell(props: {
       const onServer=row.storedOn==="server";
       const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on",onServer ? "The server" : "This computer"],["Reason",row.reason],["Incident",row.incident]];
       const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
+      const target={to:"live-documents",reveal:row.path} as const;
       // The engine refused to read the queue: Try again reads it again. Save needs what it could not read.
       if (row.recovery==="unreadable") {
         const read=() => {
@@ -2154,13 +2159,13 @@ export function DesktopWorkspaceShell(props: {
           });
         };
         reportShellFailure({title:`Live editing paused for ${row.path}`,
-          message:"dohc kept edits on this computer but could not read them.",details,retry:read,action:open,identity});
+          message:"dohc kept edits on this computer but could not read them.",details,retry:read,action:open,target,identity});
         continue;
       }
       const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};
       if (row.saveOnly) {
         reportShellFailure({title:`Edits not written to ${row.path}`,
-          message:row.reason==="retired" ? "dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back." : "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+          message:row.reason==="retired" ? "dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back." : "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,target,identity});
         continue;
       }
       // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
@@ -2196,34 +2201,34 @@ export function DesktopWorkspaceShell(props: {
       // An earlier Stop's edits: the document may be live again, so the row names only the edits.
       if (row.recovery==="not-written") {
         reportShellFailure({title:`Edits not written to ${row.path}`,
-          message:"When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.",details,retry:stopAgain,action:save,identity});
+          message:"When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.",details,retry:stopAgain,action:save,target,identity});
         continue;
       }
       if (row.recovery==="cannot-write") {
         reportShellFailure({title:`Edits not written to ${row.path}`,
-          message:"When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+          message:"When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.",details,action:save,target,identity});
         continue;
       }
       if (row.recovery==="stopped-kept") {
         reportShellFailure({title:`Live editing stopped for ${row.path}`,
-          message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+          message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,target,identity});
         continue;
       }
       if (row.recovery==="stopping") {
         reportShellFailure({title:`Stopping live editing for ${row.path}`,tone:"warning",quiet:true,
-          message:"dohc is waiting for the server to stop live editing. Your unsent edits stay on this computer.",details,retry:stopAgain,action:save,identity});
+          message:"dohc is waiting for the server to stop live editing. Your unsent edits stay on this computer.",details,retry:stopAgain,action:save,target,identity});
         continue;
       }
       if (row.recovery==="retrying") {
         reportShellFailure({title:`Trying again for ${row.path}`,tone:"warning",quiet:true,
-          message:"dohc is sending your kept edits to the server once more.",details,action:save,identity});
+          message:"dohc is sending your kept edits to the server once more.",details,action:save,target,identity});
         continue;
       }
       // Try again cannot reach an earlier copy of the workspace, so the row offers only Save.
       if (row.earlier && row.recovery==="paused") {
         reportShellFailure({title:`Live editing paused for ${row.path}`,
           message:"The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.",
-          details,action:save,identity});
+          details,action:save,target,identity});
         continue;
       }
       const retry=() => {
@@ -2238,12 +2243,12 @@ export function DesktopWorkspaceShell(props: {
       if (row.recovery==="copied") {
         reportShellFailure({title:`Live editing paused for ${row.path}`,tone:"warning",quiet:true,
           message:"The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.",
-          details,...(row.earlier ? {} : {retry}),action:save,identity});
+          details,...(row.earlier ? {} : {retry}),action:save,target,identity});
         continue;
       }
       reportShellFailure({title:`Live editing paused for ${row.path}`,
         message:`The server could not accept your edits. dohc kept them ${onServer ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`,
-        details,retry,action:save,identity});
+        details,retry,action:save,target,identity});
     }
   },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped,reportPendingLiveStop,readLiveStopRefusalForRow,setShellRetryBusy]);
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
@@ -2864,7 +2869,7 @@ export function DesktopWorkspaceShell(props: {
         showSuccessNotice(saved.copyPath
           ? `Saved a recovery copy of ${path} in ${folder}.${kept}`
           : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.${kept}`,
-        undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } });
+        undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } }, { to: "file", path: opened });
       }, (error: unknown) => {
         if (workspaceIdRef.current !== id) return;
         reportShellError(`dohc could not save a recovery copy of ${path}.`, error, () => { void saveLiveRecoveryCopyRef.current(id, path, incident); });
@@ -3047,10 +3052,6 @@ export function DesktopWorkspaceShell(props: {
   // Where this window does not show that Collection, the file opens instead.
   const collectionFoldersRef = useRef(collectionFolders);
   collectionFoldersRef.current = collectionFolders;
-  const openNoticeAutomation = useCallback(
-    (automationId: string, run: string | null, signal: AbortSignal) => openAutomation(automationId, run, null, false, signal),
-    [openAutomation],
-  );
   const openAutomationControls = useCallback(
     async (automationId: string, { sharedFile, signal }: { sharedFile?: string | undefined; signal?: AbortSignal } = {}): Promise<string | null> => {
       if (sharedFile === undefined) return openAutomation(automationId, null, null, true, signal);
@@ -3089,28 +3090,13 @@ export function DesktopWorkspaceShell(props: {
   // Read once: the shell remounts for each workspace. It opens once the saved
   // layout applies, so the layout cannot replace it.
   const openOnReady = useRef(props.openOnReady);
+  const [pendingOpen, setPendingOpen] = useState<NoticeTarget | null>(null);
   useEffect(() => {
     const open = openOnReady.current;
     if (!workbenchRestored || open === undefined) return;
     openOnReady.current = undefined;
-    if (typeof open === "string") {
-      openFile(open);
-      return;
-    }
-    if ("chatsInvitation" in open) {
-      openChatsInvitation(open.chatsInvitation);
-      return;
-    }
-    const openSwitch = () => {
-      void openAutomationControls(open.automationControls, { sharedFile: open.sharedFile }).then(
-        (note) => {
-          if (note !== null) reportShellError(note, new Error(note), openSwitch);
-        },
-        (error: unknown) => reportShellError("dohc could not open this automation.", error, openSwitch),
-      );
-    };
-    openSwitch();
-  }, [openAutomationControls, openChatsInvitation, openFile, reportShellError, workbenchRestored]);
+    setPendingOpen(open);
+  }, [workbenchRestored]);
   // Files the OS opened with dohc. Main sends each once this window has opened
   // this workspace, and they open in order when the workspace is ready.
   const [openedFromOs, setOpenedFromOs] = useState<readonly string[]>([]);
@@ -3432,7 +3418,8 @@ export function DesktopWorkspaceShell(props: {
       if (isLivePageOwnedRefusal(error)) {
         const id = workspaceId;
         reportShellFailure({ title: livePageTitle(path, "restore"), message: livePageBody("restore"), cause: error, retry, identity,
-          action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, path); } } });
+          action: { label: "Open Live documents", run: () => { if (workspaceIdRef.current === id) openLiveDocuments(id, path); } },
+          target: { to: "live-documents", reveal: path } });
         return;
       }
       if (isSharedLiveFileRefusal(error)) {
@@ -5299,15 +5286,106 @@ export function DesktopWorkspaceShell(props: {
     reloadShareProposals,
     workspaceIsReady,
   ]);
+  // Where a Notices row goes: the one place a target becomes navigation.
+  // A lookup that answers after this window left the workspace, or after
+  // `signal` aborted, opens nothing. Resolves to a sentence for the row
+  // when what it names is gone; a failed lookup throws.
+  const presentPathsRef = useRef(fileIndex.presentPaths);
+  presentPathsRef.current = fileIndex.presentPaths;
+  const openNoticeTarget = useCallback(
+    async (target: NoticeTarget, signal: AbortSignal): Promise<string | null> => {
+      const owner = workspaceId;
+      switch (target.to) {
+        case "file": {
+          // Only a listing can say a file is gone, and one read before the
+          // file arrived would say so wrongly, so a miss reads it again.
+          if (hasCommittedListing() && !presentPathsRef.current.has(target.path)) {
+            const fresh = await refreshFiles().catch(() => null);
+            if (signal.aborted || workspaceIdRef.current !== owner) return null;
+            if (fresh && !fresh.files.some((file) => file.path === target.path)) return FILE_NOT_FOUND_NOTE;
+          }
+          openFile(target.path);
+          return null;
+        }
+        case "folder":
+          showPathInExplorer(target.path, true);
+          return null;
+        case "chat": {
+          const nav = await findNoticeChat(owner, target);
+          if (signal.aborted || workspaceIdRef.current !== owner) return null;
+          if (nav === null) return CHAT_NOT_FOUND_NOTE;
+          openChatsNavInTab(nav);
+          return null;
+        }
+        case "chats-invitation":
+          openChatsInvitation({ shareId: target.shareId, inputs: target.inputs });
+          return null;
+        case "automation":
+          return openAutomation(target.automation, target.run ?? null, null, false, signal);
+        case "automation-controls":
+          return openAutomationControls(target.automation, { sharedFile: target.sharedFile, signal });
+        case "share-changes":
+          setReviewProposalId(target.proposalId);
+          return null;
+        case "sharing-declined":
+          openSharingDeclined(target.versionId, target.objectId);
+          return null;
+        case "history":
+          openHistoryView();
+          return null;
+        case "live-documents":
+          openLiveDocuments(owner, target.reveal ?? null);
+          return null;
+        case "conflicts":
+          setConflictReviewOpen(true);
+          return null;
+        case "sync-settings":
+          openSettings("cloud");
+          return null;
+        case "server-connection":
+          openCloud();
+          return null;
+        case "privacy-settings":
+          privacySettingsAction.run();
+          return null;
+      }
+    },
+    [
+      hasCommittedListing, refreshFiles, openAutomation, openAutomationControls, openChatsInvitation, openChatsNavInTab, openCloud, openFile,
+      openHistoryView, openLiveDocuments, openSettings, openSharingDeclined, privacySettingsAction, showPathInExplorer, workspaceId,
+    ],
+  );
+  // A row's open whose lookup failed says so with Try again, which opens
+  // again; a sentence for the row comes back as a notice of its own.
+  const openNoticeRowTarget = useCallback(
+    (target: NoticeTarget, signal: AbortSignal): Promise<string | null> =>
+      openNoticeTarget(target, signal).catch((error: unknown) => {
+        const owner = workspaceId;
+        const retry = () => {
+          if (workspaceIdRef.current !== owner) return;
+          void openNoticeRowTarget(target, new AbortController().signal).then((note) => {
+            if (note !== null && workspaceIdRef.current === owner) reportShellError(note, new Error(note), null);
+          });
+        };
+        if (!signal.aborted && workspaceIdRef.current === owner) reportShellError(targetLookupFailedNote(target), error, retry);
+        return null;
+      }),
+    [openNoticeTarget, reportShellError, workspaceId],
+  );
+  // What a notice's Open asked of this workspace when it switched here, once
+  // the saved layout applied, so the layout cannot replace it.
+  useEffect(() => {
+    if (pendingOpen === null) return;
+    setPendingOpen(null);
+    void openNoticeRowTarget(pendingOpen, new AbortController().signal).then((note) => {
+      if (note !== null) reportShellError(note, new Error(note), null);
+    });
+  }, [openNoticeRowTarget, pendingOpen, reportShellError]);
   const { retryDialog: sentNoticeRetryDialog, ...sentNoticeProps } = useSentNoticeProps({
     sentNotices: props.sentNotices,
     workspaceId,
     workspaces: props.workspaces,
-    openFile,
-    openAutomation: openNoticeAutomation,
-    openAutomationControls,
-    openChat: openChatsNavInTab,
-    openChatsInvitation,
+    openTarget: openNoticeTarget,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
     reportShellError,
@@ -5659,6 +5737,7 @@ export function DesktopWorkspaceShell(props: {
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
+        ...(error.target ? { target: error.target } : {}),
       })),
     [shellErrors, reportFacts, versionMerges.retryBlocked],
   );
@@ -6239,6 +6318,7 @@ export function DesktopWorkspaceShell(props: {
               onWorkspaceErrorShown={reportsNoticeShown}
               onRetryLiveDelivery={retryLiveDelivery}
               onOpenSharingDeclined={openSharingDeclined}
+              onOpenTarget={openNoticeRowTarget}
               {...(shareView
                 ? {}
                 : {
@@ -7429,7 +7509,8 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceReady={(workspace) => {
               setOpenShare(null);
               // A share opened as its own workspace can show an automation's switch.
-              props.onSwitchWorkspace(workspace, (openShare !== "blank" ? openShare.controls : undefined) ?? openSharePath);
+              props.onSwitchWorkspace(workspace, (openShare !== "blank" ? openShare.controls : undefined) ??
+                (openSharePath === undefined ? undefined : { to: "file", path: openSharePath }));
             }}
             onBack={() => setOpenShare(null)}
             onConnectionError={reportConnectionError}

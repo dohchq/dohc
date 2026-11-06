@@ -338,6 +338,24 @@ describe("ChatLane", () => {
     expect(screen.getByTestId("chats-lane-new-divider")).toBeTruthy();
   });
 
+  it("lands on the message a notice named: scrolls to it, washes it once and moves focus there", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "m1", body: "Asked" }), message({ id: "m2", body: "The reply" }), message({ id: "m3", body: "Later" }),
+    ] });
+    render(<ReactionStoreProvider workspaceId="workspace-a">
+      <ChatLane workspaceId="workspace-a" channel={channel({ id: "channel-1", type: "chat", kind: "agent" })}
+        locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
+        onAgentWaitsForTrust={onAgentWaitsForTrust} focusMessageId="m2" />
+    </ReactionStoreProvider>);
+    await screen.findByText("The reply");
+    const landed = () => document.querySelector<HTMLElement>('[data-message-id="m2"]');
+    await waitFor(() => expect(landed()?.className).toContain("dohc-target-flash"));
+    await waitFor(() => expect(document.activeElement).toBe(landed()));
+    expect(document.querySelector('[data-message-id="m3"]')?.className).not.toContain("dohc-target-flash");
+    // The wash clears once; it does not stay as a selection.
+    await waitFor(() => expect(landed()?.className).not.toContain("dohc-target-flash"), { timeout: 2000 });
+  });
+
   it("shows no New divider when everything was read", async () => {
     render(lane());
     await screen.findByText("Old message");

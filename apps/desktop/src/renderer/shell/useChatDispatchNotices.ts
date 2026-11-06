@@ -86,6 +86,7 @@ export function useChatDispatchNotices(
               // Landing in the chat reads the notice: its toast closes and
               // its row stays until Resume or the person dismisses it.
               action: { label: "Open", reads: true, run: () => { if (isCurrent()) void openPaused(pausedIn, notice.threadId); } },
+              target: { to: "chat", thread: notice.threadId } as const,
             } : {}),
           } : {}),
           details: [

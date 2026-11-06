@@ -25,6 +25,7 @@ import { CollectionChangeCard } from "./CollectionChangeCard";
 import { ComposerNotice, DispatchAnnouncement, dispatchAnnouncement } from "./ChatsControls";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
+import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>
@@ -89,6 +90,9 @@ export function ChatLane(props: {
   // One line over the composer when something stops the agent answering,
   // with the action that fixes it.
   notice?: ReactNode;
+  // A message to land on once it loads, such as the reply a notice named.
+  // One the lane does not hold leaves it at its end.
+  focusMessageId?: string;
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [postThreadIds, setPostThreadIds] = useState<readonly string[]>([]);
@@ -114,8 +118,14 @@ export function ChatLane(props: {
   onThreadRead.current = props.onThreadRead;
   const listRef = useRef<ChatMessageListHandle | null>(null);
   const paintedRevision = useRef<PaintedLane | null>(null);
-  const { workspaceId, onError } = props;
+  const { workspaceId, onError, focusMessageId } = props;
   const channelId = props.channel.id;
+  // Lands once per message asked for: scrolls to it, washes it and moves
+  // focus to it.
+  const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
+  const landed = useRef<string | null>(null);
+  const flashTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
   const agentDm = props.channel.kind === "agent";
   const agentOffer = useAgentOffer({
     workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
@@ -250,6 +260,26 @@ export function ChatLane(props: {
     void load();
     return () => { loadSequence.current += 1; };
   }, [load, props.revision]);
+
+  useEffect(() => {
+    if (focusMessageId === undefined || loading || !messages.some((message) => message.id === focusMessageId)) return;
+    const key = `${channelId}:${focusMessageId}`;
+    if (landed.current === key) return;
+    const frame = requestAnimationFrame(() => {
+      if (landed.current === key || !listRef.current?.scrollToMessage(focusMessageId)) return;
+      landed.current = key;
+      setFlashMessageId(focusMessageId);
+      window.clearTimeout(flashTimer.current);
+      flashTimer.current = window.setTimeout(() => setFlashMessageId(null), TARGET_FLASH_MS);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [channelId, focusMessageId, loading, messages]);
+  // A row the list mounts for the scroll paints a frame later.
+  useEffect(() => {
+    if (flashMessageId === null) return;
+    const frame = requestAnimationFrame(() => focusMessage(document, flashMessageId));
+    return () => cancelAnimationFrame(frame);
+  }, [flashMessageId]);
 
   useEffect(() => {
     let queued = false;
@@ -606,6 +636,7 @@ export function ChatLane(props: {
       workingMessageId={dispatch?.liveTriggerMessageId ?? null}
       listRef={listRef}
       firstUnreadMessageId={firstUnreadMessageId}
+      flashMessageId={flashMessageId}
       bottomSpace={AGENT_OFFER_SPACE}
     />
   );

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { NOTICE_BODY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NoticeRow, SyncStatusResult } from "../../ipc/bridgeContract";
+import type { NoticeTarget } from "../shell/noticeTarget";
 import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
@@ -68,6 +69,8 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
       {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
       {...(props.onRetrySentNotice ? { onRetrySentNotice: props.onRetrySentNotice } : {})}
+      {...(props.onOpenTarget ? { onOpenTarget: props.onOpenTarget } : {})}
+      {...(props.onReviewShareChanges ? { onReviewShareChanges: props.onReviewShareChanges } : {})}
     />
   );
 }
@@ -2022,7 +2025,7 @@ describe("notices sent to you", () => {
       const onReadSentNotice = vi.fn();
       renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn() });
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => screen.getByTestId("sent-notice-a-open-row").focus());
       expect(onReadSentNotice).toHaveBeenCalledExactlyOnceWith(sentRow("a").notice);
       // Moving within the row reads nothing more.
       act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
@@ -2423,9 +2426,11 @@ describe("notices sent to you", () => {
     const onOpenSentNotice = vi.fn(async () => null);
     const onDismissSentNotice = vi.fn();
     const onOpenHistory = vi.fn();
+    const onOpenTarget = vi.fn(() => null);
     renderNotices({
       agentActive: true,
       onOpenHistory,
+      onOpenTarget,
       sentNotices: [sentRow("a"), sentRow("b")],
       onOpenSentNotice,
       onDismissSentNotice,
@@ -2433,28 +2438,30 @@ describe("notices sent to you", () => {
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
 
+    // A row that opens is one stop: the control that opens it.
     await userEvent.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("notice-agent-active"));
+    expect(document.activeElement).toBe(screen.getByTestId("notice-agent-active-open-row"));
     await userEvent.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a-open-row"));
     await userEvent.keyboard("{ArrowDown}{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b-open-row"));
     await userEvent.keyboard("{ArrowUp}");
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a-open-row"));
 
     // Delete keeps the keyboard in the list: focus moves on first.
     await userEvent.keyboard("{Delete}");
     expect(onDismissSentNotice).toHaveBeenCalledWith(sentRow("a").notice);
-    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b"));
+    expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b-open-row"));
 
     await userEvent.keyboard("{Enter}");
     expect(onOpenSentNotice).toHaveBeenCalledWith(sentRow("b").notice, expect.any(AbortSignal));
     await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
 
-    // This computer's rows answer Enter with their own action.
+    // This computer's rows open where they are about, not their own action.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onOpenHistory).toHaveBeenCalledOnce();
+    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith({ to: "history" }, expect.any(AbortSignal));
+    expect(onOpenHistory).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.keyboard("{ArrowDown}{Escape}");
@@ -2591,4 +2598,124 @@ it("names the chat permission that stopped a step", async () => {
   }] });
   await userEvent.click(screen.getByTestId("notice-center-toggle"));
   expect((await screen.findByTestId("notice-automation-stops")).textContent).toContain("ana@dohc.test cannot post in Trip.");
+});
+
+describe("opening a row", () => {
+  const hold = {
+    automationId: "collection:Trip#task", automationName: "Add a task", definitionHash: "0123456789abcdef",
+    step: "0", seq: 7, collection: "Trip", collectionPath: "Projects/Trip", target: "Planning", action: "read" as const,
+    stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
+  };
+  const failedSave = {
+    id: "save", title: "Trip/day-2.md did not save", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false,
+    target: { to: "file" as const, path: "Trip/day-2.md" },
+  };
+
+  const rows: Array<[string, Partial<Parameters<typeof NoticeCenter>[0]>, NoticeTarget]> = [
+    ["agent-active", { agentActive: true }, { to: "history" }],
+    ["sync-conflict", {
+      syncStatus: { ...liveDeliveryStatus("active"), state: "conflict", conflictCount: 1 },
+      conflictSummaries: ["Both sides changed notes/today.md."],
+    }, { to: "conflicts" }],
+    ["save", { workspaceErrors: [failedSave] }, { to: "file", path: "Trip/day-2.md" }],
+    ["automation-hold-collection:Trip#task-0", { automationHolds: [hold], onAllowAutomationHold: vi.fn() }, { to: "automation", automation: "collection:Trip#task" }],
+  ];
+  it.each(rows)("opens the %s row where it is about", async (id, props, target) => {
+    const onOpenTarget = vi.fn(() => null);
+    renderNotices({ ...props, onOpenTarget });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    // The title's button stretches over the row; jsdom has no hit-testing.
+    await userEvent.click(screen.getByTestId(`notice-${id}-open-row`));
+    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith(target, expect.any(AbortSignal));
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
+  });
+
+  it.each(["{Enter}", " "])("opens with %s on the row", async (key) => {
+    const onOpenTarget = vi.fn(() => null);
+    renderNotices({ agentActive: true, onOpenTarget });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    act(() => screen.getByTestId("notice-agent-active-open-row").focus());
+    await userEvent.keyboard(key);
+    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith({ to: "history" }, expect.any(AbortSignal));
+  });
+
+  it("lets a row's own buttons do only what they name", async () => {
+    const onOpenTarget = vi.fn(() => null);
+    const onRetryWorkspaceError = vi.fn();
+    const onDismissWorkspaceError = vi.fn();
+    renderNotices({ workspaceErrors: [failedSave], onOpenTarget, onRetryWorkspaceError, onDismissWorkspaceError });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-save");
+    await userEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    expect(onRetryWorkspaceError).toHaveBeenCalledOnce();
+    expect(onOpenTarget).not.toHaveBeenCalled();
+  });
+
+  it("reads the row it opens", () => {
+    const onHideWorkspaceError = vi.fn();
+    renderNotices({ workspaceErrors: [failedSave], onHideWorkspaceError, onOpenTarget: () => new Promise<null>(() => {}) });
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+    // A click with no pointer or focus on the way, so opening alone reads it.
+    fireEvent.click(screen.getByTestId("notice-save-open-row"));
+    expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("save");
+    expect(screen.queryByTestId("notice-save-unread")).toBeNull();
+    expect(screen.queryByTestId("notice-center-count")).toBeNull();
+  });
+
+  it.each(["dohc could not find this file.", "dohc could not find this chat."])(
+    "says %s in place, and the row stops opening",
+    async (note) => {
+      const onOpenTarget = vi.fn(async () => note);
+      renderNotices({ workspaceErrors: [failedSave], onOpenTarget });
+      await userEvent.click(screen.getByTestId("notice-center-toggle"));
+      await userEvent.click(screen.getByTestId("notice-save-open-row"));
+      const row = screen.getByTestId("notice-save");
+      expect((await within(row).findByText(note)).getAttribute("role")).toBe("status");
+      expect(row.textContent).not.toContain("dohc could not save");
+      expect(screen.getByTestId("notice-center")).toBeTruthy();
+      expect(screen.queryByTestId("notice-save-open-row")).toBeNull();
+      expect(row.className).not.toContain("dohc-row-open");
+      expect(onOpenTarget).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("gives a row with nowhere to go no button, role or Tab stop, but arrows still reach it", async () => {
+    renderNotices({ workspaceErrors: [{ ...failedSave, target: undefined }], onOpenTarget: vi.fn() });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-save");
+    expect(screen.queryByTestId("notice-save-open-row")).toBeNull();
+    expect(row.querySelector("[data-notice-open]")).toBeNull();
+    expect(row.getAttribute("role")).toBeNull();
+    expect(row.tabIndex).toBe(-1);
+    expect(row.className).not.toContain("dohc-row-open");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(row);
+  });
+
+  it("does not open when a drag selects opened text, and opens on a plain click there", async () => {
+    vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+    const onOpenTarget = vi.fn(() => new Promise<null>(() => {}));
+    const long = `${"Day two needs a ferry time. ".repeat(20)}End.`;
+    renderNotices({ workspaceErrors: [{ ...failedSave, message: long }], onOpenTarget });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = screen.getByTestId("notice-save");
+    fireEvent.click(screen.getByTestId("notice-save-more"));
+    expect(onOpenTarget).not.toHaveBeenCalled();
+    const body = within(row).getByText(/End\.$/, { selector: "p" });
+
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.click(body, { detail: 1 });
+    expect(onOpenTarget).not.toHaveBeenCalled();
+
+    window.getSelection()?.removeAllRanges();
+    fireEvent.click(body, { detail: 1 });
+    expect(onOpenTarget).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+  });
 });

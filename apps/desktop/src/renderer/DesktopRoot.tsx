@@ -25,7 +25,7 @@ import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from 
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
-import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
+import type { NoticeTarget } from "./shell/noticeTarget";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
@@ -86,7 +86,7 @@ export function DesktopRoot() {
   // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
-    open: OpenOnSwitch;
+    open: NoticeTarget;
   } | null>(null);
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
