@@ -915,7 +915,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
     <div
       ref={frameRef}
       data-testid="editor-tabs"
-      className="@container/file-row group/strip relative flex h-9 w-full shrink-0 bg-panel"
+      className="@container/file-row group/strip relative flex h-9 shrink-0 bg-panel"
     >
       <span
         aria-hidden

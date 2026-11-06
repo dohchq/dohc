@@ -28,8 +28,8 @@ import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
 // its words can change width without moving a control, and in a narrow pane
 // a state mark shows only its mark. A status with nothing visible, such as a calm save
 // state or a quick open kept for screen readers, draws no box, so loading,
-// ready and failed views take the same width. Outside an editor group, as on the states page, they draw
-// in a row of their own.
+// ready and failed views take the same width. Outside an editor group, they
+// draw in a row of their own.
 //
 // `onRun` is for an app's entry file: Run opens the app's local preview. It
 // stands left of Share, so when it arrives nothing right of it moves.
@@ -81,7 +81,7 @@ export function ViewActions(props: {
     </>
   );
   if (slot === undefined) {
-    return <div data-testid="view-actions" className="@container/file-row flex h-9 w-full items-center justify-end gap-1 border-b border-line bg-panel pl-2 pr-1">{content}</div>;
+    return <div data-testid="view-actions" className="flex h-9 items-center justify-end gap-1 border-b border-line bg-panel pl-2 pr-1">{content}</div>;
   }
   return slot ? createPortal(content, slot) : null;
 }
