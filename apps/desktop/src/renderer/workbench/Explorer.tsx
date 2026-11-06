@@ -31,7 +31,7 @@ import {
   type MouseEvent,
   type ReactNode,
 } from "react";
-import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type { ShowExplorerMenuResult, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
 import { planDrop, type DragSource } from "./file-tree-dnd";
@@ -56,8 +56,10 @@ import { ExplorerHome } from "./ExplorerHome";
 import type { DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
+import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
-import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { fileManagerName } from "../../workspaces/explorerMenu";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -1167,18 +1169,55 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [pinnedApps, props.pinned],
   );
 
+  // Ends when this Explorer shows another workspace or unmounts. A menu answer
+  // from an earlier lifetime changes nothing and says nothing, even after the
+  // window comes back to this workspace.
+  const menuLifetime = useRequestSequence([workspaceId]);
+
+  // Main runs Show in File Explorer inside the menu call, after its path
+  // checks. With `reveal` it runs only that, so Try again can repeat it.
+  const askMenu = useCallback(
+    async function ask(
+      kind: "file" | "folder" | "root",
+      path: string | undefined,
+      pinnedRow: boolean,
+      reveal?: true,
+    ): Promise<ShowExplorerMenuResult> {
+      const lifetime = menuLifetime.current();
+      try {
+        const command = await bridge().showExplorerMenu({
+          workspaceId,
+          ...(path !== undefined ? { path } : {}),
+          kind,
+          pinned: pinnedRow,
+          ...(reveal ? { reveal } : {}),
+        });
+        return menuLifetime.isCurrent(lifetime) ? command : null;
+      } catch (cause) {
+        if (!menuLifetime.isCurrent(lifetime)) return null;
+        // Only a row's menu offers the reveal.
+        if (path === undefined) throw cause;
+        const fileManager = fileManagerName(window.dohcDesktop?.platform);
+        onError(
+          withErrorWords(`dohc could not show ${basenameOf(path)} in ${fileManager}.`, cause),
+          cause,
+          () => {
+            if (menuLifetime.isCurrent(lifetime)) void ask(kind, path, pinnedRow, true);
+          },
+        );
+        return null;
+      }
+    },
+    [menuLifetime, onError, workspaceId],
+  );
+
   const dispatchMenu = useCallback(
     async (
       kind: "file" | "folder" | "root",
       path: string | undefined,
       pinnedRow: boolean,
     ) => {
-      const command = await bridge().showExplorerMenu({
-        workspaceId,
-        ...(path !== undefined ? { path } : {}),
-        kind,
-        pinned: pinnedRow,
-      });
+      const command = await askMenu(kind, path, pinnedRow);
       if (command === null) return;
       const targetDir =
         kind === "root" ? "" : kind === "folder" ? (path ?? "") : dirnameOf(path ?? "");
@@ -1228,7 +1267,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
     },
     [
-      workspaceId,
+      askMenu,
       beginCreateFolder,
       beginRename,
       onModeChange,
