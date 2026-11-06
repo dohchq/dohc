@@ -59,7 +59,16 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
     }
+    // Picking it adds the reaction; picking it again from the picker takes it
+    // back, so the later shots show the post as it was.
+    const astronautPill = view.locator('[data-testid="chats-reaction-pill"][data-emoji="🧑🏽‍🚀"]');
     await astronaut.click();
+    await expect(astronautPill).toBeVisible();
+    await view.locator('article[data-testid="chats-message"]').hover();
+    await trigger.click();
+    await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🧑🏽‍🚀");
+    await astronaut.click();
+    await expect(astronautPill).toHaveCount(0);
     // The menu opens above only when the composer has no room for it below.
     // A short thread leaves its composer high, so the window ends just
     // under the composer, with less room than one row of the menu.
