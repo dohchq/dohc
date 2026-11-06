@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseCliArguments } from "./args";
 import { executeCli } from "./index";
-import { CLI_PROTOCOL_VERSION, cliRequestSchema, type CliRequestWithoutToken } from "./protocol";
+import { CLI_JSON_SCHEMA_VERSION, CLI_PROTOCOL_VERSION, cliRequestSchema, type CliRequestWithoutToken } from "./protocol";
 
 const message = {
   threadId: "th_1", messageId: "msg_1",
@@ -67,7 +67,7 @@ describe("chat watch", () => {
       },
     });
     expect(result.exitCode).toBe(0);
-    expect(printed.map(text => JSON.parse(text))).toEqual([{ messages: [message], cursor: "after-message" }]);
+    expect(printed.map(text => JSON.parse(text))).toEqual([{ schemaVersion: CLI_JSON_SCHEMA_VERSION, messages: [message], cursor: "after-message" }]);
     expect(requests[1]).toMatchObject({ args: { cursor: "after-timeout" } });
     expect(requests[2]).toMatchObject({ args: { cursor: "after-message" } });
   });
