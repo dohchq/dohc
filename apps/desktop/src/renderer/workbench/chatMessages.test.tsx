@@ -171,6 +171,26 @@ describe("chat authorship display", () => {
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
   });
 
+  // Every connected agent shares the unnamed agent's group, so only its name tells two apart.
+  it("starts a new run when a connected agent with another name posts next", () => {
+    const at = new Date(2026, 8, 17, 12).getTime();
+    const post = (id: string, authorDisplayName: string, minute: number): ChatMessageRecord => ({
+      id, threadId: "thread", presentation: { group: "unnamed-agent", hue: null, self: true },
+      authorKind: "agent", authorDisplayName, body: "Done.", createdAtMs: at + minute * 60_000,
+    });
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[post("a", "Claude", 0), post("b", "Codex", 1), post("c", "Codex", 2)]}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+      />,
+    );
+    expect(screen.getAllByTestId("test-chat-message").map((row) => row.dataset.continues)).toEqual(["false", "false", "true"]);
+    expect(screen.getAllByTestId("test-chat-message-author").map((author) => author.textContent)).toEqual(["Claude", "Codex"]);
+  });
+
   it("fits a continued message's time in the avatar's column, without AM or PM", () => {
     // Two runs: "11:05 AM" and "12:45 PM", a two-digit hour in each.
     const runs = [["Ana", 11, 3], ["Ana", 11, 5], ["Sam", 12, 43], ["Sam", 12, 45]] as const;

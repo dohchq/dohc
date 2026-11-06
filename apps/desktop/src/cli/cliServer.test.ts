@@ -1442,7 +1442,7 @@ describe("CLI socket server", () => {
     expect(describedEndpoint).not.toBe(join(stateDir, CLI_SOCKET_FILE));
   });
 
-  it("derives stop provenance for people, outside agents, and agent runs", async () => {
+  it("derives stop provenance for people, connected agents, and agent runs", async () => {
     const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
     context.stopSync = stop;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });

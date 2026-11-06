@@ -37,7 +37,7 @@ describe("agent badge", () => {
   it("finds your agent only by the id its run's message carries", () => {
     expect(tooltipFor({ authorDisplayName: "Atlas", authorAgentId: "default" }, mine)).toContain("Current local command: local-tool --private-path");
     cleanup();
-    // An outside agent with no name posts as "Agent", and an older message can
+    // A connected agent with no name posts as "Agent", and an older message can
     // carry your agent's name. Neither is your agent's run.
     for (const name of ["Agent", "Nova"]) {
       expect(tooltipFor({ authorDisplayName: name }, mine, settingsWithAgent({ name, launch: { command: "local-tool" } }, ada)))
