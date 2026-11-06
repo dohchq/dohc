@@ -397,6 +397,7 @@ import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
+import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
@@ -5043,6 +5044,7 @@ const agentWaits = createAgentWaits((agentIds) => {
 });
 
 const { startDesktopCliServer } = createDesktopCliServer({
+  notices: async (workspaceId) => agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,
   beforeMove: moveAcceptedEdits.beforeMove,

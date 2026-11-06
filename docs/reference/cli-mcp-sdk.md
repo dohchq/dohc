@@ -272,6 +272,14 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 
 Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
+### `dohc_list_notices`
+
+List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing leaves every row unread.
+
+No arguments.
+
+Returns `{ notices: { kind, id, title, body, sender, createdAtMs, read, opens, note? }[] }`.
+
 ### `dohc_list_kept_copies`
 
 List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.
@@ -807,6 +815,22 @@ dohc links resolve <source> <literals-json> [options]
 Resolve links from one document.
 
 With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } | { path, create, fragment } | null)[], mountsCovered }`.
+
+### `dohc notices`
+
+Read your Notices in this workspace.
+
+Listing changes nothing: rows you haven't read stay unread in dohc.
+
+#### `dohc notices list`
+
+```sh
+dohc notices list [options]
+```
+
+List this workspace's Notices, newest first: each row's title, text, sender, time, whether you've read it, and where it opens.
+
+With `--json`, prints `{ schemaVersion, notices: { kind, id, title, body, sender, createdAtMs, read, opens, note? }[] }`.
 
 ### `dohc sync`
 

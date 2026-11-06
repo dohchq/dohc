@@ -118,6 +118,7 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
+export const NOTICES_RESULTS: Record<string, CliSocketVerb> = { list: "notices" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy", agents: "shareAgents", disconnect: "shareDisconnect" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
@@ -210,6 +211,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
   dohc_list_kept_copies: { cli: "keptCopies" },
+  dohc_list_notices: { cli: "notices" },
   dohc_save_kept_copy: { cli: "saveKeptCopy" },
   dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
@@ -496,7 +498,7 @@ function verbReturns(command: string, name: string): string {
         ? DOCUMENT_RESULTS[name]
         : command === "automation" ? AUTOMATION_RESULTS[name]
           : command === "access" ? ACCESS_RESULTS[name]
-            : command === "sync" ? SYNC_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
+            : command === "sync" ? SYNC_RESULTS[name] : command === "notices" ? NOTICES_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
               : command === "version" ? VERSION_RESULTS[name]
               : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {

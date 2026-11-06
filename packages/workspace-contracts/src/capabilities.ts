@@ -174,7 +174,7 @@ export const CAPABILITIES = {
   "automation.host.read": capability("Read the computer that runs schedules.", {ipc: ["readScheduleHost"]}),
   "automation.host.choose": capability("Choose the computer that runs schedules.", {ipc: ["chooseScheduleHost"]}),
   "automation.host.takeover": capability("Take over scheduled work.", {ipc: ["takeOverScheduleHost"]}),
-  "notice.list": capability("List Notices.", {ipc: ["listNotices"]}),
+  "notice.list": capability("List Notices rows and where each opens.", {ipc: ["listNotices"], mcp: {owner: ["dohc_list_notices"], view: ["dohc_list_notices"], comment: ["dohc_list_notices"], edit: ["dohc_list_notices"]}}),
   "notice.mark": capability("Mark Notices.", {ipc: ["markNotices"]}),
   "automation.schedule.run": capability("Run a skipped schedule.", {ipc: ["runSkippedScheduleNow"]}),
   "automation.notice.retry": capability("Retry an automation from a Notice.", {ipc: ["retryAutomationNotice"]}),

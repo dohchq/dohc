@@ -22,7 +22,7 @@ import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
-import type { NoticeTarget } from "../shell/noticeTarget";
+import { AUTOMATION_NOTICE_KINDS, type NoticeTarget } from "../../notices/noticeTarget";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
 import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
@@ -143,11 +143,6 @@ export interface SentNotice {
   // that dohc's restart or quit stopped.
   retryable: boolean;
 }
-
-// Notices about one automation, whose Open goes to the automation.
-export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
-  "schedule-skipped", "automation-failed", "automation-switched-off",
-]);
 
 // A failed run's notice offers Try again on the computer that ran it, which
 // holds the run. Anywhere else its text names that computer instead.
