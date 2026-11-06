@@ -1032,7 +1032,7 @@ With `--json`, prints `{ schemaVersion, messages: { threadId, messageId, group, 
 dohc chat inbox [options]
 ```
 
-List unread threads. For an agent, also list its unread mentions.
+List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.
 
 With `--json`, prints `{ schemaVersion, threads: { lane?, id, title, commentCount, openDecisionCount, unread, updatedAtMs, group }[], mentions: { threadId, messageId, group, author, createdAtMs, text }[] }`.
 
