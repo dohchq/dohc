@@ -67,7 +67,8 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // one thing: "your match".
     match: "#326fce",
     success: "#38684e",
-    warning: "#8a6420",
+    // AA as text on panel-2, its tightest surface (see the contrast test).
+    warning: "#87621f",
     // AA as text on a menu row's 14% fill, its tightest surface (see the
     // contrast test).
     danger: "#9d3c28",

@@ -116,6 +116,10 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "agent", bg: "bg", min: 4.5 },
     { fg: "agent", bg: "panel", min: 4.5 },
     { fg: "agent", bg: "panel2", min: 4.5 },
+    // Warning is text: notices, the source view's strips on panel-2.
+    { fg: "warning", bg: "bg", min: 4.5 },
+    { fg: "warning", bg: "panel", min: 4.5 },
+    { fg: "warning", bg: "panel2", min: 4.5 },
     // subtle is decorative (kbd hints, timestamps): 3.0 is the bar — on
     // every surface it actually sits on, not just bg (count pills and
     // section headers render text-subtle on panel-2).
