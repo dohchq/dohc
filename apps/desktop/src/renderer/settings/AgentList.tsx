@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, Trash2, TriangleAlert, Workflow } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_TOOLS, AGENTS_RESTRICTED_MESSAGE, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
@@ -237,7 +237,10 @@ function AgentRow(props: {
   const { agent, editing, onEditingChange: setEditing } = props;
   const [menuOpen, setMenuOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const nameId = useId();
   const launched = agent.launch !== undefined;
+  // Only a switch turns an agent off, so only a row with one dims.
+  const off = launched && !agent.enabled;
   const state = !launched ? (
     <p className={`${STATE} text-muted`}><Plug size={12} aria-hidden />Through MCP</p>
   ) : props.checking ? (
@@ -255,7 +258,7 @@ function AgentRow(props: {
   return (
     <div data-testid="agent-row" data-agent-id={agent.id} className={ROW}>
       <div className={ROW_LINE}>
-        <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="comment" />
+        <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="comment" className={off ? "opacity-50" : undefined} />
         <div className="min-w-0 flex-1">
           {editing ? (
             <AgentNameField agent={agent} agents={props.agents} onSave={props.onRename} onDone={() => setEditing(false)} />
@@ -266,9 +269,9 @@ function AgentRow(props: {
                 title="Rename"
                 aria-label={`Rename ${agent.name}`}
                 onClick={() => setEditing(true)}
-                className="min-w-0 truncate rounded text-left text-[13px] font-medium text-ink"
+                className={`min-w-0 truncate rounded text-left text-[13px] font-medium ${off ? "text-muted" : "text-ink"}`}
               >
-                {agent.name}
+                <span id={nameId}>{agent.name}</span>
               </button>
               {props.forAutomations ? <AutomationChip hue={agent.hue} /> : null}
             </div>
@@ -288,7 +291,8 @@ function AgentRow(props: {
             </SecondaryButton>
           ) : null}
           {launched ? (
-            <SwitchControl label={`Turn on ${agent.name}`} checked={agent.enabled}
+            <SwitchControl label={agent.name} labelledBy={nameId}
+              tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`} checked={agent.enabled}
               onChange={(enabled) => props.onChange((current) => ({ ...current, enabled }))} />
           ) : switchSpace}
           <Menu
@@ -372,7 +376,7 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
         <SecondaryButton onClick={props.onOpenSettingsFile} className={BUTTON_ICON}>
           <FilePenLine size={14} aria-hidden />Open settings file
         </SecondaryButton>
-        <SwitchControl label={`Turn on ${name}`} checked={false} disabled onChange={() => undefined} />
+        <SwitchControl label={name} checked={false} disabled onChange={() => undefined} />
         {menuSpace}
       </div>
     </div>
