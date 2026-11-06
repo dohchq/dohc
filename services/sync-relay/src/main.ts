@@ -15,7 +15,7 @@ import {
   parseGracePeriodMs,
   serveFetchHandler,
 } from "@dohc/service-http";
-import { Pool } from "pg";
+import { Pool, type QueryConfig } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import {ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey, accountDeletionFenceKey} from "@dohc/workspace-auth/accountDeletion";
@@ -739,21 +739,22 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 }) : undefined;
 
 let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
+// pg reads query_timeout from each query's config, but its QueryConfig type doesn't declare it.
+const pushQuery = (text: string, values: unknown[]): QueryConfig & {query_timeout: number} =>
+  ({text, values, query_timeout: 5000});
 const pushSender = createPushSender({storage: storage as StorageContext, config: pool ? pushConfig : undefined,
   async lookupAccountName(userId, signal) {
     signal.throwIfAborted();
-    const result = await pool!.query<{name: string | null}>({
-      text: 'SELECT name FROM "user" WHERE id = $1 LIMIT 1', values: [userId], query_timeout: 5000,
-    });
+    const result = await pool!.query<{name: string | null}>(
+      pushQuery('SELECT name FROM "user" WHERE id = $1 LIMIT 1', [userId]),
+    );
     signal.throwIfAborted();
     return result.rows[0]?.name ?? null;
   },
   async sessionIsValid(session, signal) {
     signal.throwIfAborted();
-    const query = {text: `SELECT 1 FROM "session" s JOIN "user" u ON u.id = s."userId"
-      WHERE s.id = $1 AND s."userId" = $2 AND s."expiresAt" > now()`, values: [session.sessionId, session.userId],
-      query_timeout: 5000};
-    const result = await pool!.query(query);
+    const result = await pool!.query(pushQuery(`SELECT 1 FROM "session" s JOIN "user" u ON u.id = s."userId"
+      WHERE s.id = $1 AND s."userId" = $2 AND s."expiresAt" > now()`, [session.sessionId, session.userId]));
     signal.throwIfAborted();
     return result.rowCount === 1;
   }, onError: () => console.error("[sync-relay] Push delivery could not finish.")});
