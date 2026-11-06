@@ -560,7 +560,7 @@ describe("ChatLane", () => {
       failedRun: {
         ...failedRun,
         words: "Nova didn't reply. Its run ended with an error.",
-        nextStep: "Mention @Nova to ask again.",
+        nextStep: "Mention Nova to ask again.",
         retryable: false,
       },
     });
@@ -568,8 +568,8 @@ describe("ChatLane", () => {
     const failed = await screen.findByTestId("chats-lane-run-failed");
     // Both lines are announced: why, then what to do instead.
     expect(within(failed).getAllByRole("status").map((node) => node.textContent))
-      .toEqual(["Nova didn't reply. Its run ended with an error.", "Mention @Nova to ask again."]);
-    expect(within(failed).getByTestId("chats-lane-run-next-step").textContent).toBe("Mention @Nova to ask again.");
+      .toEqual(["Nova didn't reply. Its run ended with an error.", "Mention Nova to ask again."]);
+    expect(within(failed).getByTestId("chats-lane-run-next-step").textContent).toBe("Mention Nova to ask again.");
     expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
   });
 

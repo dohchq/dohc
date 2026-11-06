@@ -28,7 +28,6 @@ import {
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
-import { handleForName } from "@dohc/workspace-contracts/chat-mentions";
 import { WorkspaceRestrictedError } from "../workspaces/workspaceTrust";
 
 // How a run ended, as its notice says it.
@@ -129,6 +128,8 @@ function runFailureReason(run: AgentRunRecord, outcome: FailedOutcome, nodeAvail
     }
   }
 }
+
+const ASKS_AGAIN: ReadonlySet<FailedOutcome> = new Set(["failed", "no-reply", "timed-out"]);
 
 function needsNodeJs(outcome: FailedOutcome, nodeAvailable?: ReplyRuntimeAvailability): boolean {
   return (outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available;
@@ -864,16 +865,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
-    // Running a failed request again would repeat what it did, so the
-    // person asks the agent again instead, with the handle they type. An
-    // agent no longer in Settings, or whose name has no handle, can't be
+    // Running these again would repeat what they did, so the person asks
+    // the agent again instead. A run that couldn't start or needs Node.js
+    // has its own next step, and an agent no longer in Settings can't be
     // mentioned.
-    const handle = agentName === undefined ? "" : handleForName(agentName);
-    const asksAgain = outcome === "failed" && handle !== "" && !needsNodeJs(outcome, nodeAvailable);
+    const asksAgain = agentName !== undefined && ASKS_AGAIN.has(outcome) && !needsNodeJs(outcome, nodeAvailable);
     return {
       lead: `${noticeAgentName(agentName)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
-      ...(asksAgain ? { nextStep: `Mention @${handle} to ask again.` } : {}),
+      ...(asksAgain ? { nextStep: `Mention ${noticeAgentName(agentName)} to ask again.` } : {}),
     };
   }
 

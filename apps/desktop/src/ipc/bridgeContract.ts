@@ -5898,8 +5898,8 @@ export const ChatDispatchFailedRun = z.object({
   triggerMessageId: OPAQUE_ID,
   // "Nova didn't reply. Its run ended with an error."
   words: z.string().min(1).max(1_000),
-  // For a run that ended with an error, what the person can do instead, on
-  // its own line: "Mention @Nova to ask again." Its notice leaves it out.
+  // For a run that ended without its reply, what the person can do instead,
+  // on its own line: "Mention Nova to ask again." Its notice leaves it out.
   nextStep: z.string().min(1).max(1_000).optional(),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
