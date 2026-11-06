@@ -200,13 +200,31 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     const page = desktop.page;
     await openMyAgent(page);
 
-    // The first reply lands while its chat is on screen. The end of the test
-    // checks that it left no row in Notices.
+    // The first reply lands while its chat is on screen. Its run's notice
+    // comes later, once the run has ended. This reads the list on each change,
+    // as Notices does, so it sees the notice arrive before Notices dismisses it.
+    const runNotices = await page.evaluateHandle(() => {
+      const api = (window as unknown as {
+        dohcDesktop: {
+          listNotices(payload: Record<string, never>): Promise<{ notices: Array<{ kind: string }> }>;
+          onNoticesChanged(listener: () => void): () => void;
+        };
+      }).dohcDesktop;
+      const listed = async () => (await api.listNotices({})).notices.filter((notice) => notice.kind === "agent-run").length;
+      const state = { arrived: false, listed, stop: () => {} };
+      state.stop = api.onNoticesChanged(() => {
+        void listed().then((count) => { if (count > 0) state.arrived = true; });
+      });
+      return state;
+    });
     const composer = page.getByTestId("chats-lane-composer");
     await composer.fill("audit the projections");
     await composer.press("Enter");
     const agentReplies = page.getByTestId("chats-lane-message").filter({ hasText: REPORT });
     await expect(agentReplies).toHaveCount(1);
+    // Its notice arrived and left the list while the chat was still open.
+    await expect.poll(() => runNotices.evaluate(async (state) => state.arrived && await state.listed() === 0), { timeout: 30_000 }).toBe(true);
+    await runNotices.evaluate((state) => state.stop());
 
     // Ask again with the chat closed, so the reply arrives as a notice. The
     // conversation is an editor tab: another sidebar view leaves it on screen.
@@ -246,6 +264,8 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     await expect(toastOpen).toBeVisible();
     await toastOpen.hover();
     await shots("notice-toast-open-hover");
+    // The toast fades on its own; still here means the frames caught it.
+    await expect(toastOpen).toBeVisible();
 
     await page.getByTestId("notice-center-toggle").click();
     const center = page.getByTestId("notice-center");
@@ -284,7 +304,7 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     await expect(landed).toHaveCount(0);
 
     // Both replies exist now. The only Nova row is the one just opened at the
-    // second reply, so the reply that landed on screen left none.
+    // second reply.
     await page.getByTestId("notice-center-toggle").click();
     await expect(center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" })).toHaveCount(1);
   } finally {
