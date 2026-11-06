@@ -38,7 +38,7 @@ test("reduced motion ends transitions at once and keeps animations ending", asyn
       return { transition: seconds(read.transition), animation: seconds(read.animation) };
     };
     const reduced = (read: { transition: number; animation: number }) => {
-      expect(read.transition).toBe(0);
+      expect(read.transition, "reduced-motion transition").toBe(0);
       expect(read.animation).toBeGreaterThan(0);
       expect(read.animation).toBeLessThan(0.001);
     };

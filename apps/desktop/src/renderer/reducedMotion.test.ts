@@ -118,9 +118,8 @@ it("ends transitions at once and keeps a tiny animation in both reduced-motion r
   expect(css).toContain(`@media (prefers-reduced-motion: reduce) {
   ${media} {`);
   for (const selector of [media, ":where(:root[data-system-reduced-motion='true'])"]) {
-    expect(rule(selector)).toMatchObject({
-      "animation-duration": "0.001ms !important",
-      "transition-duration": "0s !important",
-    });
+    const declarations = rule(selector);
+    expect(declarations["transition-duration"], "reduced-motion transition").toBe("0s !important");
+    expect(declarations["animation-duration"], "reduced-motion animation").toBe("0.001ms !important");
   }
 });
