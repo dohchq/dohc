@@ -164,3 +164,13 @@ it("repaints every avatar of the changed agent without reading or rerendering it
   expect(parent).toHaveBeenCalledOnce();
   stop();
 });
+
+describe("ChatAvatar mark", () => {
+  it("draws a connected agent's plug and your agent's sparkle for the same name", () => {
+    const { container } = render(<>
+      <ChatAvatar name="Claude" kind="agent" presentation={{ ...neutralPresentation, connected: true }} />
+      <ChatAvatar name="Claude" kind="agent" presentation={neutralPresentation} />
+    </>);
+    expect([...container.querySelectorAll("[data-agent-mark]")].map((mark) => mark.getAttribute("data-agent-mark"))).toEqual(["connected", "agent"]);
+  });
+});

@@ -103,4 +103,21 @@ describe("agent badge", () => {
     expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Ada");
     expect(onOpen).not.toHaveBeenCalled();
   });
+
+  it("marks a connected agent with the plug and a card that names it as reported, and your run's Claude as an agent", () => {
+    const connected = { group: "agent-connected", hue: null, self: true, connected: true } as const;
+    render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Claude", authorOwnerDisplayName: "Ada" }} presentation={connected} />);
+    const badge = screen.getByTestId("chats-post-agent-badge");
+    expect(badge.getAttribute("aria-label")).toBe("connected agent");
+    fireEvent.focus(badge);
+    const card = screen.getByRole("tooltip").textContent ?? "";
+    expect(card).toContain("Claude (as reported)");
+    expect(card).toContain("Connected agent");
+    expect(card).not.toContain("Owned by");
+    cleanup();
+    render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Claude", authorOwnerDisplayName: "Ada", authorAgentId: "claude" }} presentation={mine} />);
+    expect(screen.getByTestId("chats-post-agent-badge").getAttribute("aria-label")).toBe("agent");
+    fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+    expect(screen.getByRole("tooltip").textContent).not.toContain("(as reported)");
+  });
 });

@@ -88,6 +88,9 @@ describe("momentDescription", () => {
       .toMatch(/^Edited plan\.md, Agent Nova, /);
     expect(momentDescription(moment({ id: "unnamed", agentAuthorName: "Agent", authors: [{ kind: "agent", agentId: "a" }] })))
       .toMatch(/^Edited plan\.md, Agent, /);
+    const connected = { group: "g-connected", hue: null, self: true, connected: true } as const;
+    expect(momentDescription(moment({ id: "connected", agentAuthorName: "Claude", authors: [{ kind: "agent", agentId: "dohc-mcp", agentName: "Claude" }],
+      authorPresentations: [connected] }))).toMatch(/^Edited plan\.md, Connected agent Claude, /);
     expect(momentDescription(moment({ id: "person", namedAuthor: { userId: "sam", label: "Sam Rivera" } })))
       .toMatch(/^Edited plan\.md, Sam Rivera, /);
     expect(momentDescription(moment({ id: "local" }))).toMatch(/^Edited plan\.md, Local file edit, /);
@@ -200,6 +203,14 @@ describe("groupAgentAuthorName", () => {
     ).toBeUndefined();
     expect(groupAgentAuthorName([moment({ id: "m1" })])).toBeUndefined();
     expect(groupAgentAuthorName([])).toBeUndefined();
+  });
+
+  it("names no group a connected agent shares with your agent of the same name", () => {
+    const connected = { group: "g-connected", hue: null, self: true, connected: true } as const;
+    const yours = { group: "g-claude", hue: null, self: true } as const;
+    const by = (id: string, presentation: typeof connected | typeof yours) => moment({ id, agentAuthorName: "Claude", authorPresentations: [presentation] });
+    expect(groupAgentAuthorName([by("m1", connected), by("m2", yours)])).toBeUndefined();
+    expect(groupAgentAuthorName([by("m1", connected), by("m2", connected)])).toBe("Claude");
   });
 });
 

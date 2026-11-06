@@ -2,7 +2,7 @@ import type { ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
 import { createHmac, randomBytes } from "node:crypto";
 import { actorHueInput, canonicalClaimedName, createActorIssuer, deriveLocalActor, deriveMomentActor, deriveRelayChatActor, parseActorKey, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ActorIssuer, ActorRef, ActorKey, LocalActorIdentity } from "@dohc/workspace-contracts/actor-identity";
-import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
+import { ACTOR_HUES, actorHueSlot, isConnectedAgentId } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { ActorPresentation } from "../ipc/bridgeContract";
 import type { AgentColors } from "../settings/userSettings";
@@ -87,6 +87,7 @@ function localPersonKeys(installationId: string, account: LocalActorIdentity["ac
 }
 // Chat and History share one rule: a group per key, a personal agent hue or a human hash, and self for this computer's person and their agents.
 // Your agent's message from one of its runs also names its agent, so the renderer colors it as Settings does.
+// A connected agent, keyed as the unnamed agent since no run names it, takes the plug wherever it shows.
 function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>, agentId?: string): ActorPresentation {
   const serialized = serializeActorKey(key);
   const unknown = key.kind === "unknown";
@@ -95,7 +96,8 @@ function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: ()
   const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
   const self = (human || key.kind === "agent") && own.includes(ownerKey);
   return { group, hue: key.kind === "agent" ? colors.get(serialized) ?? null : humanHue(key), self,
-    ...(self && key.kind === "agent" && agentId !== undefined ? { agentId } : {}) };
+    ...(self && key.kind === "agent" && agentId !== undefined ? { agentId } : {}),
+    ...(key.kind === "agent" && isConnectedAgentId(key.claimedName) ? { connected: true as const } : {}) };
 }
 export function ownActorPresentation(installationId: string, credentials: CloudCredentials | null): ActorPresentation {
   return { group: "own", hue: humanHue(localPersonKey(installationId, localAccount(credentials))), self: true };

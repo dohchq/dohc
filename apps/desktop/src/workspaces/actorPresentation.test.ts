@@ -66,6 +66,24 @@ describe("chat presentation admission", () => {
     expect(await group(yours)).toBe(await group(written("default")));
     expect(await group(connected)).toBe(await group(written("dohc-mcp")));
   });
+  it("marks a connected agent's post and edit, and no run's post that names itself Claude", async () => {
+    const r = request();
+    const written = (claimedName: string) => message({ author: { kind: "agent", displayName: "Claude" }, authorActorKey: serializeActorKey(
+      deriveLocalActor({ identity, workspaceId: "w", displayName: "Claude", origin: "cli", author: { kind: "agent", claimedName } }).key) });
+    for (const post of [message({ author: { kind: "agent", displayName: "Claude" } }), written("dohc-mcp")]) {
+      expect(await r.present(post, "t")).toMatchObject({ connected: true });
+    }
+    for (const post of [message({ author: { kind: "agent", displayName: "Claude" }, authorAgentId: "claude" }), written("claude"),
+      message({ author: { kind: "human", displayName: "Claude" } })]) {
+      expect(await r.present(post, "t")).not.toHaveProperty("connected");
+    }
+    const [edit, runEdit] = createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined })([
+      { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "alice" },
+      { kind: "agent", agentId: "claude", onBehalfOf: "alice" },
+    ]);
+    expect(edit).toMatchObject({ connected: true });
+    expect(runEdit).not.toHaveProperty("connected");
+  });
   it.each(["alice", "bob"])("keys a Links entry as its chat post from another device, for account %s", async (authorUserId) => {
     const r = request();
     const group = async (row: Parameters<typeof r.present>[0]) => (await r.present(row, "t")).group;
@@ -325,7 +343,7 @@ describe("personal agent hues", () => {
 
 
 it("matches dispatch's unnamed run and CLI reply claims on the current base", async () => {
-  const { UNNAMED_AGENT_ID } = await import("../agents/activeAgentRun");
+  const { UNNAMED_AGENT_ID } = await import("@dohc/workspace-contracts/actor-identity");
   expect(UNNAMED_AGENT_ID).toBe("dohc-mcp");
   const key = serializeActorKey(deriveLocalActor({ identity, workspaceId: "w", author: { kind: "agent" },
     displayName: "Agent", origin: "cli" }).key);

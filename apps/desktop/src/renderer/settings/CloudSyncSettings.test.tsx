@@ -353,6 +353,19 @@ describe("CloudSyncSettings", () => {
     expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
   });
 
+  it("marks a pause by a connected agent with the plug, and your agent's with the agent mark", () => {
+    for (const [author, mark, words] of [
+      [{ kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "human-sam", depth: 0 }, "connected", "Paused by connected agent Claude ·"],
+      [{ kind: "agent", agentId: "claude", onBehalfOf: "human-sam", depth: 1 }, "agent", "Paused by agent claude ·"],
+    ] as const) {
+      render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, syncPause: { atMs: PAUSED_AT, author } })} />);
+      const paused = screen.getByTestId("cloud-sync-paused");
+      expect(paused.textContent).toContain(words);
+      expect(paused.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark")).toBe(mark);
+      cleanup();
+    }
+  });
+
   it("resumes a paused workspace through the turn-on path", async () => {
     const settings = cloud({ ...SIGNED_IN, syncPause: PAUSE_BY_YOU });
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);

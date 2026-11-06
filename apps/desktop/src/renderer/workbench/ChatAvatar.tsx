@@ -1,5 +1,5 @@
 import { useSyncExternalStore, type ReactNode } from "react";
-import { Link2, Sparkles, Zap } from "lucide-react";
+import { Link2, Plug, Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
 import { agentTextClass, presentationClasses, subscribePresentation } from "./actorPresentation";
 
@@ -27,12 +27,12 @@ export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPres
 }
 
 // One avatar for every chat surface: a person's initial on a tint of their
-// admitted hue, the agent's sparkle in the agent voice, an automation's bare
-// lightning mark, the same mark as the Automations button, or a link holder's
-// initial in a share link's dashed ring. An agent that joined with a link is the
-// agent's olive square with the same dashed edge. Sized by the caller; 36px in the
-// composer, 32px on a feed row or an opening post, 28px on a comment, 18px in
-// a strip.
+// admitted hue, the agent's sparkle in the agent voice (a connected agent's
+// plug), an automation's bare lightning mark, the same mark as the
+// Automations button, or a link holder's initial in a share link's dashed
+// ring. An agent that joined with a link is the agent's olive square with the
+// same dashed edge. Sized by the caller; 36px in the composer, 32px on a feed
+// row or an opening post, 28px on a comment, 18px in a strip.
 
 const SIZES = {
   post: "size-9 text-[14px]",
@@ -119,9 +119,12 @@ export function ChatAvatar(props: {
     );
   }
   const agent = kind === "agent";
+  const connected = agent && props.presentation.connected === true;
+  const Mark = connected ? Plug : Sparkles;
   return (
     <span
       aria-hidden
+      data-agent-mark={agent ? (connected ? "connected" : "agent") : undefined}
       title={props.name}
       className={`inline-grid shrink-0 place-items-center border font-semibold ${
         SIZES[size]
@@ -131,7 +134,7 @@ export function ChatAvatar(props: {
           : `rounded-full border-line ${classes}`
       } ${props.className ?? ""}`}
     >
-      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initial(props.name)}
+      {agent ? <Mark size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initial(props.name)}
     </span>
   );
 }
