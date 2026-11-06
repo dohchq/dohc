@@ -161,7 +161,7 @@ A divider only separates a fixed header or footer from a list that scrolls.
 Put Cancel, then one primary, at the right.
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
-A `DangerButton` that can't be pressed yet, or is working, keeps a danger tint under a faded label, with no hover. It turns solid red only when pressing it will act.
+A disabled button keeps its shape and drops its color. A primary or danger confirm takes the `bg-line` fill; every kind shows its label and icon in `text-subtle`, with no hover. A danger confirm turns red only when pressing it will act.
 Never label a button `OK`, `Yes`, or `Confirm`.
 
 ### Focus and keys
@@ -298,7 +298,7 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
 | `bg-danger-fill`, `text-on-danger` | A danger confirm's fill and label. Dark has its own deeper fill, so never put `text-danger` text on it |
-| `bg-danger-tint`, `text-danger-disabled` | The tint behind a danger glyph and a disabled danger confirm, and that confirm's label |
+| `bg-line` as a fill | A disabled primary or danger confirm |
 
 ### Type
 
