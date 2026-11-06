@@ -144,6 +144,9 @@ const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-su
 // the shell's menus get the room from their taller boxes, and the editor's
 // menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
+// The change review is 760px wide in the app, wider than a pane, so it is
+// drawn at the pane's width, as the Settings frame is, with the shadow's room.
+const REVIEW_ROOM = `${SHADOW_ROOM} w-[672px] [&>[role=dialog]]:w-full`;
 
 // The parts the page renders, when it renders only some.
 const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
@@ -991,7 +994,7 @@ const REVIEWED_ASK = attachingChange(CHANGE_MESSAGE, "8d0c5b7e-2f4a-4c1e-9b3d-6a
 const REVIEWED_REPLY = attachingChange(changeMessage("change-reviewed", "ada", "Applied the change to Volunteers.", 47), "3f2a91c0-7b6e-4d2a-8c5f-1e9b0a4d7c36");
 
 function ChangeAppliedFromReviewSpecimen() {
-  return <div className="flex h-[720px] w-[780px] flex-col">
+  return <div className="flex h-[720px] w-[672px] flex-col">
     <ChatMessageList testIdPrefix="states-change-chat" messages={[REVIEWED_ASK, REVIEWED_REPLY]} loading={false} emptyLabel="No messages yet." anchor="start"
       renderMessageFooter={message => message.id === REVIEWED_ASK.id
         ? <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, REVIEWED_PROPOSAL, REVIEWED_ASK)} appliedBy={REVIEWED_REPLY} /> : null} />
@@ -2642,43 +2645,43 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="change-card" title="Collection change card">
         <Specimen label="loading">
-          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(null)} /></div>
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(null)} /></div>
         </Specimen>
         <Specimen label="waiting: it deletes values, Ada made one part, the agent's note sits under its code change">
-          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} /></div>
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} /></div>
         </Specimen>
         <Specimen label="applying">
-          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "applying", words: "Applying…" }} /></div>
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "applying", words: "Applying…" }} /></div>
         </Specimen>
         <Specimen label="applied, which History can't undo; a later rename, applied, with Undo">
-          <div className="flex w-[740px] flex-col">
+          <div className="flex w-[672px] flex-col">
             <CollectionChangeCardView {...changeCard({ kind: "applied", current: false })} appliedBy={changeMessage("change-applied", "ada", "Applied the change to Volunteers.", 47)} />
             <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, RENAME_PROPOSAL, RENAME_MESSAGE)}
               appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} />
           </div>
         </Specimen>
         <Specimen label="the rename, undone">
-          <div className="w-[740px]">
+          <div className="w-[672px]">
             <CollectionChangeCardView {...changeCard({ kind: "applied", current: false }, RENAME_PROPOSAL, RENAME_MESSAGE)}
               appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} undoneBy={changeMessage("rename-undone", "ada", "Undid the change to Volunteers.", 55)} />
           </div>
         </Specimen>
         <Specimen label="failed, with Try again">
-          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(null) }} /></div>
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(null) }} /></div>
         </Specimen>
         <Specimen label="refused by the server that keeps it: no Try again">
-          <div className="w-[740px]">
+          <div className="w-[672px]">
             <CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" })) }} />
           </div>
         </Specimen>
         <Specimen label="Not now">
-          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} notNow /></div>
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} notNow /></div>
         </Specimen>
         <Specimen label="Ada changed its files after it was sent">
-          <div className="w-[740px]"><CollectionChangeCardView {...changeCard({ kind: "edited", by: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 45) })} /></div>
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard({ kind: "edited", by: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 45) })} /></div>
         </Specimen>
         <Specimen label="records changed after it was sent, so it would now delete more: no Apply">
-          <div className="w-[740px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...deletesMore }} /></div>
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...deletesMore }} /></div>
         </Specimen>
         <Specimen label="in a DM, applied from the review after Ada added Phone: the card credits her part, and her reply has no chip">
           <ChangeAppliedFromReviewSpecimen />
@@ -2687,12 +2690,12 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="change-review" title="Collection change review">
         <Specimen label="ready, keyboard focus on the first row">
-          <div className={SHADOW_ROOM} data-force-state="focus focus-visible" data-force-target='[data-testid="states-change-review-row"]:first-child > button'>
+          <div className={REVIEW_ROOM} data-force-state="focus focus-visible" data-force-target='[data-testid="states-change-review-row"]:first-child > button'>
             <CollectionChangeReviewCard {...changeReview(new Set<string>())} />
           </div>
         </Specimen>
         <Specimen label="the first row's file changes open">
-          <div className={SHADOW_ROOM}><CollectionChangeReviewCard {...changeReview(new Set([CHANGE_ROWS[0]!.key]))} /></div>
+          <div className={REVIEW_ROOM}><CollectionChangeReviewCard {...changeReview(new Set([CHANGE_ROWS[0]!.key]))} /></div>
         </Specimen>
       </Section>
 
