@@ -87,7 +87,33 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
       .getByTestId("chats-add-agent-command")
       .fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
     await expect(page.getByTestId("chats-add-agent-preview")).toContainText("Nova");
-    await shoot(page, "add-agent-form");
+    // The tallest state, shot with its body scrolling between the title and
+    // actions bands. A window tall enough to hold it all is shortened for
+    // this shot only.
+    const body = page.getByTestId("chats-add-agent-body");
+    const overflows = () => body.evaluate((node) => node.scrollHeight > node.clientHeight);
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    try {
+      if (!(await overflows())) {
+        const form = await page.getByTestId("chats-add-agent").boundingBox();
+        if (!form) throw new Error("Expected the Add agent dialog to be laid out.");
+        await page.setViewportSize({ width: viewport.width, height: Math.floor(form.y + form.height) - 160 });
+      }
+      await expect.poll(overflows).toBe(true);
+      await expect(page.getByTestId("chats-add-agent")).toHaveAttribute("data-scrolls", "");
+      for (const [band, edge] of [["chats-add-agent-header", "bottom"], ["chats-add-agent-footer", "top"]] as const) {
+        await expect(page.getByTestId(band)).toBeVisible();
+        const rule = await page.getByTestId(band).evaluate((node, side) => {
+          const style = getComputedStyle(node);
+          return { width: style.getPropertyValue(`border-${side}-width`), style: style.getPropertyValue(`border-${side}-style`) };
+        }, edge);
+        expect(rule).toEqual({ width: "1px", style: "solid" });
+      }
+      expect(await dialogTop()).toBe(topBeforePick);
+      await shoot(page, "add-agent-form");
+    } finally {
+      await page.setViewportSize(viewport);
+    }
 
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
