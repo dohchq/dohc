@@ -50,7 +50,7 @@
   --dohc-match: #326fce;
   --dohc-success: #38684e;
   --dohc-warning: #8a6420;
-  --dohc-danger: #a43e2a;
+  --dohc-danger: #9d3c28;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
   /* Identity hues: olive belongs to the agent default.
@@ -76,15 +76,15 @@
   --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
   --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.65);
-  --dohc-muted: #a9a599;
+  --dohc-muted: #aba79b;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
   --dohc-focus: color-mix(in srgb, var(--dohc-accent) 50%, transparent);
   --dohc-agent: #c0c585;
-  --dohc-match: #377afa;
+  --dohc-match: #4382fa;
   --dohc-success: #82c29b;
   --dohc-warning: #d9a94e;
-  --dohc-danger: #e08065;
+  --dohc-danger: #e1866c;
   --dohc-selection: rgba(102, 148, 245, 0.30);
   --dohc-hue-rust: #dc9378;
   --dohc-hue-amber: #d9b05a;
@@ -2942,10 +2942,10 @@ mark.dohc-highlight,
  * field, and the empty/error states so math reads correctly in both themes.
  * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
 :root {
-  --dohc-math-error-color: #a43e2a;
+  --dohc-math-error-color: #9d3c28;
 }
 [data-theme='dark'] {
-  --dohc-math-error-color: #e08065;
+  --dohc-math-error-color: #e1866c;
 }
 
 .dohc-math-inline {
