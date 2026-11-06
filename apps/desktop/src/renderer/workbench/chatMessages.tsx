@@ -494,12 +494,14 @@ export const DENSITY = {
 } as const;
 
 // Whether a message continues the run before it: the same author within
-// five minutes on the same day.
+// five minutes on the same day. Every connected agent shares the unnamed
+// agent's group, so an agent's run also needs the same name.
 export function continuesRun(previous: ChatMessageRecord | undefined, message: ChatMessageRecord): boolean {
   return previous !== undefined &&
     sameChatDay(previous.createdAtMs, message.createdAtMs) &&
     previous.authorKind === message.authorKind &&
     previous.presentation.group === message.presentation.group &&
+    (message.authorKind !== "agent" || previous.authorDisplayName === message.authorDisplayName) &&
     message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
 }
 
