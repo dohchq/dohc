@@ -2080,7 +2080,9 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* The first part opens its tab list. The empty active group is
-          captured with menus closed. */}
+          captured with menus closed: opening the other group's tab list
+          focuses that group, and in a split specimen focus makes a group
+          active (#3391). */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
