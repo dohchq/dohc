@@ -8,11 +8,17 @@ export const REPLACEMENT_FAILED_REASON = "dohc could not finish replacing this d
 // The session stays read-only until the document is reopened.
 export const CONNECTION_LOST_REASON = "dohc lost its connection to this document. Close and reopen it to edit.";
 
-// The sentence for a session that became read-only with no edit set aside.
-// Ended access has its own reason.
-export function transitionReason(cause: UseEngineDoc["readOnlyCause"]): string | undefined {
-  if (cause === "lineage-failure") return REPLACEMENT_FAILED_REASON;
-  if (cause === "reconnecting") return CONNECTION_LOST_REASON;
+// Why this session became read-only, for the source strip and the save chip's
+// tooltip. None when the turn's own set-aside row says why, when the file is
+// gone and its notice says why, or when access ended, which has its own reason.
+export function transitionReason(
+  engine: Pick<UseEngineDoc, "readOnlyWhileEditing" | "readOnlyCause" | "readOnlyDraftId" | "deletedWhileEditing">,
+  drafts: readonly { id: number }[],
+): string | undefined {
+  if (!engine.readOnlyWhileEditing || engine.deletedWhileEditing) return undefined;
+  if (drafts.some((draft) => draft.id === engine.readOnlyDraftId)) return undefined;
+  if (engine.readOnlyCause === "lineage-failure") return REPLACEMENT_FAILED_REASON;
+  if (engine.readOnlyCause === "reconnecting") return CONNECTION_LOST_REASON;
   return undefined;
 }
 
@@ -23,14 +29,14 @@ export function readOnlyReasons(causes: {
   accessEnded: boolean;
   shared: boolean;
   tooLarge: boolean;
-  transition: UseEngineDoc["readOnlyCause"];
+  transition: string | undefined;
 }): string[] {
   const reasons = [
     causes.accessEnded ? ACCESS_ENDED_REASON : undefined,
     // Ended access says more than shared access.
     causes.shared && !causes.accessEnded ? SAVE_STATE["read-only"].title : undefined,
     causes.tooLarge ? SAVE_STATE["too-large"].title : undefined,
-    transitionReason(causes.transition),
+    causes.transition,
   ];
   return reasons.filter((reason): reason is string => reason !== undefined);
 }

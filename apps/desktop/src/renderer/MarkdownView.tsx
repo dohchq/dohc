@@ -869,9 +869,7 @@ export function MarkdownView(props: {
   const hasSetAsideEdit =
     engine.deletedDraftId !== null &&
     orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
-  // A session that became read-only with no edit to copy says why in the
-  // source strip and the chip's tooltip.
-  const transition = engine.readOnlyWhileEditing && orphanedDrafts.length === 0 ? engine.readOnlyCause : null;
+  const transition = transitionReason(engine, orphanedDrafts);
 
   useEffect(() => {
     if (surfaceMode === "read") preloadMarkdownEditor();
@@ -2094,7 +2092,8 @@ export function MarkdownView(props: {
   // The read-only view that follows an ended share closes the live session,
   // so the draft that turn set aside is remembered here to keep its words.
   const readOnlyDraftId = useRef<number | null>(null);
-  if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
+  // A failed history replacement's draft keeps its replacement words.
+  if (engine.readOnlyDraftId !== null && engine.readOnlyCause !== "lineage-failure") readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
       {changedOutsideNotice && !engine.deletedWhileEditing ? (
@@ -2143,7 +2142,7 @@ export function MarkdownView(props: {
               title={
                 engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
                   ? "Your access to this document ended."
-                  : transitionReason(transition) ?? (engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
+                  : transition ?? (engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
                     engine.saveState.kind === "changed-on-disk"
                   ? CHANGED_OUTSIDE_NOTICE
                   : (engineChipState === "deleted" ||

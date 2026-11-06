@@ -11,6 +11,7 @@ import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
 import { CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "./readOnlyReasons";
+import { DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE, REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE } from "./ui/StateMark";
 import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -218,7 +219,7 @@ describe("engine markdown source view", () => {
       }
     };
     const pushSaveState = (
-      state: "settling" | "saved" | "error" | "deleted" | "read-only",
+      state: "settling" | "saved" | "error" | "deleted" | "object-changed" | "read-only",
       seq: number,
       readOnlyCause?: import("../ipc/bridgeContract").ReadOnlyTransitionCause,
     ) => {
@@ -574,6 +575,50 @@ describe("engine markdown source view", () => {
     await user.click(screen.getByTestId("markdown-source-toggle"));
     const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
     expect(strip?.textContent).toBe(reason);
+  });
+
+  it.each([
+    ["reconnecting", CONNECTION_LOST_REASON],
+    ["lineage-failure", REPLACEMENT_FAILED_REASON],
+  ] as const)("says why %s left the document read-only beside an older session's draft", async (cause, reason) => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    // Every edit of this session saved, so this turn sets nothing aside.
+    act(() => pushSaveState("read-only", 0, cause));
+    const marker = await screen.findByTestId("markdown-save-state");
+    await waitFor(() => expect(marker.getAttribute("title")).toBe(reason));
+    expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(1);
+
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
+    expect(strip?.textContent).toBe(reason);
+  });
+
+  it.each([
+    ["deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+  ] as const)("drops the lost connection's reason once the file is %s", async (gone, notice) => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+    act(() => pushSaveState("read-only", 0, "reconnecting"));
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe(CONNECTION_LOST_REASON),
+    );
+
+    act(() => pushSaveState(gone, 0));
+
+    expect((await screen.findByTestId("deleted-while-editing-notice")).textContent).toBe(notice);
+    expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe("");
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).not.toBe(CONNECTION_LOST_REASON);
   });
 
   it("leaves the strip to the notice when the file is deleted in source view", async () => {
