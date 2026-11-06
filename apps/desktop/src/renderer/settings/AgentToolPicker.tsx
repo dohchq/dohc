@@ -6,9 +6,10 @@ import { useRequestSequence } from "../useRequestSequence";
 import { SecondaryButton } from "../ui/controls";
 import { PathLine, pathPieces } from "../ui/PathLine";
 
-// A whole path that wraps only between folders.
+// A whole path that wraps only between folders. Each folder is one box, so a
+// space or hyphen inside it is no break; it wraps inside only when wider than the line.
 function WrappedPath(props: { path: string }) {
-  return <>{pathPieces(props.path).map((piece, index) => <Fragment key={index}>{piece}<wbr /></Fragment>)}</>;
+  return <>{pathPieces(props.path).map((piece, index) => <Fragment key={index}><span className="inline-block max-w-full">{piece}</span><wbr /></Fragment>)}</>;
 }
 
 export function AgentToolPicker(props: {
