@@ -471,7 +471,7 @@ export function Menu(props: {
                       <span>{field.error}</span>
                     </p>
                   ) : field.hint ? (
-                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p>
+                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-muted">{field.hint}</p>
                   ) : null}
                 </div>
               );
