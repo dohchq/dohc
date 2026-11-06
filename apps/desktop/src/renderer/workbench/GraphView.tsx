@@ -64,6 +64,23 @@ type GraphViewModel = {
   local: boolean;
 };
 
+function matchesSearch(node: GraphNode, query: string): boolean {
+  return node.title.toLocaleLowerCase().includes(query) || node.path.toLocaleLowerCase().includes(query);
+}
+
+// The model follows a deferred search, so it can lag the box by a render.
+// Suggestions are filtered again by the box's own text: every one shown
+// matches what the person typed, and Enter can't open a stale result.
+export function searchMatches(model: Pick<GraphViewModel, "nodes" | "sources">, value: string, limit = SEARCH_RESULTS) {
+  const query = value.trim().toLocaleLowerCase();
+  const matches: { node: CanvasNode; index: number }[] = [];
+  if (!query) return matches;
+  for (let index = 0; index < model.nodes.length && matches.length < limit; index++) {
+    if (matchesSearch(model.sources[index]!, query)) matches.push({ node: model.nodes[index]!, index });
+  }
+  return matches;
+}
+
 function buildModel(
   graph: GraphData,
   settings: Pick<GraphSettingsValue, "hidden" | "orphans" | "depth">,
@@ -77,7 +94,7 @@ function buildModel(
     const kind = graphKind(node);
     kindCounts[kind]++;
     if (settings.hidden.includes(kind)) continue;
-    if (query && !node.title.toLocaleLowerCase().includes(query) && !node.path.toLocaleLowerCase().includes(query)) continue;
+    if (query && !matchesSearch(node, query)) continue;
     kept.set(node.path, node);
   }
   const degree = new Map<string, number>();
@@ -189,6 +206,7 @@ function GraphRows(props: {
   activePath: string | null;
   onOpen: (node: GraphNode) => void;
   onFocusNode: (index: number) => void;
+  onPointNode: (index: number) => void;
 }) {
   // Rows keep their places: sorted by title, never by which page is open.
   const order = useMemo(
@@ -248,8 +266,8 @@ function GraphRows(props: {
               onClick={() => props.onOpen(node)}
               onFocus={() => props.onFocusNode(index)}
               onBlur={() => props.onFocusNode(-1)}
-              onMouseEnter={() => props.onFocusNode(index)}
-              onMouseLeave={() => props.onFocusNode(-1)}
+              onMouseEnter={() => props.onPointNode(index)}
+              onMouseLeave={() => props.onPointNode(-1)}
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                   event.preventDefault();
@@ -276,20 +294,18 @@ function GraphSearch(props: {
   model: GraphViewModel;
   onChange: (value: string) => void;
   onOpen: (node: GraphNode) => void;
-  onFocusNode: (index: number) => void;
+  onPointNode: (index: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
-  const matches = useMemo(
-    () => (props.value.trim() ? props.model.nodes.slice(0, SEARCH_RESULTS).map((node, index) => ({ node, index })) : []),
-    [props.model, props.value],
-  );
+  const matches = useMemo(() => searchMatches(props.model, props.value), [props.model, props.value]);
   const shown = open && matches.length > 0;
   const activeMatch = shown ? matches[Math.min(active, matches.length - 1)] : undefined;
-  const { onFocusNode } = props;
+  // The combobox names the active option itself, so it only lights the node.
+  const { onPointNode } = props;
   useEffect(() => {
-    onFocusNode(activeMatch ? activeMatch.index : -1);
-  }, [activeMatch, onFocusNode]);
+    onPointNode(activeMatch ? activeMatch.index : -1);
+  }, [activeMatch, onPointNode]);
 
   return (
     <div className="relative w-56 min-w-0 shrink">
@@ -542,7 +558,12 @@ export function GraphView(props: {
   const groups = useMemo(() => groupsFor(model, settings.groups), [model, settings.groups]);
   const activeIndex = props.activePath === null ? -1 : model.index.get(props.activePath) ?? -1;
   const [focusIndex, setFocusIndex] = useState(-1);
-  useEffect(() => setFocusIndex(-1), [model]);
+  // A pointed node is lit without keyboard focus: a hovered row or the search's active option.
+  const [pointIndex, setPointIndex] = useState(-1);
+  useEffect(() => {
+    setFocusIndex(-1);
+    setPointIndex(-1);
+  }, [model]);
 
   const openNode = useCallback((node: GraphNode) => {
     if (node.kind === "chat-thread") props.onOpenChatThread?.(node);
@@ -577,6 +598,7 @@ export function GraphView(props: {
       activeIndex={activeIndex}
       activePath={props.activePath}
       focusIndex={focusIndex}
+      pointIndex={pointIndex}
       display={settings.display}
       forces={settings.forces}
       surface={variant === "page" ? "bg" : "panel"}
@@ -621,7 +643,7 @@ export function GraphView(props: {
         ) : null}
         <span className="ml-auto" />
         {variant === "page" ? (
-          <GraphSearch value={search} model={model} onChange={setSearch} onOpen={openNode} onFocusNode={setFocusIndex} />
+          <GraphSearch value={search} model={model} onChange={setSearch} onOpen={openNode} onPointNode={setPointIndex} />
         ) : null}
         {props.chatMentionsAvailable ? (
           <IconButton
@@ -681,7 +703,7 @@ export function GraphView(props: {
             />
           ) : null}
           {variant === "panel" && !loadingBlank ? (
-            <GraphRows model={model} activePath={props.activePath} onOpen={openNode} onFocusNode={setFocusIndex} />
+            <GraphRows model={model} activePath={props.activePath} onOpen={openNode} onFocusNode={setFocusIndex} onPointNode={setPointIndex} />
           ) : null}
         </div>
       )}

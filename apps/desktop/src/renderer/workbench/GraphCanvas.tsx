@@ -507,20 +507,25 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     const group = (i: number) => (i < groups.length ? groups[i]! : -1);
     const plain = (i: number) => i !== active && group(i) < 0 && model.nodes[i]!.shape !== "ring";
     fillPass(palette.node, rest, (i) => plain(i) && !isLit(i));
+    const ring = (i: number) => model.nodes[i]!.shape === "ring";
     palette.groups.forEach((color, hue) => {
-      fillPass(color, rest, (i) => i !== active && group(i) === hue && !isLit(i));
+      fillPass(color, rest, (i) => i !== active && group(i) === hue && !isLit(i) && !ring(i));
     });
-    // Files that are not pages: a ring on the paper.
-    fillPass(palette.bg, 1, (i) => model.nodes[i]!.shape === "ring" && group(i) < 0 && i !== active);
-    ctx.strokeStyle = palette.node;
+    // Files that are not pages: a ring on the paper, in its group's colour when it has one.
+    fillPass(palette.bg, 1, (i) => ring(i) && i !== active && !isLit(i));
     ctx.globalAlpha = rest;
     ctx.lineWidth = Math.max(1, Math.min(2, 1.2 * Math.sqrt(k)));
-    ctx.beginPath();
-    for (let i = 0; i < count; i++) {
-      if (model.nodes[i]!.shape !== "ring" || group(i) >= 0 || i === active || isLit(i) || !visibleNode(i)) continue;
-      addShape(ctx, "circle", sx(i), sy(i), screenR(i));
-    }
-    ctx.stroke();
+    const strokeRings = (color: string, include: (i: number) => boolean) => {
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      for (let i = 0; i < count; i++) {
+        if (!ring(i) || !include(i) || i === active || isLit(i) || !visibleNode(i)) continue;
+        addShape(ctx, "circle", sx(i), sy(i), screenR(i));
+      }
+      ctx.stroke();
+    };
+    strokeRings(palette.node, (i) => group(i) < 0);
+    palette.groups.forEach((color, hue) => strokeRings(color, (i) => group(i) === hue));
     if (highlight) {
       fillPass(palette.ink, 1, (i) => isLit(i) && i !== lit && i !== active && group(i) < 0);
       palette.groups.forEach((color, hue) => {
@@ -852,6 +857,8 @@ export function GraphCanvas(props: {
   activeIndex: number;
   activePath: string | null;
   focusIndex: number;
+  // Lit like focus while nothing has keyboard focus, but never spoken.
+  pointIndex: number;
   display: GraphDisplay;
   forces: GraphForces;
   surface: "bg" | "panel";
@@ -924,8 +931,8 @@ export function GraphCanvas(props: {
   }, [props.display, props.forces, props.local]);
 
   useEffect(() => {
-    rendererRef.current?.setFocus(props.focusIndex);
-  }, [props.focusIndex]);
+    rendererRef.current?.setFocus(props.focusIndex >= 0 ? props.focusIndex : props.pointIndex);
+  }, [props.focusIndex, props.pointIndex]);
 
   // Only keyboard focus speaks. Hover lights the node and says nothing.
   const describedNode = props.focusIndex >= 0 ? props.nodes[props.focusIndex] : undefined;

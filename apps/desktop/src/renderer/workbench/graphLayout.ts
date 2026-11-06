@@ -107,8 +107,8 @@ type Tree = {
 };
 let tree: Tree | null = null;
 
-function ensureTree(points: number): Tree {
-  const capacity = Math.max(64, points * 3);
+function ensureTree(points: number, minCapacity = 0): Tree {
+  const capacity = Math.max(64, points * 3, minCapacity);
   if (tree && tree.mass.length >= capacity && tree.next.length >= points) return tree;
   tree = {
     child: new Int32Array(capacity * 4),
@@ -195,9 +195,9 @@ function buildTree(layout: GraphLayout): Tree {
       }
     }
     if (!overflow) break;
-    // Deeply nested near-duplicates: grow the arrays and build again.
-    tree = null;
-    t = ensureTree(count * 4);
+    // Deeply nested near-duplicates: double the arrays and build again.
+    // Growing from the current size ends: depth is bounded by float precision.
+    t = ensureTree(count, t.mass.length * 2);
   }
   // Children always come after their parent, so one reverse pass sums mass.
   for (let q = t.used - 1; q >= 0; q--) {

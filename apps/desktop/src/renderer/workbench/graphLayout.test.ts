@@ -182,6 +182,15 @@ describe("layout engine", () => {
     expect(frames).toHaveLength(count);
   });
 
+  it("builds its quadtree around near-duplicate pairs that nest past the first arrays", () => {
+    // Each pair is just over the merge distance apart, so it splits about 33 levels deep.
+    const spots = [[0, 0], [1.1e-9, 0], [10, 10], [10 + 1.1e-9, 10], [5, 5]];
+    const layout = layoutOf(spots.length, [], (i) => ({ x: spots[i]![0]!, y: spots[i]![1]! }));
+    tick(layout, DEFAULT_FORCES);
+    expect(Array.from(layout.x).every(Number.isFinite)).toBe(true);
+    expect(Array.from(layout.y).every(Number.isFinite)).toBe(true);
+  });
+
   it("posts one settled picture with reduced motion", () => {
     const { layout, frames, flush, model } = engine();
     layout.receive({ type: "reduced", reduced: true });

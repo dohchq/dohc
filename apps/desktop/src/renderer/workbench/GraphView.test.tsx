@@ -15,7 +15,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
 import type { LinksEdgesResult } from "@dohc/workspace-contracts/links";
-import { GraphView } from "./GraphView";
+import { GraphView, searchMatches } from "./GraphView";
+import type { GraphNode } from "./graphData";
 import { deferred } from "../../testing/deferred";
 
 function stubAnimationFrames() {
@@ -111,6 +112,54 @@ describe("GraphView", () => {
     expect(description.textContent).toBe("beta.md, Page, 1 link");
     fireEvent.click(beta);
     expect(onOpenPath).toHaveBeenCalledWith("beta.md");
+  });
+
+  it("lights a hovered row's node without speaking, and keeps a focused row's words", async () => {
+    stubPages(["alpha.md", "beta.md"], [["alpha.md", "beta.md"]]);
+    render(<GraphView workspaceId="ws" activePath="alpha.md" refreshKey="0" onOpenPath={vi.fn()} />);
+    await waitFor(() => expect(rowPaths()).toEqual(["alpha.md", "beta.md"]));
+    const [alpha, beta] = screen.getAllByTestId("graph-file-row");
+    const canvas = screen.getByTestId("graph-canvas");
+    const description = screen.getByTestId("graph-focused-node");
+    fireEvent.mouseEnter(beta!);
+    expect(canvas.dataset.hovered).toBe("beta.md");
+    expect(description.textContent).toBe("");
+    expect(canvas.getAttribute("aria-describedby")).toBeNull();
+    fireEvent.mouseLeave(beta!);
+    expect(canvas.dataset.hovered).toBe("");
+
+    fireEvent.focus(alpha!);
+    fireEvent.mouseEnter(beta!);
+    expect(canvas.dataset.hovered).toBe("alpha.md");
+    expect(description.textContent).toBe("alpha.md, Page, 1 link");
+  });
+
+  it("lights the search's active option without speaking", async () => {
+    stubPages(["alpha.md", "beta.md", "gamma.md"], [["alpha.md", "beta.md"]]);
+    const user = userEvent.setup();
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" variant="page" onOpenPath={vi.fn()} />);
+    const canvas = await screen.findByTestId("graph-canvas");
+    await waitFor(() => expect(canvas.dataset.nodeCount).toBe("3"));
+    await user.type(screen.getByTestId("graph-search"), "a");
+    const options = await screen.findAllByTestId("graph-search-option");
+    expect(options.length).toBeGreaterThan(1);
+    fireEvent.mouseEnter(options[1]!);
+    expect(canvas.dataset.hovered).toBe(options[1]!.dataset.path);
+    expect(screen.getByTestId("graph-focused-node").textContent).toBe("");
+    expect(canvas.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("suggests only what matches the typed search while the drawn graph lags", () => {
+    const sources = ["alpha.md", "gamma.md"].map((path) => ({ path, filePath: path, kind: "file", title: path, incoming: 0, outgoing: 0 }) satisfies GraphNode);
+    // The graph is still drawn for the earlier search "a": both files.
+    const lagging = {
+      sources,
+      nodes: sources.map(({ path, title }) => ({ path, title, kind: "Page", shape: "circle" as const, degree: 0 })),
+    };
+    expect(searchMatches(lagging, "gam").map(({ node, index }) => [node.path, index])).toEqual([["gamma.md", 1]]);
+    expect(searchMatches(lagging, "zzz")).toEqual([]);
+    expect(searchMatches(lagging, "  ")).toEqual([]);
+    expect(searchMatches(lagging, "A", 1).map(({ node }) => node.path)).toEqual(["alpha.md"]);
   });
 
   it("finds a file by search in the full graph and opens it with Enter", async () => {
