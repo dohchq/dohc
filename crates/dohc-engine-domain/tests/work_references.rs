@@ -352,6 +352,7 @@ fn a_deleted_target_resolves_as_deleted() {
                 now_ms: 4,
                 request_id: None,
                 author_agent_id: None,
+                author_reported: None,
                 named_agent_ids: Vec::new(),
             },
             &NoFaults,
