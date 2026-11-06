@@ -140,7 +140,7 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
           >
             <span
               aria-hidden
-              className={`relative h-[50px] w-[76px] overflow-hidden rounded-lg border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_50%)] transition-colors group-hover:border-muted ${
+              className={`relative h-[50px] w-[76px] overflow-hidden rounded-lg border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] transition-colors group-hover:border-muted ${
                 checked ? "outline-2 outline-offset-2 outline-accent" : ""
               }`}
             >
@@ -449,7 +449,7 @@ export function ColorControl(props: {
         type="color"
         aria-label={props.label}
         defaultValue={props.value}
-        className="h-6 w-8 cursor-pointer rounded-md border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_50%)] bg-bg p-0.5"
+        className="h-6 w-8 cursor-pointer rounded-md border border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] bg-bg p-0.5"
       />
       <span className="font-mono text-[11px] text-muted">{props.value}</span>
     </label>
