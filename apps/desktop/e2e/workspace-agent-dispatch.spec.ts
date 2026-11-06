@@ -210,22 +210,22 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     // Ask again with the chat closed, so the reply arrives as a notice.
     await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
-    await page.evaluate(async () => {
+    // The agent's conversation is its channel's chat lane, not its posts.
+    await page.evaluate(async (workspaceId) => {
       const api = (window as unknown as {
         dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
           listChatChannels(payload: { workspaceId: string }): Promise<{ channels: Array<{ id: string; kind: string }> }>;
-          listChannelThreads(payload: { workspaceId: string; channelId: string }): Promise<{ threads: Array<{ id: string }> }>;
+          listChannelThreads(payload: { workspaceId: string; channelId: string; lane: "chat" }): Promise<{ threads: Array<{ id: string }> }>;
           sendChatMessage(payload: { workspaceId: string; threadId: string; body: string }): Promise<unknown>;
         };
       }).dohcDesktop;
-      const { workspaces } = await api.getWorkspaceRegistry();
-      const workspaceId = workspaces[0]!.workspaceId;
       const { channels } = await api.listChatChannels({ workspaceId });
-      const agent = channels.find((channel) => channel.kind === "agent")!;
-      const { threads } = await api.listChannelThreads({ workspaceId, channelId: agent.id });
-      await api.sendChatMessage({ workspaceId, threadId: threads[0]!.id, body: "also audit the export totals" });
-    });
+      const agent = channels.find((channel) => channel.kind === "agent");
+      if (!agent) throw new Error(`no agent channel in ${workspaceId}`);
+      const { threads: [conversation] } = await api.listChannelThreads({ workspaceId, channelId: agent.id, lane: "chat" });
+      if (!conversation) throw new Error("the agent channel has no conversation");
+      await api.sendChatMessage({ workspaceId, threadId: conversation.id, body: "also audit the export totals" });
+    }, workspaceId);
 
     await page.getByTestId("notice-center-toggle").click();
     const center = page.getByTestId("notice-center");
