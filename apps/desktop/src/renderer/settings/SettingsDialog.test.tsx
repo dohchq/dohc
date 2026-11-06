@@ -1563,7 +1563,7 @@ describe("SettingsDialog", () => {
     );
     await mcpConfigLoaded();
     await user.click(copyMcpConfig());
-    expect(await screen.findByRole("button", { name: "Couldn't copy" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Could not copy" })).toBeTruthy();
     expect(report).toHaveBeenCalledWith({
       message: "dohc could not copy to the clipboard. Clipboard denied",
       cause: denied,
