@@ -170,7 +170,7 @@ describe("transactional Collection page", () => {
     const changes = invoke.mock.calls.filter(([input]) => input.operationId === edit);
     expect(changes).toHaveLength(2); expect(changes[1]![0]).toEqual(changes[0]![0]);
     expect(screen.queryByText("Change not confirmed")).toBeNull();
-    expect(result.onNotice).toHaveBeenCalledWith("Saved the edit");
+    expect(result.onNotice).not.toHaveBeenCalled();
   });
   it.each([false, true])("invalidates an old revision's pending edit and stale retry after rule changes (in flight: %s)", async inFlight => {
     const pending = deferred<{ result: AppBackendJson }>();
@@ -226,12 +226,41 @@ describe("transactional Collection page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(result.onNotice).toHaveBeenCalledWith("Saved the edit"));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Edit Name" })).toBeNull());
+    expect(result.onNotice).not.toHaveBeenCalled();
     expect(result.onError).not.toHaveBeenCalled();
     expect(screen.queryByText("Change not confirmed")).toBeNull();
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
   });
 
+  it("shows no notice for a change the page shows", async () => {
+    const result = setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Undo last edit" });
+    expect(result.onNotice).not.toHaveBeenCalled();
+  });
+  it("tells the person which Collection a change saved in after its page closed", async () => {
+    const answer = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
+    const result = setup({ invoke });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([request]) => request.operationId === edit)).toBe(true));
+    result.unmount();
+    // The page opens again unlocked while the change is still saving.
+    render(<TransactionalCollectionPage {...result.props} />);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Edit Name for record 1" }) as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => answer.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "Alice" } } }));
+    expect(result.onNotice).toHaveBeenCalledOnce();
+    expect(result.onNotice).toHaveBeenCalledWith("Saved the edit in People");
+    // The change went out once, the closed page read nothing more, and the open page shows no Undo for it.
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === edit)).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([request]) => request.operationId === read)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
+  });
   it("keeps an uncertain edit and its exact request while refreshing and browsing", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page("Alice", true) };
@@ -569,15 +598,17 @@ describe("transactional Collection page", () => {
     expect(screen.queryByText("Workspace A")).toBeNull();
   });
 
-  it("ignores a completed old mutation and disables a stale retry after switching workspaces", async () => {
+  it("reports a completed old mutation to its own workspace and disables a stale retry after switching workspaces", async () => {
     const pending = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page(request.workspaceId) }) : pending.promise);
     const { props, rerender, onNotice, onError } = setup({ invoke });
     fireEvent.click(await screen.findByRole("button", { name: "Edit Name for record 1" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "changed" } }); fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    rerender(<TransactionalCollectionPage {...props} workspaceId="workspace-B" />); await screen.findByText("workspace-B");
+    const nextNotice = vi.fn();
+    rerender(<TransactionalCollectionPage {...props} workspaceId="workspace-B" onNotice={nextNotice} />); await screen.findByText("workspace-B");
     await act(async () => { pending.resolve({ result: { id: 1, version: 3, priorValues: { [name]: "workspace-A" } } }); });
-    expect(onNotice).not.toHaveBeenCalled(); expect(onError).not.toHaveBeenCalled();
+    // The notice goes to its own workspace's handler, which the shell drops once the window has left that workspace.
+    expect(onNotice).toHaveBeenCalledWith("Saved the edit in People"); expect(nextNotice).not.toHaveBeenCalled(); expect(onError).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
   });
 });
