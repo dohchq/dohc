@@ -428,7 +428,7 @@ export const TreeRow = memo(function TreeRow(props: {
             : props.active
               ? "bg-selected font-medium text-ink"
               : props.selected
-                ? "bg-selected text-ink font-medium"
+                ? "bg-selected text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
         }`}
       >
