@@ -375,6 +375,31 @@ describe("EditorTabs strip scrolling", () => {
       expect(span("a.md")).toEqual({ start: 0, end: 224 });
     });
 
+    // A 49px margin would scroll a tab's start out of a 40px strip.
+    it("shows the start of a tab wider than a strip too narrow for its margin", () => {
+      width.current = 40;
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [100, 100] });
+      const { rerender } = render(renderStrip("a.md"));
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 100, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 0, end: 100 });
+    });
+
+    // The margin gives way only to keep 49px of the tab in view: a 150px
+    // strip keeps all of it, and an 80px one keeps 31px.
+    it("shows the start of a tab wider than the strip as clear of the fade as the room allows", () => {
+      width.current = 150;
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [100, 200] });
+      const { rerender } = render(renderStrip("a.md"));
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 51, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 49, end: 249 });
+
+      resize(80);
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 69, behavior: "auto" });
+      expect(span("c.md")).toEqual({ start: 31, end: 231 });
+    });
+
     it("reveals a middle tab with room for both margins clear of both fades, and leaves it where it is clear", () => {
       const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 150] });
       const { rerender } = render(renderStrip("a.md"));
