@@ -419,7 +419,7 @@ Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px
 List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
-- Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
+- Active or selected: `bg-selected text-ink`. The active row adds `font-medium`. A picked row takes the picked fill, `bg-(--dohc-selection)`, instead.
 - The picked fill marks the rows an action will act on, only in the list where they were picked. The open file has the selected fill and medium weight in every list. When it is also picked, it keeps the picked fill and gains a 2 px ink edge.
 - If a row's name is content, such as a share's file, draw the name in `text-ink`. If the share ended or was removed, keep its name `text-muted`.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
