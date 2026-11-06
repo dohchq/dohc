@@ -880,15 +880,10 @@ body {
   font-weight: 600;
 }
 
-/* A cell ends at its padding when a paragraph ends it. A block with no space
- * above it takes the paragraph's 12px instead; headings and rules keep their
- * own, which is larger. */
-.dohc-notion-editor :is(th, td) > p {
+/* A cell ends at its padding when a paragraph ends it. The editor draws the
+ * column-resize handle after the cell's last block, so it does not count. */
+.dohc-notion-editor :is(th, td) > p:nth-last-child(1 of :not(.column-resize-handle)) {
   margin-bottom: 0;
-}
-
-.dohc-notion-editor :is(th, td) > p + :is(p, ul, ol, blockquote, pre, table) {
-  margin-top: 12px;
 }
 
 /* Tiptap cell-selection tint. */

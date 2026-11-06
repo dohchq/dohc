@@ -3,12 +3,14 @@ import { EditorState, NodeSelection } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
 import { beforeAll, describe, expect, it } from "vitest";
 import { doc, paragraph, schema } from "./editor/testDocs";
+import preflight from "tailwindcss/preflight.css?raw";
 import css from "./styles.css?raw";
 
-// The whole stylesheet, so each check reads the margin the cascade gives.
+// Tailwind's reset and the whole stylesheet, so each check reads the margin
+// the cascade gives in the app.
 beforeAll(() => {
   const style = document.createElement("style");
-  style.textContent = css;
+  style.textContent = `${preflight}\n${css}`;
   document.head.append(style);
 });
 
@@ -32,9 +34,18 @@ describe("a table cell's paragraphs", () => {
     expect(spaces("<p>First</p><p>Second</p>")).toEqual(["12px", "0px"]);
   });
 
-  it("keep the space above a list or a code block that follows them", () => {
-    expect(spaces("<p>Packing</p><ul><li><p>Boots</p></li></ul>")[0]).toBe("12px");
-    expect(spaces("<p>Run</p><pre><code>pnpm dev</code></pre>")[0]).toBe("12px");
+  // Each block as the editor draws it in a cell.
+  it.each([
+    ["a list", "<ul><li><p>Boots</p></li></ul>"],
+    ["a code block", "<pre><code>pnpm dev</code></pre>"],
+    ["a quote", "<blockquote><p>Pack light.</p></blockquote>"],
+    ["a table", '<div class="tableWrapper"><table><tbody><tr><td><p>Ada</p></td></tr></tbody></table></div>'],
+    ["an h4", "<h4>Lisbon</h4>"],
+    ["an h5", "<h5>Lisbon</h5>"],
+    ["an h6", "<h6>Lisbon</h6>"],
+    ["display math", '<div class="dohc-math dohc-math-block" data-dohc-math-block=""><div class="dohc-math__preview"></div></div>'],
+  ])("keep the 12px above %s that follows them", (_, block) => {
+    expect(spaces(`<p>Day one</p>${block}`)[0]).toBe("12px");
   });
 
   it("keep a heading's own larger space above it", () => {
