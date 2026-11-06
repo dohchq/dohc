@@ -539,7 +539,7 @@ describe("workspaceActivity agent run state", () => {
   });
 
   it("holds a dispatched run's secret only while that run holds the slot", async () => {
-    const { activity } = await opened();
+    const { activity, capture } = await opened();
     const secret = "a".repeat(64);
     await activity.claimAgentRun(id, run("cli-run"), undefined, secret);
     expect(activity.dispatchedRunSecret(id)).toBeNull();
@@ -549,8 +549,13 @@ describe("workspaceActivity agent run state", () => {
     // A second run is refused the slot, so it can't replace the secret.
     expect(await activity.claimAgentRun(id, { ...run("dispatch-2"), dispatch: "run" }, undefined, "b".repeat(64))).toBe(false);
     expect(activity.dispatchedRunSecret(id)).toBe(secret);
-    await activity.clearAgentRun(id, "dispatch-1");
+    // The secret stops working when the run ends, even if capture keeps the slot.
+    capture.setActiveAgentRun.mockRejectedValueOnce(new Error("capture could not flush"));
+    await expect(activity.clearAgentRun(id, "dispatch-1")).rejects.toThrow("capture could not flush");
+    expect(activity.hasAgentRun(id)).toBe(true);
     expect(activity.dispatchedRunSecret(id)).toBeNull();
+    await activity.clearAgentRun(id, "dispatch-1");
+    expect(activity.hasAgentRun(id)).toBe(false);
     await activity.stopAll();
   });
 

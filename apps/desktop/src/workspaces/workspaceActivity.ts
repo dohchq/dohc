@@ -945,6 +945,8 @@ export function createWorkspaceActivity(
       return;
     }
     if (slot.run.agentRunId !== agentRunId) return;
+    // The run's secret stops working now, even if capture fails to let the run go.
+    delete slot.secret;
     await state.entry?.capture?.setActiveAgentRun(null);
     if (state.agentRun === slot) releaseAgentRun(state, slot.workspace, agentRunId);
   }
@@ -968,8 +970,8 @@ export function createWorkspaceActivity(
   }
 
   // The agent of a run dohc dispatched while it holds the slot, or null. The
-  // CLI writes as that agent whatever name a write claims, so the run stays
-  // one actor.
+  // CLI writes as that agent for a request that proves it is the run's,
+  // whatever name the request gives, so the run stays one actor.
   function dispatchedAgent(state: WorkspaceActivityState): string | null {
     const run = state.agentRun?.run;
     return run?.dispatch !== undefined ? run.agentId : null;

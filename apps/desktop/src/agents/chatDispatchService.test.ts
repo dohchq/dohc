@@ -1236,9 +1236,13 @@ describe("chatDispatchService", () => {
     await activate(fixture);
     const personRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(personRun.chainDepth).toBe(0);
+    // The run's slot and its process get the same secret.
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    const personSecret = fixture.spawnCalls[0]!.options.env.DOHC_RUN_SECRET;
+    expect(personSecret).toMatch(/^[a-f0-9]{64}$/u);
     expect(fixture.attributions.at(-1)).toEqual({
       workspaceId: WORKSPACE_ID,
-      run: { agentId: "default", agentRunId: personRun.run.runId, depth: 0, dispatch: "run" },
+      run: { agentId: "default", agentRunId: personRun.run.runId, depth: 0, dispatch: "run", secret: personSecret },
     });
     await linkAgentReply(fixture, asked.threadId, personRun.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(0);
@@ -1265,8 +1269,12 @@ describe("chatDispatchService", () => {
     await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(2));
     const wokenRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(wokenRun.run.triggerMessageId).toBe(wake.message.id);
+    // Each run gets a secret of its own.
+    const wokenSecret = fixture.spawnCalls[1]!.options.env.DOHC_RUN_SECRET;
+    expect(wokenSecret).toMatch(/^[a-f0-9]{64}$/u);
+    expect(wokenSecret).not.toBe(personSecret);
     expect(fixture.attributions.at(-1)?.run).toEqual({
-      agentId: "default", agentRunId: wokenRun.run.runId, depth: 3, dispatch: "run",
+      agentId: "default", agentRunId: wokenRun.run.runId, depth: 3, dispatch: "run", secret: wokenSecret,
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
@@ -3804,7 +3812,7 @@ describe("chatDispatchService", () => {
     expect(call.process.stdinText).toContain(expectedReply(form, threadId, runId, marker));
     if (form === "mcp") expect(call.process.stdinText).toContain(`\`body\` \`${marker}\``);
     expect(runId).toBe("run_self_test_self_test_id_1");
-    expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: "default", agentRunId: runId, depth: 0, dispatch: "self-test" });
+    expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: "default", agentRunId: runId, depth: 0, dispatch: "self-test", secret });
 
     expect(await fixture.chat.listMessages({ workspaceId: WORKSPACE_ID, threadId })).toEqual([
       expect.objectContaining({ author: expect.objectContaining({ kind: "human" }), body: "Reply here to check the agent connection." }),
@@ -3815,6 +3823,7 @@ describe("chatDispatchService", () => {
       threadId,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
+      authorAgentId: "default",
       body: marker,
     });
     call.process.emitExit(0);
@@ -3846,6 +3855,7 @@ describe("chatDispatchService", () => {
       threadId,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
+      authorAgentId: "default",
       body: retryMarker,
     });
     retryCall.process.emitExit(0);
@@ -3862,6 +3872,32 @@ describe("chatDispatchService", () => {
       ),
     ).toHaveLength(1);
     expect((await fixture.chat.getThread({ workspaceId: WORKSPACE_ID, threadId })).thread.lane).toBe("posts");
+  });
+
+  it("fails a runner self-test whose reply did not come from the run", async () => {
+    const fixture = await createFixture({ runner: { command: "claude -p" } });
+
+    const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
+    await vi.waitFor(() => {
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
+    });
+    const call = fixture.spawnCalls[0]!;
+    // A reply sent without the run's secret posts as the unnamed agent, with no agent id.
+    await fixture.chat.sendMessage({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      threadId: call.options.env.DOHC_CHAT_THREAD!,
+      author: { kind: "agent", displayName: "Sam" },
+      origin: "cli",
+      body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
+    });
+    call.process.emitExit(0);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      ok: false,
+      detail: "Runner exited before reporting self-test success.",
+    });
   });
 
   it("refuses a runner self-test on a workspace without a capture before resolving a store", async () => {
@@ -3916,6 +3952,7 @@ describe("chatDispatchService", () => {
       threadId: call.options.env.DOHC_CHAT_THREAD!,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
+      authorAgentId: "default",
       body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
     });
     call.process.emitExit(0);

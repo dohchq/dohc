@@ -4517,6 +4517,34 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
+  it("posts a run's reply that arrives without its secret as the unnamed agent's, unlinked", async () => {
+    if (!store) throw new Error("Store is not available");
+    await seedDispatchThread("thread-dispatch");
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-dispatch_trigger",
+      threadId: "thread-dispatch",
+      agentId: "default",
+    });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected a dispatch run.");
+    const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
+    holdRun(claim.run.runId);
+    // The run's MCP server got no secret: Claude Code with
+    // CLAUDE_CODE_MCP_ALLOWLIST_ENV set, or a provider that drops it.
+    callerRunSecret = undefined;
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2.", runId: claim.run.runId }, "Claude");
+    if (!reply.ok) throw new Error(reply.reason);
+    const message = (await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice("th_".length)}` }))
+      .find((row) => row.id === reply.messageId);
+    if (!message?.authorActorKey) throw new Error("Expected the reply.");
+    expect(parseActorKey(message.authorActorKey)).toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
+    expect(message.author.displayName).toBe("Claude");
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
   it("retries transient run-message provenance failures until the link persists", async () => {
     await seedDispatchThread("thread-retry");
     await dispatchStore.recordTrigger({

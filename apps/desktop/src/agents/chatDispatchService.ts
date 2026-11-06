@@ -1908,10 +1908,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             if (!test || test.settled) return;
             try {
               const messages = await chat.listMessages({ workspaceId, threadId });
+              // Only the run's own reply carries its agent. A reply that lost
+              // the run's secret is the unnamed agent's and doesn't pass.
               if (
                 messages.some(
                   (message) =>
                     message.author.kind === "agent" &&
+                    message.authorAgentId === agent.id &&
                     message.body.trim() === marker,
                 )
               ) {
