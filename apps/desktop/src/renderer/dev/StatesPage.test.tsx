@@ -33,6 +33,25 @@ const expectForcedTarget = (mark: HTMLElement) =>
   expect(mark.querySelector(mark.dataset.forceTarget ?? ""), mark.dataset.forceTarget).not.toBeNull();
 
 describe("states page", () => {
+  it("draws calm and held read-only strips in both themes", () => {
+    vi.stubGlobal("dohcDesktop", {});
+    try {
+      render(<StatesPage parts={new Set(["file-view-actions"])} />);
+      for (const theme of ["light", "dark"]) {
+        const notices = within(screen.getByTestId(`states-${theme}`)).getAllByTestId("lossy-note-notice");
+        expect(notices).toHaveLength(2);
+        expect(within(notices[0]!).getByText("This note has parts dohc can't show.")).toBeTruthy();
+        expect(within(notices[1]!).getByText("dohc held a change, because saving it would rewrite parts it can't show.")).toBeTruthy();
+        for (const notice of notices) {
+          expect(within(notice).getByRole("button", { name: "Open externally" })).toBeTruthy();
+          expect(within(notice).getByRole("button", { name: "Edit anyway" })).toBeTruthy();
+        }
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("draws the failed-open body below its disabled document controls", () => {
     vi.stubGlobal("dohcDesktop", {});
     try {

@@ -299,6 +299,24 @@ export function ReadOnlyPropertiesFlag(props: {
   );
 }
 
+export function LossyNoteNoticeView(props: { held?: boolean; children: ReactNode }) {
+  return (
+    <div
+      data-testid="lossy-note-notice"
+      role="status"
+      className={`flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] ${props.held ? "text-warning" : "text-muted"}`}
+    >
+      <span className="flex min-w-0 items-center gap-1">
+        <Lock aria-hidden size={12} className="shrink-0" />
+        {props.held
+          ? "dohc held a change, because saving it would rewrite parts it can't show."
+          : "This note has parts dohc can't show."}
+      </span>
+      <span className="flex shrink-0 items-center gap-3">{props.children}</span>
+    </div>
+  );
+}
+
 // A lossy note (CONTEXT.md) opens read-only. The way forward is the system's
 // app for the file, which edits it without dohc's editor.
 export function LossyNoteNotice(props: {
@@ -340,18 +358,8 @@ export function LossyNoteNotice(props: {
     : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
     : "dohc could not confirm that History can restore the original.";
   return (
-    <div
-      data-testid="lossy-note-notice"
-      role="status"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
-    >
-      <span className="flex min-w-0 items-center gap-1">
-        <Lock aria-hidden size={12} className="shrink-0" />
-        {props.held
-          ? "dohc held a change to this note. Saving it would also change parts dohc can't show."
-          : "dohc can't edit this note yet without changing parts it can't show."}
-      </span>
-      <span className="flex shrink-0 items-center gap-3">
+    <>
+      <LossyNoteNoticeView held={props.held}>
         <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
         {props.onEditAnyway ? (
           <button
@@ -361,12 +369,12 @@ export function LossyNoteNotice(props: {
               setOpened((count) => count + 1);
               setConfirming(true);
             }}
-            className="whitespace-nowrap text-subtle hover:text-ink"
+            className="whitespace-nowrap text-muted hover:text-ink"
           >
             Edit anyway
           </button>
         ) : null}
-      </span>
+      </LossyNoteNoticeView>
       {confirming && props.onEditAnyway ? (
         <ConfirmDialog
           title="Edit this note anyway?"
@@ -387,7 +395,7 @@ export function LossyNoteNotice(props: {
           </p>
         </ConfirmDialog>
       ) : null}
-    </div>
+    </>
   );
 }
 
