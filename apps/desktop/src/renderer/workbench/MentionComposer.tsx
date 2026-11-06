@@ -280,7 +280,7 @@ export function MentionComposer(props: {
       const frame = form.getBoundingClientRect();
       // The topmost bar, the poll, or the box itself: its border, not the
       // stack's empty margin above it.
-      const top = (stack.firstElementChild ?? form).getBoundingClientRect().top;
+      const top = (stackRef.current?.firstElementChild ?? form).getBoundingClientRect().top;
       const above = top - MENU_GAP_PX - MENU_EDGE_PX;
       const below = window.innerHeight - frame.bottom - MENU_GAP_PX - MENU_EDGE_PX;
       const height = Math.min(192, menu.scrollHeight + 2);

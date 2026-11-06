@@ -217,6 +217,19 @@ describe("MentionComposer autocomplete", () => {
     listHeight.mockRestore();
   });
 
+  it("floats a post's roster off the card, not the author row inside it", async () => {
+    const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
+    render(<Harness surface="post" />);
+    const composer = screen.getByTestId("chats-composer");
+    const frame = composer.closest("form")!;
+    vi.spyOn(frame, "getBoundingClientRect").mockReturnValue(new DOMRect(40, 500, 300, 120));
+    vi.spyOn(frame.firstElementChild!, "getBoundingClientRect").mockReturnValue(new DOMRect(53, 513, 274, 20));
+    await userEvent.type(composer, "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    expect(menu.style.bottom).toBe("272px");
+    listHeight.mockRestore();
+  });
+
   it("moves the roster above once a query leaves it room there", async () => {
     // Each row is 38px tall. Over the frame there are 104px to fill.
     const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get")
