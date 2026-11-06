@@ -1236,17 +1236,19 @@ describe("open editors", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    const rowB = (await screen.findAllByTestId("tree-row")).find(
-      (row) => row.getAttribute("data-path") === "b.md",
-    )!;
-    await user.click(rowB);
-    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    const rows = await screen.findAllByTestId("tree-row");
+    for (const path of ["a.md", "b.md"]) {
+      await user.click(rows.find((row) => row.getAttribute("data-path") === path)!);
+      expect(await screen.findByTestId(`tab-${path}`)).toBeTruthy();
+    }
+    expect(screen.getAllByTestId("open-editor-row")).toHaveLength(2);
     const header = screen.getByTestId("open-editors-header");
     expect(within(header).queryByLabelText("New untitled text file")).toBeNull();
 
     await user.click(within(header).getByLabelText("Close all editors"));
-    await waitFor(() => expect(screen.queryByTestId("tab-b.md")).toBeNull());
-    expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
+    await waitFor(() => expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0));
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
   });
 
   it("surfaces file title actions for create, refresh, and collapse folders", async () => {
