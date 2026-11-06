@@ -49,11 +49,15 @@ impl Daemon {
     fn close_cleanly(&mut self) {
         drop(self.0.stdin.take());
         let status = self.0.wait().unwrap();
-        let mut stderr = String::new();
+        let mut stderr = Vec::new();
         if let Some(mut pipe) = self.0.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
+            let _ = pipe.read_to_end(&mut stderr);
         }
-        assert!(status.success(), "the daemon exited with {status}; stderr:\n{stderr}");
+        assert!(
+            status.success(),
+            "the daemon exited with {status}; stderr:\n{}",
+            String::from_utf8_lossy(&stderr)
+        );
     }
     fn streamed(
         &mut self,
