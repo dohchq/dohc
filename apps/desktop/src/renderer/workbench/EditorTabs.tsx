@@ -143,8 +143,11 @@ function revealTab(strip: HTMLElement, tab: HTMLElement, behavior: ScrollBehavio
   if (earliest <= latest) {
     target = nearest(earliest, latest);
   } else if (end - start > view) {
-    // A tab wider than the strip shows its start.
-    target = latest;
+    // A tab wider than the strip shows its start, clear of the fade where
+    // the strip has room. A strip narrower than two margins gives the margin
+    // up, so the tab's start always shows.
+    const margin = Math.min(REVEAL_MARGIN, Math.max(0, view - REVEAL_MARGIN));
+    target = Math.min(max, Math.max(0, start - margin));
   } else {
     // The tab and its margins do not fit, so the whole tab shows: at an edge
     // the strip reaches, where it shows there, or else as clear of both
