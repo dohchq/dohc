@@ -2287,8 +2287,8 @@ export function NoticeCenter(props: {
                                     ) : null}
                                   </div>
                                 ) : null}
-                                <p className="m-0 mt-1 flex min-w-0 items-baseline gap-2 text-[10px] text-subtle">
-                                  <time dateTime={new Date(notice.createdAtMs).toISOString()} className="text-[12px]">
+                                <p className="m-0 mt-1 flex min-w-0 gap-2 text-[12px] text-subtle">
+                                  <time dateTime={new Date(notice.createdAtMs).toISOString()}>
                                     {relativeTime(notice.createdAtMs)}
                                   </time>
                                   {folder ? <span className="truncate">{folder}</span> : null}

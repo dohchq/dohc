@@ -2758,18 +2758,24 @@ describe("opening a row", () => {
 });
 
 describe("a row's parts", () => {
-  it("draws a row's worded actions as the toast's bordered buttons, and its time at 12px", () => {
+  it("draws a row's worded actions as the toast's bordered buttons, and its time line at 12px", () => {
     const failed = { id: "e1", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false };
     const toast = render(<WorkspaceErrorToast error={failed} onRetry={vi.fn()} />);
     const toastAction = within(toast.container).getByRole("button", { name: "Try again" }).className;
     toast.unmount();
-    renderNotices({ workspaceErrors: [failed], onRetryWorkspaceError: vi.fn(), sentNotices: [sentRow("a")] });
+    renderNotices({ workspaceErrors: [failed], onRetryWorkspaceError: vi.fn(), sentNotices: [sentRow("a", {}, "Trip")] });
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     const rowAction = within(screen.getByTestId("notice-e1")).getByRole("button", { name: "Try again" }).className;
     expect(rowAction).toContain("border-line");
     expect(rowAction.startsWith(toastAction.replace(/ disabled:opacity-50$/, ""))).toBe(true);
+    // A time and the folder beside it are one line at one size.
     const times = [...screen.getByTestId("notice-center").querySelectorAll("time")];
-    expect(times.length).toBeGreaterThan(0);
-    for (const time of times) expect(time.className).toContain("text-[12px]");
+    expect(times.length).toBeGreaterThan(1);
+    for (const time of times) {
+      const line = time.parentElement?.tagName === "P" ? time.parentElement : time;
+      expect(line.className).toContain("text-[12px]");
+      for (const part of line.querySelectorAll("*")) expect(part.className).not.toMatch(/text-\[\d+px\]/);
+    }
+    expect(within(screen.getByTestId("sent-notice-a")).getByText("Trip").closest("p")?.className).toContain("text-[12px]");
   });
 });
