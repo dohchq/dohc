@@ -54,6 +54,9 @@ export interface GuardPulls {
   pulls: GuardPull[];
   // Another pass was running when the catch-up began, so a pull here may be that pass's.
   shared: boolean;
+  // The catch-up had ended when the guard stopped waiting, so the guard
+  // returned because its pull finished, not because its wait ran out.
+  endedInWait: boolean;
 }
 
 function failedPull(error: unknown, elapsedMs: number): GuardPull {
@@ -228,7 +231,8 @@ export async function openLiveMoveFixture(input: {
       // failure, against the guard catch-up running when the pull started.
       // The guard hands both of an attempt's catch-ups the same signal, so
       // the signal ties the pull to the move whose wait started the attempt.
-      interface MoveRecord { catchUps: Array<GuardPulls & { settled: Promise<void> }> }
+      interface CatchUp { pulls: GuardPull[]; shared: boolean; ended: boolean; settled: Promise<void> }
+      interface MoveRecord { catchUps: CatchUp[]; endedInWait: boolean }
       let moving: MoveRecord | undefined;
       let lastGuarded: MoveRecord | undefined;
       const attempts = new WeakMap<AbortSignal, MoveRecord>();
@@ -267,8 +271,11 @@ export async function openLiveMoveFixture(input: {
           const pulls: GuardPull[] = [];
           catchingUp = pulls;
           const run = sync.catchUp({ signal });
-          const settled = run.then(() => undefined, () => undefined).finally(() => { if (catchingUp === pulls) catchingUp = undefined; });
-          attempts.get(signal)?.catchUps.push({ pulls, shared, settled });
+          // Attached before the guard awaits the run, so `ended` is set before the guard can return.
+          const catchUp: CatchUp = { pulls, shared, ended: false, settled: Promise.resolve() };
+          const end = () => { catchUp.ended = true; };
+          catchUp.settled = run.then(end, end).finally(() => { if (catchingUp === pulls) catchingUp = undefined; });
+          attempts.get(signal)?.catchUps.push(catchUp);
           return run;
         },
       });
@@ -278,11 +285,14 @@ export async function openLiveMoveFixture(input: {
         targetedPasses: () => targeted,
         pull: () => capture.runRelaySync(materializePage => relay.pull(materializePage)),
         async move(fromPath, toPath, { guarded }) {
-          const record: MoveRecord = { catchUps: [] };
+          const record: MoveRecord = { catchUps: [], endedInWait: false };
           if (guarded) lastGuarded = record;
           const beforeMove = async (storedSpelling: () => Promise<string>) => {
             moving = record;
-            try { await guard.beforeMove(workspaceId, storedSpelling); } finally { moving = undefined; }
+            try { await guard.beforeMove(workspaceId, storedSpelling); } finally {
+              moving = undefined;
+              record.endedInWait = record.catchUps.length > 0 && record.catchUps.every(catchUp => catchUp.ended);
+            }
           };
           const started = performance.now();
           await moveWorkspacePathByHand(operation, { fromPath, toPath }, person, { capture, requestId: randomUUID(),
@@ -292,9 +302,9 @@ export async function openLiveMoveFixture(input: {
         },
         async guardPulls() {
           if (!lastGuarded) throw new Error("This device made no guarded move.");
-          const { catchUps } = lastGuarded;
+          const { catchUps, endedInWait } = lastGuarded;
           await Promise.all(catchUps.map(catchUp => catchUp.settled));
-          return { pulls: catchUps.flatMap(catchUp => catchUp.pulls), shared: catchUps.some(catchUp => catchUp.shared) };
+          return { pulls: catchUps.flatMap(catchUp => catchUp.pulls), shared: catchUps.some(catchUp => catchUp.shared), endedInWait };
         },
         backgroundPulls: () => background,
         syncFailed: () => sync.snapshot().syncFailure !== null,
