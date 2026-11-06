@@ -226,6 +226,7 @@ fn outside_posted_thread_reply_still_counts_when_it_names_a_dohc_agent() {
                 author_user_id: Some("ada".to_owned()),
                 author_owner_display_name: None,
                 author_agent_id: None,
+                author_reported: None,
                 parent_message_id: Some("own".to_owned()),
                 origin: None,
                 body: "@Research, please also look".to_owned(),
