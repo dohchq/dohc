@@ -762,6 +762,7 @@ function makeBaseBridge(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
+    onCollectionRulesChanged: vi.fn(() => () => undefined),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
         report: null,

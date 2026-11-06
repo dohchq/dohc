@@ -15,6 +15,7 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
   onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
+  onCollectionRulesChanged: vi.fn((_listener: (event: { workspaceId: string; datasetId: string }) => void) => () => undefined),
   settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
   onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined),
   checkCollectionAutomation: vi.fn(async () => ({ diagnostics: [], formulaProblems: [], findProblems: [], cannotRun: null, missingFiles: [] })),
@@ -25,10 +26,10 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   onCloudSessionChanged: vi.fn(() => () => undefined),
   writeCollectionAutomations: vi.fn(), listRelayShares: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; dataset?: { tables: Array<{ fields: Array<{ name: string }> }> }; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
   {props.automationsButton}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
-  <input aria-label="Collection view state" data-records-version={props.recordsVersion} data-records-changed={props.recordsChanged} defaultValue="" />
+  <input aria-label="Collection view state" data-fields={props.dataset?.tables[0]?.fields.map(field => field.name).join(",")} data-records-version={props.recordsVersion} data-records-changed={props.recordsChanged} defaultValue="" />
   <button onClick={props.onRefresh}>Refresh records</button>
   {props.onHistory && <button onClick={props.onHistory}>History</button>}
   {props.onReviewSchema && <button onClick={props.onReviewSchema}>Fields and names</button>}
@@ -117,6 +118,28 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
     revisionSha256: current.revisionSha256, operationId: id(5), idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 2, values: { [id(3)]: "Original name" } } });
   expect(onNotice).toHaveBeenCalledWith("Reversed the edit");
   expect(onError).not.toHaveBeenCalled();
+});
+it("reads the Collection again when a change to its fields applies elsewhere, and not for another Collection or workspace", async () => {
+  const rulesChanged: Array<(event: { workspaceId: string; datasetId: string }) => void> = [];
+  backend.onCollectionRulesChanged.mockImplementation(listener => { rulesChanged.push(listener); return () => undefined; });
+  backend.dataset.mockResolvedValue({ kind: "description", dataset });
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+  const input = await screen.findByLabelText("Collection view state");
+  await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("1"));
+  expect(input.getAttribute("data-fields")).toBe("Name");
+  const describes = () => backend.dataset.mock.calls.map(([request]) => request).filter(request => request.action === "describe");
+  expect(describes()).toHaveLength(1);
+  const changed = (workspaceId: string, datasetId: string) => act(() => { for (const listener of rulesChanged) listener({ workspaceId, datasetId }); });
+  changed("workspace-b", id(1));
+  changed("workspace-a", id(9));
+  expect(describes()).toHaveLength(1);
+  const withDueDate: DatasetDescription = { ...dataset, revision: 2, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(7), name: "Due date", type: "date", required: false, unique: false }] }] };
+  backend.dataset.mockResolvedValue({ kind: "description", dataset: withDueDate });
+  changed("workspace-a", id(1));
+  await waitFor(() => expect(input.getAttribute("data-fields")).toBe("Name,Due date"));
+  expect(describes()).toHaveLength(2);
+  expect(describes()[1]).toMatchObject({ workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1) });
+  expect(input.getAttribute("data-records-version")).toBe("2");
 });
 it("reads the records again in place when runs in its workspace end, however they started", async () => {
   const runsChanged: Array<(event: { workspaceId: string }) => void> = [];

@@ -49,6 +49,7 @@ import {
   MenuCommand,
   CrashReportChangedEvent,
   CollectionCopiesLeftChangedEvent,
+  CollectionRulesChangedEvent,
   NoticesChangedEvent,
   LiveDraftRecoveryChangedEvent,
   SearchResultsEvent,
@@ -339,6 +340,8 @@ const bridge: DohcDesktopBridge = {
   onHistoryNamesChanged: (listener) => onEvent(CHANNELS.historyNamesChanged, WorkspaceIdPayload, listener),
   onCollectionAutomationsChanged: (listener) =>
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
+  onCollectionRulesChanged: (listener) =>
+    onEvent(CHANNELS.collectionRulesChanged, CollectionRulesChangedEvent, listener),
   onAutomationRunsChanged: (
     listener: (event: { workspaceId: string }) => void,
   ) => {

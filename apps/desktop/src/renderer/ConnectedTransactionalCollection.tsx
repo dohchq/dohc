@@ -170,6 +170,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   // A run or its Undo changes records without touching a file, whether a press, a record change, or a schedule
   // started it, so the table reads them again when runs end.
   useEffect(() => bridge().onAutomationRunsChanged(event => { if (event.workspaceId === workspaceId) setRecordsChanged(value => value + 1); }), [workspaceId]);
+  // A change to this Collection's fields applied, as from a chat's change card, so the page reads it again.
+  useEffect(() => bridge().onCollectionRulesChanged(event => {
+    if (event.workspaceId === workspaceId && event.datasetId === describedId.current) void refresh();
+  }), [workspaceId, refresh]);
   const buttonColumns = useMemo((): TransactionalButtons | undefined => buttons === null || buttonFields.length === 0 ? undefined : {
     fields: buttonFields,
     // A dataset record's id goes to main as JSON, since the table's key can be a number.

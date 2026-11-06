@@ -77,6 +77,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   collectionPlace?(workspace: W, datasetId: string, signal: AbortSignal): Promise<DatasetPlace>;
   /** Moves a Collection that is only on this computer to the workspace's server for good. */
   moveToServer?(workspace: W, datasetId: string, signal: AbortSignal): Promise<void>;
+  /** A change to a Collection's fields or rules applied. */
+  collectionRulesChanged?(workspaceId: string, datasetId: string): void;
 }) {
   const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
   let preparingMigrations = 0;
@@ -287,6 +289,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         pending.clear();
         if (input.action === "discardMigration") { await migrationAuthority.discardMigrationCandidate(candidate); migrationAuthority.assertCurrent(); return { kind: "migration-discarded" as const }; }
         const result = await approveLocalDatasetMigration(migrationAuthority, pending.review, { ...input, signal: operation.signal }); migrationAuthority.assertCurrent();
+        dependencies.collectionRulesChanged?.(input.workspaceId, candidate.datasetId);
         return { kind: "migrated" as const, ...result };
       }
       const prepareMigration = async (selection: { datasetId: string; descriptorPath: string; migrationPath: string }) => {

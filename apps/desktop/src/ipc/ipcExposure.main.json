@@ -43,6 +43,7 @@
     "desktop:cloud-stop-sync",
     "desktop:collection-automations-changed",
     "desktop:collection-copies-left-changed",
+    "desktop:collection-rules-changed",
     "desktop:compare-workspace-versions",
     "desktop:confirm-collection-automation-step",
     "desktop:count-workspace-version-changes",

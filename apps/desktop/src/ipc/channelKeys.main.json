@@ -34,6 +34,7 @@
   "cloudStatus",
   "collectionAutomationsChanged",
   "collectionCopiesLeftChanged",
+  "collectionRulesChanged",
   "confirmCollectionAutomationStep",
   "crashReportChanged",
   "workspaceTrustChanged",

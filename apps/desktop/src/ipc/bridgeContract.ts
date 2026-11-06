@@ -412,6 +412,9 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+export const CollectionRulesChangedEvent = z.strictObject({ workspaceId: WORKSPACE_ID, datasetId: z.uuid() });
+export type CollectionRulesChangedEvent = z.infer<typeof CollectionRulesChangedEvent>;
+
 export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
   recoveryCopies: z.boolean().optional(),
 });
@@ -7679,6 +7682,9 @@ export interface DohcDesktopBridge
   onCollectionAutomationsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // A change to a Collection's fields or rules applied, from any window or
+  // the CLI: a page that shows that Collection reads it again.
+  onCollectionRulesChanged(listener: (event: CollectionRulesChangedEvent) => void): () => void;
   // A press this window made settled, or waits. Each event names its
   // workspace; a window on another workspace drops it.
   onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;
