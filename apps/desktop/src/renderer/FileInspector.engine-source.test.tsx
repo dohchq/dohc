@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
+import { CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "./readOnlyReasons";
 import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -554,7 +555,11 @@ describe("engine markdown source view", () => {
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
   });
 
-  it.each(["reconnecting", "lineage-failure"] as const)("uses unavailable words for %s without a draft", async (cause) => {
+  it.each([
+    ["reconnecting", CONNECTION_LOST_REASON],
+    ["lineage-failure", REPLACEMENT_FAILED_REASON],
+  ] as const)("says why %s left the document read-only without a draft", async (cause, reason) => {
+    const user = userEvent.setup();
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -562,8 +567,30 @@ describe("engine markdown source view", () => {
     act(() => pushSaveState("read-only", 0, cause));
     const marker = await screen.findByTestId("markdown-save-state");
     expect(marker.dataset.state).toBe("read-only");
-    expect(marker.getAttribute("title")).toBeNull();
+    // The editor has no strip, so the chip's tooltip says it.
+    expect(marker.getAttribute("title")).toBe(reason);
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
+    expect(strip?.textContent).toBe(reason);
+  });
+
+  it("leaves the strip to the notice when the file is deleted in source view", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+
+    act(() => pushSaveState("deleted", 0));
+
+    expect((await screen.findByTestId("deleted-while-editing-notice")).textContent).toBe(
+      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
+    );
+    expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe("");
   });
 
   it.each([{ workspaceId: "ws-2" }, { path: "b.md" }, { engineVersionKey: 1 }])("does not carry an ended marker into a changed request %j", async (changed) => {

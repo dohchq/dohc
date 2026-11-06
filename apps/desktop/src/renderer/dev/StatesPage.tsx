@@ -35,7 +35,16 @@ import { DocumentMenu } from "../DocumentMenu";
 import { PageIdentity } from "../PageIdentity";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { TextViewActions } from "../TextEditorView";
-import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
+import {
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
+  DocumentControls,
+  MarkdownSourceStrip,
+  OPENING_TITLE,
+  OpeningState,
+  SetAsideEditRow,
+  ViewActions,
+} from "../fileInspectorUi";
+import { CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "../readOnlyReasons";
 import { BlockMenu } from "../editor/blockControls";
 import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -3550,6 +3559,32 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="keyboard focus on the unsaved active tab">
           <UnsavedTabStrip testId={`states-tab-unsaved-focus-${theme}`} dirty recovered tab="focus-visible" />
+        </Specimen>
+      </Section>
+
+      <Section part="read-only-reasons" title="Read-only reasons">
+        <Specimen label="the replacement did not finish: the chip with Try again, over the source strip">
+          <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
+            <div className="flex justify-end px-3 py-1.5">
+              <StateMark testId={`states-read-only-replacement-${theme}`} state="read-only" shown="read-only-unavailable"
+                title={REPLACEMENT_FAILED_REASON} onRetry={noop} />
+            </div>
+            <MarkdownSourceStrip words={REPLACEMENT_FAILED_REASON} getText={() => null} />
+          </div>
+        </Specimen>
+        <Specimen label="the connection was lost: the chip, over the source strip">
+          <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
+            <div className="flex justify-end px-3 py-1.5">
+              <StateMark testId={`states-read-only-connection-${theme}`} state="read-only" shown="read-only-unavailable"
+                title={CONNECTION_LOST_REASON} />
+            </div>
+            <MarkdownSourceStrip words={CONNECTION_LOST_REASON} getText={() => null} />
+          </div>
+        </Specimen>
+        <Specimen label="an edit refused for good: its set-aside row">
+          <div className="w-[440px] overflow-hidden rounded-lg border border-line">
+            <SetAsideEditRow message={DOCUMENT_NOT_SAVED_DRAFT_NOTICE} getText={() => null} onDismiss={noop} />
+          </div>
         </Specimen>
       </Section>
     </section>

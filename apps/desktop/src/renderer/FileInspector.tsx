@@ -11,6 +11,7 @@ import {
   EngineMayHoldDocumentNotice,
   ViewActions,
   OrphanedDraftNotices,
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
   OpenExternallyButton,
@@ -739,6 +740,8 @@ export const FileInspector = memo(function FileInspector(
                 ? "dohc could not save this drawing. Copy your set-aside drawing to keep it."
                 : kind === "drawing" && engine.readOnlyWhileEditing
                   ? "This drawing became read-only before your edit saved. Copy your set-aside drawing to keep it."
+          : engine.permanentFailureWhileEditing
+            ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
           : engine.readOnlyWhileEditing
             ? "This document became read-only before your edit saved. Copy your text to keep it."
             : undefined

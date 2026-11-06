@@ -11,6 +11,8 @@ import {
   OpeningState,
   ViewActions,
   OrphanedDraftNotices,
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
+  MarkdownSourceStrip,
   EngineRemovalInProgressNotice,
   LossyNoteNotice,
   OpenExternallyLink,
@@ -24,7 +26,7 @@ import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import { prepareArtifactSource, projectArtifactSource } from "./editor/artifactSource";
 import { canPreserveMarkdownSource } from "@dohc/ydoc-projection/artifact-markdown-guard";
 import type { PendingTextUndo } from "./fileEditorUndo";
-import { readOnlyReasons } from "./readOnlyReasons";
+import { readOnlyReasons, transitionReason } from "./readOnlyReasons";
 import {
   AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
@@ -32,7 +34,6 @@ import {
 } from "./useAutosavedTextDraft";
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
-import { CopyButton } from "./ui/CopyButton";
 import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
@@ -868,6 +869,9 @@ export function MarkdownView(props: {
   const hasSetAsideEdit =
     engine.deletedDraftId !== null &&
     orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
+  // A session that became read-only with no edit to copy says why in the
+  // source strip and the chip's tooltip.
+  const transition = engine.readOnlyWhileEditing && orphanedDrafts.length === 0 ? engine.readOnlyCause : null;
 
   useEffect(() => {
     if (surfaceMode === "read") preloadMarkdownEditor();
@@ -2105,8 +2109,10 @@ export function MarkdownView(props: {
       <OrphanedDraftNotices
         workspaceId={props.workspaceId}
         path={props.path}
-        message="This document became read-only. Copy your text to keep it."
-        messageDraftId={readOnlyDraftId.current}
+        message={engine.permanentFailureWhileEditing
+          ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
+          : "This document became read-only. Copy your text to keep it."}
+        messageDraftId={engine.permanentFailureWhileEditing ? engine.permanentFailureDraftId : readOnlyDraftId.current}
         replacedDraftIds={engine.replacedDraftIds}
       />
     </>
@@ -2137,7 +2143,7 @@ export function MarkdownView(props: {
               title={
                 engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
                   ? "Your access to this document ended."
-                  : engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
+                  : transitionReason(transition) ?? (engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
                     engine.saveState.kind === "changed-on-disk"
                   ? CHANGED_OUTSIDE_NOTICE
                   : (engineChipState === "deleted" ||
@@ -2146,7 +2152,7 @@ export function MarkdownView(props: {
                   ? goneNotice(engine.goneCause, true)
                   : typeof engineChipState !== "string" && engineChipState.kind === "error" && engine.saveError
                     ? engine.saveError
-                    : undefined
+                    : undefined)
               }
               onRetry={engine.retryReplacement ?? undefined}
             />
@@ -2179,18 +2185,17 @@ export function MarkdownView(props: {
           // the top-matter zone (which renders the same metadata as chrome)
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-muted">
-              <span>
-                {readOnly
-                  ? readOnlyReasons({
-                      accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
-                      shared: !!props.forceReadOnly,
-                      tooLarge: !!props.truncated && !engine.available,
-                    }).join(" ") || "Read-only markdown source"
-                  : "Read-only markdown source — switch back to Editor to make changes."}
-              </span>
-              <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
-            </div>
+            <MarkdownSourceStrip
+              words={readOnly
+                ? readOnlyReasons({
+                    accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
+                    shared: !!props.forceReadOnly,
+                    tooLarge: !!props.truncated && !engine.available,
+                    transition,
+                  }).join(" ")
+                : "Read-only markdown source — switch back to Editor to make changes."}
+              getText={() => sourceMarkdown}
+            />
             {sourceMarkdown === null ? (
               <SkeletonRows layout="panel" label="Loading source..." />
             ) : (
