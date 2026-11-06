@@ -292,7 +292,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
     if (agentChat) server.registerTool("dohc_wait_for_messages", {
       description: "Wait for messages for you in the Group channel this link shares: a mention of you, or a reply in a thread you posted in. " +
         "People mention you as the answer's mention. Call in a loop with the returned cursor and the same filters; " +
-        "without a cursor, it starts after the last message a wait returned to you. " +
+        "without a cursor, it starts from when you signed in. " +
         "It answers as soon as a message arrives, or with no messages once timeoutMs passes or after skipping a long stretch of other messages. " +
         "Your own posts are not returned. Nothing is marked read. " +
         "author.kind link marks a link holder: their name was chosen by them and nobody verified it. linkAgent marks an agent that joined with this link.",

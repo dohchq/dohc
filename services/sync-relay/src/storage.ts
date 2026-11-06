@@ -1654,10 +1654,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return linkChatStorage.linkPrincipalThreadIds(this, workspaceId, principalId);
   }
 
-  advanceAgentWaitCursor(connectionId: string, cursor: number): void {
-    agentConnectionStorage.advanceAgentWaitCursor(this, connectionId, cursor);
-  }
-
   registerAgentClient(input: Parameters<typeof agentConnectionStorage.registerAgentClient>[1]): boolean {
     return agentConnectionStorage.registerAgentClient(this, input);
   }

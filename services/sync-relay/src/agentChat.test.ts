@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AGENT_CHAT_MAX_WAIT_MS, MAX_AGENT_CHAT_WAITS_PER_CONNECTION, MAX_AGENT_CHAT_WAITS_PER_LINK } from "./agentChatRoutes";
+import {
+  AGENT_CHAT_MAX_WAIT_MS, MAX_AGENT_CHAT_WAITS_PER_CONNECTION, MAX_AGENT_CHAT_WAITS_PER_LINK, MAX_AGENT_CHAT_WAITS_PER_WORKSPACE,
+} from "./agentChatRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { pkceS256Challenge } from "./linkSecurity";
@@ -13,12 +15,14 @@ import {
   chatChannelCreate,
   chatMessageAppend,
   chatThreadCreate,
+  closeTestStorage,
   closeTestStorages,
   createShare,
   inspectDatabase,
   json,
   jsonBody,
   linkSecret,
+  reopenTestStorage,
   request,
   sequenced,
   storagePath,
@@ -374,7 +378,7 @@ describe("an agent waiting for messages", () => {
     expect(await ids({ threadId: "thread-private" })).toEqual([]);
   });
 
-  it("starts a wait without a cursor after the last message a wait returned to it", async () => {
+  it("starts every wait without a cursor from when the agent signed in, so a lost answer loses nothing", async () => {
     const f = await fixture();
     const agent = await connect(f, "read-write");
     await ok(await post(f, agent, { threadId: "thread-team" }));
@@ -382,7 +386,54 @@ describe("an agent waiting for messages", () => {
     // The reply, and not the thread's message from before the agent signed in.
     const first = await ok(await wait(f, agent, { timeoutMs: 0 })) as WaitAnswer;
     expect(first.messages.map((message) => message.messageId)).toEqual(["owner-reply"]);
-    expect(await ok(await wait(f, agent, { timeoutMs: 0 }))).toMatchObject({ messages: [], cursor: first.cursor });
+    // The first answer never arrived: the next wait without a cursor returns the same reply.
+    const again = await ok(await wait(f, agent, { timeoutMs: 0 })) as WaitAnswer;
+    expect(again.messages.map((message) => message.messageId)).toEqual(["owner-reply"]);
+    expect(again.cursor).toBe(first.cursor);
+    // The first answer's cursor resumes after it.
+    expect(await ok(await wait(f, agent, { cursor: first.cursor, timeoutMs: 0 }))).toMatchObject({ messages: [], cursor: first.cursor });
+  });
+
+  it("keeps a mention in another thread for a later wait without a thread filter", async () => {
+    const f = await fixture();
+    const agent = await connect(f, "read-write");
+    await ok(await post(f, agent, { threadId: "thread-team" }));
+    ownerSays(f, "owner-mention", "thread-other", "@Helper look at this");
+    ownerSays(f, "owner-reply", "thread-team", "reply");
+    const filtered = await ok(await wait(f, agent, { threadId: "thread-team", timeoutMs: 0 })) as WaitAnswer;
+    expect(filtered.messages.map((message) => message.messageId)).toEqual(["owner-reply"]);
+    const unfiltered = await ok(await wait(f, agent, { timeoutMs: 0 })) as WaitAnswer;
+    expect(unfiltered.messages.map((message) => message.messageId)).toEqual(["owner-mention", "owner-reply"]);
+  });
+
+  it("adds the start column to a relay whose connections have none, and signs agents in after", async () => {
+    const f = await fixture();
+    const before = await connect(f, "read-write");
+    const path = storagePath(f.storage);
+    closeTestStorage(f.storage);
+    const db = inspectDatabase(path);
+    db.exec(`ALTER TABLE sync_relay_agent_connections DROP COLUMN start_seq;
+      DELETE FROM sync_relay_migrations WHERE migration_id = 'agent-connection-start-seq-v1';`);
+    db.close();
+
+    const storage = reopenTestStorage(path);
+    const upgraded: Fixture = {
+      ...f, storage, h: testHandler(storage, { ...released, discussionActivity: f.activity, nowMs: () => f.clock.value }),
+    };
+    const check = inspectDatabase(path, { readOnly: true });
+    try {
+      // A connection from before starts at the log's end.
+      expect(check.prepare("SELECT start_seq FROM sync_relay_agent_connections WHERE connection_id = ?").get(before.connectionId))
+        .toEqual(check.prepare("SELECT MAX(relay_seq) AS start_seq FROM sync_relay_log WHERE workspace_id = ?").get(workspaceId));
+    } finally {
+      check.close();
+    }
+    ownerSays(upgraded, "owner-mention", "thread-team", "@Helper hello");
+    const read = await ok(await wait(upgraded, before, { timeoutMs: 0 })) as WaitAnswer;
+    expect(read.messages.map((message) => message.messageId)).toEqual(["owner-mention"]);
+    // A new agent signs in, and starts after the mention.
+    const after = await connect(upgraded, "read-write");
+    expect(await ok(await wait(upgraded, after, { timeoutMs: 0 }))).toMatchObject({ messages: [] });
   });
 
   it("answers a cursor far behind the log after one page, with the cursor it reached", async () => {
@@ -493,6 +544,40 @@ describe("an agent waiting for messages", () => {
     expect(f.activity.stats().waiters).toBe(0);
     await expectRefused(await wait(f, agent, { timeoutMs: 0 }));
     await expectRefused(await post(f, agent, { idempotencyKey: "post-after" }));
+  });
+
+  it("holds at most its workspace's share of waits, and frees a place when one ends", async () => {
+    const f = await fixture();
+    const linkConnections = MAX_AGENT_CHAT_WAITS_PER_LINK / MAX_AGENT_CHAT_WAITS_PER_CONNECTION;
+    const agents: Agent[] = [];
+    const full = () => agents.length * MAX_AGENT_CHAT_WAITS_PER_CONNECTION >= MAX_AGENT_CHAT_WAITS_PER_WORKSPACE;
+    while (!full()) {
+      const first = await connect(f, "read-only");
+      agents.push(first);
+      while (agents.length % linkConnections !== 0 && !full()) agents.push(await connect(f, "read-only", first));
+    }
+    // An agent on a link with no waits of its own.
+    const late = await connect(f, "read-only");
+    const parks = watchParks(f);
+    const controllers: AbortController[] = [];
+    const held: Promise<Response>[] = [];
+    for (const agent of agents) {
+      for (let index = 0; index < MAX_AGENT_CHAT_WAITS_PER_CONNECTION; index++) {
+        const controller = new AbortController();
+        controllers.push(controller);
+        held.push(wait(f, agent, {}, controller.signal));
+        await parks.next(held.length - 1);
+      }
+    }
+    await expectCode(await wait(f, late, { timeoutMs: 0 }), 429, "link_read_rate_limited");
+
+    controllers[0]!.abort();
+    await expectRefused(await held[0]!);
+    expect((await wait(f, late, { timeoutMs: 0 })).status).toBe(200);
+
+    controllers.forEach((controller) => controller.abort());
+    for (const response of await Promise.all(held.slice(1))) await expectRefused(response);
+    expect(f.activity.stats().waiters).toBe(0);
   });
 
   it("refuses a wait whose message arrives after its link ended, before it answers", async () => {

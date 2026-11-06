@@ -33,7 +33,7 @@ const TOKEN_CHARS = 64;
 const THREAD_ID_CHARS = 256;
 
 type AgentChatStorage = Pick<SyncRelayStorage,
-  | "advanceAgentWaitCursor" | "appendAgentChatPost" | "authenticateAgentAccessToken" | "fetchChatMessages"
+  | "appendAgentChatPost" | "authenticateAgentAccessToken" | "fetchChatMessages"
   | "findChannelCreateKind" | "getShare" | "getShareGrant" | "getShareLabels" | "linkPrincipalThreadIds" | "workspaceIsOwnedBy"
 >;
 
@@ -175,8 +175,9 @@ export function createAgentChatRoutes(input: {
     take(waitsByLink, grantId);
     take(waitsByWorkspace, workspaceId);
     try {
-      // Without a cursor, from where this connection's waits last answered.
-      let position = requestedCursor ?? first.connection.waitCursor;
+      // Without a cursor, from where the log stood when the agent signed in.
+      // Progress lives only in the cursor each answer returns.
+      let position = requestedCursor ?? first.connection.startSeq;
       const scan = () => {
         const { authorized } = current(tokenHash);
         if (authorized.effectiveSelector.channelWireId !== channelWireId) throw new Refused();
@@ -225,7 +226,6 @@ export function createAgentChatRoutes(input: {
         }
         answer.messages.push(message);
       }
-      storage.advanceAgentWaitCursor(connectionId, answer.cursor);
       return jsonResponse(answer);
     } finally {
       release(waitsByConnection, connectionId);

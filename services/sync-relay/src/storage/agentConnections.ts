@@ -85,8 +85,6 @@ export function initializeAgentConnectionSchema(db: SqliteDb): void {
       resource_hash TEXT NOT NULL,
       connected_at_ms INTEGER NOT NULL,
       last_action_at_ms INTEGER,
-      -- The log position its waits have answered up to: a wait without a cursor starts here.
-      wait_cursor INTEGER NOT NULL CHECK (wait_cursor >= 0),
       status TEXT NOT NULL CHECK (status IN ('active', 'disconnected', 'retired')),
       ended_at_ms INTEGER,
       CHECK ((status = 'active') = (ended_at_ms IS NULL)),
@@ -116,6 +114,19 @@ export function initializeAgentConnectionSchema(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_sync_relay_agent_tokens_connection
       ON sync_relay_agent_tokens(connection_id, kind, issued_at_ms);
   `);
+  // start_seq is the log position when the agent signed in. A wait without
+  // a cursor reads from there, and nothing moves it. A connection from
+  // before the column starts at the log's end when the relay adds it.
+  const marker = "agent-connection-start-seq-v1";
+  if (!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker)) {
+    const columns = new Set(db.prepare("PRAGMA table_info(sync_relay_agent_connections)").all().map(row => String(row.name)));
+    if (!columns.has("start_seq")) {
+      db.exec(`ALTER TABLE sync_relay_agent_connections ADD COLUMN start_seq INTEGER NOT NULL DEFAULT 0 CHECK (start_seq >= 0);
+        UPDATE sync_relay_agent_connections SET start_seq = (SELECT COALESCE(MAX(log.relay_seq), 0) FROM sync_relay_log AS log
+          WHERE log.workspace_id = sync_relay_agent_connections.workspace_id);`);
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(marker, Date.now());
+  }
 }
 
 export type AgentClientRegistration = "metadata-document" | "registered";
@@ -154,7 +165,8 @@ export interface AgentConnectionRow {
   reportedName: string | null;
   connectedAtMs: number;
   lastActionAtMs: number | null;
-  waitCursor: number;
+  /** The log position when it signed in, where a wait without a cursor starts. */
+  startSeq: number;
   status: AgentConnectionStatus;
   endedAtMs: number | null;
 }
@@ -174,7 +186,7 @@ type Guard = () => boolean;
 
 const CONNECTION_COLUMNS = `c.connection_id, c.workspace_id, c.share_id, c.grant_id, c.credential_id,
   c.generation, c.principal_id, c.client_id, c.reported_name, c.connected_at_ms,
-  c.last_action_at_ms, c.wait_cursor, c.status, c.ended_at_ms`;
+  c.last_action_at_ms, c.start_seq, c.status, c.ended_at_ms`;
 
 function rowToConnection(row: Record<string, unknown>): AgentConnectionRow {
   return {
@@ -189,7 +201,7 @@ function rowToConnection(row: Record<string, unknown>): AgentConnectionRow {
     reportedName: nullableText(row.reported_name),
     connectedAtMs: Number(row.connected_at_ms),
     lastActionAtMs: row.last_action_at_ms === null ? null : Number(row.last_action_at_ms),
-    waitCursor: Number(row.wait_cursor),
+    startSeq: Number(row.start_seq),
     status: String(row.status) as AgentConnectionStatus,
     endedAtMs: row.ended_at_ms === null ? null : Number(row.ended_at_ms),
   };
@@ -477,7 +489,7 @@ export function redeemAgentAuthorizationCode(storage: StorageContext, input: {
         principalBytes);
     storage.db.prepare(`INSERT INTO sync_relay_agent_connections (
         connection_id, workspace_id, share_id, grant_id, credential_id, generation, principal_id, client_id,
-        reported_name, resource_hash, connected_at_ms, last_action_at_ms, wait_cursor, status, ended_at_ms
+        reported_name, resource_hash, connected_at_ms, last_action_at_ms, start_seq, status, ended_at_ms
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
         (SELECT COALESCE(MAX(relay_seq), 0) FROM sync_relay_log WHERE workspace_id = ?), 'active', NULL)`)
       .run(input.connectionId, authorization.workspaceId, authorization.shareId, authorization.grantId,
@@ -564,12 +576,6 @@ export function recordAgentConnectionActionInTransaction(storage: StorageContext
 
 export function recordAgentConnectionAction(storage: StorageContext, connectionId: string, atMs: number): void {
   storage.tx(() => recordAgentConnectionActionInTransaction(storage, connectionId, atMs));
-}
-
-/** Moves an active connection's wait position forward to `cursor`, never back. */
-export function advanceAgentWaitCursor(storage: StorageContext, connectionId: string, cursor: number): void {
-  storage.db.prepare(`UPDATE sync_relay_agent_connections SET wait_cursor = MAX(wait_cursor, ?)
-    WHERE connection_id = ? AND status = 'active'`).run(Math.trunc(cursor), connectionId);
 }
 
 /** The link's active connections, newest first. The caller checks the owner. */
