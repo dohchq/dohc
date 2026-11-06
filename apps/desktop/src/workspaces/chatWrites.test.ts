@@ -110,7 +110,6 @@ function fixture() {
     // The person's agents: Nova, the default, and Codex.
     agentIdsNamedIn: async (body: string) => Object.entries({ default: "@nova", codex: "@codex" })
       .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
-    isOwnAgentId: async (name: string) => ["default", "codex"].includes(name),
     localInstallationId: () => "local-id",
     // Marks where an answer holds dispatch scans off.
     async betweenDispatchScans(_workspaceId, write) {
@@ -688,18 +687,21 @@ describe("ActorKey local admission", () => {
     expect(parseActorKey(switched.authorActorKey!)).toEqual({ kind: "account", issuer: "https://cloud.test", userId: "user-2" });
   });
 
-  // Nova is one of the person's agents' names. A name alone is only a claim, so it stays.
-  it.each([undefined, " Opus ", "Nova"])("records the actual handshake claim (%s), matching History", async (agentName) => {
+  // "default" and "codex" are the person's agents' ids, and Nova is one of their
+  // names. Outside a run dohc dispatched, any name is only a claim: the message
+  // shows it, under the unnamed agent's key, as History records the agent's edits.
+  it.each([undefined, " Opus ", "Nova", "default", "codex"])("keys an agent's message outside a run as the unnamed agent, showing its name (%s)", async (agentName) => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
     });
-    const history = deriveMomentActor({ kind: "agent", agentId: agentName ?? "dohc-mcp", onBehalfOf: "user-1" }, {
+    const history = deriveMomentActor({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "user-1" }, {
       source: "own-store", origin: "cli", workspaceId: "workspace",
       identity: { installationId: "local-id", account: { issuer: createActorIssuer("https://cloud.test"), userId: "user-1" } },
     }, "Agent");
     expect(parseActorKey(sent.authorActorKey!)).toEqual(history.key);
     expect(sent.author.displayName).toBe(agentName ?? "Agent");
+    expect(sent.authorAgentId).toBeUndefined();
   });
 
   it("keeps what an agent reported beside its name, and never on a person's message", async () => {
@@ -721,22 +723,6 @@ describe("ActorKey local admission", () => {
       resolveAttachments: async () => [],
     });
     expect(person).not.toHaveProperty("authorReported");
-  });
-
-  it.each(["default", "codex"])("drops a claim to the person's agent id %s, so the message is an unnamed agent's that keeps what it reported", async (agentName) => {
-    const test = fixture();
-    const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
-    const claimed = await test.writes.sendMessage(test.place, {
-      writer: { via: "cli", actor: "agent", agentName, reported }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
-    });
-    const unnamed = await test.writes.sendMessage(test.place, {
-      writer: { via: "cli", actor: "agent" }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
-    });
-    expect(claimed.authorActorKey).toBeDefined();
-    expect(claimed.authorActorKey).toBe(unnamed.authorActorKey);
-    expect(claimed.author).toEqual({ kind: "agent", displayName: "Agent" });
-    expect(claimed.authorAgentId).toBeUndefined();
-    expect(claimed.authorReported).toEqual(reported);
   });
 
   it("stores CLI human origin and automation definition identity locally", async () => {

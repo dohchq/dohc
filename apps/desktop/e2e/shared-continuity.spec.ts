@@ -54,6 +54,9 @@ const HA = "Agent edited while hosted.";
 const AGENT = "trip-agent";
 const HOSTED_AGENT = "trip-agent-hosted";
 const NEXT_AGENT = "trip-agent-after-restore";
+// Outside a run dohc dispatched, an agent's edit is the unnamed agent's,
+// whatever name it gives.
+const UNNAMED_AGENT = "dohc-mcp";
 // The document is shared, so the pending warning goes on to say someone may change the same blocks.
 const PENDING_EDIT_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit. " +
   "The edit is saved. Someone may be changing this document at the same moment, and a change they make to the " +
@@ -489,9 +492,18 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await testInfo.attach(`owner enrollment ${phase}`, { contentType: "application/json", body: JSON.stringify(lastEnrollment, null, 2) });
   };
   const ownerAudit = (deliveryId: string) => ownerAuditRecord(ownerTemp.rootPath, deliveryId);
-  /** The one accepted change that declared `agentId`, as the relay journaled it, the service host accepted and audited it, and the owner imported that audit. */
-  const acceptedDeclaration = async (workspaceId: string, agentId: string): Promise<AcceptedDeclaration> => {
-    const read = () => stack!.hostedAgentEvidence(workspaceId, PATH, agentId);
+  /** The changes the relay has journaled so far that declared the unnamed agent. */
+  const declaredDeliveries = (workspaceId: string) =>
+    new Set(stack!.hostedAgentEvidence(workspaceId, PATH, UNNAMED_AGENT).relay.map(change => change.deliveryId));
+  /** The one accepted change since `before` that declared the unnamed agent, as the relay journaled it, the service host accepted and audited it, and the owner imported that audit. */
+  const acceptedDeclaration = async (workspaceId: string, before: ReadonlySet<string>): Promise<AcceptedDeclaration> => {
+    const agentId = UNNAMED_AGENT;
+    const read = () => {
+      const evidence = stack!.hostedAgentEvidence(workspaceId, PATH, agentId);
+      const relay = evidence.relay.filter(change => !before.has(change.deliveryId));
+      const fresh = new Set(relay.map(change => change.deliveryId));
+      return { ...evidence, relay, host: evidence.host.filter(copy => fresh.has(copy.deliveryId)) };
+    };
     await expect.poll(() => {
       const { relay, host, journal } = read();
       const imported = relay.length === 1 && ownerAudit(relay[0]!.deliveryId) !== null;
@@ -499,7 +511,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       lastAcceptance = { agentId, checkedAt: new Date().toISOString(), ownerOutbox: ownerOutboxDeclarations(ownerTemp.rootPath),
         journal, declaredChanges: relay.length, hostAudits: host.filter(copy => copy.audit).length, ownerImported: imported };
       return imported && host.some(copy => copy.audit);
-    }, { message: `The server accepted, audited and returned one change that declared ${agentId}.`, timeout: 60_000, intervals: [1_000] }).toBe(true);
+    }, { message: `The server accepted, audited and returned one new change that declared ${agentId}.`, timeout: 60_000, intervals: [1_000] }).toBe(true);
     const { relay: [change], host } = read();
     const ownerId = await accountId(ownerAccount.email);
     // The authority is the authenticated owner; the agent is only declared.
@@ -561,7 +573,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(saveState(page)).toHaveAttribute("data-state", "saved");
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1]), { timeout: 30_000 }).toBe(true);
       const authors = ydocUpdateAuthors(ownerTemp.rootPath);
-      expect(authors).toContainEqual({ actorOriginId: AGENT, actorKind: "agent" });
+      expect(authors).toContainEqual({ actorOriginId: UNNAMED_AGENT, actorKind: "agent" });
       expect(authors.some(author => author.actorKind === "human")).toBe(true);
     });
 
@@ -597,11 +609,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await test.step("an agent edits through the CLI while the server hosts the document, and history names it", async () => {
       const page = owner!.page;
       await waitForOwnerEnrollment(page, ownerTemp, workspace.workspaceId);
+      const before = declaredDeliveries(workspace.workspaceId);
       testInfo.annotations.push({ type: "hosted agent edit", description: await hostedAgentEdit(ownerTemp, A1, `${A1} ${HA}`, HOSTED_AGENT) });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(HA);
       await expect(editor(page)).toContainText(HA);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA]), { timeout: 60_000 }).toBe(true);
-      hosted = await acceptedDeclaration(workspace.workspaceId, HOSTED_AGENT);
+      hosted = await acceptedDeclaration(workspace.workspaceId, before);
       provenance.hostedOwner = await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted.change.authorSnapshot));
     });
 
@@ -829,6 +842,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // saved locally or saved to the host. The settled-file check covers the disk.
       await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(H2);
+      const before = declaredDeliveries(workspace.workspaceId);
       testInfo.annotations.push({ type: "post-restore agent edit", description: await hostedAgentEdit(ownerTemp, A1, `${A1} ${A2}`, NEXT_AGENT) });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(A2);
       await expect(editor(page)).toContainText(A2);
@@ -837,7 +851,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
       // The restore moved the document to a new binding, so the agent's
       // accepted change carries the higher restore fence.
-      next = await acceptedDeclaration(workspace.workspaceId, NEXT_AGENT);
+      next = await acceptedDeclaration(workspace.workspaceId, before);
       expect(next.change.restoreFenceGeneration).toBeGreaterThan(hosted!.change.restoreFenceGeneration);
       provenance.nextOwner = await expectDeclaredMoment(page, workspace.workspaceId, A2, admittedAgent(next.change.authorSnapshot));
       expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
@@ -1008,11 +1022,11 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         .catch(() => undefined);
       await testInfo.attach("relay output", { contentType: "text/plain", body: relay.relayOutput() })
         .catch(() => undefined);
-      // Where each declared agent's change stopped, against the moments found so far.
-      const declared = ownerWorkspaceId && [HOSTED_AGENT, NEXT_AGENT].map(agentId => {
-        try { return { agentId, evidence: relay.hostedAgentEvidence(ownerWorkspaceId!, PATH, agentId) }; }
-        catch (cause) { return { agentId, error: cause instanceof Error ? cause.message : String(cause) }; }
-      });
+      // Where each declared agent change stopped, against the moments found so far.
+      const declared = ownerWorkspaceId && (() => {
+        try { return { agentId: UNNAMED_AGENT, evidence: relay.hostedAgentEvidence(ownerWorkspaceId!, PATH, UNNAMED_AGENT) }; }
+        catch (cause) { return { agentId: UNNAMED_AGENT, error: cause instanceof Error ? cause.message : String(cause) }; }
+      })();
       await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ lastAcceptance, declared, hosted, next, provenance, foldEvidence, enrollments, lastEnrollment }, null, 2) })
         .catch(() => undefined);
     }
