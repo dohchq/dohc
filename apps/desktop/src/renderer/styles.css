@@ -2815,10 +2815,14 @@ body {
   @apply bg-selected;
 }
 
+/* Keyboard focus takes the hover fill, like other focus rows, so a focused
+ * option never looks chosen. The chosen option keeps its fill under focus. */
 [data-keyboard-nav] .dohc-callout-type-option:focus-visible {
-  @apply bg-selected;
   outline: 1px solid var(--dohc-accent);
   outline-offset: -1px;
+}
+[data-keyboard-nav] .dohc-callout-type-option:not([aria-selected='true']):focus-visible {
+  @apply bg-hover;
 }
 
 .dohc-callout-title-input {
