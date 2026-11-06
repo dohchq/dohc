@@ -349,18 +349,22 @@ export const TreeRow = memo(function TreeRow(props: {
 }) {
   const { row } = props;
   const name = basenameOf(row.fullPath);
-  // A drop preview colors the whole row, glyph included.
-  const glyphClass = props.dropPreview ? "" : glyphTone(props.selected || props.active);
-  const dropClass =
-    props.dropPreview?.kind === "blocked"
-      ? props.dropPreview.role === "target"
-        ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
-        : "bg-danger/5 text-danger"
-      : props.dropPreview
-        ? props.dropPreview.role === "target"
-          ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
-          : "bg-line/35 text-ink"
-        : "";
+  const blocked = props.dropPreview?.kind === "blocked";
+  const target = props.dropPreview?.role === "target";
+  // A drop preview colors the whole row, glyph included. An allowed target's
+  // glyph takes the success color.
+  const glyphClass = props.dropPreview
+    ? target && !blocked
+      ? "text-success"
+      : ""
+    : glyphTone(props.selected || props.active);
+  const dropClass = blocked
+    ? target
+      ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
+      : "bg-danger/5 text-danger"
+    : target
+      ? "bg-success/16 text-ink"
+      : "bg-line/35 text-ink";
   return (
     <li role="none" className="px-1">
       <button
@@ -400,8 +404,9 @@ export const TreeRow = memo(function TreeRow(props: {
         // selected-not-active rows sat between hover and selected, too close
         // to either to read. The keyboard-focused row draws the row's 1px
         // accent line inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
-        // Background style).
+        // cannot clip it on a row scrolled to an edge. An allowed drop target is
+        // a success tint with no ring or bar, so it never reads as focus. A
+        // blocked target adds a danger ring and a danger bar.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
@@ -413,17 +418,8 @@ export const TreeRow = memo(function TreeRow(props: {
                 : "text-muted hover:bg-hover hover:text-ink"
         }`}
       >
-        {props.dropPreview ? (
-          <span
-            aria-hidden
-            className={`absolute bottom-1 left-0 top-1 w-0.5 rounded-full ${
-              props.dropPreview.role === "target"
-                ? props.dropPreview.kind === "blocked"
-                  ? "bg-danger"
-                  : "bg-ink"
-                : "bg-transparent"
-            }`}
-          />
+        {blocked && target ? (
+          <span aria-hidden className="absolute bottom-1 left-0 top-1 w-0.5 rounded-full bg-danger" />
         ) : null}
         <IndentGuides depth={row.depth} />
         {row.isFolder ? (
