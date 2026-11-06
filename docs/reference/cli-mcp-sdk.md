@@ -250,7 +250,7 @@ Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine"
 
 ### `dohc_list_notices`
 
-List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it's read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing does not change whether rows are read.
+List the Notices rows for this workspace, newest first. Each row has its title, text, sender, time, whether it is read, and where it opens (`opens`): a file or folder path, a chat thread and message to read with dohc_read_chat, or an automation. A row with nowhere to go has `opens: null`, and `note` says why when dohc knows. Listing does not change whether rows are read.
 
 No arguments.
 
@@ -781,9 +781,9 @@ With `--json`, prints `{ schemaVersion, versionId, results: ({ path, fragment } 
 
 ### `dohc notices`
 
-Read your Notices in this workspace.
+Read this workspace's Notices.
 
-Listing changes nothing: rows you haven't read stay unread in dohc.
+Listing does not change whether rows are read.
 
 #### `dohc notices list`
 
@@ -791,7 +791,7 @@ Listing changes nothing: rows you haven't read stay unread in dohc.
 dohc notices list [options]
 ```
 
-List this workspace's Notices, newest first: each row's title, text, sender, time, whether you've read it, and where it opens.
+List this workspace's Notices, newest first: each row's title, text, sender, time, whether you have read it, and where it opens.
 
 With `--json`, prints `{ schemaVersion, notices: { kind, id, title, body, sender, createdAtMs, read, opens, note? }[] }`.
 

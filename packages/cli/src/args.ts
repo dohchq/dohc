@@ -1206,12 +1206,12 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     } },
   } },
   notices: {
-    summary: "Read your Notices in this workspace.",
-    notes: ["Listing changes nothing: rows you haven't read stay unread in dohc."],
+    summary: "Read this workspace's Notices.",
+    notes: ["Listing does not change whether rows are read."],
     verbs: {
       list: {
         capabilityId: "notice.list",
-        summary: "List this workspace's Notices, newest first: each row's title, text, sender, time, whether you've read it, and where it opens.",
+        summary: "List this workspace's Notices, newest first: each row's title, text, sender, time, whether you have read it, and where it opens.",
         operands: "",
         parse: ({ operands }) => {
           noExtraArgs(operands, "notices list");
