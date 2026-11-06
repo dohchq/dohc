@@ -1,6 +1,6 @@
 import { DohcMark } from "@dohc/brand";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FolderOpen, Laptop, Link, MoreHorizontal, type LucideIcon } from "lucide-react";
+import { FolderOpen, Laptop, Link, ListMinus, MoreHorizontal, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -489,6 +489,7 @@ export function WorkspaceManager(props: {
       </div>
       {removing ? (
         <ConfirmDialog
+          icon={ListMinus}
           title={`Remove ${workspaceName(removing.workspace)} from this list?`}
           confirmLabel={removing.busy ? "Removing…" : "Remove from list"}
           confirmDisabled={removing.busy}
