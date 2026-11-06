@@ -566,7 +566,9 @@ describe("ChatLane", () => {
     });
     await act(async () => activity({ workspaceId: "workspace-a" }));
     const failed = await screen.findByTestId("chats-lane-run-failed");
-    expect(within(failed).getByRole("status").textContent).toBe("Nova didn't reply. Its run ended with an error.");
+    // Both lines are announced: why, then what to do instead.
+    expect(within(failed).getAllByRole("status").map((node) => node.textContent))
+      .toEqual(["Nova didn't reply. Its run ended with an error.", "Mention Nova to ask again."]);
     expect(within(failed).getByTestId("chats-lane-run-next-step").textContent).toBe("Mention Nova to ask again.");
     expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
   });

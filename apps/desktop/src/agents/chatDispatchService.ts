@@ -870,7 +870,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return {
       lead: `${noticeAgentName(agentName)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
-      ...(asksAgain ? { nextStep: `Mention ${agentName} to ask again.` } : {}),
+      ...(asksAgain ? { nextStep: `Mention ${noticeAgentName(agentName)} to ask again.` } : {}),
     };
   }
 

@@ -214,7 +214,7 @@ export function FailedRunLine(props: {
       {props.failed.nextStep ? (
         <span data-testid={`${props.testIdPrefix}-run-next-step`} className="flex basis-full gap-x-2">
           <TriangleAlert size={14} aria-hidden className="invisible shrink-0" />
-          <span className="min-w-0">{props.failed.nextStep}</span>
+          <span role="status" className="min-w-0">{props.failed.nextStep}</span>
         </span>
       ) : null}
     </div>
