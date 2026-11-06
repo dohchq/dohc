@@ -29,6 +29,10 @@ export default defineConfig({
     timeout: 30_000,
   },
   retries: 0,
+  // A missing or differing baseline fails its test and writes nothing into
+  // the checkout. The capture goes to the test output. To write baselines on
+  // purpose, pass --update-snapshots.
+  updateSnapshots: "none",
   reporter: [["list"]],
   use: {
     screenshot: "only-on-failure",
