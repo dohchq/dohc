@@ -437,6 +437,12 @@ describe("transactional Collection page", () => {
     expect(invoke.mock.calls.find(([request]) => request.operationId === create)![0].input).toEqual({ values: { [name]: "Bob", [amount]: 12.5, [status]: "New" } });
   });
 
+  it.each([[false, "1 record"], [true, "1 record on this page"]] as const)("counts the records, and says on this page only when another page exists (next page: %s)", async (next, words) => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? page("Alice", next) : { id: 1, version: 1 } }));
+    setup({ invoke }); await screen.findByText("Alice");
+    expect(screen.getByText(words, { selector: "footer span" })).toBeTruthy();
+  });
+
   it("shows a field's error under the field, marks the field, and moves focus to it", async () => {
     setup(); await screen.findByText("Alice");
     fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);

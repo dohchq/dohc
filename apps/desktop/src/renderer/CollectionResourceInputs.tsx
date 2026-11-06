@@ -59,7 +59,7 @@ export function CollectionAttachmentCell(props: { scope: CollectionResourceScope
     catch (cause) { if (alive.current && !abort.signal.aborted) props.onError(`dohc could not download ${props.fieldName}.`, cause, () => { if (alive.current) void download(); }); }
     finally { if (alive.current) { locked.current = false; setPending(false); } }
   }
-  return <SecondaryButton disabled={props.disabled || pending} onClick={() => void download()}>{pending ? "Downloading…" : `Download ${props.fieldName}`}</SecondaryButton>;
+  return <SecondaryButton className="max-w-full truncate" title={`Download ${props.fieldName}`} disabled={props.disabled || pending} onClick={() => void download()}>{pending ? "Downloading…" : `Download ${props.fieldName}`}</SecondaryButton>;
 }
 
 export function CollectionRelationInput(props: InputProps & { resolve: NonNullable<CollectionResources["resolveRelation"]> }) {
