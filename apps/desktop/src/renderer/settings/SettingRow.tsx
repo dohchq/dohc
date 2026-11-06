@@ -296,6 +296,7 @@ export function SwitchControl(props: {
   // What a screen reader says after the name, in place of the tooltip, so a
   // tooltip that repeats the name is not read twice.
   description?: string;
+  describedBy?: string | undefined;
   checked: boolean;
   disabled?: boolean;
   // The change it asked for is still running.
@@ -319,6 +320,7 @@ export function SwitchControl(props: {
         aria-labelledby={props.labelledBy}
         title={props.tooltip}
         aria-description={props.description}
+        aria-describedby={props.describedBy}
         aria-checked={props.checked}
         aria-busy={props.busy || undefined}
         disabled={props.disabled}
