@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { DATASET_SERVER_NOT_FOUND, ipcWireError } from "../../ipc/errorWords";
 import type { CollectionChangeRow } from "../../workspaces/collectionChange";
 import { COLLECTION_CHANGE_FILE, loadCollectionChange, undoCollectionChange } from "../collections/collectionChangeFlow";
 import { ask, proposalPath, volunteers, world, type World } from "../collections/collectionChangeFlow.testHarness";
+import { useShellError } from "../shell/useShellError";
 import { formatClock } from "../time";
 import { CollectionChangeCard } from "./CollectionChangeCard";
 
@@ -135,6 +136,8 @@ it("offers Try again for an Applied reply that didn't post, which posts it", asy
   (onError.mock.calls[0]![2] as () => void)();
   await waitFor(() => expect(onReply).toHaveBeenCalledTimes(2));
   expect(onReply).toHaveBeenLastCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
+  // The card shows it applied, so no notice says so.
+  expect(onNotice).not.toHaveBeenCalled();
 });
 
 it("offers Try again for an Apply that fails after the chat closed, which prepares the change from the Collection as it is now", async () => {
@@ -203,9 +206,11 @@ it("says it applied the change after the chat closed even when its reply didn't 
   await waitFor(() => expect(onReply).toHaveBeenCalledTimes(2));
   expect(onReply).toHaveBeenLastCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
   expect(onNotice).toHaveBeenCalledTimes(1);
+  // Try again posted only the reply: the change applied once.
+  expect(place.actions().filter(action => action === "prepareMigration" || action === "approveMigration")).toEqual(["prepareMigration", "approveMigration"]);
 });
 
-it("says it undid the change after the chat closed even when its reply didn't post", async () => {
+it("says it undid the change after the chat closed even when its reply didn't post, and Try again only posts the reply", async () => {
   const proposal = ask(place);
   const renamed: CollectionChangeRow = { kind: "collection-renamed", key: "collection:name", from: "Volunteers", to: "Helpers" };
   vi.mocked(loadCollectionChange).mockResolvedValueOnce({ proposal, rows: [renamed], state: { kind: "applied", current: true } });
@@ -216,7 +221,34 @@ it("says it undid the change after the chat closed even when its reply didn't po
   view.unmount();
   await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid the change to Volunteers"));
   expect(onError).toHaveBeenCalledWith("dohc couldn't send that message.", expect.any(Error), expect.any(Function));
+  (onError.mock.calls[0]![2] as () => void)();
+  await waitFor(() => expect(onReply).toHaveBeenCalledTimes(2));
+  expect(onReply).toHaveBeenLastCalledWith({ body: "Undid the change to Volunteers.", resolves: false });
   expect(onNotice).toHaveBeenCalledTimes(1);
+  expect(undoCollectionChange).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the Applied row when the reply's Try again posts it, and takes back only the reply's error row", async () => {
+  const shell = renderHook(() => useShellError("w"));
+  const proposal = ask(place);
+  onReply.mockRejectedValueOnce(new Error("dohc couldn't send that message."));
+  const view = render(<CollectionChangeCard workspaceId="w" message={message} path={proposalPath} locked={false} onReply={onReply}
+    onError={(words, cause, retry) => shell.result.current.reportShellFailure({ message: words, cause, ...(retry ? { retry } : {}) })}
+    onNotice={words => shell.result.current.showSuccessNotice(words)} testIdPrefix="lane" />);
+  fireEvent.click(await screen.findByTestId("lane-change-apply"));
+  view.unmount();
+  const rows = () => shell.result.current.shellErrors.map(entry => ({ message: entry.message, tone: entry.tone ?? "error", retry: entry.retry !== null }));
+  await waitFor(() => expect(rows()).toHaveLength(2));
+  expect(rows()).toEqual(expect.arrayContaining([
+    { message: "Applied the change to Volunteers", tone: "success", retry: false },
+    { message: "dohc couldn't send that message.", tone: "error", retry: true },
+  ]));
+  const failed = shell.result.current.shellErrors.find(entry => entry.tone === undefined)!;
+  act(() => shell.result.current.retryShellError(failed.id));
+  await waitFor(() => expect(onReply).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(rows()).toEqual([{ message: "Applied the change to Volunteers", tone: "success", retry: false }]));
+  expect(place.actions().filter(action => action === "prepareMigration" || action === "approveMigration")).toEqual(["prepareMigration", "approveMigration"]);
+  expect(place.head().revisionSha256).toBe(proposal.revisionSha256);
 });
 
 it("names the server when it refuses the change, with no Try again", async () => {
