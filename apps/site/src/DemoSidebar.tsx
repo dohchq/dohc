@@ -198,7 +198,6 @@ export function DemoSidebar(props: {
           onActivateTab={(_groupId, path) => props.onOpenDocument(path)}
           onCloseTab={(_groupId, path) => props.onCloseTab(path)}
           onCloseAllTabs={props.onCloseAllTabs}
-          onNewUntitledTextFile={props.onCreateDocument}
           onCollapseFolders={() => setExpandedFolders([])}
           onSetFolderExpanded={(path, expanded) =>
             setExpandedFolders((current) =>
