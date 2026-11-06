@@ -259,6 +259,7 @@ const Tab = memo(function Tab(props: {
         <button
           type="button"
           aria-label={`Close ${name}`}
+          title="Close"
           tabIndex={-1}
           // Don't let a press on the close button arm the drag above.
           onPointerDown={(event) => event.stopPropagation()}

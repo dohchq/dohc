@@ -53,6 +53,13 @@ function renderTabs(activeTab: string) {
 }
 
 describe("EditorTabs strip scrolling", () => {
+  it("gives every tab's close the tooltip Close", () => {
+    renderTabs("b.md");
+    for (const path of ["a.md", "b.md", "c.md"]) {
+      expect(screen.getByRole("button", { name: `Close ${path}` }).getAttribute("title")).toBe("Close");
+    }
+  });
+
   it.each([
     [siteTabPath("apps/trip"), "Discovered name", "apps/trip"],
     [collectionTabPath("notes/旅"), "旅", "notes/旅"],
