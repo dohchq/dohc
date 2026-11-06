@@ -43,3 +43,10 @@ it("sets quotes in Noto Serif on Linux before any Times face", () => {
   expect(stack.indexOf("'Noto Serif'")).toBe(stack.indexOf("Georgia") + 1);
   expect(stack.indexOf("'Noto Serif'")).toBeLessThan(stack.indexOf("'Times New Roman'"));
 });
+
+// ProseMirror marks a node-selected atom with .ProseMirror-selectednode.
+it("tints a node-selected wikilink pill as a selected Ref chip is tinted", () => {
+  expect(rule(".dohc-wikilink-pill.ProseMirror-selectednode")).toContain(
+    "background-image: linear-gradient(var(--dohc-selection), var(--dohc-selection));",
+  );
+});

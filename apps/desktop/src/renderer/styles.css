@@ -1293,6 +1293,12 @@ body {
   color: var(--dohc-subtle);
 }
 
+/* Node-selected, the pill takes the text selection's tint over its fill,
+ * as a selected Ref chip does. */
+.dohc-wikilink-pill.ProseMirror-selectednode {
+  background-image: linear-gradient(var(--dohc-selection), var(--dohc-selection));
+}
+
 .dohc-wikilink-pill__label {
   overflow: hidden;
   text-overflow: ellipsis;
