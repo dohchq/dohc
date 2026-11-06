@@ -4,7 +4,7 @@ import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-c
 import { cutText } from "@dohc/automation-executor/automation-chat";
 import type { PostNoticeInput } from "../notices/noticeStore";
 import type { OwedRunNotices } from "./owedRunNotices";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   createChatRunnerProcess,
@@ -215,7 +215,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // at the run's chain depth, for the person main names.
   setRunAttribution(
     workspace: ChatDispatchWorkspace,
-    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch } | null,
+    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch; secret: string } | null,
   ): void | Promise<void>;
   runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
@@ -312,6 +312,12 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 // MCP server that its launch starts (chatRunnerProcess.ts replyServerArguments).
 // A custom command replies through the dohc CLI.
 type ReplyForm = "argument" | "mcp";
+
+// A new secret for each run. Only the run's process gets it, so only its
+// requests are the run's.
+function runSecret(): string {
+  return randomBytes(32).toString("hex");
+}
 
 function replyFormFor(tool: AgentLaunchProfile["tool"] | undefined): ReplyForm {
   return tool ? "mcp" : "argument";
@@ -982,11 +988,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       // A claim from before a lost response can name an agent turned off since.
       if (!agent) throw new Error("this agent is off or no longer set up");
+      const secret = runSecret();
       await options.setRunAttribution(workspace, {
         agentId: agent.id,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
         dispatch: "run",
+        secret,
       });
       const markdown = await buildRunnerThreadContext({
         dispatchStore: dispatch,
@@ -1011,6 +1019,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         command: launchCommand(agent.launch),
         profile: launchProfile(agent.launch),
         prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, launchProfile(agent.launch)?.tool),
+        runSecret: secret,
         assertMayStart,
       });
       const timeout = setTimeout(() => {
@@ -1830,11 +1839,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         const prompt = replyFormFor(launchProfile(agent.launch)?.tool) === "mcp"
           ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
           : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
+        const secret = runSecret();
         await options.setRunAttribution(workspace, {
           agentId: agent.id,
           agentRunId: runId,
           depth: 0,
           dispatch: "self-test",
+          secret,
         });
         const child = spawnConfiguredRunner({
           rootPath: workspace.rootPath,
@@ -1844,6 +1855,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           command,
           profile: launchProfile(agent.launch),
           prompt,
+          runSecret: secret,
           assertMayStart,
         });
         return await new Promise<RunnerSelfTestResult>((resolveResult) => {

@@ -47,6 +47,7 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
       command,
       profile,
       prompt: "",
+      runSecret: "a".repeat(64),
       assertMayStart,
     });
   return { calls, root, spawn };
@@ -292,6 +293,7 @@ describe("chat runner process", () => {
         logPath: join(shims, "run.log"),
         command: `"${shim}"`,
         prompt: "",
+        runSecret: "a".repeat(64),
         assertMayStart: () => undefined,
       });
       const exitCode = await new Promise<number | null>((resolveExit) => child.onExit(resolveExit));
@@ -318,6 +320,7 @@ describe("chat runner process", () => {
       command: "",
       profile: { tool: "codex", executable: codex },
       prompt: "",
+      runSecret: "a".repeat(64),
       assertMayStart: () => undefined,
     });
     expect(() => start(root)).toThrow(

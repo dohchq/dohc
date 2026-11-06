@@ -80,7 +80,7 @@ function codexReplyServer(args) {
   const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
   const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
   const sandbox = process.platform === "win32" && config.has("windows.sandbox") ? ["windows.sandbox"] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode", `permissions.${profile}`, "default_permissions", "projects", ...sandbox];
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.env_vars", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode", `permissions.${profile}`, "default_permissions", "projects", ...sandbox];
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
   const trust = [...(config.get("projects") ?? "").matchAll(/('[^']*'|"(?:[^"\\]|\\.)*")=\{trust_level='untrusted'\}/gu)];
@@ -94,6 +94,7 @@ function codexReplyServer(args) {
     !tomlStrings(trust.map(([, key]) => key).join(",")).includes(rootKey) ||
     (sandbox.length > 0 && config.get("windows.sandbox") !== "'unelevated'") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
+    config.get("mcp_servers.dohc.env_vars") !== "['DOHC_RUN_SECRET']" ||
     JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
     JSON.stringify(args.slice(-3)) !== JSON.stringify(["--skip-git-repo-check", "--ephemeral", "-"]) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
@@ -116,7 +117,9 @@ function claudeReplyServer(args) {
 }
 
 // Reply as Claude Code and Codex do: start the dohc MCP server the launch
-// names, outside the runner's environment, and call the reply tool once.
+// names, outside the runner's environment, and call the reply tool once. The
+// server keeps the run's secret: Claude Code passes its own environment, and
+// Codex the variables the launch names, which codexReplyServer checks.
 function replyThroughMcp(args, body) {
   const launch = profileTool === "codex" ? codexReplyServer(args) : claudeReplyServer(args);
   if (!launch || !existsSync(launch.command)) {
