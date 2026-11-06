@@ -248,7 +248,7 @@ function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
 
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode; body?: ReactNode }) {
   const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
@@ -272,7 +272,7 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
         )}
       >
         {props.children}
-        <div className="h-4 rounded-b-lg bg-bg" />
+        {props.body ?? <div className="h-4 rounded-b-lg bg-bg" />}
       </EditorGroupFrame>
     </div>
   );
@@ -2237,12 +2237,18 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="failed" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" body={
+            <div className="flex h-56 flex-col rounded-b-lg bg-bg">
+              <EmptyState icon={AlertTriangle} tone="danger" title="dohc could not read this file.">
+                <SecondaryButton data-testid="file-read-retry" onClick={noop}>Try again</SecondaryButton>
+              </EmptyState>
+            </div>
+          }>
             <ViewActions
               onShare={noop}
               actions={
                 <DocumentControls
-                  toggle={{ label: "Edit", disabled: true }}
+                  toggle={{ label: "Edit", disabled: true, title: "dohc could not open this file." }}
                   menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
                 />
               }

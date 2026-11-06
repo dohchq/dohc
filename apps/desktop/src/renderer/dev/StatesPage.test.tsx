@@ -33,6 +33,22 @@ const expectForcedTarget = (mark: HTMLElement) =>
   expect(mark.querySelector(mark.dataset.forceTarget ?? ""), mark.dataset.forceTarget).not.toBeNull();
 
 describe("states page", () => {
+  it("draws the failed-open body below its disabled document controls", () => {
+    vi.stubGlobal("dohcDesktop", {});
+    try {
+      render(<StatesPage parts={new Set(["tab-row-actions"])} />);
+      for (const theme of ["light", "dark"]) {
+        const part = within(screen.getByTestId(`states-${theme}`));
+        const body = part.getByText("dohc could not read this file.").parentElement!.parentElement!;
+        expect(within(body).getByRole("button", { name: "Try again" })).toBeTruthy();
+        expect(body.querySelector(".lucide-triangle-alert")).not.toBeNull();
+        expect(part.getByRole("button", { name: "Edit", description: "dohc could not open this file." }).getAttribute("aria-disabled")).toBe("true");
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("draws the start tiles and recent files in every empty editor group", () => {
     vi.stubGlobal("dohcDesktop", {});
     try {

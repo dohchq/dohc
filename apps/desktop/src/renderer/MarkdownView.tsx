@@ -18,6 +18,7 @@ import {
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  SAVE_STATE,
   StateMark,
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
@@ -2301,7 +2302,13 @@ export function MarkdownView(props: {
               label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE : undefined,
+              title: opening ? OPENING_TITLE
+                : props.lossyNote === "lossy" ? "This note has parts dohc can't show."
+                : chipState === "read-only" ? "Your access to this document ended."
+                : readOnly && typeof chipState === "string" && SAVE_STATE[chipState].title ? SAVE_STATE[chipState].title
+                : props.forceReadOnly ? SAVE_STATE["read-only"].title
+                : props.truncated ? SAVE_STATE["too-large"].title
+                : undefined,
               onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {

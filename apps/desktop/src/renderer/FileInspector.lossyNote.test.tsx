@@ -137,7 +137,9 @@ describe("a lossy note", () => {
     const notice = await screen.findByTestId("lossy-note-notice");
     expect(notice.textContent).toContain("dohc can't edit this note yet without changing parts it can't show.");
     await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("See the docs."));
-    expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(true);
+    expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "Edit", description: "This note has parts dohc can't show." }).getAttribute("title"))
+      .toBe("This note has parts dohc can't show.");
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(screen.queryByTestId("properties-panel")).toBeNull();
     expect(bridge.openEngineYDocSession).not.toHaveBeenCalled();

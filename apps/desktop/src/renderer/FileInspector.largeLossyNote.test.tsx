@@ -82,7 +82,7 @@ function bridgeFor(text: string, engine: "record" | "no-record") {
 async function expectWaiting() {
   await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("Paragraph 1 of plain text"));
   expect(screen.queryByTestId("markdown-editor")).toBeNull();
-  expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(true);
+  expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
   expect(screen.getByTestId("markdown-open-state").getAttribute("title"))
     .toBe("You can edit this document when it finishes opening.");
 }
@@ -96,7 +96,7 @@ describe("a note past read mode's size", () => {
 
     await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
     const toggle = screen.getByTestId("markdown-edit-toggle");
-    await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(toggle.getAttribute("aria-disabled")).not.toBe("true"));
     expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
     expect(pending).toEqual([]);
     await user.click(toggle);
