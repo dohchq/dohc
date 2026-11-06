@@ -2550,7 +2550,7 @@ describe("ui-state merge-on-load", () => {
       await newer.promise;
     });
     expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
-    expect(screen.getAllByText("pulled.md").length).toBeGreaterThan(0);
+    expect(await screen.findByRole("treeitem", { name: "pulled.md" })).toBeTruthy();
   });
 
   // Closing the active tab remounts the keyed inspector on its neighbour —
