@@ -171,7 +171,10 @@ async function flushCapture(harnessed: Harness) {
   );
 }
 
-/** The granter's files, as the share's pull leaves them: moments and a projection. */
+/**
+ * Writes this person's local work to the store and disk. The next push can send it.
+ * A case that needs files the share already has pushes them once first.
+ */
 async function seedSharedFiles(
   harnessed: Harness,
   files: readonly { path: string; text: string }[],
@@ -558,16 +561,16 @@ describe("share-view file operations through the real store", () => {
   it.skipIf(engine.missing)("keeps a Collection file apart after rebuilding its saved list", async () => {
     const written: string[][] = [];
     const uploaded: string[] = [];
-    const collectionWritePaths: Array<string | undefined> = [];
+    const collectionWritePaths: Array<string | null> = [];
     const ownFileSha256 = createHash("sha256").update("my own file").digest("hex");
     const server = createServer((request, response) => {
       void (async () => {
         if (request.method === "POST" && request.url === `/sync/shares/${SHARE_ID}/collection-writes`) {
           const chunks: Buffer[] = [];
           for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { changes: Array<{ basedOnPath?: string; afterPath?: string }> };
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { changes: Array<{ basedOnPath: string | null; afterPath: string | null }> };
           collectionWritePaths.push(...body.changes.flatMap(change => [change.basedOnPath, change.afterPath]));
-          const paths = body.changes.flatMap(change => change.afterPath === undefined ? [] : [change.afterPath]);
+          const paths = body.changes.flatMap(change => change.afterPath == null ? [] : [change.afterPath]);
           written.push(paths);
           response.writeHead(200, { "content-type": "application/json", connection: "close" });
           response.end(JSON.stringify({ paths }));
@@ -610,6 +613,7 @@ describe("share-view file operations through the real store", () => {
       uploaded.length = 0;
       collectionWritePaths.length = 0;
       written.length = 0;
+      const beforeRefresh = replicationLogRows(view.rootPath);
       await writeFile(join(view.rootPath, path), "my own file", "utf8");
       const record = join(view.rootPath, ".dohc", "local", "share-refresh", "share-collision-record.json");
       await mkdir(dirname(record), { recursive: true, mode: 0o700 });
@@ -624,6 +628,7 @@ describe("share-view file operations through the real store", () => {
       expect(uploaded).not.toContain(ownFileSha256);
       expect(collectionWritePaths).not.toContain(path);
       expect(written).toEqual([]);
+      expect(replicationLogRows(view.rootPath)).toBe(beforeRefresh);
       expect(await readFile(join(view.rootPath, path), "utf8")).toBe("my own file");
       expect(JSON.parse(await readFile(record, "utf8"))).toEqual({ shareId: SHARE_ID, paths: [path] });
 
@@ -635,6 +640,8 @@ describe("share-view file operations through the real store", () => {
       expect(uploaded).not.toContain(ownFileSha256);
       expect(collectionWritePaths).not.toContain(path);
       expect(written).toEqual([[controlPath]]);
+      expect(await readFile(join(view.rootPath, path), "utf8")).toBe("my own file");
+      expect(JSON.parse(await readFile(record, "utf8"))).toEqual({ shareId: SHARE_ID, paths: [path] });
     } finally {
       errorLog.mockRestore();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
