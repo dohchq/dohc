@@ -8,6 +8,7 @@ afterEach(closeTestStorages);
 const ws = "references";
 const target = {kind: "file", versionId: "main", objectId: "plan"} as const;
 const ref = "A".repeat(43);
+type ReferencePage = Awaited<ReturnType<StorageContext["listWorkReferences"]>>;
 
 function mintBody(target: unknown): RequestInit {
   return {...jsonBody({workspaceId: ws, target}), headers: {"content-type": "application/json", "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY}};
@@ -163,7 +164,7 @@ describe("work reference registration and resolution", () => {
     expect(JSON.stringify(found)).not.toContain("snapshot-object");
     expect(await json(await handler(linkRequest(token,"/sync/internal/work-references",{
       ...jsonBody({target:found.target}),headers:{"content-type":"application/json","x-dohc-relay-exchange-key":RELAY_EXCHANGE_KEY},
-    }))))).toMatchObject({reference:ref,target:found.target});
+    })))).toMatchObject({reference:ref,target:found.target});
     expect((await handler(linkRequest("X".repeat(43), `/sync/work-references/${ref}`))).status).toBe(404);
     expect((await handler(linkRequest(token, `/sync/shares/${shareId}/work-references`, jsonBody({references: []})))).status).toBe(404);
     storage.revokeShareGrant({shareId, grantId: "link-grant", revokedAtMs: 3});
@@ -188,7 +189,7 @@ describe("work reference registration and resolution", () => {
     const {handler, storage} = await fixture();
     await appendLog(handler, "owner", ws, [moment("private/hidden.md", "Plan", {originSeq: 1, objectId: "hidden", momentId: "hidden-write"})], {originId: "device"});
     const shareId = await createShare(handler, "owner", ws, {paths: ["notes"], recipientUserId: "reader", access: "view"});
-    const read = (after?: string) => handler(request("reader", `/sync/shares/${shareId}/work-references${after ? `?after=${encodeURIComponent(after)}` : ""}`)).then(json);
+    const read = (after?: string) => handler(request("reader", `/sync/shares/${shareId}/work-references${after ? `?after=${encodeURIComponent(after)}` : ""}`)).then(json) as Promise<ReferencePage>;
     const empty = await read();
     await register(handler, [{reference: ref, target, createdAtMs: 1}]);
     const one = await read();
@@ -264,7 +265,7 @@ describe("work reference registration and resolution", () => {
     }
     const objects = vi.spyOn(storage, "objectMoment");
     try {
-      const first = await json(await handler(request("reader", `/sync/shares/${shareId}/work-references`)));
+      const first = await json(await handler(request("reader", `/sync/shares/${shareId}/work-references`))) as ReferencePage;
       expect(first).toMatchObject({references: [], hasMore: false});
       expect(first.nextAfter).toHaveLength(144);
       expect(objects).toHaveBeenCalledTimes(500);
@@ -325,7 +326,7 @@ describe("work reference registration and resolution", () => {
     try {
       const response = await handler(request("owner", `/sync/${ws}/work-references`));
       expect(response.status).toBe(200);
-      const page = await json(response);
+      const page = await json(response) as ReferencePage;
       expect(page.references.map((mapping: {reference: string}) => mapping.reference)).toEqual([ref, "D".repeat(43)]);
       expect(page.references.every((mapping: object) => !("deleted" in mapping))).toBe(true);
       expect(objects).not.toHaveBeenCalled();
@@ -405,9 +406,9 @@ describe("work reference registration and resolution", () => {
     expect(deleted.references).toMatchObject([{reference: references[128]!.reference}]);
     expect(deleted.hasMore).toBe(false);
     await appendLog(handler, "owner", ws, [moment("notes/plan.md", "Plan", {originSeq: 2, objectId: "plan", momentId: "restore-plan"})], {originId: "device"});
-    const restored = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${deleted.nextAfter}`)));
+    const restored = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${deleted.nextAfter}`))) as ReferencePage;
     expect(restored.references).toHaveLength(128);
-    const tail = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${restored.nextAfter}`)));
+    const tail = await json(await handler(request("owner", `/sync/${ws}/work-references?after=${restored.nextAfter}`))) as ReferencePage;
     expect([...restored.references, ...tail.references].map((mapping: {reference: string}) => mapping.reference).sort()).toEqual(references.map(mapping => mapping.reference).sort());
     expect(tail.hasMore).toBe(false);
     expect((await handler(request("owner", `/sync/work-references/${references[0]!.reference}`))).status).toBe(200);
