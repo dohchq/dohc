@@ -1,6 +1,6 @@
 import { Check, Layers, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
+import type { ListVersionLastChangesResult, ListWorkspaceVersionConflictsResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
@@ -16,6 +16,27 @@ interface ConflictCount { count: number; more: boolean }
 // Conflict counts read the open conflicts a page at a time. Past this many pages
 // a count shows as a lower bound.
 const CONFLICT_PAGES_MAX = 5;
+
+// How long a read waits for its answer. The engine can leave a read with no
+// answer while the workspace's engine thread is stuck (#3318), so the page
+// gives up, in the words of the engine's own deadline.
+const READ_DEADLINE_MS = 30_000;
+
+// The read, or a failure once it has gone READ_DEADLINE_MS with no answer. An
+// answer after that is dropped.
+function withDeadline<T>(read: Promise<T>, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const error = new Error(`${what} got no answer in ${READ_DEADLINE_MS} ms.`);
+      error.name = "EngineRequestDeadlineError";
+      reject(error);
+    }, READ_DEADLINE_MS);
+    read.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
 
 // Where the tab's failed reads go: a row in Notices, which onSettled takes back.
 // `quiet` changes the row where it stands, with no new toast.
@@ -56,6 +77,8 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
     if (filed.current !== null) reports.onSettled(identity);
   }, []);
   useEffect(() => {
+    // A Try again pressed since this render took these failures back.
+    if (failures !== current.current) return;
     if (failures.size === 0) {
       if (filed.current !== null) reports.onSettled(identity);
       filed.current = null;
@@ -70,8 +93,11 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
     // The first failure's error gives the words and Copy details.
     reports.onError(sentence, failures.get(first!), () => {
       const failed = [...current.current.keys()];
+      // The effect of a render before this press can still run. It finds its
+      // failures gone, so it files nothing.
+      current.current = new Map();
       filed.current = null;
-      setFailures(new Map());
+      setFailures(current.current);
       retry(failed);
     }, identity, quiet);
   }, [failures, reading]);
@@ -136,7 +162,12 @@ export function VersionsPage(props: {
   // Try again reads again each read that had failed.
   const notice = useReadsNotice(props, (reads) => {
     if (reads.includes("last-changes")) setLastChangesRetry((attempt) => attempt + 1);
-    if (reads.includes("counts")) recount(failedCounts.current);
+    // Every failed count, even one whose failure has not reached the notice
+    // yet. That failure's effect, from before the press, then files nothing.
+    if (failedCounts.current.length > 0) {
+      recount(failedCounts.current);
+      failedCounts.current = [];
+    }
     if (reads.includes("conflicts")) setConflictsRetry((attempt) => attempt + 1);
   });
 
@@ -269,10 +300,10 @@ export function VersionsPage(props: {
       let after: string | null = null;
       try {
         for (let page = 0; page < CONFLICT_PAGES_MAX; page += 1) {
-          const result = await bridge().listWorkspaceVersionConflicts({
+          const result: ListWorkspaceVersionConflictsResult = await withDeadline(bridge().listWorkspaceVersionConflicts({
             workspaceId,
             ...(after === null ? {} : { afterConflictId: after }),
-          });
+          }), "listWorkspaceVersionConflicts");
           if (!conflictReads.isCurrent(token)) return;
           for (const conflict of result.conflicts) {
             if (conflict.origin !== "merge") continue;
