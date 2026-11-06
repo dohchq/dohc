@@ -3525,11 +3525,14 @@ async function dispatchWorkspace(
       );
       // Inside a run dohc dispatched, the inbox is that run's agent's unread
       // work: its chat, and each message elsewhere that asked it. Outside a
-      // run, a self-connected agent reads every agent chat and the plain
-      // @agent mentions no dohc agent took.
+      // run, connected agents share DMs, plain @agent mentions, and replies
+      // in threads they posted in.
       const runId = options.dispatchedRunId(context.workspaceId);
       const runAgentId = runId === null ? null : options.dispatchedAgent(context.workspaceId);
-      const unread = await context.store.listAgentUnreadThreads(context.workspaceId, runId ?? undefined);
+      const mentionRows = await context.store.listAgentUnreadRequests(context.workspaceId, runId ?? undefined);
+      const unread = runId === null
+        ? [...new Set(mentionRows.map(row => row.threadId))].map(id => ({ id }))
+        : await context.store.listAgentUnreadThreads(context.workspaceId, runId);
       const agentChannelIds = new Set(
         channels
           .filter(({ engine }) => engine.kind === "agent" && (runAgentId === null || engine.agentId === runAgentId))
@@ -3559,20 +3562,13 @@ async function dispatchWorkspace(
       );
       inboxThreads.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 
-      const mentionRows = runId !== null
-        ? await context.store.listAgentUnreadRequests(context.workspaceId, runId)
-        : await context.store.listMentionsForHandle(
-          context.workspaceId,
-          "agent",
-          { unreadByAgentOnly: true },
-        );
       const messageCache = new Map<string, ChatMessage[]>();
       const mentions: CliResultByVerb["inbox"]["mentions"] = [];
       for (const mention of mentionRows) {
         const thread = loadedById.get(mention.threadId);
         if (!thread) continue;
-        // A request in the run's agent's own chat is already in its threads.
-        if (runAgentId !== null && thread.thread.channelId && agentChannelIds.has(thread.thread.channelId)) continue;
+        // Requests in an agent chat are already in the threads above.
+        if (thread.thread.channelId && agentChannelIds.has(thread.thread.channelId)) continue;
         let messages = messageCache.get(thread.thread.id);
         if (!messages) {
           messages = await context.store.listMessages({
@@ -4096,16 +4092,7 @@ async function watchMessages(
         });
       };
       // Keep the outside-run inbox's reach even while dohc has a run open.
-      for (const unread of await context.store.listAgentUnreadThreads(context.workspaceId)) {
-        const thread = byId.get(unread.id);
-        if (!thread || thread.group.kind !== "agent") continue;
-        for (const message of await read(unread.id)) {
-          const afterRead = message.createdAtMs > unread.lastRead.createdAtMs ||
-            (message.createdAtMs === unread.lastRead.createdAtMs && message.id > unread.lastRead.messageId);
-          if (message.author.kind === "human" && afterRead) add(thread, message);
-        }
-      }
-      for (const mention of await context.store.listMentionsForHandle(context.workspaceId, "agent", { unreadByAgentOnly: true })) {
+      for (const mention of await context.store.listAgentUnreadRequests(context.workspaceId)) {
         const thread = byId.get(mention.threadId);
         if (!thread) continue;
         const message = (await read(mention.threadId)).find(row => row.id === mention.messageId);

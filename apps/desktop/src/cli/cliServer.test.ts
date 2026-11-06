@@ -579,8 +579,8 @@ describe("CLI socket server", () => {
     const [template] = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
     let candidates: NonNullable<typeof template>[] = [];
     const messages = vi.spyOn(store!, "listMessages").mockImplementation(async input => input.threadId === thread.id ? candidates : []);
-    const mentions = vi.spyOn(store!, "listMentionsForHandle").mockImplementation(async () => candidates.map(row => ({
-      threadId: thread.id, messageId: row.id, handle: "agent", authorKind: "human" as const, createdAtMs: row.createdAtMs,
+    const mentions = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async () => candidates.map(row => ({
+      threadId: thread.id, messageId: row.id, authorKind: "human" as const, createdAtMs: row.createdAtMs,
     })));
     let cursor: string | undefined;
     const watch = async () => {
@@ -608,8 +608,8 @@ describe("CLI socket server", () => {
 
   it("wakes a wait when a local message arrives", async () => {
     const queried = deferred<void>();
-    const list = store!.listMentionsForHandle.bind(store!);
-    const spy = vi.spyOn(store!, "listMentionsForHandle").mockImplementation(async (...args) => {
+    const list = store!.listAgentUnreadRequests.bind(store!);
+    const spy = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async (...args) => {
       const rows = await list(...args);
       queried.resolve();
       return rows;
@@ -620,6 +620,37 @@ describe("CLI socket server", () => {
       const posted = await post({ group: "general", actor: "human", body: "@agent a new message" });
       expect((await pending).messages.map(message => message.messageId)).toEqual([posted.messageId]);
     } finally { spy.mockRestore(); }
+  });
+
+  it("wakes for replies after the agent posts and preserves unread state", async () => {
+    const root = await post({ group: "general", actor: "agent", body: "My discussion" });
+    const queried = deferred<void>();
+    const original = store!.listAgentUnreadRequests.bind(store!);
+    const spy = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async (...args) => {
+      const rows = await original(...args); queried.resolve(); return rows;
+    });
+    try {
+      const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: root.threadId });
+      await queried.promise;
+      const reply = await invoke("reply", { cwd: workspaceRoot, actor: "human", thread: root.threadId, body: "A reply", attachments: [], needsDecision: false });
+      const batch = await pending;
+      expect(batch.messages.map(row => row.messageId)).toEqual([reply.messageId]);
+      expect((await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map(row => row.messageId)).toEqual([reply.messageId]);
+      expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: root.threadId, cursor: batch.cursor, timeoutMs: 0 })).messages).toEqual([]);
+      const later = await invoke("reply", { cwd: workspaceRoot, actor: "human", thread: root.threadId, body: "Another reply", attachments: [], needsDecision: false });
+      expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: root.threadId, cursor: batch.cursor, timeoutMs: 0 })).messages.map(row => row.messageId)).toEqual([later.messageId]);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("includes replies after an agent posts and excludes its own mentions", async () => {
+    const root = await post({ group: "general", actor: "agent", body: "My discussion" });
+    await invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: root.threadId, body: "My @agent reply", attachments: [], needsDecision: false });
+    const reply = await invoke("reply", { cwd: workspaceRoot, actor: "human", thread: root.threadId, body: "A plain reply", attachments: [], needsDecision: false });
+    const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
+    expect(batch.messages.map(row => row.messageId)).toEqual([reply.messageId]);
+    expect((await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map(row => row.messageId)).toEqual([reply.messageId]);
+    await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "my-agent", timeoutMs: 0 })).messages).toEqual([]);
   });
 
   it("narrows to a Group and thread without widening the inbox", async () => {
@@ -652,12 +683,13 @@ describe("CLI socket server", () => {
     expect(batch.messages.map(message => message.text)).toEqual(["Later"]);
   });
 
-  it("wakes after a workspace cloud pull even if the message predates the cursor", async () => {
+  it.each(["mention", "posted-thread reply"])("uses the cloud-pull wake mechanism for a %s that predates the cursor", async (kind) => {
     const first = await post({ group: "general", actor: "human", body: "@agent first" });
+    if (kind === "posted-thread reply") await invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: first.threadId, body: "Joining the thread", attachments: [], needsDecision: false });
     const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
     const queried = deferred<void>();
-    const original = store!.listMentionsForHandle.bind(store!);
-    const spy = vi.spyOn(store!, "listMentionsForHandle").mockImplementation(async (...args) => {
+    const original = store!.listAgentUnreadRequests.bind(store!);
+    const spy = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async (...args) => {
       const rows = await original(...args); queried.resolve(); return rows;
     });
     try {
@@ -666,7 +698,7 @@ describe("CLI socket server", () => {
       const threads = await store!.listThreads({ workspaceId: WORKSPACE_ID });
       const thread = threads.find(thread => cliThreadId(thread.id) === first.threadId)!;
       const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
-      const older = { ...messages[0]!, id: "synced-message", createdAtMs: 0, body: "@agent synced" };
+      const older = { ...messages[0]!, id: "synced-message", createdAtMs: 0, body: kind === "mention" ? "@agent synced" : "A synced reply" };
       const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
       const start = source.indexOf("    afterSuccessfulPull: ({ recovered, applied }) => {");
       const end = source.indexOf("\n    // Recorded durably before each pull", start);
@@ -696,7 +728,7 @@ describe("CLI socket server", () => {
           recoverOrigin: async () => { throw new Error("Unexpected recovery"); },
           pull: async () => {
             messageSpy.mockImplementation(async input => input.threadId === thread.id ? [...messages, older] : []);
-            spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, handle: "agent", authorKind: "human" as const, createdAtMs: 0 }]);
+            spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, authorKind: "human" as const, createdAtMs: 0 }]);
             return { fetched: 1, applied: 1, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: 1, sharingDeclined: [] };
           },
         },

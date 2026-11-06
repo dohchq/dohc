@@ -4026,12 +4026,11 @@ impl<'a> LinkedChatStore<'a> {
     /// Mention rows for a normalized handle in ascending message-coordinate
     /// order. Inner joins fail closed over missing messages or threads. A
     /// message that already woke a dohc agent is that agent's work, so it is
-    /// left out. `unread_only` reads the place agents outside a run share.
+    /// left out.
     pub fn list_mentions_for_handle(
         &self,
         workspace_id: &str,
         handle: &str,
-        unread_only: bool,
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, DomainError> {
@@ -4050,19 +4049,13 @@ impl<'a> LinkedChatStore<'a> {
                        AND m.thread_id = x.thread_id AND m.message_id = x.message_id \
                      JOIN chat_threads t ON t.workspace_id = x.workspace_id \
                        AND t.thread_id = x.thread_id \
-                     LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = x.workspace_id \
-                       AND ars.agent_id = ?8 AND ars.thread_id = x.thread_id \
                      WHERE x.workspace_id = ?1 AND x.handle = ?2 \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l \
                          WHERE l.workspace_id = x.workspace_id \
                            AND l.trigger_message_id = x.message_id) \
-                       AND (?3 = 0 OR ars.thread_id IS NULL \
-                         OR x.created_at_ms > ars.last_read_created_at_ms \
-                         OR (x.created_at_ms = ars.last_read_created_at_ms \
-                           AND x.message_id > ars.last_read_message_id)) \
-                       AND (?4 = 0 OR x.created_at_ms > ?5 \
-                         OR (x.created_at_ms = ?5 AND x.message_id > ?6)) \
-                     ORDER BY x.created_at_ms, x.message_id LIMIT ?7",
+                       AND (?3 = 0 OR x.created_at_ms > ?4 \
+                         OR (x.created_at_ms = ?4 AND x.message_id > ?5)) \
+                     ORDER BY x.created_at_ms, x.message_id LIMIT ?6",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
@@ -4070,12 +4063,10 @@ impl<'a> LinkedChatStore<'a> {
                     params![
                         workspace_id,
                         handle,
-                        i64::from(unread_only),
                         has_after,
                         after_created_at_ms,
                         after_message_id,
-                        limit,
-                        OUTSIDE_RUN_READER
+                        limit
                     ],
                     |row| {
                         let thread_id: String = row.get(0)?;
@@ -4099,19 +4090,21 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// The messages that asked a running run's agent and lie beyond that
-    /// agent's place in their thread, in ascending message-coordinate order.
+    /// Unread requests for a run's agent, or the shared outside-run reader.
     pub fn list_agent_unread_requests(
         &self,
         workspace_id: &str,
-        run_id: &str,
+        run_id: Option<&str>,
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAgentRequest>, DomainError> {
         validate_chat_page_limit(limit)?;
+        if run_id.is_none() {
+            return self.list_outside_agent_requests(workspace_id, after, limit);
+        }
         let (has_after, after_created_at_ms, after_message_id) = chat_after(after);
         self.store.read_with(|conn| {
-            let agent_id = agent_reader(conn, workspace_id, Some(run_id))?;
+            let agent_id = agent_reader(conn, workspace_id, run_id)?;
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms \
@@ -4154,6 +4147,81 @@ impl<'a> LinkedChatStore<'a> {
                                 author_kind,
                                 created_at_ms,
                             }
+                        }))
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    fn list_outside_agent_requests(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAgentRequest>, DomainError> {
+        let (has_after, after_ms, after_id) = chat_after(after);
+        self.store.read_with(|conn| {
+            let sql = r#"
+                WITH posted AS MATERIALIZED (
+                  SELECT thread_id, MIN(message_order) AS first_order
+                  FROM chat_messages
+                  WHERE workspace_id = ?1 AND author_kind = 'agent' AND author_agent_id IS NULL
+                  GROUP BY thread_id
+                ), agent_threads AS MATERIALIZED (
+                  SELECT t.thread_id, (
+                    SELECT latest.author_kind FROM chat_messages latest
+                    WHERE latest.workspace_id = ?1 AND latest.thread_id = t.thread_id
+                    ORDER BY latest.created_at_ms DESC, latest.message_id DESC LIMIT 1
+                  ) AS latest_author
+                  FROM chat_channels c JOIN chat_threads t
+                    ON t.workspace_id = c.workspace_id AND t.channel_id = c.channel_id
+                  WHERE c.workspace_id = ?1 AND c.kind = 'agent'
+                ), candidates AS (
+                  SELECT m.thread_id, m.message_id FROM agent_threads a CROSS JOIN chat_messages m
+                    ON m.workspace_id = ?1 AND m.thread_id = a.thread_id
+                  WHERE a.latest_author = 'human' AND m.author_kind = 'human'
+                  UNION
+                  SELECT x.thread_id, x.message_id FROM chat_mentions x
+                  WHERE x.workspace_id = ?1 AND x.handle = 'agent'
+                    AND NOT EXISTS (SELECT 1 FROM chat_dispatch_ledger l
+                      WHERE l.workspace_id = x.workspace_id AND l.trigger_message_id = x.message_id)
+                  UNION
+                  SELECT m.thread_id, m.message_id FROM posted p CROSS JOIN chat_messages m
+                    ON m.workspace_id = ?1 AND m.thread_id = p.thread_id
+                      AND m.message_order > p.first_order
+                  WHERE m.author_kind = 'human'
+                )
+                SELECT m.thread_id, m.message_id, m.author_kind, m.created_at_ms
+                FROM candidates candidate CROSS JOIN chat_messages m
+                  ON m.workspace_id = ?1 AND m.message_id = candidate.message_id
+                    AND m.thread_id = candidate.thread_id
+                JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
+                LEFT JOIN agent_threads a ON a.thread_id = t.thread_id
+                LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = m.workspace_id
+                  AND ars.agent_id = ?6 AND ars.thread_id = m.thread_id
+                WHERE NOT (m.author_kind = 'agent' AND m.author_agent_id IS NULL)
+                  AND (a.thread_id IS NULL OR a.latest_author = 'human')
+                  AND (ars.thread_id IS NULL OR m.created_at_ms > ars.last_read_created_at_ms
+                    OR (m.created_at_ms = ars.last_read_created_at_ms AND m.message_id > ars.last_read_message_id))
+                  AND (?2 = 0 OR m.created_at_ms > ?3 OR (m.created_at_ms = ?3 AND m.message_id > ?4))
+                ORDER BY m.created_at_ms, m.message_id LIMIT ?5
+            "#;
+            let mut stmt = conn.prepare_cached(sql).map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![workspace_id, has_after, after_ms, after_id, limit, OUTSIDE_RUN_READER],
+                    |row| {
+                        let kind: String = row.get(2)?;
+                        let thread_id = row.get(0)?;
+                        let message_id = row.get(1)?;
+                        let created_at_ms = row.get(3)?;
+                        Ok(ChatActorKind::from_db(&kind).map(|author_kind| ChatAgentRequest {
+                            thread_id,
+                            message_id,
+                            author_kind,
+                            created_at_ms,
                         }))
                     },
                 )

@@ -253,12 +253,11 @@ type ChatThreadPageParams = ChatPageParams & { threadId: string };
 type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | { objectId: string }; cursor?: string; scope: string; sharedChannelRowsUncovered: number };
 type ChatMentionsParams = ChatPageParams & {
   handle: string;
-  unreadByAgentOnly?: boolean;
 };
 // A run dohc dispatched names itself, and the engine reads its agent from the
 // run's record. Without a run, the reads are those of agents outside a run.
 type ChatAgentUnreadThreadsParams = ChatPageParams & { runId?: string };
-type ChatAgentRequestsParams = ChatPageParams & { runId: string };
+type ChatAgentRequestsParams = ChatPageParams & { runId?: string };
 type ChatAgentReadMarkParams = ChatsJsonObject & {
   runId?: string;
   threadId: string;

@@ -585,14 +585,14 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
-  // The messages that asked a running run's agent and that it has not read.
-  async listAgentUnreadRequests(workspaceId: string, runId: string): Promise<ChatAgentRequest[]> {
+  // Unread requests for a run's agent, or the shared outside-run reader.
+  async listAgentUnreadRequests(workspaceId: string, runId?: string): Promise<ChatAgentRequest[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatAgentRequest[] = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
-        runId,
+        ...(runId !== undefined ? { runId } : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
@@ -605,7 +605,6 @@ export class ChatsLiveAdapter {
   async listMentionsForHandle(
     workspaceId: string,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMention[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatMention[] = [];
@@ -613,9 +612,6 @@ export class ChatsLiveAdapter {
     do {
       const page = await this.request(CHATS_METHOD.mentionsListForHandle, {
         handle,
-        ...(options?.unreadByAgentOnly !== undefined
-          ? { unreadByAgentOnly: options.unreadByAgentOnly }
-          : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });

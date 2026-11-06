@@ -1304,12 +1304,10 @@ export interface LinkedChatStore {
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
   listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
-  listAgentUnreadRequests(workspaceId: WorkspaceId, runId: string): Promise<ChatAgentRequestRecord[]>;
-  // unreadByAgentOnly reads the place agents outside a run share.
+  listAgentUnreadRequests(workspaceId: WorkspaceId, runId?: string): Promise<ChatAgentRequestRecord[]>;
   listMentionsForHandle(
     workspaceId: WorkspaceId,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMentionRecord[]>;
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A

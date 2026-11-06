@@ -467,7 +467,7 @@ const CHAT_VERBS = {
   },
   inbox: {
     capabilityId: "chat.inbox.read",
-    summary: "List unread threads. For an agent, also list its unread mentions.",
+    summary: "List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.",
     operands: "",
     parse: ({ operands }) => {
       noExtraArgs(operands, "inbox");

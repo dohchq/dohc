@@ -152,8 +152,6 @@ struct ChatAttachmentsListFileMentionsParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatMentionsListForHandleParams {
     handle: String,
-    #[serde(default)]
-    unread_by_agent_only: bool,
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
@@ -524,15 +522,10 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
-        let unread_filter = if params.unread_by_agent_only {
-            "unread"
-        } else {
-            "all"
-        };
         let binding = chat_cursor_binding(
             "chats.mentions.listForHandle",
             &workspace_id,
-            &[&params.handle, unread_filter],
+            &[&params.handle],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor.as_ref().map(|cursor| MentionCursor {
@@ -546,7 +539,6 @@ impl EngineService {
             open.actor.chat_mentions_list_for_handle(
                 workspace_id,
                 params.handle,
-                params.unread_by_agent_only,
                 after,
                 page_limit + 1,
             ),
