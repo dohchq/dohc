@@ -35,3 +35,11 @@ describe("a table cell's paragraphs", () => {
     expect(flush("<p>Body</p><p>More</p>")).toEqual([false, false]);
   });
 });
+
+// Linux's fontconfig answers Times New Roman with a Times-like face. Windows
+// and macOS have Georgia, so the stack stops there for them.
+it("sets quotes in Noto Serif on Linux before any Times face", () => {
+  const stack = /--font-serif: ([^;]+);/.exec(css)![1]!.split(",").map((family) => family.trim());
+  expect(stack.indexOf("'Noto Serif'")).toBe(stack.indexOf("Georgia") + 1);
+  expect(stack.indexOf("'Noto Serif'")).toBeLessThan(stack.indexOf("'Times New Roman'"));
+});

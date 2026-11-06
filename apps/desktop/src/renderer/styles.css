@@ -121,7 +121,7 @@
   --color-hue-rose: var(--dohc-hue-rose);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
-  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', serif;
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Noto Serif', 'Times New Roman', serif;
 }
 
 html,
