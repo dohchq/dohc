@@ -353,6 +353,7 @@ export const TreeRow = memo(function TreeRow(props: {
   const { row } = props;
   // A drop preview colors the whole row, glyph included.
   const glyphClass = props.dropPreview ? "" : glyphTone(props.picked || props.active);
+  const openEdge = !props.dropPreview && props.picked && props.active;
   const dropClass =
     props.dropPreview?.kind === "blocked"
       ? props.dropPreview.role === "target"
@@ -393,10 +394,11 @@ export const TreeRow = memo(function TreeRow(props: {
         // The open file's row is active: the selected fill and medium weight.
         // Picked rows, the ones Delete and drag would act on when they are
         // not just the open file, take the text-selection tint instead. An
-        // open file among them keeps its weight. The keyboard-focused row
-        // draws the 1px accent line inside its own rounded box, so the
-        // tree's scroller cannot clip it on a row scrolled to an edge. The
-        // drop target is a filled tint with a solid bar.
+        // open file among them keeps its weight and gains a 2px ink edge. The
+        // keyboard-focused row draws the 1px accent line inside its own
+        // rounded box, so the tree's scroller cannot clip it on a row
+        // scrolled to an edge. The drop target is a filled tint with a solid
+        // bar, and its marks replace the edge.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
@@ -418,6 +420,13 @@ export const TreeRow = memo(function TreeRow(props: {
                   : "bg-ink"
                 : "bg-transparent"
             }`}
+          />
+        ) : null}
+        {openEdge ? (
+          <span
+            aria-hidden
+            data-testid="tree-row-open-edge"
+            className="absolute bottom-1.5 left-0.5 top-1.5 w-0.5 rounded-full bg-ink"
           />
         ) : null}
         <IndentGuides depth={row.depth} />
