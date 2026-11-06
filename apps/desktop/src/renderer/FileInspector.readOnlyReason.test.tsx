@@ -68,7 +68,7 @@ describe("read-only reason on the text and CSV chips", () => {
       render(<FileInspector workspaceId="ws-1" path={path} />);
       const chip = await screen.findByTestId(testId);
       expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
-      expect(chip.textContent).toBe("Read-only");
+      expect(chip.textContent).toBe("Too large to edit");
       expect(chip.getAttribute("title")).toBe(TOO_LARGE);
       expect(chip.dataset.state).toBe("saved");
     });
