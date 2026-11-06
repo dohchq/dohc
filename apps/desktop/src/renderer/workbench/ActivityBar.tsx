@@ -51,13 +51,14 @@ function RailButton(props: {
           }`}
         />
       ) : null}
-      {/* Notices' count: inside the button's corner, clear of its icon.
-          The button's name carries the exact number. */}
+      {/* Notices' count, 2px higher: at Notices' place "9+" touches the
+          magnifier's ring. It stays inside the button's rounded corner. The
+          button's name carries the exact number. */}
       {typeof props.count === "number" ? (
         <span
           data-testid={`${props.testId}-count`}
           aria-hidden
-          className="absolute right-0.5 top-0.5 h-3 min-w-3 rounded-full bg-ink px-0.5 text-center text-[8px] font-semibold leading-3 text-bg"
+          className="absolute right-0.5 top-0 h-3 min-w-3 rounded-full bg-ink px-0.5 text-center text-[8px] font-semibold leading-3 text-bg"
         >
           {props.count > 9 ? "9+" : props.count}
         </span>
