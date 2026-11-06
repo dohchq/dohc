@@ -6382,6 +6382,229 @@ describe("Collection automations that a Group message starts", () => {
     expect(added(w)).toEqual([]);
   });
 
+  describe("when the workspace stays open without a relay answer", () => {
+    const untilAborted = (signal: AbortSignal) =>
+      new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    // This bound fails a blocked job; the relay's own limit is 15 s.
+    const promptly = async (work: Promise<unknown>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([work, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("The job waited for the relay.")), 1_000);
+        })]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const kinds = ["reach verdicts", "Group handover"] as const;
+    type ReadKind = typeof kinds[number];
+    const relayFor = (kind: ReadKind, read: (generation: number, signal: AbortSignal) => Promise<void>): Partial<CollectionAutomationsOptions> =>
+      kind === "reach verdicts" ? {
+        reachRelayRecord: async (generation, signal) => {
+          await read(generation, signal);
+          return { generation, reach: null, everShared: false };
+        },
+      } : {
+        groupRelayRecord: async (generation, signal) => {
+          await read(generation, signal);
+          return { generation, handover: null };
+        },
+      };
+    const unanswered = (failFirst = true) => {
+      const asked: number[] = [];
+      const signals: AbortSignal[] = [];
+      const reading = Promise.withResolvers<void>();
+      const answer = Promise.withResolvers<void>();
+      const read = async (generation: number, signal: AbortSignal) => {
+        asked.push(generation);
+        signals.push(signal);
+        if (failFirst && asked.length === 1) throw new TypeError("fetch failed");
+        reading.resolve();
+        await Promise.race([answer.promise, untilAborted(signal)]);
+        if (signal.aborted) throw signal.reason;
+      };
+      return { asked, signals, reading: reading.promise, answer: () => answer.resolve(), read };
+    };
+    const rosterProblem = { kind: "unchecked", next: "Try again later." } as const;
+    async function openingAt3(relay: Partial<CollectionAutomationsOptions>, beforeSave?: (reach: Parameters<AutomationRunStore["saveReachVerdicts"]>[0]) => void) {
+      const bump = [
+        "  - id: bump",
+        "    name: Bump",
+        "    when: {field-changed: Status}",
+        "    do: [{set: {Count: '=record.Count + 1'}}]",
+      ].join("\n");
+      const w = await world({ channels: [TRIP], automations: { Tasks: `${task}\n${bump}` } });
+      const changes: string[] = [];
+      const { subscribeAutomation, unsubscribeAutomation, watchAutomationGroups, releaseAutomationGroups } = w.engine;
+      w.engine.subscribeAutomation = async (input) => { changes.push("subscribe"); return await subscribeAutomation(input); };
+      w.engine.unsubscribeAutomation = async (input) => { changes.push("unsubscribe"); return await unsubscribeAutomation(input); };
+      w.engine.watchAutomationGroups = async (input) => { changes.push("watch Groups"); return await watchAutomationGroups(input); };
+      w.engine.releaseAutomationGroups = async () => { changes.push("release Groups"); return await releaseAutomationGroups(); };
+      const executor = w.makeExecutor({
+        groupHost: async () => 3,
+        cachedRoster: async () => ({ kind: "unknown", problem: rosterProblem }),
+        reachRelayRecord: async (generation) => ({ generation, reach: null, everShared: false }),
+        ...relay,
+        store: {
+          ...w.baseStore,
+          saveSubscriptions: async (saved) => { changes.push("save subscriptions"); await w.baseStore.saveSubscriptions(saved); },
+          saveReachVerdicts: async (reach) => { changes.push("save verdicts"); beforeSave?.(reach); await w.baseStore.saveReachVerdicts(reach); },
+        },
+      });
+      onTestFinished(() => executor.dispose());
+      const opening = executor.open();
+      return { w, executor, changes, opening };
+    }
+
+    it.each(kinds)("waits once for %s until the next sync answer", async (kind) => {
+      const relay = unanswered();
+      const { w, executor, changes, opening } = await openingAt3(relayFor(kind, relay.read));
+      await opening;
+      const before = changes.length;
+      const saved = await w.baseStore.readReachVerdicts();
+      executor.hostChanged();
+      await promptly(Promise.all([executor.resyncFileObservation(), executor.resyncFileObservation(), executor.open()]));
+      expect(relay.asked).toEqual([3]);
+      expect(w.errors.map(({ context }) => context)).toEqual([
+        kind === "reach verdicts" ? "read the last automation host's reach verdicts" : "read the Group handover",
+      ]);
+      expect(await w.baseStore.readReachVerdicts()).toEqual(saved);
+      expect(changes.slice(before)).toEqual([]);
+
+      const beforeAnswer = changes.length;
+      executor.relayAnswered();
+      await promptly(relay.reading);
+      expect(relay.asked).toEqual([3, 3]);
+      expect(changes.slice(beforeAnswer).filter((change) => change !== "watch Groups")).toEqual([]);
+      await executor.dispose();
+      expect(w.errors).toHaveLength(1);
+    });
+
+    it("releases later claims without asking for reach verdicts again", async () => {
+      const relay = unanswered();
+      const { w, executor, opening } = await openingAt3(relayFor("reach verdicts", relay.read));
+      await opening;
+      const entry = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+      const claims = [w.claim(TASKS, entry), w.claim(TASKS, entry)];
+      executor.notifyClaimed();
+      await promptly(w.until(() => claims.every((claim) => w.events.includes(`released ${claim.claimId}`))));
+      await promptly(executor.idle());
+      expect(relay.asked).toEqual([3]);
+      expect(claims.map((claim) => claim.state)).toEqual(["pending", "pending"]);
+      expect(w.fieldsOf(entry).Count).toBe(2);
+      expect(w.errors).toHaveLength(1);
+    });
+
+    it.each(kinds)("keeps an active %s read through a sync answer", async (kind) => {
+      const group = kind === "Group handover";
+      const relay = unanswered(group);
+      let generation = 3;
+      const { w, executor, changes, opening } = await openingAt3({
+        ...relayFor(kind, relay.read),
+        groupHost: async () => generation,
+      });
+      let active = opening;
+      if (group) {
+        await opening;
+        generation = 4;
+        active = executor.resyncFileObservation();
+      }
+      await promptly(relay.reading);
+      const before = changes.length;
+      const saved = await w.baseStore.readReachVerdicts();
+      let opened = false;
+      void active.then(() => { opened = true; });
+      const hostChanged = vi.spyOn(executor, "hostChanged");
+      executor.relayAnswered();
+      expect(hostChanged).toHaveBeenCalledOnce();
+      const queued = executor.resyncFileObservation();
+      expect(await w.baseStore.readReachVerdicts()).toEqual(saved);
+      expect(relay.signals.at(-1)?.aborted).toBe(false);
+      expect(relay.asked).toEqual(group ? [3, 4] : [3]);
+      expect(opened).toBe(false);
+      expect(changes.slice(before)).toEqual([]);
+
+      relay.answer();
+      await promptly(Promise.all([active, queued]));
+      expect(relay.asked).toEqual(group ? [3, 4] : [3]);
+      expect(relay.signals.at(-1)?.aborted).toBe(false);
+      expect(w.errors.map(({ context }) => context)).toEqual(group ? ["read the Group handover"] : []);
+    });
+
+    it.each(kinds)("asks for %s again at the next open after a failure", async (kind) => {
+      const relay = unanswered();
+      const { executor, opening } = await openingAt3(relayFor(kind, relay.read));
+      await opening;
+      await executor.close();
+      const reopened = executor.open();
+      await promptly(relay.reading);
+      expect(relay.asked).toEqual([3, 3]);
+      await executor.dispose();
+      await reopened;
+    });
+
+    it("reads reach verdicts at a new generation at once after saving it as pending", async () => {
+      const relay = unanswered();
+      let generation = 3;
+      const { w, executor, opening } = await openingAt3({
+        ...relayFor("reach verdicts", relay.read),
+        groupHost: async () => generation,
+      });
+      await opening;
+      generation = 4;
+      const queued = executor.resyncFileObservation();
+      await promptly(relay.reading);
+      expect(relay.asked).toEqual([3, 4]);
+      expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: 4, taken: null, unprovenAll: true });
+      relay.answer();
+      await promptly(queued);
+      expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 4 });
+    });
+
+    it("reads a Group handover at the next generation without a sync answer", async () => {
+      const relay = unanswered();
+      let generation = 3;
+      const { w, executor, opening } = await openingAt3({
+        ...relayFor("Group handover", relay.read),
+        groupHost: async () => generation,
+      });
+      await opening;
+      generation = 4;
+      const queued = executor.resyncFileObservation();
+      await promptly(relay.reading);
+      expect(relay.asked).toEqual([3, 4]);
+      relay.answer();
+      await promptly(queued);
+      expect(w.relayRecords.map(({ generation: at }) => at)).toEqual([4]);
+      expect(w.errors).toHaveLength(1);
+    });
+
+    it("reads reach verdicts on the next job after a failed claims save without a sync answer", async () => {
+      const asked: number[] = [];
+      const failure = new Error("The disk is full.");
+      let fail = true;
+      const { w, executor, opening } = await openingAt3({
+        reachRelayRecord: async (generation) => {
+          asked.push(generation);
+          return { generation, reach: null, everShared: false };
+        },
+      }, (reach) => {
+        if (fail && reach.pending === 3) {
+          fail = false;
+          throw failure;
+        }
+      });
+      await opening;
+      expect(fail).toBe(false);
+      expect(asked).toEqual([]);
+      expect(w.errors).toEqual([{ context: "read the last automation host's reach verdicts", error: failure }]);
+      await promptly(executor.resyncFileObservation());
+      expect(asked).toEqual([3]);
+      expect(await w.baseStore.readReachVerdicts()).toMatchObject({ pending: null, taken: 3 });
+      expect(w.errors).toHaveLength(1);
+    });
+  });
+
   describe("when the workspace closes during a relay read", () => {
     const watched = { automationId: "collection:Tasks#task", groupId: "trip", startsWith: "/task" };
     // A relay that took the request and never answers: only the close ends it.
