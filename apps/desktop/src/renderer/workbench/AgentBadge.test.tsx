@@ -66,6 +66,20 @@ describe("agent badge", () => {
     expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Ice");
   });
 
+  it("names an agent that joined with a link, in olive, without an owner", () => {
+    const presentation = { group: "7", hue: "plum", self: false } as const;
+    render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Claude Code", linkAgent: true }} presentation={presentation} />);
+    const badge = screen.getByTestId("chats-post-agent-badge");
+    expect(badge.getAttribute("aria-label")).toBe("agent");
+    expect(badge.parentElement!.className).toContain("text-agent");
+    expect(badge.parentElement!.className).not.toContain("hue");
+    fireEvent.focus(badge);
+    const text = screen.getByRole("tooltip").textContent ?? "";
+    expect(text).toContain("Claude Code");
+    expect(text).not.toContain("Owned by");
+    expect(text).not.toContain("Owner name unavailable");
+  });
+
   it("closes on Escape, and stays open while it has focus", () => {
     render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Nova", authorOwnerDisplayName: "Ada" }} presentation={theirs} />);
     const badge = screen.getByTestId("chats-post-agent-badge");

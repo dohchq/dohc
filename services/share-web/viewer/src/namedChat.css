@@ -32,9 +32,6 @@
 .chat-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0 0 2px; }
 .chat-author { font-weight: 600; overflow-wrap: anywhere; }
 .chat-agent-mark { align-self: center; width: 10px; height: 10px; border-radius: 3px; background: var(--viewer-accent); }
-.chat-agent-icon { display: inline-grid; place-items: center; box-sizing: border-box; width: 16px; height: 16px; border-radius: 4px;
-  border: 1px solid var(--viewer-accent); background: transparent; color: var(--viewer-accent); }
-.chat-agent-icon svg { width: 11px; height: 11px; }
 .chat-link-mark { align-self: center; width: 12px; height: 12px; color: var(--viewer-subtle); }
 .chat-owner, .chat-meta time { color: var(--viewer-subtle); font: 11px/1.5 ui-monospace, monospace; }
 .chat-body.markdown { max-width: none; margin: 0; overflow-wrap: anywhere; font: 14px/1.55 ui-sans-serif, system-ui, sans-serif; }

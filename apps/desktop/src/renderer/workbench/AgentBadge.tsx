@@ -23,6 +23,8 @@ type AgentAuthor = {
   authorReported?: ChatReportedAgentRecord;
   // Your agent's run records its id. A name an agent gives itself never makes it yours.
   authorAgentId?: string;
+  // An agent that signed in with a share link: no owner here, and the default agent color.
+  linkAgent?: boolean;
 };
 
 export function AgentBadge(props: {
@@ -36,7 +38,7 @@ export function AgentBadge(props: {
   children?: ReactNode;
 }) {
   const settings = useContext(AgentSettingsContext);
-  const ink = useAgentInk(props.presentation);
+  const ink = useAgentInk(props.author.linkAgent ? undefined : props.presentation);
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
@@ -123,9 +125,11 @@ export function AgentBadge(props: {
           className="dohc-popover dohc-pop-in fixed z-50 flex w-max max-w-72 flex-col gap-1 overflow-y-auto rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
         >
           <span className="font-medium">{author.authorDisplayName}</span>
-          <span className="text-muted">
-            {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
-          </span>
+          {author.linkAgent ? null : (
+            <span className="text-muted">
+              {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
+            </span>
+          )}
           {reported ? (
             <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">
               {reported.slice(0, -AS_REPORTED.length)}<span className="whitespace-nowrap">{AS_REPORTED}</span>

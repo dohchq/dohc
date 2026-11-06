@@ -3,7 +3,7 @@ import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime, formatShortTime } from "../time";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
@@ -187,7 +187,7 @@ export function PostCard(props: {
   onOpenPath?: (path: string) => void;
 }) {
   const message = props.data.openingMessage;
-  const isAgent = message?.authorKind === "agent";
+  const isAgent = message ? isAgentAuthor(message) : false;
   const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
   const time = formatChatTime(createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
@@ -257,13 +257,13 @@ export function PostCard(props: {
               className="truncate text-[13px] font-semibold text-ink"
             >
               {message ? (
-                <AgentName kind={message.authorKind} presentation={message.presentation}>{chatAuthorLabel(message)}</AgentName>
+                <AgentName kind={message.authorKind} presentation={message.presentation} linkAgent={message.linkAgent === true}>{chatAuthorLabel(message)}</AgentName>
               ) : "Unknown author"}
             </span>
             {isAgent ? (
               <AgentBadge testIdPrefix="chats-post" author={message!} presentation={message!.presentation} />
             ) : null}
-            {message?.authorKind === "link" ? <LinkHolderMark testId="chats-post-link-holder" linkAgent={message?.linkAgent === true} /> : null}
+            {message?.authorKind === "link" ? <LinkHolderMark testId="chats-post-link-holder" /> : null}
             {message?.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-post"

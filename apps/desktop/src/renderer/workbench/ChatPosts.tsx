@@ -22,7 +22,7 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { SecondaryButton } from "../ui/controls";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
@@ -541,7 +541,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS;
   const openingDecision = decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
-  const openingIsAgent = openingMessage.authorKind === "agent";
+  const openingIsAgent = isAgentAuthor(openingMessage);
   const hasExplicitTitle = !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
   const failedEnd = failedRun ? failedRunEnd(failedRun, runRecords, messages) : null;
@@ -581,7 +581,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const commentTime = formatChatTime(comment.createdAtMs);
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? NO_ATTACHMENTS;
-    const isAgent = comment.authorKind === "agent";
+    const isAgent = isAgentAuthor(comment);
     const continues = previous !== undefined && previous.replies.length === 0 &&
       continuesRun(previous.message, comment);
     const replyCount = node.replies.length;
@@ -662,12 +662,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-author-kind={comment.authorKind}
               className="text-[13px] font-semibold text-ink"
             >
-              <AgentName kind={comment.authorKind} presentation={comment.presentation}>
+              <AgentName kind={comment.authorKind} presentation={comment.presentation} linkAgent={comment.linkAgent === true}>
                 <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
               </AgentName>
             </span>
             {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} presentation={comment.presentation} /> : null}
-            {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" linkAgent={comment.linkAgent === true} /> : null}
+            {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
@@ -830,12 +830,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               data-author-kind={openingMessage.authorKind}
               className="truncate text-[13px] font-semibold text-ink"
             >
-              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
+              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation} linkAgent={openingMessage.linkAgent === true}>
                 <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
               </AgentName>
             </span>
             {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} presentation={openingMessage.presentation} /> : null}
-            {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" linkAgent={openingMessage.linkAgent === true} /> : null}
+            {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-message"

@@ -16,7 +16,6 @@ import {
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentSettingsProvider } from "./AgentBadge";
-import { ChatGroupNameContext } from "./ChatAvatar";
 
 import { setChosenColors } from "./chosenColors";
 
@@ -303,39 +302,45 @@ describe("chat authorship display", () => {
     expect(avatar.className).not.toMatch(/hue/u);
   });
 
-  it("shows an agent that joined with a link as an agent, marked with the link and its Group", () => {
+  it("shows an agent that joined with a link as an agent, then a link holder", () => {
     render(
       <AgentSettingsProvider settings={DEFAULT_USER_SETTINGS}>
-        <ChatGroupNameContext.Provider value="Trip plan">
-          <ChatMessageList
-            testIdPrefix="test-chat"
-            messages={[
-              { presentation: { group: "7", hue: null, self: false },
-                id: "message-link-agent",
-                threadId: "thread-1",
-                authorKind: "link",
-                linkAgent: true,
-                authorDisplayName: "Claude Code",
-                body: "Booked the cabin",
-                createdAtMs: 1_700_000_000_000,
-              },
-            ]}
-            loading={false}
-            emptyLabel="No messages"
-            listRef={createRef<ChatMessageListHandle>()}
-          />
-        </ChatGroupNameContext.Provider>
+        <ChatMessageList
+          testIdPrefix="test-chat"
+          messages={[
+            { presentation: { group: "7", hue: null, self: false },
+              id: "message-link-agent",
+              threadId: "thread-1",
+              authorKind: "link",
+              linkAgent: true,
+              authorDisplayName: "Claude Code",
+              body: "Booked the cabin",
+              createdAtMs: 1_700_000_000_000,
+            },
+          ]}
+          loading={false}
+          emptyLabel="No messages"
+          listRef={createRef<ChatMessageListHandle>()}
+        />
       </AgentSettingsProvider>,
     );
-    expect(screen.getByTestId("test-chat-message-author").textContent).toBe("Claude Code");
+    const author = screen.getByTestId("test-chat-message-author");
+    expect(author.textContent).toBe("Claude Code");
+    expect(author.querySelector(".text-agent")?.textContent).toBe("Claude Code");
+    const badge = screen.getByTestId("test-chat-agent-badge");
     const mark = screen.getByTestId("test-chat-message-link-holder");
-    expect(mark.textContent).toBe("Joined with a link to Trip plan");
-    expect(mark.title).toBe("Joined with a link to Trip plan");
+    expect(badge.getAttribute("aria-label")).toBe("agent");
+    expect(mark.textContent).toBe("Link holder");
+    expect(mark.title).toBe("Link holder");
+    // A screen reader meets the agent badge, then the name, then the link mark.
+    expect(badge.compareDocumentPosition(author) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(author.compareDocumentPosition(mark) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const avatar = document.querySelector<HTMLElement>("[data-link-agent]")!;
-    expect(avatar.title).toBe("Joined with a link to Trip plan");
+    expect(avatar.title).toBe("Claude Code");
     expect(avatar.className).toMatch(/\brounded-lg\b/u);
-    expect(avatar.className).not.toContain("border-dashed");
-    expect(avatar.querySelector("svg.lucide-sparkles")).not.toBeNull();
+    expect(avatar.className).toContain("border-dashed");
+    expect(avatar.className).toContain("border-agent");
+    expect(avatar.className).toContain("text-agent");
   });
 
   it("renders file chips without requiring a person or agent roster", () => {

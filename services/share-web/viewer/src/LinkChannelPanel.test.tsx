@@ -64,7 +64,7 @@ it("posts from a read-write link with the name it sets once, and marks the post 
   expect(posts[1]?.body).not.toHaveProperty("claimedName");
 });
 
-it("shows an agent that joined with the link as an agent, marked with the link and its Group", async () => {
+it("shows an agent that joined with the link with the agent mark, then the link mark", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), "https://viewer.test"), signal = init?.signal ?? new AbortController().signal;
     if (url.pathname === "/api/view/chat/channels") return jsonResponse({shareId: "share", profileName: null,
@@ -79,10 +79,10 @@ it("shows an agent that joined with the link as an agent, marked with the link a
   const posted = [...container.querySelectorAll<HTMLElement>(".chat-message")].at(-1)!;
   expect(posted.dataset.authorKind).toBe("link");
   const marks = [...posted.querySelectorAll('[role="img"]')].map(node => node.getAttribute("aria-label"));
-  expect(marks).toEqual(["Agent", "Joined with a link to Team"]);
-  const mark = posted.querySelector(".chat-agent-mark");
-  expect(mark?.getAttribute("title")).toBe("Joined with a link to Team");
-  expect(mark?.querySelector('svg[data-icon="sparkles"]')).not.toBeNull();
+  expect(marks).toEqual(["Agent", "Link holder"]);
+  // The same mark as any other agent's, with no square of its own.
+  expect(posted.querySelector(".chat-agent-mark")?.childElementCount).toBe(0);
+  expect(posted.querySelector(".chat-agent-mark")?.className).toBe("chat-agent-mark");
 });
 
 it("shows the name this browser set on an earlier visit, with no field to change it", async () => {

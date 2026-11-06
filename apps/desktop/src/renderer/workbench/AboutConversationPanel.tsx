@@ -86,6 +86,10 @@ export type ConversationLinksView =
 
 const LINKS_FAILED = "dohc could not load the files this conversation mentions.";
 
+// What a screen reader hears before a name in the strip: an agent that joined
+// with a link is an agent, then a link holder, as beside its posts.
+const authorKindLabel = (author: Author) =>
+  author.kind !== "link" ? author.kind : author.linkAgent ? "agent link holder" : "link holder";
 const authorKey = (author: Author) =>
   `${author.kind}\0${author.linkAgent ? "agent" : ""}\0${author.presentation.group}\0${author.displayName}`;
 
@@ -276,8 +280,8 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
             {file.authors.map((author, index) => (
               <Fragment key={authorKey(author)}>
                 {index > 0 ? ", " : null}
-                {author.kind === "human" ? null : <span className="sr-only">{author.kind === "link" ? (author.linkAgent ? "agent" : "link holder") : author.kind} </span>}
-                <AgentName kind={author.kind} presentation={author.presentation}>{author.displayName}</AgentName>
+                {author.kind === "human" ? null : <span className="sr-only">{authorKindLabel(author)} </span>}
+                <AgentName kind={author.kind} presentation={author.presentation} linkAgent={author.linkAgent === true}>{author.displayName}</AgentName>
               </Fragment>
             ))}
           </span>

@@ -1,4 +1,4 @@
-import { createContext, useContext, useSyncExternalStore, type ReactNode } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import { Link2, Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
 import { agentTextClass, presentationClasses, subscribePresentation } from "./actorPresentation";
@@ -10,25 +10,27 @@ export function useAgentInk(token: ActorPresentation | undefined): string {
 
 type ChatAuthorKind = "human" | "agent" | "automation" | "link";
 
-/** The Group a chat surface shows, so an agent that joined with its link can say which. */
-export const ChatGroupNameContext = createContext<string | null>(null);
-
-/** Who an agent that joined with a link is: the link's Group, when the surface knows it. */
-export function useLinkAgentLabel(): string {
-  const group = useContext(ChatGroupNameContext);
-  return group ? `Joined with a link to ${group}` : "Joined with a link";
+/** An agent author: a member's agent, or an agent that signed in with a share link. */
+export function isAgentAuthor(author: { authorKind: ChatAuthorKind; linkAgent?: boolean }): boolean {
+  return author.authorKind === "agent" || (author.authorKind === "link" && author.linkAgent === true);
 }
 
-/** An author's name beside their avatar: an agent's in its avatar's hue, anyone else's as it is. */
-export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPresentation; children: ReactNode }) {
+/**
+ * An author's name beside their avatar: an agent's in its avatar's hue, anyone
+ * else's as it is. An agent that joined with a link has no hue, so it is olive.
+ */
+export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPresentation; linkAgent?: boolean; children: ReactNode }) {
   const ink = useAgentInk(props.kind === "agent" ? props.presentation : undefined);
-  return props.kind === "agent" ? <span className={ink}>{props.children}</span> : <>{props.children}</>;
+  return isAgentAuthor({ authorKind: props.kind, linkAgent: props.linkAgent })
+    ? <span className={ink}>{props.children}</span>
+    : <>{props.children}</>;
 }
 
 // One avatar for every chat surface: a person's initial on a tint of their
 // admitted hue, the agent's sparkle in the agent voice, an automation's bare
 // lightning mark, the same mark as the Automations button, or a link holder's
-// initial in a share link's dashed ring. Sized by the caller; 36px in the
+// initial in a share link's dashed ring. An agent that joined with a link is the
+// agent's olive square with the same dashed edge. Sized by the caller; 36px in the
 // composer, 32px on a feed row or an opening post, 28px on a comment, 18px in
 // a strip.
 
@@ -72,7 +74,6 @@ export function ChatAvatar(props: {
   const size = props.size ?? "post";
   const kind = props.kind;
   const linkAgent = kind === "link" && props.linkAgent === true;
-  const linkAgentLabel = useLinkAgentLabel();
   const classes = useSyncExternalStore(subscribePresentation, () =>
     presentationClasses(props.presentation, kind === "agent" ? "agent" : "human"));
   if (linkAgent) {
@@ -81,8 +82,8 @@ export function ChatAvatar(props: {
         aria-hidden
         data-author-kind="link"
         data-link-agent=""
-        title={linkAgentLabel}
-        className={`inline-grid shrink-0 place-items-center border border-agent bg-bg font-semibold text-agent ${SIZES[size]} ${AGENT_RADIUS[size]} ${
+        title={props.name}
+        className={`inline-grid shrink-0 place-items-center border border-dashed border-agent bg-bg font-semibold text-agent ${SIZES[size]} ${AGENT_RADIUS[size]} ${
           props.className ?? ""
         }`}
       >
@@ -135,15 +136,13 @@ export function ChatAvatar(props: {
   );
 }
 
-// Beside a link holder's name: the share link's mark, named for screen readers.
-// An agent that joined with the link says which Group the link opens.
-export function LinkHolderMark(props: { testId?: string; linkAgent?: boolean }) {
-  const linkAgentLabel = useLinkAgentLabel();
-  const label = props.linkAgent ? linkAgentLabel : "Link holder";
+// Beside a link holder's name, a person's or an agent's: the share link's
+// mark, named for screen readers.
+export function LinkHolderMark(props: { testId?: string }) {
   return (
-    <span data-testid={props.testId} title={label} className="inline-flex shrink-0 self-center text-subtle">
+    <span data-testid={props.testId} title="Link holder" className="inline-flex shrink-0 self-center text-subtle">
       <Link2 size={12} strokeWidth={1.9} aria-hidden />
-      <span className="sr-only">{label}</span>
+      <span className="sr-only">Link holder</span>
     </span>
   );
 }
