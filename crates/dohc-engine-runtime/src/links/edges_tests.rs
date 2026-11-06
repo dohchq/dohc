@@ -96,15 +96,19 @@ async fn edges_never_parse_pending_heads_and_refresh_only_after_certification() 
     // Even before seed/certification, authoritative aliases must appear.
     write_deferred(&mut store, "new", "new.md", "[[target]]", 4);
     drop(store);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let _hold = actor.hold_link_drain();
+    // Hold link updates before the actor's first idle slot, which otherwise starts the drain.
+    let mut hold = None;
+    let mut workspace = crate::actor::test_support::spawn_prequeued_actor(&db, |handle| {
+        hold = Some(handle.hold_link_drain());
+    });
+    let actor = workspace.handle();
     let pending = actor
         .run(|s, _| Ok(count(s, "link_pending")))
         .await
         .unwrap();
     let page = edges(&actor, None).await;
     bounded(&page);
+    assert_eq!(actor.link_drain_metrics().worker_starts, 0);
     assert_eq!(page["entries"], json!([]));
     assert_eq!(page["unchecked"], json!(["a.md", "new.md"]));
     assert_eq!(page["complete"], false);
@@ -127,6 +131,8 @@ async fn edges_never_parse_pending_heads_and_refresh_only_after_certification() 
     assert_eq!(fresh["entries"].as_array().unwrap().len(), 2);
     assert_eq!(fresh["complete"], true);
     assert_eq!(fresh["indexBuilding"], false);
+    workspace.close().unwrap();
+    drop(hold);
 }
 
 #[tokio::test]
