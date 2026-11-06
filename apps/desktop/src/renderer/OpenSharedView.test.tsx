@@ -122,6 +122,42 @@ describe("OpenSharedView", () => {
     expectMissingInput("Choose an empty folder.");
   });
 
+  it("shows no folder reason until the default folder lookup settles", async () => {
+    const lookup = deferred<string>();
+    bridgeMock.getDefaultShareRoot.mockReturnValue(lookup.promise);
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        resolvedShare={{ shareId: "share-1", shareCode: "ordinary-received-share-code" }}
+      />,
+    );
+
+    expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledWith({ shareId: "share-1" });
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    expect(start.disabled).toBe(true);
+    expectMissingInput(null);
+
+    await act(async () => lookup.resolve("/home/sam/dohc/shared/share-1"));
+    expectMissingInput(null);
+    expect(start.disabled).toBe(false);
+  });
+
+  it("shows the folder reason when the default folder lookup fails", async () => {
+    const lookup = deferred<string>();
+    bridgeMock.getDefaultShareRoot.mockReturnValue(lookup.promise);
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        resolvedShare={{ shareId: "share-1", shareCode: "ordinary-received-share-code" }}
+      />,
+    );
+
+    await act(async () => lookup.reject(new Error("No default folder")));
+    expectMissingInput("Choose an empty folder.");
+  });
+
   it("keeps Back available while adding a share and ignores the late result after leaving", async () => {
     const pending = deferred<{
       workspace: typeof SHARED_VIEW;
