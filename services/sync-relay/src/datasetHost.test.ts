@@ -42,6 +42,47 @@ const revision = describeDatasetRevision({definition, revision: 1, schemaSql, op
 const scope = {workspaceId: "w", datasetId: definition.datasetId};
 const helper: AppBackendAuth = {kind: "named", workspaceId: "w", userId: "helper", grantId: "helper-grant"};
 
+it("checks transactional reference targets through current dataset reads and guards the registration revision", async () => {
+  const rules: DatasetDefinition = {...definition, operations: [...definition.operations,
+    {operationId: id(8), name: "remove", label: "Remove", tableId: id(2), kind: "delete", access: "owner", readOnly: false, fieldIds: [id(3), id(4)]},
+  ]};
+  const source = datasetOperations.generateDatasetOperations(rules);
+  const schema = schemaSql.replace("name TEXT NOT NULL)", "name TEXT NOT NULL,_record_version INTEGER NOT NULL DEFAULT 1)");
+  const approved = describeDatasetRevision({definition: rules, revision: 1, schemaSql: schema, operationSource: source});
+  const f = await fixture(false, {revision: approved, schemaSql: schema, operationSource: source});
+  await f.activate(); f.addHelper();
+  const added = await f.invoke(owner, id(5), {values: {[id(4)]: "Person"}}, undefined, "create-person");
+  const recordId = (added.result as {id: string}).id;
+  const target = {kind: "transactionalRecord" as const, datasetId: scope.datasetId, tableId: id(2), recordId};
+  const reference = "D".repeat(43);
+  const mapping = {reference, target, createdAtMs: 1};
+  expect(await f.storage.registerWorkReferences({workspaceId: "w", userId: "owner", references: [mapping]})).toEqual([reference]);
+  await expect(f.storage.registerWorkReferences({workspaceId: "w", userId: "owner", references: [
+    {...mapping, reference: "F".repeat(43), target: {...target, recordId: "missing"}},
+  ]})).rejects.toThrow();
+  await expect(f.storage.registerWorkReferences({workspaceId: "w", userId: "owner", references: [
+    {...mapping, reference: "F".repeat(43), target: {...target, tableId: id(99)}},
+  ]})).rejects.toThrow();
+  const reader = {kind: "user" as const, userId: "helper", grantId: "helper-grant"};
+  expect(await f.storage.resolveWorkReference({reference, reader, identityKey: "key"})).toEqual({status: "unavailable"});
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {
+    operationIds: [id(6)], discover: true, revision: 1, revisionSha256: approved.revisionSha256,
+  }});
+  expect(await f.storage.resolveWorkReference({reference, reader, identityKey: "key"})).toMatchObject({status: "found", target});
+  const publicationId = f.publish([id(6)], [{operationId: id(6), fieldIds: [id(3), id(4)]}]);
+  const datasetAuth = f.link("reader");
+  if (datasetAuth.kind !== "link") throw new Error("Expected link authority");
+  const linkReader = {kind: "link" as const, grantId: "g", generation: 1, requireSession() {}, datasetAuth};
+  expect(await f.storage.resolveWorkReference({reference, reader: linkReader, identityKey: "key"})).toMatchObject({status: "found", target});
+  f.storage.withdrawAppPublication({...scope, publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
+  expect(await f.storage.resolveWorkReference({reference, reader: linkReader, identityKey: "key"})).toEqual({status: "unavailable"});
+  const datasetAccess = await f.storage.prepareWorkReferenceRegistration({workspaceId: "w", userId: "owner", references: [mapping]});
+  await f.invoke(owner, id(8), {id: recordId, expectedVersion: 1}, undefined, "remove-person");
+  expect([...datasetAccess.values()].every(check => !check())).toBe(true);
+  expect(await f.storage.resolveWorkReference({reference, reader: {kind: "user", userId: "owner"}})).toEqual({status: "unavailable"});
+  expect(f.storage.db.prepare("SELECT deleted FROM sync_relay_work_reference_scopes WHERE reference=?").get(reference)!.deleted).toBe(1);
+});
+
 async function fixture(startupExclusive = false, prepared = { revision, schemaSql, operationSource }) {
   const { revision, schemaSql, operationSource } = prepared;
   const base = appFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));

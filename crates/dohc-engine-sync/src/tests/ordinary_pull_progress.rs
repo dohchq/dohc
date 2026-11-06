@@ -17,6 +17,8 @@ fn pull_token(engine: &EngineStore) -> Option<String> {
 /// empty end of the log for a later pull.
 fn padded_relay(pages: i64) -> PagedRelay {
     let end = PullResponse {
+        work_references: Vec::new(),
+        next_reference_after: None,
         ops: Vec::new(),
         next_cursor: pages,
         has_more: false,
@@ -27,6 +29,8 @@ fn padded_relay(pages: i64) -> PagedRelay {
                 (
                     seq,
                     PullResponse {
+                        work_references: Vec::new(),
+                        next_reference_after: None,
                         ops: vec![envelope("padding-peer", seq, "probe.padding", json!({}))],
                         next_cursor: seq + 1,
                         has_more: seq + 1 < pages,

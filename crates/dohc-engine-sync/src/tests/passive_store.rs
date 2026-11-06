@@ -42,6 +42,8 @@ fn update(
 
 fn page(ops: Vec<ReplicationEnvelope>, cursor: i64, more: bool) -> PullResponse {
     PullResponse {
+        work_references: Vec::new(),
+        next_reference_after: None,
         ops,
         next_cursor: cursor,
         has_more: more,

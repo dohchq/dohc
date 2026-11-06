@@ -10,7 +10,7 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import type { DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import { createDatasetSupervisor, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-install";
-import { type AppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type AppDatasetCapability, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyAppDatasetCapability, hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { parseAppPublicationCandidate, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -23,6 +23,7 @@ import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "./shareFilter";
 import { notFound, relayError } from "./errors";
+import {stableJsonStringify} from "./canonicalJson";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 import { collectionFilePresent } from "./storage/collectionFilePresence";
@@ -320,6 +321,69 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_automation_failure_generations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-OLD.storage_bytes WHERE workspace_id=OLD.workspace_id;
       END;`));
+    storage.workReferenceDatasetAccess = async input => {
+      try {
+        current();
+        const auth: AppBackendAuth = input.linkAuth ?? {kind: "named", workspaceId: input.workspaceId, userId: input.userId!, grantId: input.grantId};
+        const key = {workspaceId: input.workspaceId, datasetId: input.target.datasetId};
+        let request: Parameters<typeof host.authorize>[1] | undefined;
+        let primaryKeyFieldId: string | undefined;
+        if (auth.kind === "named") {
+          const description = host.describe(auth, key);
+          const table = description.tables.find(table => table.tableId === input.target.tableId);
+          const operation = description.operations.find(operation => operation.tableId === input.target.tableId &&
+            operation.kind === "read" && operation.readOnly && (input.target.kind === "transactionalCollection" ||
+              !!table?.primaryKeyFieldId && operation.fieldIds.includes(table.primaryKeyFieldId)));
+          if (!table || !operation) return null;
+          primaryKeyFieldId = table.primaryKeyFieldId;
+          request = {...key, revision: description.revision, revisionSha256: description.revisionSha256, operationId: operation.operationId};
+        } else {
+          const publications = storage.db.prepare("SELECT publication_id FROM sync_relay_app_publications WHERE workspace_id=? AND grant_id=? AND active=1 LIMIT 64")
+            .all(key.workspaceId, input.grantId!);
+          for (const row of publications) {
+            try {
+              const published = publication(auth, String(row.publication_id));
+              if (!published || published.datasetId !== key.datasetId) continue;
+              for (const operation of published.capability.operations.filter(operation => operation.readOnly)) {
+                const candidate = {...key, revision: published.capability.revision, revisionSha256: published.capability.revisionSha256,
+                  operationId: operation.operationId, access: {kind: "app" as const, appId: String(row.publication_id)}};
+                const permitted = host.authorize(auth, candidate);
+                if (permitted.operation.kind !== "read" || permitted.operation.tableId !== input.target.tableId) continue;
+                const table = permitted.revision.definition.tables.find(table => table.tableId === input.target.tableId)!;
+                const primary = datasetColumnFields(table).find(field => field.sqlColumn === table.primaryKey);
+                if (input.target.kind === "transactionalRecord" && (!primary || !permitted.operation.fieldIds.includes(primary.fieldId))) continue;
+                request = candidate; primaryKeyFieldId = primary?.fieldId; break;
+              }
+              if (request) break;
+            } catch { continue; }
+          }
+          if (!request) return null;
+        }
+        if (!request) return null;
+        const readRequest = request;
+        const authorization = host.authorize(auth, readRequest);
+        if (input.target.kind === "transactionalRecord" && !generatedRevision(authorization.revision)) return null;
+        const admitted = JSON.stringify(authorization);
+        const recordId = input.target.kind === "transactionalRecord" ? input.target.recordId : undefined;
+        return await host.readOperation(auth, {...readRequest, idempotencyKey: randomUUID(), signal: storage.unavailable,
+          input: recordId === undefined ? {limit: 1} : {limit: 1, filters: [{fieldId: primaryKeyFieldId!, value: recordId}]}}, (result, revision) => {
+          const found = recordId === undefined || !!result && typeof result === "object" && !Array.isArray(result) &&
+            Array.isArray(result.rows) && result.rows.some(row => row !== null && typeof row === "object" && !Array.isArray(row) && row.id === recordId);
+          storage.db.prepare(`UPDATE sync_relay_work_reference_scopes SET deleted=? WHERE reference IN
+            (SELECT reference FROM sync_relay_work_references WHERE workspace_id=? AND target_json=?)`)
+            .run(found ? 0 : 1, key.workspaceId, stableJsonStringify(input.target));
+          return () => {
+            try {
+              current();
+              if (JSON.stringify(host.authorize(auth, readRequest)) !== admitted) return false;
+              const head = storage.db.prepare("SELECT revision,active,approved_revision_hash FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?")
+                .get(key.workspaceId, key.datasetId);
+              return found && head?.active === 1 && head.revision === revision && head.approved_revision_hash === readRequest.revisionSha256;
+            } catch { return false; }
+          };
+        });
+      } catch { return null; }
+    };
     return {
       automations: createDatasetAutomations({ host, storage, current, authority: automationAuthority }),
       observeAutomationClaims(wake: (workspaceId: string, failed: boolean) => void) {

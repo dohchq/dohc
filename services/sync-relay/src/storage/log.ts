@@ -1,4 +1,6 @@
 import {commitHostedSettlement,settlementResponseIdentifier} from "./hostedSettlement";
+import {indexWorkReferenceSnapshot} from "./workReferenceSchema";
+import {assertMessageWorkReferences, registerWorkReferencesInTransaction, updateWorkReferenceScopes} from "./workReferences";
 import { type StorageContext } from "./context";
 import { enforceWorkspaceIdentityInTransaction, assertWorkspaceQuota } from "./workspaces";
 import {
@@ -82,6 +84,7 @@ export function appendLogBatch(storage: StorageContext, input: {
     admit?: (ops: SyncRelayLogInput[]) => void;
     confirm?: (ops: SyncRelayLogInput[]) => void;
     classifyRedundantRecoveries?: boolean;
+    workReferences?: {userId: string; references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[]; datasetAccess?: import("./workReferences").DatasetReferenceAccess};
   }): AppendLogBatchResult {
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
   }
@@ -95,6 +98,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   admit?: (ops: SyncRelayLogInput[]) => void;
   confirm?: (ops: SyncRelayLogInput[]) => void;
   classifyRedundantRecoveries?: boolean;
+  workReferences?: {userId: string; references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[]; datasetAccess?: import("./workReferences").DatasetReferenceAccess};
 }): AppendLogBatchResult {
       for (const op of input.ops) {
         if (!Number.isSafeInteger(op.recordedAtMs)) throw new Error("recordedAtMs must be an integer in the safe wire range");
@@ -273,6 +277,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         // key. The relay_seq this row just took IS the order the guard in the
         // upsert compares, so a later moment always wins and an out-of-order
         // one never moves a path backwards.
+        if (op.opKind === "version.create") indexWorkReferenceSnapshot(storage.db, input.workspaceId, op.payloadJson, Number(result.lastInsertRowid));
         if (op.opKind === "moment.append") {
           const resolved = objectPathFromMomentPayload(op.payloadJson);
           if (resolved) {
@@ -289,6 +294,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           // proposal's base resolves to at accept.
           const moment = objectMomentFromMomentPayload(op.payloadJson);
           if (moment) {
+            updateWorkReferenceScopes(storage, input.workspaceId, moment.objectId, moment.versionId, moment.path);
             if (moment.versionId === "main" && moment.path !== null) notifyDesktopReadiness(storage, {workspaceId: input.workspaceId, path: moment.path});
             if (moment.versionId === "main") forgetCollectionFilePresence(storage, input.workspaceId);
             objectMomentStmt.run(
@@ -333,7 +339,11 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
       const settlementRefusals=input.ops.filter(op=>op.settlementAdmission?.status === "refused").map(op=>({originId:input.originId,originSeq:op.originSeq,
         momentId:settlementResponseIdentifier((JSON.parse(op.payloadJson) as Record<string,unknown>).momentId),settlementId:op.settlementAdmission!.settlementId,reason:"authorship-mismatch"}));
-      return { inserted, skipped, currentMaxOriginSeq: currentMax,...(settlementRefusals.length?{settlementRefusals}:{}),
+      const registeredReferences = input.workReferences ? registerWorkReferencesInTransaction(storage, {
+        workspaceId: input.workspaceId, ...input.workReferences, deferMissing: true,
+      }) : [];
+      assertMessageWorkReferences(storage, input.workspaceId, newOps);
+      return { inserted, skipped, currentMaxOriginSeq: currentMax, ...(registeredReferences.length ? {registeredReferences} : {}), ...(settlementRefusals.length?{settlementRefusals}:{}),
         ...(redundant.size ? {redundantRecoveries: [...redundant.values()]} : {}) };
   }
 

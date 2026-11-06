@@ -1,4 +1,5 @@
 import {accountIsFenced} from "./storage/accountDeletion";
+import * as workReferenceStorage from "./storage/workReferences";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
 import * as replicaHistoryReads from "./replicaHistoryReads";
@@ -361,6 +362,13 @@ export function openSyncRelayStorage(
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
+  workReferenceDatasetAccess?: import("./storage/context").StorageContext["workReferenceDatasetAccess"];
+  prepareWorkReferenceRegistration(input: Parameters<SyncRelayStorage["prepareWorkReferenceRegistration"]>[0]) { return workReferenceStorage.prepareWorkReferenceRegistration(this, input); }
+  indexReceivedWorkTargets(rows: Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0]) { workReferenceStorage.indexReceivedWorkTargets(this, rows); }
+  registerWorkReferences(input: Parameters<SyncRelayStorage["registerWorkReferences"]>[0]) { return workReferenceStorage.registerWorkReferences(this, input); }
+  makeWorkReference(input: Parameters<SyncRelayStorage["makeWorkReference"]>[0]) { return workReferenceStorage.makeWorkReference(this, input); }
+  resolveWorkReference(input: Parameters<SyncRelayStorage["resolveWorkReference"]>[0]) { return workReferenceStorage.resolveWorkReference(this, input); }
+  listWorkReferences(input: Parameters<SyncRelayStorage["listWorkReferences"]>[0]) { return workReferenceStorage.listWorkReferences(this, input); }
   createReplicaLinkReadService(...args:Parameters<SyncRelayStorage["createReplicaLinkReadService"]>) {return createReplicaLinkReadService(this,...args);}
   readonly newDiscussionId: () => string;
   private readingLiveAuthority = false;
@@ -1063,6 +1071,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     admit?: (ops: SyncRelayLogInput[]) => void;
     confirm?: (ops: SyncRelayLogInput[]) => void;
     classifyRedundantRecoveries?: boolean;
+    workReferences?: {userId: string; references: readonly import("@dohc/workspace-engine-client/daemon").WorkReferenceMapping[]; datasetAccess?: import("./storage/workReferences").DatasetReferenceAccess};
   }): AppendLogBatchResult {
     return logStorage.appendLogBatch(this, input);
   }

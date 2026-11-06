@@ -57,11 +57,11 @@ export function createShareReadQueries(
     | "laterObjectMomentPaths"
     | "listLinkRevisionLogRows"
     | "currentObjectFile"
+    | "indexReceivedWorkTargets"
   >,
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
 ) {
-  const identity = createReceivedIdentity(linkKey);
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
@@ -200,6 +200,11 @@ export function createShareReadQueries(
     nextCursor: number;
     hasMore: boolean;
   } => {
+    const observed = new Map<string, Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number]>();
+    const identity = createReceivedIdentity(linkKey, (recipient, workspaceId, objectId, objectToken) => {
+      const sourceHandle = identity.source(recipient, workspaceId);
+      if (sourceHandle) observed.set(objectToken, {recipient, workspaceId, objectId, objectToken, sourceHandle});
+    });
     const chatResolver = chatResolverFor(workspaceId);
     const fileSelector = fileSideOf(selector);
     const accountlessProjection =
@@ -303,6 +308,7 @@ export function createShareReadQueries(
         };
       },
     );
+    storage.indexReceivedWorkTargets([...observed.values()]);
     return { ops: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
 

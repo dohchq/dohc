@@ -973,6 +973,7 @@ impl RelayTransport for HostedFeed {
             .max()
             .unwrap_or(-1);
         let mut response = PushResponse {
+            registered_references: Vec::new(),
             settlement_refusals: Vec::new(),
             hosted_refusals,
             redundant_recoveries: Vec::new(),
@@ -2901,6 +2902,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
         reason: reason.to_owned(),
     };
     let response = |hosted_refusals: Vec<HostedPushRefusal>, settled: Option<i64>| PushResponse {
+        registered_references: Vec::new(),
         settlement_refusals: settled
             .map(|origin_seq| SettlementPublicationRefusal {
                 origin_id: HOST.to_owned(),
@@ -2972,6 +2974,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
 
     // Neither a probe nor a share log push refuses an op.
     let unrefused = PushResponse {
+        registered_references: Vec::new(),
         hosted_refusals: Vec::new(),
         ..valid.clone()
     };
@@ -2984,6 +2987,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
         Err(RelayError::InvalidResponse)
     );
     let probe = PushResponse {
+        registered_references: Vec::new(),
         accepted: 0,
         inserted: 0,
         ..unrefused
@@ -2991,6 +2995,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
     assert_eq!(crate::relay::validate_probe_response(&probe), Ok(()));
     assert_eq!(
         crate::relay::validate_probe_response(&PushResponse {
+            registered_references: Vec::new(),
             hosted_refusals: valid.hosted_refusals.clone(),
             ..probe
         }),

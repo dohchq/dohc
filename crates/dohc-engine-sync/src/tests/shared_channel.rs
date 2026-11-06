@@ -291,6 +291,8 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
             (
                 0,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 1,
@@ -301,6 +303,8 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
             (
                 1,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: Vec::new(),
                     next_cursor: 2,
@@ -377,6 +381,8 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             (
                 0,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: vec![rejected],
                     next_cursor: 1,
@@ -387,6 +393,8 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
             (
                 1,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: vec![admitted],
                     next_cursor: 2,
@@ -665,6 +673,8 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
             (
                 0,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: vec![
                         share_op(
@@ -698,6 +708,8 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
             (
                 2,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: vec![message(2, "m-task", "/task Book"), message(3, "m-hi", "Hi")],
                     next_cursor: 4,
@@ -766,6 +778,8 @@ fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
             (
                 0,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: vec![
                         share_op(
@@ -799,6 +813,8 @@ fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
             (
                 2,
                 SharedChannelResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     own_origin_id: None,
                     ops: vec![ShareReplicationEnvelope {
                         origin_id: format!(

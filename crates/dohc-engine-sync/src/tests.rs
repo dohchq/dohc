@@ -277,6 +277,11 @@ impl RelayTransport for FakeRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
+            registered_references: req
+                .work_references
+                .iter()
+                .map(|mapping| mapping.reference.clone())
+                .collect(),
             settlement_refusals,
             hosted_refusals: Vec::new(),
             redundant_recoveries: Vec::new(),
@@ -591,6 +596,7 @@ impl RelayTransport for PagedRelay {
                 .push(started.elapsed());
         }
         Ok(PushResponse {
+            registered_references: Vec::new(),
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
             redundant_recoveries: Vec::new(),
@@ -870,6 +876,7 @@ impl RelayTransport for PagedShareRelay {
             .expect("shared push calls")
             .push(req);
         Ok(PushResponse {
+            registered_references: Vec::new(),
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
             redundant_recoveries: Vec::new(),
@@ -985,6 +992,106 @@ fn seed_identity(engine: &mut EngineStore) {
     )
     .expect("identity");
     assert_eq!(outcome, TxnOutcome::Committed(0));
+}
+
+#[test]
+fn work_reference_outbox_retries_the_same_binding_after_remote_commit() {
+    use dohc_engine_domain::work_references::{
+        WorkTargetInput, make_work_reference, pending_work_references,
+    };
+    let (_scratch, path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1, &NoFaults)
+        .unwrap();
+    seed_identity(&mut engine);
+    seed_text_head(&mut engine, "referenced", "plan.md", "Plan");
+    let made = make_work_reference(
+        &mut engine,
+        "ws",
+        &WorkTargetInput::File {
+            version_id: Some("main".into()),
+            object_id: Some("referenced".into()),
+            path: None,
+        },
+        2,
+        &NoFaults,
+    )
+    .unwrap();
+    let expected = pending_work_references(&engine, "ws").unwrap();
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].reference, made.reference);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    assert_eq!(
+        client
+            .push_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 3, 0)
+            .unwrap(),
+        SyncPassOutcome::CrashedAfterRemoteCommit,
+    );
+    assert_eq!(pending_work_references(&engine, "ws").unwrap(), expected);
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 4).unwrap();
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 5, 0)
+        .unwrap();
+    assert!(pending_work_references(&engine, "ws").unwrap().is_empty());
+    let requests = client.transport().pushed_requests();
+    let sent: Vec<_> = requests
+        .iter()
+        .filter(|request| !request.work_references.is_empty())
+        .collect();
+    assert!(sent.len() >= 2);
+    assert!(
+        sent.iter()
+            .all(|request| request.work_references == expected)
+    );
+}
+
+#[test]
+fn work_reference_outbox_drains_in_bounded_passes_without_new_log_operations() {
+    use dohc_engine_domain::work_references::{
+        TransactionalRecordId, WorkTargetInput, make_work_reference, pending_work_references,
+    };
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    for record in 0..129 {
+        make_work_reference(
+            &mut engine,
+            "ws",
+            &WorkTargetInput::TransactionalRecord {
+                dataset_id: "00000000-0000-4000-8000-000000000001".into(),
+                table_id: "00000000-0000-4000-8000-000000000002".into(),
+                record_id: TransactionalRecordId::Number(record),
+            },
+            2,
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let first = client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3, 0)
+        .unwrap();
+    assert!(matches!(
+        first,
+        SyncPassOutcome::Complete { has_more: true, .. }
+    ));
+    assert_eq!(pending_work_references(&engine, "ws").unwrap().len(), 1);
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 4, 0)
+        .unwrap();
+    assert!(pending_work_references(&engine, "ws").unwrap().is_empty());
+    let requests = client.transport().pushed_requests();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.work_references.len() <= 128)
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.ops.is_empty() && !request.work_references.is_empty())
+    );
 }
 
 fn seed_replication_version(engine: &mut EngineStore, version_id: &str, kind: &str) {
@@ -1135,6 +1242,8 @@ fn refused_malformed_proof_with_phantom_blobs_does_not_block_the_next_pull_opera
         let next = envelope("malicious", 1, "workspace.init", json!({}));
         let client = RelaySyncClient::new(FakeRelay {
             pull: Mutex::new(Some(PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
                 ops: vec![refused, next],
                 next_cursor: 2,
                 has_more: false,

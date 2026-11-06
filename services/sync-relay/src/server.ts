@@ -1,5 +1,6 @@
 import {accountIsFenced} from "./storage/accountDeletion";
 import {parseRoute} from "./relayRoute";
+import {createWorkReferenceRoutes} from "./workReferenceRoutes";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {normalizeLinkRefusal} from "./linkRefusal";
 import type { AppPublicationLimits } from "@dohc/security-contract/app-publication";
@@ -475,6 +476,7 @@ export function createSyncRelayHandler({
     historicalSharedBlob,
     discussionActivity,
     lookupUserDisplayName,
+    linkKey,
   );
 
   const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
@@ -783,6 +785,20 @@ export function createSyncRelayHandler({
         return push ? await push(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
+      if (route.route === "work-reference" || route.route === "work-references" || route.route === "share-work-references") {
+        if (request.headers.has("cookie")) throw notFound();
+        const respond = createWorkReferenceRoutes(storage, linkKey, nowMs);
+        if (request.headers.get("authorization")?.startsWith("LinkCapability ")) {
+          const {capabilityToken, capability} = requireLinkCapability(request);
+          const secret = request.headers.get("x-dohc-link-profile-secret");
+          const datasetAuth = secret && linkKey && LINK_SECRET_PATTERN.test(secret)
+            ? {kind: "link" as const, capabilityHash: capability.session.capabilityHash, profileTokenHash: hashLinkProfileSecret(secret, linkKey)} : undefined;
+          return await respond(request, route, {kind: "link", grantId: capability.grantId, generation: capability.generation, datasetAuth,
+            requireSession: () => { requireFreshLinkRead(capabilityToken, capability); }});
+        }
+        const actor = await resolveActor(request, route.route === "work-references" ? route.workspaceId : "");
+        return await respond(request, route, {kind: "user", userId: actor.userId});
+      }
       if (route.route === "link-exchange") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         return await respondToLinkExchange(request);

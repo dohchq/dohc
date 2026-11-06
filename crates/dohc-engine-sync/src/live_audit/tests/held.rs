@@ -637,6 +637,8 @@ fn more_unrelated_work_than_a_pull_retains_still_arrives() {
     for page in ops.chunks(crate::MAX_PULL_OPS) {
         cursor += page.len() as i64;
         *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
             ops: page.to_vec(),
             next_cursor: cursor,
             has_more: false,

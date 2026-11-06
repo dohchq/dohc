@@ -1149,6 +1149,8 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
             [(
                 0,
                 ShareViewResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
                     ops: vec![ShareReplicationEnvelope {
                         origin_id: "granter".to_owned(),
                         origin_seq: 0,

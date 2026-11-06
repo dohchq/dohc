@@ -3911,6 +3911,8 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
             ops: vec![asset_a, scene_a],
             next_cursor: 2,
             has_more: false,
@@ -3942,6 +3944,8 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
             ops: vec![scene_b, asset_b],
             next_cursor: 2,
             has_more: false,

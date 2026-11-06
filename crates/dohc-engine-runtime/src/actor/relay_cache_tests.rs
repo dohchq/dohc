@@ -132,6 +132,7 @@ async fn push(actor: &ActorHandle) {
                 let response = match &request {
                     RelayIoRequest::Push(request) if request.ops.is_empty() => {
                         RelayIoResponse::Push(PushResponse {
+                            registered_references: Vec::new(),
                             settlement_refusals: Vec::new(),
                             hosted_refusals: Vec::new(),
                             redundant_recoveries: Vec::new(),
@@ -146,6 +147,7 @@ async fn push(actor: &ActorHandle) {
                         missing: Vec::new(),
                     }),
                     RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                        registered_references: Vec::new(),
                         settlement_refusals: Vec::new(),
                         hosted_refusals: Vec::new(),
                         redundant_recoveries: Vec::new(),
@@ -211,6 +213,8 @@ async fn pull_of_own_echo_keeps_writer_cache_warm() {
                 async move {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
                             ops: vec![own_echo],
                             next_cursor: 2,
                             has_more: false,
@@ -310,6 +314,8 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
                 async move {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
                             ops: vec![own_echo, foreign],
                             next_cursor: 3,
                             has_more: false,
@@ -588,6 +594,7 @@ async fn cycle_push(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
                                     state.push(op);
                                 }
                                 Ok(RelayIoResponse::Push(PushResponse {
+                                    registered_references: Vec::new(),
                                     settlement_refusals: Vec::new(),
                                     hosted_refusals: Vec::new(),
                                     redundant_recoveries: Vec::new(),
@@ -641,6 +648,8 @@ async fn full_cycle(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
                                 let has_more =
                                     rows.last().is_some_and(|op| op.relay_seq.unwrap() > next);
                                 Ok(RelayIoResponse::Pull(PullResponse {
+                                    work_references: Vec::new(),
+                                    next_reference_after: None,
                                     ops,
                                     next_cursor: next,
                                     has_more,
@@ -892,6 +901,8 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
                 async move {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
                             ops: vec![own],
                             next_cursor: 1,
                             has_more: false,

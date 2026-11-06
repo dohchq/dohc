@@ -222,6 +222,8 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
     let repaired = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n";
     let sha = hex_sha256(repaired.as_bytes());
     let owner = RelaySyncClient::new(PagedShareRelay::new([], [(0, ShareViewResponse {
+        work_references: Vec::new(),
+        next_reference_after: None,
         ops: vec![ShareReplicationEnvelope {
             origin_id: "owner-adoption".to_owned(), origin_seq: 0, op_kind: "moment.append".to_owned(), recorded_at_ms: 3_000,
             payload: json!({ "versionId": "main", "operation": "write", "path": path,
@@ -351,6 +353,8 @@ fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
         let (_scratch, _db, mut engine) = proposal_fixture(&[]);
         let client = RelaySyncClient::new(
             PagedShareRelay::new([], [(0, ShareViewResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
                 ops: vec![ShareReplicationEnvelope {
                     origin_id: "owner".to_owned(), origin_seq: 0,
                     op_kind: "moment.append".to_owned(), recorded_at_ms: 2_000,
@@ -379,6 +383,8 @@ fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
         let owner_sha = hex_sha256(owner_text.as_bytes());
         let owner = RelaySyncClient::new(
             PagedShareRelay::new([], [(1, ShareViewResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
                 ops: vec![ShareReplicationEnvelope {
                     origin_id: "owner".to_owned(), origin_seq: 1,
                     op_kind: "moment.append".to_owned(), recorded_at_ms: 3_000,

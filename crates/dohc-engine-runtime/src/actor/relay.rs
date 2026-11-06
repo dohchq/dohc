@@ -1029,6 +1029,7 @@ mod deferred_relay_tests {
                     missing: Vec::new(),
                 }),
                 RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                    registered_references: Vec::new(),
                     settlement_refusals: Vec::new(),
                     hosted_refusals: Vec::new(),
                     redundant_recoveries: Vec::new(),
@@ -1217,6 +1218,8 @@ mod deferred_relay_tests {
                     let request = transport.take_pending().unwrap();
                     let response = match &request {
                         RelayIoRequest::Pull(_) => RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
                             ops: Vec::new(),
                             next_cursor: 0,
                             has_more: false,
@@ -1225,6 +1228,7 @@ mod deferred_relay_tests {
                             assert!(push.ops.is_empty());
                             probes += 1;
                             RelayIoResponse::Push(PushResponse {
+                                registered_references: Vec::new(),
                                 settlement_refusals: Vec::new(),
                                 hosted_refusals: Vec::new(),
                                 redundant_recoveries: Vec::new(),
@@ -1289,6 +1293,7 @@ mod deferred_relay_tests {
                                         RelayIoRequest::Push(push) => {
                                             assert_eq!(push.ops.len(), 2);
                                             RelayIoResponse::Push(PushResponse {
+                                                registered_references: Vec::new(),
                                                 settlement_refusals: Vec::new(),
                                                 hosted_refusals: Vec::new(),
                                                 redundant_recoveries: Vec::new(),
@@ -1481,6 +1486,7 @@ mod deferred_relay_tests {
     fn completed_pull_page_remains_available_for_replay() {
         let transport = DeferredRelayTransport::default();
         let request = PullRequest {
+            reference_after: None,
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1488,6 +1494,8 @@ mod deferred_relay_tests {
             limit: 10,
         };
         let response = PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
             ops: Vec::new(),
             next_cursor: 1,
             has_more: false,
@@ -1509,6 +1517,7 @@ mod deferred_relay_tests {
     fn completed_push_batches_release_consumed_request_payloads() {
         let transport = DeferredRelayTransport::default();
         let request = PushRequest {
+            work_references: Vec::new(),
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1531,6 +1540,7 @@ mod deferred_relay_tests {
         transport.complete(
             RelayIoRequest::Push(request.clone()),
             Ok(RelayIoResponse::Push(PushResponse {
+                registered_references: Vec::new(),
                 settlement_refusals: Vec::new(),
                 hosted_refusals: Vec::new(),
                 redundant_recoveries: Vec::new(),
@@ -1544,6 +1554,7 @@ mod deferred_relay_tests {
         assert_eq!(
             transport.push(request).expect("consume completed push"),
             PushResponse {
+                registered_references: Vec::new(),
                 settlement_refusals: Vec::new(),
                 hosted_refusals: Vec::new(),
                 redundant_recoveries: Vec::new(),
@@ -1725,6 +1736,7 @@ mod deferred_relay_tests {
     fn deferred_multi_page_pull_schedules_each_http_request_once() {
         let transport = DeferredRelayTransport::default();
         let request = |cursor| PullRequest {
+            reference_after: None,
             workspace_id: "workspace".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
@@ -1743,6 +1755,8 @@ mod deferred_relay_tests {
                     transport.complete(
                         pending,
                         Ok(RelayIoResponse::Pull(PullResponse {
+                            work_references: Vec::new(),
+                            next_reference_after: None,
                             ops: Vec::new(),
                             next_cursor: cursor + 1,
                             has_more: cursor < 3,

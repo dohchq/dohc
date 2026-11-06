@@ -3619,6 +3619,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_reported_agent.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 86,
+        id: "v2-learned-work-references",
+        sql: include_str!("learned_work_references.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5614,6 +5620,10 @@ mod tests {
             (
                 "v2-chat-reported-agent",
                 "7e66943ecdb7659231ac8aab7a3629304243c0fb7264b14f381a2c98a58c551a",
+            ),
+            (
+                "v2-learned-work-references",
+                "eb375cd867263916724d5795e53d02ceb5ad6bf51ddb11e0b1692289a9c63457",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

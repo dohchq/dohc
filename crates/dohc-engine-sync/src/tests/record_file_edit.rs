@@ -164,6 +164,8 @@ fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&s
     let mut relay = PagedRelay::new([(
         from,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
             ops: ops.to_vec(),
             next_cursor: next,
             has_more: false,
@@ -1300,6 +1302,8 @@ fn conflict_held_work_past_the_retention_limit_names_the_conflict() {
     let mut relay = PagedRelay::new([(
         4,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
             ops: vec![gemini],
             next_cursor: 5,
             has_more: false,

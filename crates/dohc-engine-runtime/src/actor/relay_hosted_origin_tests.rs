@@ -19,6 +19,7 @@ fn create(new_origin_id: &str) -> RelayOperation {
 /// The probe of the replica created under `ORIGIN`.
 fn probe() -> RelayIoRequest {
     RelayIoRequest::PushHosted(PushRequest {
+        work_references: Vec::new(),
         workspace_id: "ws".to_owned(),
         replication_epoch: "epoch".to_owned(),
         stream_identity: "stream".to_owned(),
@@ -30,6 +31,7 @@ fn probe() -> RelayIoRequest {
 
 fn relay_max(current_max_origin_seq: i64) -> Result<RelayIoResponse, RelayError> {
     Ok(RelayIoResponse::Push(PushResponse {
+        registered_references: Vec::new(),
         settlement_refusals: Vec::new(),
         hosted_refusals: Vec::new(),
         redundant_recoveries: Vec::new(),

@@ -100,6 +100,8 @@ fn live_local_echo_skips_replay_on_first_pull_and_retry() {
     let relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
             ops: vec![f.echo.clone()],
             next_cursor: 1,
             has_more: false,
