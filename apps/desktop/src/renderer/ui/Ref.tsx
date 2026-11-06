@@ -16,7 +16,8 @@ import { KindGlyph, ObjectGlyph, type ObjectKind } from "./KindGlyph";
 const CHIP =
   "inline-flex h-[22px] max-w-full min-w-0 items-center gap-[5px] whitespace-nowrap rounded border bg-panel-2 px-[7px] align-[1px] text-[13px] leading-none text-ink";
 const HOVER = "transition-colors duration-75 hover:bg-[image:linear-gradient(var(--color-hover),var(--color-hover))]";
-const SELECTED = "bg-[image:linear-gradient(var(--dohc-selection),var(--dohc-selection))]";
+// Like the bg-selected utility, the selected fill shows subtle text in muted.
+const SELECTED = "bg-[image:linear-gradient(var(--dohc-selection),var(--dohc-selection))] [--dohc-subtle:var(--dohc-muted)]";
 
 export function Ref(props: {
   path: string;

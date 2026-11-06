@@ -128,6 +128,14 @@
   --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Noto Serif', 'Times New Roman', serif;
 }
 
+/* Subtle text misses AA on the selected fill, so inside it subtle shows in
+ * muted. Every variant and @apply of bg-selected carries this, and a hover or
+ * focus color on a control inside still wins. */
+@utility bg-selected {
+  background-color: var(--dohc-selected);
+  --dohc-subtle: var(--dohc-muted);
+}
+
 html,
 body,
 #root {
