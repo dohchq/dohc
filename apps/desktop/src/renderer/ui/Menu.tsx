@@ -115,9 +115,9 @@ export const MENU_LABEL = "min-w-0 flex-1 truncate";
 /** A row's label when a detail follows it on the same line, such as a path or a hint. */
 export const MENU_TITLE = "max-w-[65%] shrink-0 truncate";
 /** The detail after a row's title, in the rest of the row. */
-export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-subtle";
+export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-muted";
 /** The line a list shows when nothing matches. */
-export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-subtle";
+export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-muted";
 
 /**
  * Whether a mousemove came from a pointer that moved. A row that opens or
