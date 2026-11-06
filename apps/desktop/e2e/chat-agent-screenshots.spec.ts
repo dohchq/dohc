@@ -1,21 +1,37 @@
-import { activityPin } from "../src/testPins";
-import { expect, test, type Page } from "@playwright/test";
-import { mkdir } from "node:fs/promises";
+import { activityPin, desktopPins } from "../src/testPins";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
+import { resolveEngineBinary } from "../src/testing/engineBinary";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
+import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
+import { relayJson } from "./helpers/relayPeer";
+import { startServerProxy } from "./helpers/selfHostOnboarding";
+import { sharedDatasetViewerOrigin } from "./helpers/sharedDatasetBrowser";
+import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  openAboutPanel,
+  openChatsView,
   openWorkspaceFromFirstRun,
   trustOpenWorkspace,
+  seedCloudCredentials,
   seedWorkspaceManifest,
+  seedWorkspaceRegistry,
+  waitForFileObjectId,
+  waitForWorkspaceFile,
+  writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // Screenshot harness (@ui-audit) for the agent moments of the chat overhaul:
-// adding an agent, the agent's screen, and an agent's question answered as a
-// poll. Light and dark. Not a regression test; it runs only when a shot
+// adding an agent, the agent's screen, an agent's question answered as a
+// poll, and the marks of authors who joined with a share link. Light and dark. Not a regression test; it runs only when a shot
 // directory is set, the way ui-audit-screenshots.spec.ts does.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture agent screenshots");
@@ -111,5 +127,270 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await shoot(page, "agent-question-answered");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// --- Link agent and link holder marks ----------------------------------------
+// A Group shared by a read-write link, where three authors write in a row: the
+// owner's agent at the default color, an agent that signed in with the link,
+// and a person holding the link. Both link authors reach the relay through the
+// routes a real one uses: share-web's MCP sign-in for the agent, a browser's
+// link session for the person.
+
+type Api = DohcDesktopBridge;
+type RelayOp = { opKind: string; payload: Record<string, unknown> };
+const LINK_WORKSPACE_ID = "link-marks";
+const LINK_OWNER = "e2e-link-marks-owner";
+const LINK_TOKEN = `test:${LINK_OWNER}`;
+const LINK_REDIRECT = "http://127.0.0.1:43110/callback";
+const LINK_VERIFIER = "link-marks-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
+const CABIN = "trip-plan/cabin.md";
+const SAID = {
+  kickoff: "Kickoff: where do we stay?",
+  memberAgent: "I can hold the lake cabin until Friday.",
+  linkAgent: `Booked @[${CABIN}] for the first week.`,
+  linkHolder: `Can we add a night? @[${CABIN}]`,
+  post: "Shortlist: three cabins near the lake.",
+  linkAgentComment: "The second cabin has a dock.",
+  linkHolderComment: "A dock wins it for me.",
+} as const;
+
+// What a screen reader hears of the author marks in one row, in order.
+async function spokenMarks(row: Locator): Promise<string[]> {
+  return row.evaluate((node) => [...node.querySelectorAll(".sr-only")]
+    .map((word) => word.textContent?.trim().toLowerCase() ?? "")
+    .filter((word) => word === "agent" || word === "link holder"));
+}
+
+async function relayPost(baseUrl: string, path: string, body: unknown, headers: Record<string, string>): Promise<Record<string, unknown>> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await response.text();
+  expect(response.status, text).toBe(200);
+  return JSON.parse(text) as Record<string, unknown>;
+}
+
+// The Group as the relay holds it, once the owner's chat and the agent's post have synced.
+function groupOnRelay(ops: readonly RelayOp[], postThreadId: string) {
+  const channel = ops.find((op) => op.opKind === "chat.channel.create" && op.payload.name === "Trip plan")?.payload;
+  const thread = (match: (payload: Record<string, unknown>) => boolean) =>
+    ops.find((op) => op.opKind === "chat.thread.create" && match(op.payload))?.payload;
+  const lane = thread((payload) => payload.channelWireId === channel?.wireId && payload.lane === "chat");
+  if (!channel || !lane || !thread((payload) => payload.threadId === postThreadId)) return null;
+  return { channelWireId: String(channel.wireId), folderPath: String(channel.folderPath), laneThreadId: String(lane.threadId) };
+}
+
+test("@ui-audit link agent and link holder marks", async () => {
+  test.setTimeout(480_000);
+  await mkdir(SHOT_DIR, { recursive: true });
+  const temp = await createTempWorkspace();
+  const exchangeKey = randomBytes(32).toString("base64url");
+  let relay: SyncRelayHandle | undefined;
+  let proxy: Awaited<ReturnType<typeof startServerProxy>> | undefined;
+  let owner: Awaited<ReturnType<typeof launchDesktopApp>> | undefined;
+  let primaryFailure: unknown;
+  try {
+    // A read-write Group link edits the Group's folder, so it needs a relay
+    // that releases Edit links, deployed the self-hosted way.
+    const ca = await mintLocalhostCa(temp.baseDir);
+    const env = { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+      DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath, DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
+      DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
+    proxy = await startServerProxy(ca);
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
+      editLinks: { engineExecutable: resolveEngineBinary(), publicOrigin: proxy.origin, trustEnv: env },
+      linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey,
+        publicViewerOrigin: sharedDatasetViewerOrigin } });
+    proxy.routeRelayTo(relay.baseUrl);
+    const relayOps = async (): Promise<RelayOp[]> => {
+      const identity = relayAdoptedIdentity(relay!.dbPath, LINK_WORKSPACE_ID);
+      if (!identity) return [];
+      const query = new URLSearchParams({ since: "0", limit: "1000", ...identity });
+      const result = await relayJson(relay!.baseUrl, LINK_TOKEN, `/sync/${LINK_WORKSPACE_ID}/log?${query}`);
+      expect(result.status, result.body).toBe(200);
+      return (JSON.parse(result.body) as { ops: RelayOp[] }).ops;
+    };
+
+    // --- The owner syncs a Group with a chat and posts --------------------
+    await seedWorkspaceManifest(temp, LINK_WORKSPACE_ID);
+    await seedWorkspaceRegistry(temp, [{ workspaceId: LINK_WORKSPACE_ID, rootPath: temp.rootPath }]);
+    await seedCloudCredentials(temp, { serverUrl: proxy.origin, relayUrl: proxy.origin,
+      userId: LINK_OWNER, email: `${LINK_OWNER}@dohc.test`, token: LINK_TOKEN });
+    owner = await launchDesktopApp({ workspace: temp, env });
+    const page = owner.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await page.evaluate(async (workspaceId) => {
+      await (window as unknown as { dohcDesktop: Api }).dohcDesktop.cloudEnableSync({ workspaceId });
+    }, LINK_WORKSPACE_ID);
+
+    await openChatsView(page);
+    await page.getByTestId("chats-new-channel").click();
+    await page.getByTestId("chats-new-channel-name").fill("Trip plan");
+    await page.getByTestId("chats-new-channel-type-both").click();
+    await page.getByTestId("chats-new-channel-submit").click();
+    const channelView = page.locator('[data-testid="chats-channel-view"][data-variant="page"]');
+    const threadView = page.locator('[data-testid="chats-thread-view"][data-variant="page"]');
+    await expect(channelView.getByTestId("chats-channel-title")).toHaveText("Trip plan");
+    await waitForWorkspaceFile(page, LINK_WORKSPACE_ID, "trip-plan");
+    await writeWorkspaceFiles(temp, [{ path: CABIN, contents: "# Lake cabin\n\nSleeps six. Dock on the east side.\n" }]);
+    await waitForFileObjectId(page, LINK_WORKSPACE_ID, CABIN);
+
+    // The owner's first chat message starts the Group's chat.
+    await channelView.getByTestId("chats-group-lane-chat").click();
+    await channelView.getByTestId("chats-lane-composer").fill(SAID.kickoff);
+    await channelView.getByTestId("chats-lane-composer").press("Enter");
+    await expect(channelView.getByTestId("chats-lane-message-body").filter({ hasText: SAID.kickoff })).toBeVisible();
+
+    // The owner's agent, at the default color, posts, then answers in the chat.
+    await waitForCliEndpoint(temp.homeDir);
+    const posted = await runDohcCli(temp, ["chat", "post", "trip-plan", "--as-agent", SAID.post]);
+    const postThreadId = posted.stdout.match(/^posted\s+(\S+)\s/mu)?.[1];
+    if (!postThreadId) throw new Error(`The agent's post printed no thread: ${posted.stdout}`);
+    await expect.poll(async () => groupOnRelay(await relayOps(), postThreadId) !== null,
+      { timeout: 120_000, intervals: [1000] }).toBe(true);
+    const group = groupOnRelay(await relayOps(), postThreadId)!;
+    const replied = await runDohcCli(temp, ["chat", "reply", group.laneThreadId, "--as-agent", SAID.memberAgent]);
+    expect(replied.stdout).toContain("replied");
+
+    // --- The owner shares the Group and makes a read-write link -----------
+    const shared = await relayJson(relay.baseUrl, LINK_TOKEN, `/sync/${LINK_WORKSPACE_ID}/shares`, {
+      method: "POST", body: JSON.stringify({ recipientUserId: "e2e-link-marks-member", channelWireId: group.channelWireId,
+        paths: [group.folderPath], access: "read-write", subjectName: "Trip plan" }),
+    });
+    expect(shared.status, shared.body).toBe(200);
+    const shareId = String((JSON.parse(shared.body) as { shareId: string }).shareId);
+    const created = await relayJson(relay.baseUrl, LINK_TOKEN, `/sync/${LINK_WORKSPACE_ID}/shares/${shareId}/links`, {
+      method: "POST", body: JSON.stringify({ access: "read-write" }),
+    });
+    expect(created.status, created.body).toBe(200);
+    const secret = new URL((JSON.parse(created.body) as { url: string }).url).hash.slice(1);
+    const exchange = { "x-dohc-relay-exchange-key": exchangeKey };
+
+    // --- An agent signs in with the link, as share-web's MCP sign-in does --
+    const resource = `${sharedDatasetViewerOrigin}/mcp/s/${secret}`;
+    const { clientId } = await relayPost(relay.baseUrl, "/sync/link/agent-clients",
+      { registration: "registered", redirectUris: [LINK_REDIRECT], clientName: "Claude Code" }, exchange);
+    const { requestId } = await relayPost(relay.baseUrl, "/sync/link/agent-authorizations", {
+      clientId, resource, redirectUri: LINK_REDIRECT, state: "link-marks", codeChallengeMethod: "S256",
+      codeChallenge: createHash("sha256").update(LINK_VERIFIER).digest("base64url"),
+    }, exchange);
+    const { code } = await relayPost(relay.baseUrl, "/sync/link/agent-authorizations/decision", { requestId, decision: "allow" }, exchange);
+    const { accessToken } = await relayPost(relay.baseUrl, "/sync/link/agent-token", {
+      grantType: "authorization_code", clientId, code, redirectUri: LINK_REDIRECT, codeVerifier: LINK_VERIFIER, resource,
+    }, exchange);
+    const agentPost = (body: string, threadId: string, idempotencyKey: string) =>
+      relayPost(relay!.baseUrl, "/sync/link/agent-chat/post", { accessToken, body, threadId, idempotencyKey }, exchange);
+
+    // --- A person opens the link in a browser -----------------------------
+    const { capabilityToken } = await relayPost(relay.baseUrl, "/sync/link-exchange", { secret }, exchange);
+    const browser = {
+      authorization: `LinkCapability ${String(capabilityToken)}`,
+      "x-dohc-link-profile-secret": randomBytes(32).toString("base64url"),
+    };
+    const holderPost = (body: string, threadId: string, idempotencyKey: string) =>
+      relayPost(relay!.baseUrl, "/sync/link/chat/messages",
+        { channelWireId: group.channelWireId, threadId, body, claimedName: "Wren", idempotencyKey }, browser);
+
+    // Both write in the Group's chat after the owner's agent, then comment on its post.
+    await agentPost(SAID.linkAgent, group.laneThreadId, "chat-1");
+    await holderPost(SAID.linkHolder, group.laneThreadId, "chat-1");
+    await agentPost(SAID.linkAgentComment, postThreadId, "comment-1");
+    await holderPost(SAID.linkHolderComment, postThreadId, "comment-1");
+
+    // --- The Group: three authors in a row --------------------------------
+    // An idle owner pulls on its own sync cadence; a throwaway write wakes it.
+    const lane = channelView.getByTestId("chats-lane");
+    const laneRow = (body: string) => lane.getByTestId("chats-lane-message").filter({ hasText: body });
+    let nudge = 0;
+    await expect.poll(async () => {
+      nudge += 1;
+      await writeFile(join(temp.rootPath, `sync-nudge-${nudge}.md`), `nudge ${nudge}\n`);
+      await channelView.getByTestId("chats-group-lane-posts").click();
+      await channelView.getByTestId("chats-group-lane-chat").click();
+      await expect(channelView.getByTestId("chats-lane-composer")).toBeEnabled({ timeout: 10_000 });
+      return laneRow("Can we add a night?").count();
+    }, { timeout: 120_000, intervals: [2000] }).toBe(1);
+    await expect(laneRow(SAID.memberAgent)).toHaveAttribute("data-author-kind", "agent");
+    await expect(laneRow("Booked")).toHaveAttribute("data-author-kind", "link");
+    expect(await spokenMarks(laneRow(SAID.memberAgent))).toEqual(["agent"]);
+    expect(await spokenMarks(laneRow("Booked"))).toEqual(["agent", "link holder"]);
+    expect(await spokenMarks(laneRow("Can we add a night?"))).toEqual(["link holder"]);
+    await expect(laneRow("Booked").getByTestId("chats-lane-message-author")).toHaveText("Claude Code");
+    await expect(laneRow("Booked").locator("[data-link-agent]")).toHaveAttribute("title", "Claude Code");
+    await page.mouse.move(0, 0);
+    await shoot(page, "link-marks-group");
+
+    // --- About this conversation: a file both link authors mentioned ------
+    await openAboutPanel(page);
+    const about = page.getByTestId(desktopPins.aboutRail);
+    const cabin = about.locator(`[data-testid="about-conversation-link"][data-path="${CABIN}"]`);
+    // The conversation's link index may still be building when About opens.
+    await expect(cabin).toBeVisible({ timeout: 30_000 });
+    const authors = cabin.getByTestId("about-conversation-link-authors");
+    await expect(authors).toContainText("agent link holder Claude Code");
+    await expect(authors).toContainText("link holder Wren");
+    await expect(authors).not.toContainText("agent link holder Wren");
+    await expect(cabin.locator("[data-link-agent]")).toHaveCount(1);
+    await shoot(page, "link-marks-about");
+
+    // --- The post card, its thread, and the link agent's comment ----------
+    await channelView.getByTestId("chats-group-lane-posts").click();
+    const card = channelView.getByTestId("chats-post-card").filter({ hasText: SAID.post });
+    await expect(card).toBeVisible();
+    // A link author writes in the Group's chat or comments on a post; it
+    // cannot start a post. The card's author is the owner's agent.
+    expect(await spokenMarks(card)).toEqual(["agent"]);
+    await page.mouse.move(0, 0);
+    await shoot(page, "link-marks-post-card");
+
+    await card.click();
+    await expect(threadView).toBeVisible();
+    const comment = (body: string) => threadView
+      .locator('li[data-testid="chats-message"] > [data-testid="chats-comment-bubble"]').filter({ hasText: body });
+    await expect(comment(SAID.linkHolderComment)).toBeVisible({ timeout: 30_000 });
+    expect(await spokenMarks(threadView.locator('article[data-testid="chats-message"]'))).toEqual(["agent"]);
+    expect(await spokenMarks(comment(SAID.linkAgentComment))).toEqual(["agent", "link holder"]);
+    expect(await spokenMarks(comment(SAID.linkHolderComment))).toEqual(["link holder"]);
+    await expect(comment(SAID.linkAgentComment).getByTestId("chats-comment-link-holder")).toHaveText("Link holder");
+    await page.mouse.move(0, 0);
+    await shoot(page, "link-marks-thread");
+
+    // The agent's badge names it, with no owner: nobody in the workspace owns it.
+    const badge = comment(SAID.linkAgentComment).getByTestId("chats-comment-agent-badge");
+    await expect(badge).toHaveAccessibleName("agent");
+    await badge.focus();
+    const tooltip = page.getByRole("tooltip");
+    await expect(tooltip).toContainText("Claude Code");
+    await expect(tooltip).not.toContainText("Owned by");
+    await expect(tooltip).not.toContainText("Owner name unavailable");
+    await shoot(page, "link-marks-comment");
+    await page.keyboard.press("Escape");
+
+    // --- Home ---------------------------------------------------------------
+    await page.getByTestId("chats-feed-link").click();
+    const home = page.locator('[data-testid="chats-personal-feed"][data-variant="page"]');
+    const feedRow = (body: string) => home.getByTestId("chats-feed-item").filter({ hasText: body });
+    await expect(feedRow(SAID.linkAgentComment)).toBeVisible();
+    expect(await spokenMarks(feedRow(SAID.linkAgentComment))).toEqual(["agent", "link holder"]);
+    expect(await spokenMarks(feedRow(SAID.linkHolderComment))).toEqual(["link holder"]);
+    await page.mouse.move(0, 0);
+    await shoot(page, "link-marks-feed");
+
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    const cleanup = await Promise.allSettled([owner?.close()]);
+    cleanup.push(...await Promise.allSettled([relay?.stop(), proxy?.close()]));
+    cleanup.push(...await Promise.allSettled([temp.cleanup()]));
+    const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length) {
+      await test.info().attach("cleanup failures", { contentType: "text/plain",
+        body: failures.map((result) => String(result.reason)).join("\n") });
+      if (primaryFailure === undefined) throw new AggregateError(failures.map((result) => result.reason), "Link marks test cleanup failed.");
+    }
   }
 });

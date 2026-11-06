@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { test, expect, type Browser, type Page } from "@playwright/test";
 import { getCookies } from "better-auth/cookies";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
+import { LINK_CHAT_MESSAGE_ID_PREFIX, linkChatOrigin } from "../../sync-relay/src/relayLogInputs";
 import { openSyncRelayStorage } from "../../sync-relay/src/storage";
 import type { StorageContext } from "../../sync-relay/src/storage/context";
 import { createSyncRelayHandler } from "../../sync-relay/src/server";
@@ -160,6 +161,11 @@ test("a group member reads and posts from a phone while a read-only member follo
     storage.appendLogBatch({ workspaceId, originId: "owner-agent", ops: [{ originSeq: 0, opKind: "chat.message.append", recordedAtMs: Date.now(),
       payloadJson: JSON.stringify({ messageId: "agent-report", threadId, authorKind: "agent", authorDisplayName: "Planner",
         authorOwnerDisplayName: "Owner", body: "x".repeat(210_000), createdAtMs: Date.now() }) }] });
+    // An agent that signed in with a share link posts under its link principal's origin, as the relay writes it.
+    storage.appendLogBatch({ workspaceId, originId: linkChatOrigin("principal-helper"), ops: [{ originSeq: 0, opKind: "chat.message.append",
+      recordedAtMs: Date.now(), payloadJson: JSON.stringify({ messageId: `${LINK_CHAT_MESSAGE_ID_PREFIX}helper-1`, threadId,
+        authorKind: "link", authorDisplayName: "Claude Code", linkGrantId: "grant-link", linkPrincipalId: "principal-helper",
+        agentConnectionId: "connection-helper", body: "Held the tram tickets for Saturday.", createdAtMs: Date.now() }) }] });
     const owner = await relay(new Request(`https://relay.example.org/sync/${workspaceId}/log`, { method: "POST",
       headers: { authorization: "Bearer owner", "content-type": "application/json" },
       body: JSON.stringify({ originId: "owner-laptop", ops: [{ originSeq: 0, opKind: "chat.message.append", recordedAtMs: Date.now(),
@@ -174,6 +180,16 @@ test("a group member reads and posts from a phone while a read-only member follo
     await ana.reload();
     await expect(ana.locator(".chat-list strong", { hasText: "hotel" })).toBeVisible();
     await expect(ana.getByText(tooLong, { exact: true })).toBeVisible();
+    // The link agent wears the agent mark other agents wear, then the link mark, and no owner.
+    const helper = ana.locator(".chat-message", { hasText: "Held the tram tickets for Saturday." });
+    await expect(helper).toBeVisible();
+    await expect(riley.getByText("Held the tram tickets for Saturday.", { exact: true })).toBeVisible();
+    expect(await helper.locator(".chat-meta [role=img]").evaluateAll(marks => marks.map(mark => mark.getAttribute("aria-label"))))
+      .toEqual(["Agent", "Link holder"]);
+    await expect(helper.locator(".chat-author")).toHaveText("Claude Code");
+    await expect(helper.locator(".chat-owner")).toHaveCount(0);
+    await helper.scrollIntoViewIfNeeded();
+    await ana.screenshot({ path: testInfo.outputPath("shared-channel-phone-link-agent.png") });
     await ana.emulateMedia({ colorScheme: "dark" });
     await ana.screenshot({ path: testInfo.outputPath("shared-channel-phone-dark.png") });
 
