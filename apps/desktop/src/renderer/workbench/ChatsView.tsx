@@ -4438,7 +4438,7 @@ export function ChatsView(props: {
           dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
-            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-subtle"
+            className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 text-[10px] tabular-nums text-muted"
           >
             {liveRunId !== null
               ? `agent working${

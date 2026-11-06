@@ -223,7 +223,7 @@ export function DmRequestListItem(props: {
           <span className="block truncate text-[12px] font-medium text-ink">
             {props.request.granterEmail ?? "A teammate"}
           </span>
-          <span className="block text-[10px] text-subtle">
+          <span className="block text-[10px] text-muted">
             {pending ? "Wants to message you" : "Declined"}
           </span>
         </span>
