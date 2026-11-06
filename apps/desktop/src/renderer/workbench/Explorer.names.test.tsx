@@ -78,16 +78,31 @@ describe("splitName", () => {
   });
 
   it("joins back into the name", () => {
-    for (const name of [NOTES, FOLDER, ".gitignore", "a.md", "plan", "copy (2).md", "Q3 report v1.5", "café 🚀 notes.md"]) {
+    for (const name of [NOTES, FOLDER, ".gitignore", "a.md", "plan", "copy (2).md", "Q3 report v1.5", "café 🚀 notes.md", "annual  report.md", "  a b  c  .md"]) {
       const { start, end } = splitName(name);
       expect(start + end).toBe(name);
     }
   });
 
-  it("takes no extension from a leading dot, a space, or a long suffix", () => {
+  it("takes no extension from a leading dot, a space, or a suffix over 15 characters", () => {
     expect(splitName(".gitignore").end).toBe("gnore");
-    expect(splitName("Meeting with Ana re. the venue").end).toBe("venue");
-    expect(splitName("notes.a-suffix-far-too-long").end).toBe("-long");
+    expect(splitName("Meeting with Ana re. the-venue").end).toBe("venue");
+    expect(splitName("notes.abcdefghijklmnop").end).toBe("lmnop");
+  });
+
+  it("keeps a whole extension of 15 characters", () => {
+    expect(splitName("quarterly-report.fifteen-chars-x")).toEqual({ start: "quarterly-r", end: "eport.fifteen-chars-x" });
+    expect(splitName("workspace-settings.code-workspace").end).toBe("tings.code-workspace");
+  });
+
+  it("moves the cut off a space, so neither part starts or ends with one", () => {
+    expect(splitName("Meeting with Ana re. the venue")).toEqual({ start: "Meeting with Ana re. th", end: "e venue" });
+    expect(splitName("budget review  final.md")).toEqual({ start: "budget revie", end: "w  final.md" });
+    expect(splitName("project notes (12).md")).toEqual({ start: "project note", end: "s (12).md" });
+  });
+
+  it("leaves the name whole when the spaces at the cut reach its start", () => {
+    expect(splitName("a     b.md")).toEqual({ start: "", end: "a     b.md" });
   });
 
   it("never splits a character made of two code units", () => {
@@ -104,7 +119,7 @@ describe("Explorer names", () => {
     render(<Explorer {...explorerProps({ files: [file(`notes/${NOTES}`), file(`${FOLDER}/plan.md`)], folders: [FOLDER, "notes"], expandedFolders: ["notes"] })} />);
     const row = treeRow(`notes/${NOTES}`);
     expect(parts(row)).toEqual(["2026-07-08-meeting-", "notes.md"]);
-    expect(row.querySelector("[data-name-start]")?.className).toContain("text-ellipsis");
+    expect(row.querySelector("[data-name-start]")?.className).toContain("truncate");
     expect(row.querySelector("[data-name-end]")?.className).toContain("shrink-0");
     expect(parts(treeRow(FOLDER))).toEqual(["quarterly-planning-and-budget-review", "-2026"]);
   });
@@ -120,6 +135,18 @@ describe("Explorer names", () => {
       expect(row.title).toBe(name);
       expect(row.textContent).toBe(name);
     }
+  });
+
+  it("collapses repeated spaces as one line does", () => {
+    // jsdom draws nothing, so check the parts and their white-space classes.
+    // Each part collapses its own spaces with nowrap, as one line did.
+    render(<Explorer {...explorerProps({ files: [file("annual  report.md"), file("Meeting with Ana re. the venue")] })} />);
+    const fits = treeRow("annual  report.md");
+    expect(parts(fits)).toEqual(["annual  r", "eport.md"]);
+    expect(fits.textContent).toBe("annual  report.md");
+    expect(fits.innerHTML).not.toContain("whitespace-pre");
+    expect(fits.querySelector("[data-name-start]")?.parentElement?.className).toContain("whitespace-nowrap");
+    expect(parts(treeRow("Meeting with Ana re. the venue"))).toEqual(["Meeting with Ana re. th", "e venue"]);
   });
 
   it("draws a short tree name in one part, as before", () => {
