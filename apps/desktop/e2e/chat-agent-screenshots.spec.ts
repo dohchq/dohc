@@ -308,8 +308,8 @@ test("@ui-audit link agent and link holder marks", async () => {
       await expect(channelView.getByTestId("chats-lane-composer")).toBeEnabled({ timeout: 10_000 });
       return laneRow("Can we add a night?").count();
     }, { timeout: 120_000, intervals: [2000] }).toBe(1);
-    await expect(laneRow(SAID.memberAgent)).toHaveAttribute("data-author-kind", "agent");
-    await expect(laneRow("Booked")).toHaveAttribute("data-author-kind", "link");
+    await expect(laneRow(SAID.memberAgent).getByTestId("chats-lane-message-author")).toHaveAttribute("data-author-kind", "agent");
+    await expect(laneRow("Booked").getByTestId("chats-lane-message-author")).toHaveAttribute("data-author-kind", "link");
     expect(await spokenMarks(laneRow(SAID.memberAgent))).toEqual(["agent"]);
     expect(await spokenMarks(laneRow("Booked"))).toEqual(["agent", "link holder"]);
     expect(await spokenMarks(laneRow("Can we add a night?"))).toEqual(["link holder"]);
