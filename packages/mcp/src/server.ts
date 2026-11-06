@@ -18,7 +18,7 @@ import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
-import { MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
+import { chatWatchInputSchema, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, versionResolutionSchema } from "@dohc/cli/protocol";
 import {
   isShareAccessValue,
   SHARE_ACCESS_VALUES,
@@ -42,6 +42,7 @@ import {
   retryAutomationRun,
   readRecord,
   setRecordFields,
+  waitForMessages,
   listFileChats,
   readChat,
   replyToChat,
@@ -133,6 +134,7 @@ function text(structuredContent: Record<string, unknown> | null) {
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
+  let waits = 0;
   const level = ctx.shareAccess ?? "owner";
   function register<InputArgs extends z.ZodRawShape>(
     name: keyof typeof MCP_TOOL_CAPABILITIES,
@@ -558,6 +560,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     },
     async (args) => text(await listFileChats(ctx, args)),
   );
+
+  register("dohc_wait_for_messages", {
+    description: "Wait for the outside-run agent inbox without marking messages read. Returns messages and a cursor, or an empty batch after at most 25 seconds. Call in a loop with the returned cursor and the same filters. Group and thread filters only narrow the inbox. At most 4 waits can run on this connection.",
+    inputSchema: chatWatchInputSchema.shape,
+  }, async (args, extra) => {
+    if (waits >= 4) return text({ ok: false, reason: "Too many chat waits. Finish an existing wait and try again." });
+    waits += 1;
+    try { return text(await waitForMessages(ctx, args, extra.signal)); }
+    finally { waits -= 1; }
+  });
 
   register(
     "dohc_read_chat",

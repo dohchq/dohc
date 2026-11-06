@@ -49,6 +49,15 @@ const threadsArgsSchema = z
   .object({ ...argsBase, group: z.string().min(1) })
   .strict();
 const inboxArgsSchema = z.object(argsBase).strict();
+export const CHAT_WATCH_TIMEOUT_MS = 25_000;
+export const CHAT_WATCH_MAX_TIMEOUT_MS = 25_000;
+export const chatWatchInputSchema = z.object({
+  cursor: z.string().min(1).max(1_048_576).optional(),
+  group: z.string().min(1).max(500).optional(),
+  thread: z.string().min(1).max(500).optional(),
+  timeoutMs: z.number().int().min(0).max(CHAT_WATCH_MAX_TIMEOUT_MS).optional(),
+}).strict();
+const watchArgsSchema = chatWatchInputSchema.extend(argsBase).strict();
 // Where a group's stream page ends: an item's time, lane and id.
 const streamPositionSchema = z
   .object({
@@ -495,6 +504,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
@@ -603,6 +613,7 @@ export const CLI_CAPABILITIES = {
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
   threads: ["chat.threads.list"],
+  watch: ["chat.inbox.read"],
   inbox: ["chat.inbox.read"],
   show: ["chat.show"],
   post: ["chat.post"],
@@ -1757,6 +1768,7 @@ export const cliResultSchemas = {
   ownerAppResponses: OwnerAppResponsesResult,
   groups: groupsResultSchema,
   threads: threadsResultSchema,
+  watch: z.object({ messages: z.array(cliInboxMentionSchema), cursor: z.string().min(1).max(1_048_576) }).strict(),
   inbox: inboxResultSchema,
   show: showResultSchema,
   post: postResultSchema,

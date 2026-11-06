@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -44,6 +44,7 @@ type CliCommandBody =
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
   | { verb: "groups" }
   | { verb: "threads"; group: string }
+  | { verb: "watch"; cursor?: string; group?: string; thread?: string; timeoutMs: number; once: boolean }
   | { verb: "inbox" }
   | { verb: "show"; target: string; peek: boolean; before?: CliStreamPosition; limit?: number }
   | {
@@ -442,6 +443,26 @@ const CHAT_VERBS = {
       if (!group) fail("threads requires a group");
       noExtraArgs(extra, "threads");
       return { verb: "threads", group };
+    },
+  },
+  watch: {
+    capabilityId: "chat.inbox.read",
+    summary: "Wait for the agent's unread messages. Repeat until interrupted; never mark messages read.",
+    operands: "",
+    flags: [
+      { name: "--cursor", value: "cursor", text: "Continue from the cursor returned by watch." },
+      { name: "--group", value: "group", text: "Wait only for messages in this Group." },
+      { name: "--thread", value: "thread", text: "Wait only for messages in this thread." },
+      { name: "--timeout", value: "seconds", text: "Wait up to this many seconds per batch. The default and maximum are 25." },
+      { name: "--once", text: "Return after one batch, including an empty batch at the timeout." },
+    ],
+    parse: input => {
+      noExtraArgs(input.operands, "watch");
+      const timeout = lastValue(input, "--timeout");
+      const timeoutMs = timeout === undefined ? CHAT_WATCH_TIMEOUT_MS : integerFlag(timeout, "--timeout", { allowZero: true }) * 1_000;
+      if (timeoutMs > CHAT_WATCH_MAX_TIMEOUT_MS) fail("--timeout must be at most 25 seconds");
+      if (timeoutMs === 0 && !input.flags.has("--once")) fail("--timeout 0 requires --once");
+      return { verb: "watch", cursor: lastValue(input, "--cursor"), group: lastValue(input, "--group"), thread: lastValue(input, "--thread"), timeoutMs, once: input.flags.has("--once") };
     },
   },
   inbox: {
@@ -1448,7 +1469,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

@@ -133,7 +133,7 @@ function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
   syncSharedChannels?: () => Promise<boolean>;
-  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  afterSuccessfulPull?: (pass: { recovered: boolean; applied: boolean }) => Promise<void>;
   afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   operations?: RelaySyncOperations;
   idlePullMs?: number;
@@ -378,7 +378,7 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(pushMock).toHaveBeenCalledTimes(pushes + 1);
     expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
-    expect(afterSuccessfulPull).toHaveBeenLastCalledWith({ recovered: true });
+    expect(afterSuccessfulPull).toHaveBeenLastCalledWith(expect.objectContaining({ recovered: true }));
     await sync.stop();
     errorSpy.mockRestore();
   });
@@ -695,7 +695,7 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(500);
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
-    expect(afterSuccessfulPull.mock.calls).toEqual([[{ recovered: true }], [{ recovered: false }]]);
+    expect(afterSuccessfulPull.mock.calls).toEqual([[expect.objectContaining({ recovered: true })], [expect.objectContaining({ recovered: false })]]);
 
     errorSpy.mockRestore();
     await sync.stop();

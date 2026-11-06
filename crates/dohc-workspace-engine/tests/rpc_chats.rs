@@ -3971,6 +3971,10 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(unread["threads"][0]["id"], json!("thread"));
+    assert_eq!(
+        unread["threads"][0]["lastRead"],
+        json!({ "createdAtMs": 0, "messageId": "" })
+    );
     let read = call(
         &transport,
         &handle,

@@ -925,7 +925,12 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.agentReadListUnreadRequests]: pageSchema({
     requests: Schema.mutable(Schema.Array(ChatAgentRequestSchema)),
   }),
-  [CHATS_METHOD.agentReadListUnreadThreads]: ThreadsPageSchema,
+  [CHATS_METHOD.agentReadListUnreadThreads]: pageSchema({
+    threads: Schema.mutable(Schema.Array(mutableStruct({
+      ...ChatThreadSchema.fields,
+      lastRead: mutableStruct({ createdAtMs: NonnegativeInt, messageId: Schema.String }),
+    }))),
+  }),
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadStateSchema,
   [CHATS_METHOD.followsSet]: ChatFollowSchema,
   [CHATS_METHOD.followsList]: pageSchema({

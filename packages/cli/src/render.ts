@@ -396,6 +396,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":
       return renderThreads(result as CliResultByVerb["threads"]);
+    case "watch": {
+      const batch = result as CliResultByVerb["watch"];
+      return [...batch.messages.map(message => `${message.threadId}/${message.messageId} ${lineSafe(message.author.displayName)}: ${lineSafe(message.text)}`), `cursor: ${batch.cursor}`].join("\n");
+    }
     case "inbox":
       return renderInbox(result as CliResultByVerb["inbox"]);
     case "show":

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDesktopSharedChannelSync } from "./desktopSharedChannelSync";
+import { subscribeChatWrites } from "./chatWriteSignals";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
@@ -71,6 +72,26 @@ function harness(rows: JoinedSharedChannel[], recheckRemovedShares?: (workspaceI
 }
 
 describe("desktop shared-channel pass composition", () => {
+  it("signals applied messages while a later pull is still pending", async () => {
+    const h = harness([joined("one")]);
+    const applied = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<{ fetched: number; applied: number; skipped: number; nextCursor: number }>();
+    const heard = Promise.withResolvers<void>();
+    const unsubscribe = subscribeChatWrites("workspace", () => heard.resolve());
+    h.pull.mockImplementationOnce(async input => {
+      input.onApplied?.();
+      applied.resolve();
+      return finish.promise;
+    });
+    try {
+      const pending = h.rendererPassForChannel();
+      await applied.promise;
+      await heard.promise;
+      finish.resolve({ fetched: 1, applied: 1, skipped: 0, nextCursor: 1 });
+      expect((await pending).changed).toBe(true);
+    } finally { unsubscribe(); }
+  });
+
   it("passes only this account's live rows through the bounded rotation and preserves its priority", async () => {
     const live = Array.from({ length: SHARED_CHANNEL_SYNC_PASS_ROWS + 2 }, (_, index) => joined(`share-${index}`));
     const h = harness([

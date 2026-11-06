@@ -1,3 +1,4 @@
+import { signalChatWrite } from "./chatWriteSignals";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatMessage, ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
@@ -271,6 +272,7 @@ export function createChatWrites(dependencies: {
     // Nothing on screen asked for an automation's message, so the windows hear of it.
     if (writer?.via === "automation") notifyRenderer(workspaceId);
     if (message) {
+      signalChatWrite(workspaceId);
       // A message can mark a live bookmark projection pending, and a person's
       // message can call an agent.
       projectChatBookmarks(workspaceId);
