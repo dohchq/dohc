@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { editorTabTestId } from "../../testPins";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
 import { useFocusSurface } from "../ui/focusReturn";
@@ -1172,7 +1172,6 @@ describe("EditorTabs overlay scrollbar", () => {
 
   it("labels and invokes group-scoped controls", () => {
     const onCreateGroupRight = vi.fn();
-    const onCloseGroup = vi.fn();
     render(
       <EditorTabs
         groupId="left"
@@ -1187,7 +1186,6 @@ describe("EditorTabs overlay scrollbar", () => {
         onMove={noop}
         onMoveToGroup={noop}
         onCreateGroupRight={onCreateGroupRight}
-        onCloseGroup={onCloseGroup}
       />,
     );
 
@@ -1200,9 +1198,104 @@ describe("EditorTabs overlay scrollbar", () => {
     );
     expect(onCreateGroupRight).toHaveBeenCalledOnce();
     expect(onCreateGroupRight).toHaveBeenCalledWith("left");
-    fireEvent.click(screen.getByRole("button", { name: "Close editor group" }));
+  });
+
+  // The strip's group close sat beside the active tab's close, with the same
+  // X, so a group with tabs closes from its tab list.
+  it("closes a group with tabs from the end of its tab list, not the strip", () => {
+    const onActivate = vi.fn();
+    const onCloseGroup = vi.fn();
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={2}
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={onActivate}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={onCloseGroup}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "All tabs in editor group 2" }));
+    const menu = screen.getByRole("menu", { name: "Tabs in editor group 2" });
+    expect(
+      Array.from(menu.children, (row) => row.getAttribute("role") === "separator" ? "---" : row.textContent),
+    ).toEqual(["a.md", "b.md", "c.md", "---", "Close group"]);
+    const close = screen.getByRole("menuitem", { name: "Close group" });
+    expect(close.getAttribute("aria-current")).toBeNull();
+    fireEvent.click(close);
     expect(onCloseGroup).toHaveBeenCalledOnce();
     expect(onCloseGroup).toHaveBeenCalledWith("left");
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("keeps the strip's close button for an empty group, which has no tab list", () => {
+    const onCloseGroup = vi.fn();
+    const group = (groupId: string, groupNumber: number, groupTabs: typeof tabs) => (
+      <EditorTabs
+        groupId={groupId}
+        groupNumber={groupNumber}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={onCloseGroup}
+      />
+    );
+    // A split, as the shell lays it out: a group with tabs, then an empty one.
+    render(<>{group("left", 1, tabs)}{group("right", 2, [])}</>);
+
+    const [tabbed, empty] = screen.getAllByTestId("editor-tabs");
+    expect(within(tabbed!).queryByRole("button", { name: "Close editor group" })).toBeNull();
+    expect(within(empty!).queryByTestId("tabs-overflow")).toBeNull();
+    fireEvent.click(within(empty!).getByRole("button", { name: "Close editor group" }));
+    expect(onCloseGroup).toHaveBeenCalledOnce();
+    expect(onCloseGroup).toHaveBeenCalledWith("right");
+  });
+
+  it.each([
+    ["with tabs", tabs],
+    ["with no tabs", []],
+  ])("offers no group close when the shell cannot close the group, %s", (_label, groupTabs) => {
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+    if (groupTabs.length === 0) return;
+    fireEvent.click(screen.getByTestId("tabs-overflow"));
+    const menu = screen.getByTestId("tabs-overflow-menu");
+    expect(screen.queryByRole("menuitem", { name: "Close group" })).toBeNull();
+    expect(menu.querySelector('[role="separator"]')).toBeNull();
+    expect(screen.getAllByRole("menuitem").map((row) => row.textContent)).toEqual(["a.md", "b.md", "c.md"]);
   });
 
   // Forced colors remove fills, so the mark is a border, which they keep, in
@@ -1294,19 +1387,26 @@ it("uses one tab stop and arrow, Home and End activation", () => {
 // The strip's scroller cuts off a tab's outset ring, and the pane edge the
 // last strip button's.
 it("draws the focus ring inside every tab and strip button", () => {
+  // An empty group's strip holds the group close.
   render(
-    <EditorTabs groupId="left" groupNumber={1} tabs={tabs} activeTab="b.md"
-      activeTabDirty={false} recoveryPaths={new Set<string>()}
-      onActivate={noop} onClose={noop} onContextMenu={noop} onMove={noop}
-      onMoveToGroup={noop} onCreateGroupRight={noop} onCloseGroup={noop} />,
+    <>
+      <EditorTabs groupId="left" groupNumber={1} tabs={tabs} activeTab="b.md"
+        activeTabDirty={false} recoveryPaths={new Set<string>()}
+        onActivate={noop} onClose={noop} onContextMenu={noop} onMove={noop}
+        onMoveToGroup={noop} onCreateGroupRight={noop} onCloseGroup={noop} />
+      <EditorTabs groupId="right" groupNumber={2} tabs={[]} activeTab={null}
+        activeTabDirty={false} recoveryPaths={new Set<string>()}
+        onActivate={noop} onClose={noop} onContextMenu={noop} onMove={noop}
+        onMoveToGroup={noop} onCreateGroupRight={noop} onCloseGroup={noop} />
+    </>,
   );
   const controls = [
     ...screen.getAllByRole("tab"),
     screen.getByRole("button", { name: "Close editor group" }),
-    screen.getByTestId("create-editor-group-right"),
+    ...screen.getAllByTestId("create-editor-group-right"),
     screen.getByTestId("tabs-overflow"),
   ];
-  expect(controls).toHaveLength(6);
+  expect(controls).toHaveLength(7);
   for (const control of controls) {
     expect(control.className.split(" ")).toContain("focus-visible:-outline-offset-2");
   }

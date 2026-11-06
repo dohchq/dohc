@@ -211,9 +211,9 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         onCreateGroupRight={noop}
         onCloseGroup={noop}
       />
-      {/* Tall enough to hold the tab list, which the capture opens, and its
-          shadow. */}
-      <div className="h-28 bg-bg" />
+      {/* Tall enough to hold the tab list, which the capture opens, with
+          Close group and its shadow. */}
+      <div className="h-38 bg-bg" />
     </>
   );
 }
