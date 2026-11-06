@@ -38,7 +38,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const card = () => render(<CollectionChangeCard workspaceId="w" message={message} path={proposalPath} locked={false}
-  onReply={onReply} onError={onError} onNotice={onNotice} testIdPrefix="lane" />);
+  onReply={onReply} onError={onError} onNotice={onNotice} chatName="#Sign-ups" testIdPrefix="lane" />);
 const row = (text: string) => screen.getByText(text).closest("li")!;
 
 it("shows a collaborator's unapplied edit as its own row with its author", async () => {
@@ -210,6 +210,16 @@ it("says it applied the change after the chat closed even when its reply didn't 
   expect(place.actions().filter(action => action === "prepareMigration" || action === "approveMigration")).toEqual(["prepareMigration", "approveMigration"]);
 });
 
+it("names the chat when the reply that says it applied the change didn't post and its error has no words of its own", async () => {
+  ask(place); const view = card();
+  const apply = await screen.findByTestId("lane-change-apply");
+  onReply.mockRejectedValueOnce(new Error("ECONNRESET"));
+  fireEvent.click(apply);
+  view.unmount();
+  await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc applied the change to Volunteers but could not post its reply in #Sign-ups.", expect.any(Error), expect.any(Function)));
+  expect(onNotice).toHaveBeenCalledWith("Applied the change to Volunteers");
+});
+
 it("says it undid the change after the chat closed even when its reply didn't post, and Try again only posts the reply", async () => {
   const proposal = ask(place);
   const renamed: CollectionChangeRow = { kind: "collection-renamed", key: "collection:name", from: "Volunteers", to: "Helpers" };
@@ -234,7 +244,7 @@ it("keeps the Applied row when the reply's Try again posts it, and takes back on
   onReply.mockRejectedValueOnce(new Error("dohc couldn't send that message."));
   const view = render(<CollectionChangeCard workspaceId="w" message={message} path={proposalPath} locked={false} onReply={onReply}
     onError={(words, cause, retry) => shell.result.current.reportShellFailure({ message: words, cause, ...(retry ? { retry } : {}) })}
-    onNotice={words => shell.result.current.showSuccessNotice(words)} testIdPrefix="lane" />);
+    onNotice={words => shell.result.current.showSuccessNotice(words)} chatName="#Sign-ups" testIdPrefix="lane" />);
   fireEvent.click(await screen.findByTestId("lane-change-apply"));
   view.unmount();
   const rows = () => shell.result.current.shellErrors.map(entry => ({ message: entry.message, tone: entry.tone ?? "error", retry: entry.retry !== null }));
