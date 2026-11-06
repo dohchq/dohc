@@ -93,7 +93,7 @@ export function pushMessageAccess(storage: StorageContext, message: PushMessage,
 
 /** Reasons describe the accepted message; caller-provided recipient lists have no role. */
 export function chatMessageInterest(storage: StorageContext, message: PushMessage, recipient: {userId: string; accountName: string}): ChatMessageReason | null {
-  if (message.authorUserId === recipient.userId) return null;
+  if (message.authorUserId === recipient.userId && message.authorKind !== "agent" && message.authorKind !== "automation") return null;
   const access = pushMessageAccess(storage, message, recipient.userId);
   if (!access) return null;
   const handle = normalizeHandle(handleForName(recipient.accountName));

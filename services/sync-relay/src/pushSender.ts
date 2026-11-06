@@ -207,8 +207,9 @@ export function createPushSender(options: {
         return true;
       }
       const ownerName = pushPlainText(accountName, "Someone");
-      const sender = fresh.message.authorKind === "agent"
-        ? `${fresh.message.senderLabel} (${ownerName}'s agent)`
+      const authorKind = fresh.message.authorKind;
+      const sender = authorKind === "agent" || authorKind === "automation"
+        ? `${fresh.message.senderLabel} (${ownerName}'s ${authorKind})`
         : fresh.message.authorUserId ? ownerName : fresh.message.senderLabel;
       const place = fresh.access.place;
       const label = delivery.reason === "mention" ? `${sender} mentioned you in ${place}` :

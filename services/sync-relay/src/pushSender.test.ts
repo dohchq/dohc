@@ -554,15 +554,17 @@ it("waits for a lease or the recipient rate window before waking again", async (
   expect(nextPushDeliveryAt(f.storage, now)).toBe((Math.floor(now / 60_000) + 1) * 60_000);
 });
 
-it.each(["human", "agent"])("uses the server account name for a %s author", async authorKind => {
+it.each([
+  {authorKind: "human", authorName: "Claimed name", label: "Kim mentioned you in Team"},
+  {authorKind: "agent", authorName: "Claude", label: "Claude (Kim's agent) mentioned you in Team"},
+  {authorKind: "automation", authorName: "Weekly digest", label: "Weekly digest (Kim's automation) mentioned you in Team"},
+])("uses the server account name for another person's $authorKind", async ({authorKind, authorName, label}) => {
   const f = await fixture();
   f.append([chatMessageAppend("label", threadId, "@Alice", {
-    authorUserId: "owner", authorKind, authorDisplayName: "Claude", authorOwnerDisplayName: "Claimed owner",
+    authorUserId: "owner", authorKind, authorDisplayName: authorName, authorOwnerDisplayName: "Claimed owner",
   })]);
   const transport = vi.fn<PushTransport>(async prepared => {
-    expect(decryptedPayload(prepared.body).label).toBe(authorKind === "agent"
-      ? "Claude (Kim's agent) mentioned you in Team"
-      : "Kim mentioned you in Team");
+    expect(decryptedPayload(prepared.body).label).toBe(label);
     return 201;
   });
   const sender = createPushSender({storage: f.storage, config, lookup, transport,
@@ -574,11 +576,69 @@ it.each(["human", "agent"])("uses the server account name for a %s author", asyn
   expect(rows(f.storage)[0]!.state).toBe("sent");
 });
 
-it.each(["human", "agent"])("excludes own-account %s posts without trusted agent provenance", async authorKind => {
+it("never sends an alert for the recipient's own human post", async () => {
   const f = await fixture("dm");
-  f.append([chatMessageAppend("self", threadId, "@Alice", {
-    authorUserId: "alice", authorKind, authorDisplayName: "Planner", authorOwnerDisplayName: "Alice",
-  })], "alice");
+  const handler = testHandler(f.storage);
+  const response = await handler(request("alice", `/sync/shares/${shareId}/log`, jsonBody({originId: "alice-device", ops: sequenced([
+    chatMessageAppend("self", threadId, "@Alice", {authorUserId: "alice", authorKind: "human"}),
+  ])})));
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(rows(f.storage)).toEqual([]);
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  expect(await sender.runOnce()).toBe(false);
+  await sender.close();
+  expect(transport).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["agent", "mention"], ["agent", "dm"], ["agent", "reply"],
+  ["automation", "mention"], ["automation", "dm"], ["automation", "reply"],
+] as const)("sends one %s alert to its owner for a %s", async (authorKind, reason) => {
+  const f = await fixture(reason === "dm" ? "dm" : "channel");
+  f.bind({userId: "owner", sessionId: "session-owner", accountName: "Kim"});
+  const handler = testHandler(f.storage);
+  const post = (messageId: string, body: string, kind: string) => handler(request("owner", `/sync/${workspaceId}/log`, jsonBody({
+    originId: "owner-device",
+    ops: sequenced([chatMessageAppend(messageId, threadId, body, {
+      authorUserId: "owner", authorKind: kind,
+      authorDisplayName: kind === "automation" ? "Weekly digest" : "Claude", authorOwnerDisplayName: "Claimed owner",
+    })], f.storage.maxOriginSeq(workspaceId, "owner-device") + 1),
+  })));
+  if (reason === "reply") {
+    const prior = await post("prior", "hello", "human");
+    expect(prior.status, await prior.clone().text()).toBe(200);
+    expect(rows(f.storage)).toEqual([]);
+  }
+  const response = await post("self", reason === "mention" ? "@Kim" : "hello", authorKind);
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(rows(f.storage)).toEqual([expect.objectContaining({account_user_id: "owner", reason})]);
+  const authorName = authorKind === "agent" ? "Claude" : "Weekly digest";
+  const senderLabel = `${authorName} (Kim's ${authorKind})`;
+  const expectedLabel = reason === "mention" ? `${senderLabel} mentioned you in Team`
+    : reason === "dm" ? `${senderLabel} sent you a message` : `${senderLabel} replied in Team`;
+  const transport = vi.fn<PushTransport>(async prepared => {
+    expect(decryptedPayload(prepared.body).label).toBe(expectedLabel);
+    return 201;
+  });
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    lookupAccountName: userId => userId === "owner" ? "Kim" : null,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  expect(await sender.runOnce()).toBe(false);
+  await sender.close();
+  expect(transport).toHaveBeenCalledOnce();
+  expect(rows(f.storage)[0]!.state).toBe("sent");
+});
+
+it.each(["agent", "automation"])("does not count the owner's %s posts as thread participation", async authorKind => {
+  const f = await fixture();
+  f.bind({userId: "owner", sessionId: "session-owner", accountName: "Kim"});
+  f.append([
+    chatMessageAppend("first", threadId, "hello", {authorUserId: "owner", authorKind}),
+    chatMessageAppend("reply", threadId, "reply", {authorUserId: "owner", authorKind}),
+  ]);
   expect(rows(f.storage)).toEqual([]);
 });
 
