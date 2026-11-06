@@ -192,8 +192,8 @@ function Mark(props: { kind: StateMarkKind }) {
  * own save error. `truncate` hides the words in a narrow file row. Above
  * that threshold, a long label can still end in an ellipsis. While cut, the
  * chip takes keyboard focus and shows the whole label and its explanation in
- * a tooltip, on focus or hover. The title stays in both shapes. With room
- * to spare it is not a tab stop. `quietWhenCalm` keeps a saved,
+ * a tooltip, on focus or hover, in place of the title. With room to spare
+ * it is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
  * saving or saved-to-host chip for screen readers only: those pass on their
  * own, so typing never changes what the row draws. Words appear when the
  * file is held, a pending share has lasted (and then stay while the person
@@ -269,8 +269,7 @@ export function StateMark(props: {
       ref={chipRef}
       data-testid={props.testId}
       data-state={dataState ?? undefined}
-      aria-label={presentation.label}
-      title={title}
+      title={cut ? undefined : title}
       tabIndex={cut || focused ? 0 : undefined}
       // The chip's words are its label, so only the explanation describes it.
       aria-describedby={shown && title ? explanationId : undefined}

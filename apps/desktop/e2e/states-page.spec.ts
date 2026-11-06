@@ -440,8 +440,8 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       if (!(await label.evaluate((el) => getComputedStyle(el).position === "absolute" && el.clientWidth === 1))) {
         failures.push(`the narrow tab row's save state (${theme}) does not show only its mark`);
       }
-      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveAttribute("aria-label", "Changed outside dohc");
-      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveAttribute("title", "This file changed outside dohc.");
+      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveText("Changed outside dohc");
+      await expect(page.getByTestId(`states-mark-changed-on-disk-${theme}`)).toHaveAttribute("title", "This file changed outside dohc.");
     }
     // An overflowing strip fades only the edges it can still scroll past,
     // 40px each, and its active tab sits clear of them. Each specimen must
