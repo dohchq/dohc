@@ -199,7 +199,9 @@ describe("work reference registration and resolution", () => {
     const mixed = await read();
     expect(mixed.references).toEqual(one.references);
     expect(mixed.hasMore).toBe(false);
-    expect(await read()).toEqual(mixed);
+    const repeated = await read();
+    expect(repeated.references).toEqual(mixed.references);
+    expect(repeated.hasMore).toBe(mixed.hasMore);
     expect(mixed.nextAfter.length).toBe(one.nextAfter.length);
     expect(empty.nextAfter.length).toBe(one.nextAfter.length);
     const objects = vi.spyOn(storage, "objectMoment");
@@ -209,6 +211,28 @@ describe("work reference registration and resolution", () => {
       expect(caughtUp.nextAfter.length).toBe(empty.nextAfter.length);
       expect(objects).not.toHaveBeenCalled();
     } finally { objects.mockRestore(); }
+  });
+
+  it("randomizes empty recipient cursors before and after hidden registrations", async () => {
+    const {handler} = await fixture();
+    const shareId = await createShare(handler, "owner", ws, {paths: ["private"], recipientUserId: "reader", access: "view"});
+    const read = (after?: string) => handler(request("reader", `/sync/shares/${shareId}/work-references${after ? `?after=${encodeURIComponent(after)}` : ""}`)).then(json) as Promise<ReferencePage>;
+    const after = (await read()).nextAfter;
+    const first = await read(after);
+    const second = await read(after);
+    expect(first).toMatchObject({references: [], hasMore: false});
+    expect(second).toMatchObject({references: [], hasMore: false});
+    expect(first.nextAfter).toBeTypeOf("string");
+    expect(second.nextAfter).toBeTypeOf("string");
+    expect(second.nextAfter).not.toBe(first.nextAfter);
+    expect(second.nextAfter).toHaveLength(first.nextAfter.length);
+
+    expect(await json(await register(handler, [{reference: ref, target, createdAtMs: 1}])))
+      .toMatchObject({registeredReferences: [ref]});
+    const hidden = await read(after);
+    expect(hidden).toMatchObject({references: [], hasMore: false});
+    expect(hidden.nextAfter).toBeTypeOf("string");
+    expect(hidden.nextAfter).toHaveLength(first.nextAfter.length);
   });
 
   it("caps a recipient scan at 1024 rows and continues from its hidden tail", async () => {

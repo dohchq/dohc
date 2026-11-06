@@ -214,7 +214,12 @@ describe("chat over a file share", () => {
         }) }),
       ]);
       const immediate = await json(await h(request(RECIPIENT, path + initial.nextCursor)));
-      expect(page).toEqual(immediate);
+      const {nextReferenceAfter: heldCursor, ...heldPage} = page;
+      const {nextReferenceAfter: immediateCursor, ...immediatePage} = immediate;
+      expect(heldPage).toEqual(immediatePage);
+      expect(heldCursor).toBeTypeOf("string");
+      expect(immediateCursor).toBeTypeOf("string");
+      expect(heldCursor).toHaveLength(String(immediateCursor).length);
       expect(activity.stats().waiters).toBe(0);
     } finally {
       controller.abort();
