@@ -1394,6 +1394,7 @@ fn one_message_registers_more_than_one_reference_page_without_resending_acknowle
                 author_display_name: "Owner".into(),
                 author_owner_display_name: None,
                 author_user_id: Some("owner".into()),
+                author_reported: None,
                 origin: None,
                 body,
                 needs_decision: false,
