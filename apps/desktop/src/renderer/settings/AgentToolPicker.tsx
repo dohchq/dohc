@@ -57,7 +57,7 @@ export function AgentToolPicker(props: {
           onClick={() => {
             if (detected?.executable && (tool.id === "claude" || tool.id === "codex")) props.onChange({ tool: tool.id, executable: detected.executable });
           }}
-          className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${selected ? "border-accent bg-selected ring-1 ring-accent" : "border-line bg-panel enabled:hover:bg-hover"} disabled:cursor-default disabled:opacity-60`}>
+          className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${selected ? "border-accent bg-selected ring-1 ring-accent" : "border-line bg-panel enabled:hover:bg-hover"} disabled:cursor-default`}>
           <span className="flex items-center justify-between gap-2">
             <span className="min-w-0 text-[13px] font-medium text-ink">{tool.name}</span>
             {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
