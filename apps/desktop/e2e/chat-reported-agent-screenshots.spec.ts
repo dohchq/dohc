@@ -44,24 +44,32 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   await waitForVisibleAnimations(page);
 }
 
-async function expectTooltipUnclipped(page: Page): Promise<void> {
+async function expectTooltipUnclipped(page: Page, badge: Locator, side: "either" | "above" = "either"): Promise<void> {
   const tooltip = page.getByRole("tooltip");
   await expect(tooltip).toBeVisible();
-  await expect.poll(() => tooltip.evaluate((card) => {
-    const box = card.getBoundingClientRect();
-    const hit = document.elementFromPoint(box.left + box.width / 2, box.bottom - 4);
-    return {
-      fitsViewport: box.width > 0 && box.height > 0 && box.left >= 0 && box.top >= 0 &&
-        box.right <= window.innerWidth && box.bottom <= window.innerHeight,
-      bottomVisible: hit !== null && card.contains(hit),
-    };
-  })).toEqual({ fitsViewport: true, bottomVisible: true });
+  await expect.poll(async () => {
+    const anchor = await badge.boundingBox();
+    return tooltip.evaluate((card, { anchor, side }) => {
+      const box = card.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.bottom - 4);
+      return {
+        fitsViewport: box.width > 0 && box.height > 0 && box.left >= 0 && box.top >= 0 &&
+          box.right <= window.innerWidth && box.bottom <= window.innerHeight,
+        bottomVisible: hit !== null && card.contains(hit),
+        nextToBadge: anchor !== null && Math.min(
+          Math.abs(box.top - anchor.y - anchor.height),
+          Math.abs(anchor.y - box.bottom),
+        ) <= 8,
+        correctSide: side === "either" || (anchor !== null && box.bottom <= anchor.y),
+      };
+    }, { anchor, side });
+  }).toEqual({ fitsViewport: true, bottomVisible: true, nextToBadge: true, correctSide: true });
 }
 
-async function shoot(page: Page, name: string, hover = false): Promise<void> {
+async function shoot(page: Page, name: string, badge?: Locator, side?: "above"): Promise<void> {
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
-    if (hover) await expectTooltipUnclipped(page);
+    if (badge) await expectTooltipUnclipped(page, badge, side);
     await page.screenshot({ path: join(SHOT_DIR, `${name}${BEFORE ? "-before" : ""}-${theme}.png`) });
   }
   await setTheme(page, "light");
@@ -196,7 +204,7 @@ test("@ui-audit reported agents in feeds, replies, and run details", async () =>
     const plainCard = main.getByTestId("chats-post-card").filter({ hasText: "An agent with no report" });
     const plainBadge = plainCard.getByTestId("chats-post-agent-badge");
     await showHover(page, plainBadge);
-    await shoot(page, "reported-agent-c-no-report", true);
+    await shoot(page, "reported-agent-c-no-report", plainBadge);
     await closeHover(page, plainBadge);
 
     const plainRun = await startRun(page, "audit-without-report", "Checked the exports without a report.");
@@ -218,7 +226,7 @@ test("@ui-audit reported agents in feeds, replies, and run details", async () =>
       await showHover(page, badge, reported);
       if (!("model" in reported)) await expect(page.getByRole("tooltip")).not.toContainText(REPORT.model!);
       if (!("product" in reported)) await expect(page.getByRole("tooltip")).not.toContainText(REPORT.product!);
-      await shoot(page, `reported-agent-${name}`, true);
+      await shoot(page, `reported-agent-${name}`, badge);
       await closeHover(page, badge);
     }
 
@@ -264,15 +272,29 @@ test("@ui-audit reported agents in feeds, replies, and run details", async () =>
     await expect.poll(() => firstBadge.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
     await expect(page.locator("html")).toHaveAttribute("data-keyboard-nav", "");
     await expect(page.getByRole("tooltip")).toContainText("(as reported)");
-    await shoot(page, "reported-agent-d-reply-keyboard", true);
+    await shoot(page, "reported-agent-d-reply-keyboard", firstBadge);
     await closeHover(page, firstBadge);
+
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    try {
+      const aboveBadge = unreportedReply.getByTestId("chats-comment-agent-badge");
+      await aboveBadge.scrollIntoViewIfNeeded();
+      const anchor = await aboveBadge.boundingBox();
+      if (!anchor) throw new Error("Expected a visible reply badge for above placement.");
+      await page.setViewportSize({ width: viewport.width, height: Math.ceil(anchor.y + anchor.height + 32) });
+      await showHover(page, aboveBadge);
+      await shoot(page, "reported-agent-i-above", aboveBadge, "above");
+      await closeHover(page, aboveBadge);
+    } finally {
+      await page.setViewportSize(viewport);
+    }
     await backToFeed(page);
 
     const longRun = await startRun(page, "audit-long-values", "Checked the long reported values.");
     const longBadge = longRun.getByTestId("chats-comment-agent-badge");
     await showHover(page, longBadge, LONG_REPORT);
     await expect.poll(() => page.getByRole("tooltip").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
-    await shoot(page, "reported-agent-g-long-hover", true);
+    await shoot(page, "reported-agent-g-long-hover", longBadge);
     await closeHover(page, longBadge);
     const longDetails = await openRun(page, longRun, LONG_REPORT);
     await expect.poll(() => longDetails.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);

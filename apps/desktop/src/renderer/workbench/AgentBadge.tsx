@@ -51,22 +51,23 @@ export function AgentBadge(props: {
     // Like Menu and the reaction picker, use the top layer to escape each
     // virtualized feed row's paint containment.
     card.showPopover?.();
-    setPlace(resolveFloatingMenuPosition({
-      cursorRect: badge.getBoundingClientRect(),
-      menuWidth: card.offsetWidth,
-      menuMaxHeight: card.offsetHeight,
-      margin: 4,
-      gap: 4,
-    }));
-    const close = (event: Event) => {
-      if (event.target instanceof Node && card.contains(event.target)) return;
-      setOpen(false);
+    const position = (event?: Event) => {
+      if (event?.target instanceof Node && card.contains(event.target)) return;
+      setPlace(resolveFloatingMenuPosition({
+        cursorRect: badge.getBoundingClientRect(),
+        menuWidth: card.offsetWidth,
+        menuMaxHeight: card.offsetHeight,
+        margin: 4,
+        gap: 4,
+      }));
     };
-    document.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
+    position();
+    document.addEventListener("scroll", position, true);
+    window.addEventListener("resize", position);
     return () => {
-      document.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
+      document.removeEventListener("scroll", position, true);
+      window.removeEventListener("resize", position);
+      setPlace(null);
     };
   }, [open, reported, command]);
   return (
@@ -111,8 +112,8 @@ export function AgentBadge(props: {
             margin: 0,
             inset: "auto",
             left: place?.x,
-            top: place?.bottom === undefined ? place?.y : undefined,
-            bottom: place?.bottom,
+            top: place?.bottom === undefined ? place?.y : "auto",
+            bottom: place?.bottom ?? "auto",
             maxHeight: place?.maxHeight,
           }}
           className="dohc-popover dohc-pop-in fixed z-50 flex w-max max-w-72 flex-col gap-1 overflow-y-auto rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
