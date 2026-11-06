@@ -35,7 +35,7 @@ import { DocumentMenu } from "../DocumentMenu";
 import { PageIdentity } from "../PageIdentity";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { TextViewActions } from "../TextEditorView";
-import { DocumentControls, LossyNoteNoticeView, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
+import { DocumentControls, LossyNoteNoticeView, LOSSY_NOTE_TITLE, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
 import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -2956,7 +2956,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               </LossyNoteNoticeView>
             }>
               <ViewActions onShare={noop} actions={
-                <DocumentControls toggle={{ label: "Edit", disabled: true, title: "This note has parts dohc can't show." }} menu={null} />
+                <DocumentControls toggle={{ label: "Edit", disabled: true, title: LOSSY_NOTE_TITLE }} menu={null} />
               } />
             </TabRowActionsSpecimen>
           </Specimen>

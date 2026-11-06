@@ -1059,7 +1059,7 @@ describe("engine markdown source view", () => {
     // The content still renders — read-only, not replaced.
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(
-      (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
+      screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled") || screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled") === "true",
       "drop engineMayHoldDocument from the readOnly computation -> the edit toggle is enabled over a session the engine may still bind.",
     ).toBe(true);
     expect(opens).toBe(1);

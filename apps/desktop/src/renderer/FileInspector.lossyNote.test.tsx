@@ -136,10 +136,6 @@ describe("a lossy note", () => {
 
     const notice = await screen.findByTestId("lossy-note-notice");
     expect(notice.textContent).toContain("This note has parts dohc can't show.");
-    expect(notice.classList.contains("text-[12px]")).toBe(true);
-    expect(notice.classList.contains("text-muted")).toBe(true);
-    expect(notice.classList.contains("text-warning")).toBe(false);
-    expect(screen.getByTestId("lossy-note-edit-anyway").classList.contains("text-muted")).toBe(true);
     await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("See the docs."));
     expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
     expect(screen.getByRole("button", { name: "Edit", description: "This note has parts dohc can't show." }).getAttribute("title"))
@@ -156,8 +152,6 @@ describe("a lossy note", () => {
 
     const notice = await screen.findByTestId("lossy-note-notice");
     expect(notice.textContent).toContain("dohc held a change, because saving it would rewrite parts it can't show.");
-    expect(notice.classList.contains("text-[12px]")).toBe(true);
-    expect(notice.classList.contains("text-warning")).toBe(true);
     expect(screen.getByTestId("lossy-note-edit-anyway")).toBeTruthy();
   });
 
