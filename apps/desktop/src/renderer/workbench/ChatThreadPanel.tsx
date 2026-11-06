@@ -179,7 +179,8 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
 }
 
 // Under the message an agent didn't answer: why, in its notice's words, and
-// Try again while its request can run once more.
+// Try again while its request can run once more. A next step takes its own
+// line, behind a hidden copy of the icon so it starts under the words.
 export function FailedRunLine(props: {
   testIdPrefix: string;
   failed: ChatDispatchFailedRun;
@@ -210,6 +211,12 @@ export function FailedRunLine(props: {
         </SecondaryButton>
       ) : null}
       {props.children}
+      {props.failed.nextStep ? (
+        <span data-testid={`${props.testIdPrefix}-run-next-step`} className="flex basis-full gap-x-2">
+          <TriangleAlert size={14} aria-hidden className="invisible shrink-0" />
+          <span className="min-w-0">{props.failed.nextStep}</span>
+        </span>
+      ) : null}
     </div>
   );
 }

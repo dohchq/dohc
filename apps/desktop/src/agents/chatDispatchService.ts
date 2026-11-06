@@ -100,7 +100,7 @@ function runNoticeTitle(what: string, thread: string): string {
 // Node.js. A body holds no control characters, or the notice store would
 // refuse it.
 function runFailureReason(run: AgentRunRecord, outcome: FailedOutcome, nodeAvailable?: ReplyRuntimeAvailability): string {
-  if ((outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available) {
+  if (needsNodeJs(outcome, nodeAvailable)) {
     return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
   }
   switch (outcome) {
@@ -127,6 +127,10 @@ function runFailureReason(run: AgentRunRecord, outcome: FailedOutcome, nodeAvail
       return lead + (detail.length <= room ? detail.join("") : `${detail.slice(0, room - 1).join("")}…`);
     }
   }
+}
+
+function needsNodeJs(outcome: FailedOutcome, nodeAvailable?: ReplyRuntimeAvailability): boolean {
+  return (outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available;
 }
 
 export const CHAT_DISPATCH_PUMP_MS = 15_000;
@@ -853,15 +857,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     run: AgentRunRecord,
     outcome: FailedOutcome,
     agentName: string | undefined,
-  ): Promise<{ lead: string; reason: string }> {
+  ): Promise<{ lead: string; reason: string; nextStep?: string }> {
     const posted = outcome !== "no-reply" && outcome !== "not-started" && (await options.dispatchStoreFor(workspace)
       .listRunMessages(workspace.workspaceId, run.runId, durableDispatchRequest)).length > 0;
     const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
+    // Running a failed request again would repeat what it did, so the
+    // person asks the agent again instead. An agent no longer in Settings
+    // can't be mentioned.
+    const asksAgain = outcome === "failed" && agentName !== undefined && !needsNodeJs(outcome, nodeAvailable);
     return {
       lead: `${noticeAgentName(agentName)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
+      ...(asksAgain ? { nextStep: `Mention ${agentName} to ask again.` } : {}),
     };
   }
 
@@ -1674,8 +1683,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!found) return null;
     const { run, outcome, retryable } = found;
     const agentName = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId)?.name;
-    const { lead, reason } = await failureWords(workspace, run, outcome, agentName);
-    return { runId: run.runId, triggerMessageId: run.triggerMessageId, words: `${lead}. ${reason}`, retryable };
+    const { lead, reason, nextStep } = await failureWords(workspace, run, outcome, agentName);
+    return {
+      runId: run.runId,
+      triggerMessageId: run.triggerMessageId,
+      words: `${lead}. ${reason}`,
+      ...(nextStep ? { nextStep } : {}),
+      retryable,
+    };
   }
 
   // The one place that decides which run Try again can run again: the

@@ -906,7 +906,7 @@ const STOPPED_RUN: ChatRunRecord = {
   runId: "4f2a9c1e0b", threadId: "post-plain", triggerMessageId: "opening", command: "claude",
   startedAtMs: CHAT_AT, endedAtMs: CHAT_AT + 90_000, exitCode: 143,
 };
-function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryable: boolean; busy?: boolean }) {
+function ChatFailedRunSpecimen(props: { words: string; nextStep?: string; posted: boolean; retryable: boolean; busy?: boolean }) {
   return (
     <div className="w-[560px]">
       <ThreadMessages
@@ -918,7 +918,10 @@ function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryabl
         threadLocked={false}
         flashMessageId={null}
         runRecords={props.posted ? { [STOPPED_REPLY.id]: STOPPED_RUN } : {}}
-        failedRun={{ runId: STOPPED_RUN.runId, triggerMessageId: "opening", words: props.words, retryable: props.retryable }}
+        failedRun={{
+          runId: STOPPED_RUN.runId, triggerMessageId: "opening", words: props.words,
+          ...(props.nextStep ? { nextStep: props.nextStep } : {}), retryable: props.retryable,
+        }}
         retryBusy={props.busy ?? false}
         onRetryFailedRun={noop}
         reactionsByMessage={new Map()}
@@ -2627,7 +2630,20 @@ function Pane(props: { theme: "light" | "dark" }) {
           <ChatThreadSpecimen />
         </Specimen>
         <Specimen label="failed before the agent posted">
-          <ChatFailedRunSpecimen words="Claude Code didn't reply. Its run ended with an error." posted={false} retryable={false} />
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep="Mention Claude Code to ask again."
+            posted={false}
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed after the agent posted">
+          <ChatFailedRunSpecimen
+            words="Claude Code stopped before finishing. Its run ended with an error."
+            nextStep="Mention Claude Code to ask again."
+            posted
+            retryable={false}
+          />
         </Specimen>
         <Specimen label="stopped when dohc quit, before the agent posted">
           <ChatFailedRunSpecimen words="Claude Code didn't reply. dohc quit during its run." posted={false} retryable />

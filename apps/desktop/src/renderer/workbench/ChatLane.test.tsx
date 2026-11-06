@@ -545,6 +545,7 @@ describe("ChatLane", () => {
     const line = await screen.findByTestId("chats-lane-run-failed");
     expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("message-1");
     expect(line.textContent).toBe(`${failedRun.words}Try again`);
+    expect(screen.queryByTestId("chats-lane-run-next-step")).toBeNull();
 
     bridgeMock.retryStoppedRun.mockImplementationOnce(async () => {
       bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, pendingCount: 1 });
@@ -555,10 +556,18 @@ describe("ChatLane", () => {
     await waitFor(() => expect(screen.queryByTestId("chats-lane-run-failed")).toBeNull());
 
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-      ...idle, failedRun: { ...failedRun, words: "Nova didn't reply. Its run ended with an error.", retryable: false },
+      ...idle,
+      failedRun: {
+        ...failedRun,
+        words: "Nova didn't reply. Its run ended with an error.",
+        nextStep: "Mention Nova to ask again.",
+        retryable: false,
+      },
     });
     await act(async () => activity({ workspaceId: "workspace-a" }));
-    expect((await screen.findByTestId("chats-lane-run-failed")).textContent).toBe("Nova didn't reply. Its run ended with an error.");
+    const failed = await screen.findByTestId("chats-lane-run-failed");
+    expect(within(failed).getByRole("status").textContent).toBe("Nova didn't reply. Its run ended with an error.");
+    expect(within(failed).getByTestId("chats-lane-run-next-step").textContent).toBe("Mention Nova to ask again.");
     expect(screen.queryByTestId("chats-lane-run-try-again")).toBeNull();
   });
 
