@@ -611,35 +611,44 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   indexesRef.current = indexes;
   const topMessageId = useRef<string | null>(null);
   const clippedDividers = useRef(new Set<string>());
-  const dividers = useRef(new Set<Element>());
+  const dividers = useRef(new Map<string, HTMLElement>());
   const dividerObserver = useRef<IntersectionObserver | null>(null);
   const updateTopDay = useCallback(() => {
     const messages = messagesRef.current;
     const at = topMessageId.current === null ? undefined : indexesRef.current.get(topMessageId.current);
     const message = at === undefined ? undefined : messages[at];
-    const label = pinnedChatDay(message ? {
+    const label = at === undefined || !message ? null : pinnedChatDay({
       day: formatChatDay(message.createdAtMs),
       startsDay: at === 0 || !sameChatDay(messages[at - 1]!.createdAtMs, message.createdAtMs),
       dividerFullyVisible: !clippedDividers.current.has(message.id),
-    } : null);
+    });
     setTopDay(current => current === label ? current : label);
   }, []);
   const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
     const id = info.viewableItems[0]?.item.id ?? null;
     if (id === topMessageId.current) return;
     topMessageId.current = id;
+    // A jump can carry a divider from below the pane to above it with no
+    // threshold crossed, so the new top row's divider is observed afresh. Its
+    // first entry says which side of the top edge it is on.
+    const divider = id === null ? undefined : dividers.current.get(id);
+    if (divider && dividerObserver.current) {
+      dividerObserver.current.unobserve(divider);
+      dividerObserver.current.observe(divider);
+    }
     updateTopDay();
   }, [updateTopDay]);
   // Rows mount and unmount as Legend virtualizes, so each divider joins and
   // leaves the observer through its ref.
   const observeDivider = useCallback((divider: HTMLElement | null) => {
     if (!divider) return;
-    dividers.current.add(divider);
+    const id = divider.dataset.dayDivider!;
+    dividers.current.set(id, divider);
     dividerObserver.current?.observe(divider);
     return () => {
-      dividers.current.delete(divider);
+      if (dividers.current.get(id) === divider) dividers.current.delete(id);
       dividerObserver.current?.unobserve(divider);
-      clippedDividers.current.delete(divider.dataset.dayDivider!);
+      clippedDividers.current.delete(id);
     };
   }, []);
   const listShown = !props.loading && props.messages.length > 0;
@@ -661,11 +670,14 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       if (changed) updateTopDay();
     }, { root: scroller, threshold: [0, 1] });
     dividerObserver.current = observer;
-    for (const divider of dividers.current) observer.observe(divider);
+    for (const divider of dividers.current.values()) observer.observe(divider);
     return () => {
       observer.disconnect();
       dividerObserver.current = null;
       clippedDividers.current.clear();
+      // A list shown again reports its top row afresh.
+      topMessageId.current = null;
+      setTopDay(null);
     };
   }, [listShown, updateTopDay]);
   useEffect(updateTopDay, [props.messages, updateTopDay]);
