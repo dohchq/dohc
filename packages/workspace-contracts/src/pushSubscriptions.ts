@@ -4,12 +4,12 @@
 
 export const PUSH_STATUS_PATH = "/push/status";
 export const PUSH_SUBSCRIBE_PATH = "/push/subscribe";
-export const PUSH_UNSUBSCRIBE_PATH = "/push/unsubscribe";
+const PUSH_UNSUBSCRIBE_PATH = "/push/unsubscribe";
 export const PUSH_PATHS = [PUSH_STATUS_PATH, PUSH_SUBSCRIBE_PATH, PUSH_UNSUBSCRIBE_PATH] as const;
 
 export const PUSH_MAX_REQUEST_BYTES = 4096;
 export const PUSH_MAX_RESPONSE_BYTES = 1024;
-export const PUSH_ENDPOINT_MAX_CHARS = 2048;
+const PUSH_ENDPOINT_MAX_CHARS = 2048;
 
 const base64url = (length: number) => new RegExp(`^[A-Za-z0-9_-]{${length}}$`, "u");
 // 16 random bytes the browser mints once and keeps.
@@ -45,20 +45,6 @@ export function isPushEndpoint(value: unknown): value is string {
   } catch {
     return false;
   }
-}
-
-export interface PushSubscribeInput {
-  installationId: string;
-  vapidKeyId: string;
-  endpoint: string;
-  p256dh: string;
-  auth: string;
-  // The browser subscription's own expiry, when it has one.
-  expiresAtMs: number | null;
-}
-
-export interface PushUnsubscribeInput {
-  installationId: string;
 }
 
 /**
