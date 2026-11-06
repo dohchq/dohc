@@ -723,10 +723,11 @@ describe("ActorKey local admission", () => {
     expect(person).not.toHaveProperty("authorReported");
   });
 
-  it.each(["default", "codex"])("drops a claim to the person's agent id %s, so the message is an unnamed agent's", async (agentName) => {
+  it.each(["default", "codex"])("drops a claim to the person's agent id %s, so the message is an unnamed agent's that keeps what it reported", async (agentName) => {
     const test = fixture();
+    const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
     const claimed = await test.writes.sendMessage(test.place, {
-      writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+      writer: { via: "cli", actor: "agent", agentName, reported }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
     });
     const unnamed = await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "agent" }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
@@ -735,6 +736,7 @@ describe("ActorKey local admission", () => {
     expect(claimed.authorActorKey).toBe(unnamed.authorActorKey);
     expect(claimed.author).toEqual({ kind: "agent", displayName: "Agent" });
     expect(claimed.authorAgentId).toBeUndefined();
+    expect(claimed.authorReported).toEqual(reported);
   });
 
   it("stores CLI human origin and automation definition identity locally", async () => {

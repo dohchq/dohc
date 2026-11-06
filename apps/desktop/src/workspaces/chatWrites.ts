@@ -223,7 +223,7 @@ export function createChatWrites(dependencies: {
   // which would give its message that agent's key.
   async function admittedWriter(writer: ChatWriter): Promise<ChatWriter> {
     if (writer.via !== "cli" || writer.agentName === undefined || !await isOwnAgentId(writer.agentName)) return writer;
-    return { via: "cli", actor: writer.actor, ...(writer.agentId ? { agentId: writer.agentId } : {}) };
+    return { via: "cli", actor: writer.actor, ...(writer.agentId ? { agentId: writer.agentId } : {}), ...(writer.reported ? { reported: writer.reported } : {}) };
   }
 
   // People and agents; only they react.
