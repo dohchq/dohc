@@ -312,7 +312,7 @@ function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode
     ),
   });
   return (
-    <div className="flex w-full max-w-[640px] overflow-hidden rounded-lg border border-line">
+    <div className="flex w-full overflow-hidden rounded-lg border border-line">
       <EditorGroupLayout
         groups={[group("left", 1, props.left), group("right", 2, props.right)]}
         activeGroupId="left"

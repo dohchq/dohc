@@ -447,8 +447,8 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       if (!(await label.evaluate((el) => getComputedStyle(el).position === "absolute" && el.clientWidth === 1))) {
         failures.push(`the narrow tab row's save state (${theme}) does not show only its mark`);
       }
-      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveAttribute("aria-label", "Changed outside dohc");
-      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveAttribute("title", "This file changed outside dohc.");
+      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveText("Changed outside dohc");
+      await expect(page.getByTestId(`states-mark-changed-on-disk-${theme}`)).toHaveAttribute("title", "This file changed outside dohc.");
     }
     // At the sidebar's default width, a Collection change cuts who made it
     // and what changed before its Collection's name, even a long name, and
