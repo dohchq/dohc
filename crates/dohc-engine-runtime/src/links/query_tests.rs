@@ -548,10 +548,14 @@ async fn cursor_keeps_incompleteness_when_the_index_catches_up() {
     write(&mut store, "target", "target.md", "", 1);
     write(&mut store, "many", "many.md", &"[[target]] ".repeat(110), 2);
     drop(store);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let _hold = actor.hold_link_drain();
+    // Hold link updates before the actor's first idle slot, which otherwise starts the drain.
+    let mut hold = None;
+    let mut workspace = crate::actor::test_support::spawn_prequeued_actor(&db, |handle| {
+        hold = Some(handle.hold_link_drain());
+    });
+    let actor = workspace.handle();
     let first = page(&actor, "target.md", None).await;
+    assert_eq!(actor.link_drain_metrics().worker_starts, 0);
     assert_eq!(first["complete"], false);
     assert_eq!(first["indexBuilding"], true);
     actor
@@ -571,6 +575,8 @@ async fn cursor_keeps_incompleteness_when_the_index_catches_up() {
     assert_eq!(next["indexBuilding"], true);
     assert_eq!(next["entries"].as_array().unwrap().len(), 10);
     assert_eq!(page(&actor, "target.md", None).await["complete"], true);
+    workspace.close().unwrap();
+    drop(hold);
 }
 
 #[tokio::test]
