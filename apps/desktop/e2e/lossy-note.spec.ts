@@ -103,6 +103,21 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await expect(notice).toBeVisible();
     await expect(notice).toContainText("dohc can't edit this note yet without changing parts it can't show.");
     await expect(page.getByTestId("view-markdown")).toContainText("Hidden until opened.");
+    // The raw HTML shows as its text, at the note's left edge like the rest.
+    const lefts = await page.locator(".dohc-readable-text").evaluate((view, needles) =>
+      needles.map((needle) => {
+        const walker = document.createTreeWalker(view, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          if (!node.textContent?.includes(needle)) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          return range.getClientRects()[0]?.left ?? null;
+        }
+        return null;
+      }), ["Readme", "<details>", "Hidden until opened.", "</details>", "See "]);
+    const edges = lefts.filter((left): left is number => left !== null);
+    expect(edges, JSON.stringify(lefts)).toHaveLength(lefts.length);
+    expect(Math.max(...edges) - Math.min(...edges), JSON.stringify(lefts)).toBeLessThan(1);
     await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
     await shoot(page, "lossy-note-notice");

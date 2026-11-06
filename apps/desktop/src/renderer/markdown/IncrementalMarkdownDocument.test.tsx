@@ -376,6 +376,39 @@ describe("IncrementalMarkdownDocument", () => {
     ).toBe(true);
   });
 
+  it("gives each top-level block of raw HTML a paragraph of its text", () => {
+    const body = [
+      "# Edit anyway check",
+      "<details>\n<summary>More</summary>",
+      "Hidden text.",
+      "</details>",
+      "<!-- note -->",
+      "> <div>quoted</div>",
+      "An <kbd>inline</kbd> tag.",
+    ].join("\n\n");
+    const view = render(<IncrementalMarkdownDocument body={body} components={{}} />);
+
+    // The reading column centers each top-level element, so text outside one
+    // starts left of the note.
+    const loose = Array.from(view.container.childNodes).filter(
+      (node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim(),
+    );
+    expect(loose.map((node) => node.textContent)).toEqual([]);
+    expect(
+      Array.from(view.container.querySelectorAll(":scope > p"), (p) => p.textContent),
+    ).toEqual([
+      "<details>\n<summary>More</summary>",
+      "Hidden text.",
+      "</details>",
+      "<!-- note -->",
+      "An <kbd>inline</kbd> tag.",
+    ]);
+    expect(view.container.querySelector("details, summary, div, kbd")).toBeNull();
+    expect(view.container.querySelector("blockquote")?.textContent?.trim()).toBe(
+      "<div>quoted</div>",
+    );
+  });
+
   it("mounts an unchanged chunk again without parsing it", () => {
     const parses = vi.mocked(Markdown);
     const components: Components = {};
