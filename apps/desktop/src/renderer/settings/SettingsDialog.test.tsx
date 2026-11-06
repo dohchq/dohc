@@ -130,7 +130,7 @@ const bridge = {
   readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
   setChatDispatchPaused: vi.fn(async () => undefined),
   onChatDispatchPaused: vi.fn(() => () => undefined),
-  getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
+  getUpdateState: vi.fn(async (): Promise<SettingsUpdateState> => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
     state: SettingsUpdateState;
@@ -2241,7 +2241,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toBe("Start run");
   });
 
-  it("shows current desktop update version and channel", async () => {
+  it("shows the version, and not the default channel's name", async () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     await waitFor(() =>
@@ -2249,8 +2249,19 @@ describe("SettingsDialog", () => {
         "idle",
       ),
     );
-    expect(screen.getByTestId("desktop-updates-version").textContent).toBe("1.2.3");
-    expect(screen.getByTestId("desktop-updates-channel").textContent).toBe("latest");
+    expect(screen.getByTestId("desktop-updates-version").textContent).toBe("Version 1.2.3");
+    expect(screen.getByTestId("settings-row-desktop-updates").textContent).not.toContain("latest");
+  });
+
+  it("names a nightly once, in its version", async () => {
+    const nightly = "0.1.1-nightly.20261105.42.1";
+    bridge.getUpdateState.mockResolvedValueOnce({ ...idleUpdateState, currentVersion: nightly, channel: "nightly" });
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-updates-version").textContent).toBe(`Version ${nightly}`),
+    );
+    expect(screen.getByTestId("settings-row-desktop-updates").textContent?.match(/nightly/gi)).toHaveLength(1);
   });
 
   it("checks for updates, downloads only when asked, then restarts", async () => {
@@ -2426,7 +2437,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(report).toHaveBeenCalledWith({
-        message: "dohc could not install update 1.2.4.",
+        message: "dohc could not install the update.",
         cause: undefined,
         retry: expect.any(Function),
       }),
@@ -2436,7 +2447,7 @@ describe("SettingsDialog", () => {
 
   it("shows why a Linux .deb did not install, and the command that installs it beside its copy", async () => {
     updateReady = true;
-    const reason = "dohc did not get permission to install the update. Run this command in a terminal to install it.";
+    const reason = "dohc did not get permission. Run this command in a terminal to install it.";
     const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb'";
     bridge.installUpdate.mockResolvedValueOnce({
       accepted: false,
@@ -2459,7 +2470,7 @@ describe("SettingsDialog", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").textContent).toBe(
-        `dohc could not install update 1.2.4. ${reason}`,
+        `dohc could not install version 1.2.4. ${reason}`,
       ),
     );
     expect(screen.getByTestId("desktop-updates-install-command").textContent).toBe(installCommand);
