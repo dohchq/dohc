@@ -288,6 +288,7 @@ export function TextControl(props: {
 
 export function SwitchControl(props: {
   label: string;
+  describedBy?: string | undefined;
   checked: boolean;
   disabled?: boolean;
   // The change it asked for is still running.
@@ -301,6 +302,7 @@ export function SwitchControl(props: {
       type="button"
       role="switch"
       aria-label={props.label}
+      aria-describedby={props.describedBy}
       aria-checked={props.checked}
       aria-busy={props.busy || undefined}
       disabled={props.disabled}
