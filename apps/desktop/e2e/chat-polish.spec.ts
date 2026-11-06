@@ -29,31 +29,37 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     const view = page.locator("main");
     const composer = view.getByTestId("chats-composer");
+    await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["light", "dark"]) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
-      await page.emulateMedia({ reducedMotion: "reduce" });
       await composer.fill("@");
       const menu = view.getByTestId("chats-mention-menu");
       await expect(menu).toBeVisible();
       const openBox = await composer.boundingBox();
       const menuBox = await menu.boundingBox();
       expect(menuBox!.y).toBeGreaterThanOrEqual(openBox!.y + openBox!.height);
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`mentions-${theme}.png`) });
       await composer.press("Escape");
       const closedBox = await composer.boundingBox();
       expect(closedBox!.y).toBe(openBox!.y);
       await composer.fill("");
-      // The opening post's actions show, and take the pointer, on hover.
-      const trigger = view.getByTestId("chats-add-reaction").first();
-      await view.locator('article[data-testid="chats-message"]').hover();
-      await expect(trigger).toBeVisible();
-      await trigger.click();
-      const search = page.getByRole("textbox", { name: "Search emoji or paste any emoji" });
-      await search.fill("🧑🏽‍🚀");
-      await expect(page.getByRole("button", { name: "🧑🏽‍🚀", exact: true })).toBeVisible();
-      await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
-      await page.getByRole("button", { name: "🧑🏽‍🚀", exact: true }).click();
     }
+    // The opening post's actions show, and take the pointer, on hover. Both
+    // themes are shot from one open picker, before the reaction is added.
+    const trigger = view.getByTestId("chats-add-reaction").first();
+    await view.locator('article[data-testid="chats-message"]').hover();
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🧑🏽‍🚀");
+    const astronaut = page.getByRole("button", { name: "🧑🏽‍🚀", exact: true });
+    await expect(astronaut).toBeVisible();
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await waitForVisibleAnimations(page);
+      await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
+    }
+    await astronaut.click();
     // The menu opens above only when the composer has no room for it below.
     // A short thread leaves its composer high, so the window ends just
     // under the composer, with less room than one row of the menu.
@@ -103,6 +109,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       // Compared at rest: a hovered row takes a fill and rounded corners.
       await page.mouse.move(0, 0);
       await expect(homeCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await waitForVisibleAnimations(page);
       const surface = await homeCard.evaluate(node => {
         const style = getComputedStyle(node);
         return { background: style.backgroundColor, radius: style.borderRadius, padding: style.paddingLeft };
@@ -114,6 +121,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await expect(opened).toHaveCSS("background-color", surface.background);
       await expect(opened).toHaveCSS("border-radius", surface.radius);
       await expect(opened).toHaveCSS("padding-left", surface.padding);
+      await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`opened-card-${theme}.png`) });
       await page.getByTestId("chats-feed-link").click();
     }
