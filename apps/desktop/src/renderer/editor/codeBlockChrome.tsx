@@ -221,13 +221,9 @@ function buildCodeLanguageDecorations(
           const left = document.createElement("div");
           left.className = "dohc-code-block-toolbar-left";
 
-          const dot = document.createElement("span");
-          dot.className = "dohc-code-block-dot";
-          dot.setAttribute("aria-hidden", "true");
-
           const select = document.createElement("select");
           select.className = "dohc-code-language-select";
-          select.setAttribute("aria-label", "code language");
+          select.setAttribute("aria-label", "Code language");
           select.disabled = view.editable === false;
 
           const hasKnownLanguage = CODE_LANGUAGE_OPTIONS.some(
@@ -281,10 +277,10 @@ function buildCodeLanguageDecorations(
           select.addEventListener("change", commit);
 
           // The shared copy tile, drawn here because React does not render
-          // this toolbar. Its name stays "copy code".
+          // this toolbar. Its name stays "Copy code".
           const copy = document.createElement("button");
           copy.type = "button";
-          copy.setAttribute("aria-label", "copy code");
+          copy.setAttribute("aria-label", "Copy code");
           const status = document.createElement("span");
           status.setAttribute("role", "status");
           status.setAttribute("aria-live", "polite");
@@ -322,7 +318,7 @@ function buildCodeLanguageDecorations(
             void action.copy();
           });
 
-          left.append(dot, select);
+          left.append(select);
           toolbar.append(left, copy, status);
           disposeToolbar.set(toolbar, () => {
             action.dispose();
