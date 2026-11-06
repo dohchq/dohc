@@ -504,6 +504,7 @@ describe("CLI socket server", () => {
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
         agentIdsNamedIn: async () => [],
+        namesOwnAgent: async () => false,
         localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
@@ -3310,7 +3311,7 @@ describe("CLI socket server", () => {
     const chats = await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" });
     if (!chats.ok) throw new Error(chats.reason);
     expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
-    // An agent that gave no name carries the agent name from the person's settings.
+    // An agent that gave no name is "Agent".
     await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
       .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Agent" } }]);
 

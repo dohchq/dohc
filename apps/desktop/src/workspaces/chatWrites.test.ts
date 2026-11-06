@@ -110,6 +110,7 @@ function fixture() {
     // The person's agents: Nova, the default, and Codex.
     agentIdsNamedIn: async (body: string) => Object.entries({ default: "@nova", codex: "@codex" })
       .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
+    namesOwnAgent: async (name: string) => ["default", "codex", "Nova", "Codex"].includes(name),
     localInstallationId: () => "local-id",
     // Marks where an answer holds dispatch scans off.
     async betweenDispatchScans(_workspaceId, write) {
@@ -719,6 +720,20 @@ describe("ActorKey local admission", () => {
       resolveAttachments: async () => [],
     });
     expect(person).not.toHaveProperty("authorReported");
+  });
+
+  it.each(["default", "codex", "Nova", "Codex"])("drops a claim to the person's agent %s, so the message is an unnamed agent's", async (agentName) => {
+    const test = fixture();
+    const claimed = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+    });
+    const unnamed = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent" }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+    });
+    expect(claimed.authorActorKey).toBeDefined();
+    expect(claimed.authorActorKey).toBe(unnamed.authorActorKey);
+    expect(claimed.author).toEqual({ kind: "agent", displayName: "Agent" });
+    expect(claimed.authorAgentId).toBeUndefined();
   });
 
   it("stores CLI human origin and automation definition identity locally", async () => {

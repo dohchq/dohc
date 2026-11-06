@@ -3385,6 +3385,7 @@ describe("chatDispatchService", () => {
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
         agentIdsNamedIn: async () => [],
+        namesOwnAgent: async () => false,
         localInstallationId: () => "install-local",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,

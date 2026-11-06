@@ -23,6 +23,7 @@ import {
   newAgentId,
   newAgentName,
   ownAgentNamed,
+  namesOwnAgent,
   withFirstAgent,
   effectiveThemeMode,
   zoomPercent,
@@ -302,6 +303,8 @@ describe("desktop user settings model", () => {
     expect(ownAgentNamed(settings, "Bee")?.id).toBe("agent-b");
     expect(ownAgentNamed(settings, "nova")).toBeNull();
     expect(ownAgentNamed(settings, "Cursor")).toBeNull();
+    for (const name of ["default", "agent-b", "Atlas", "Nova", "Bee"]) expect(namesOwnAgent(settings, name)).toBe(true);
+    for (const name of ["nova", "Cursor", "dohc-mcp"]) expect(namesOwnAgent(settings, name)).toBe(false);
   });
 
   it("starts only an agent dohc has a launch for", () => {

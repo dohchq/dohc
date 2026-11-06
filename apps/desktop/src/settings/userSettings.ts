@@ -149,6 +149,11 @@ export function ownAgentNamed(settings: Pick<DesktopUserSettings, "agents">, nam
     ?? null;
 }
 
+/** Whether a name is one of your agents' ids or names, which only your own agents' messages carry. */
+export function namesOwnAgent(settings: Pick<DesktopUserSettings, "agents">, name: string): boolean {
+  return listAgents(settings).some(({ id }) => id === name) || ownAgentNamed(settings, name) !== null;
+}
+
 // A message names one of your agents with @ and its name's handle: the name
 // without spaces or the punctuation a handle cannot hold. "" names no agent.
 export function agentHandle(name: string): string {

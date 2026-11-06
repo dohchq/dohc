@@ -552,7 +552,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { agentIdsNamedIn, automationAgent, listAgents, type Agent, type ThemeMode } from "./settings/userSettings";
+import { agentIdsNamedIn, automationAgent, listAgents, namesOwnAgent, type Agent, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -4935,6 +4935,7 @@ const chatWrites = createChatWrites({
   },
   agentIdsNamedIn: async (body) =>
     agentIdsNamedIn((await readCachedUserSettingsFile(stateDir())).settings, body),
+  namesOwnAgent: async (name) => namesOwnAgent((await readCachedUserSettingsFile(stateDir())).settings, name),
   localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
