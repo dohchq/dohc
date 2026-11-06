@@ -136,10 +136,18 @@ export function DocumentControls(props: {
         type="button"
         data-testid={toggle.testId}
         aria-pressed={toggle.pressed}
-        disabled={toggle.disabled}
+        disabled={toggle.disabled && !toggle.title}
+        aria-disabled={toggle.disabled && !!toggle.title || undefined}
+        aria-description={toggle.disabled ? toggle.title : undefined}
         title={toggle.title}
-        onClick={toggle.onClick}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        onClick={(event) => {
+          if (toggle.disabled) {
+            event.preventDefault();
+            return;
+          }
+          toggle.onClick?.();
+        }}
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
       >
         {toggle.label}
       </button>

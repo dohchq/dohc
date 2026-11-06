@@ -207,7 +207,7 @@ describe("markdown document opening state", () => {
           ? "toggle"
           : el.getAttribute("aria-label") ?? el.querySelector("[aria-label]")?.getAttribute("aria-label") ?? el.textContent,
       ),
-      disabled: controls.map((el) => (control(el) as HTMLButtonElement).disabled),
+      disabled: controls.map((el) => (control(el) as HTMLButtonElement).disabled || control(el).getAttribute("aria-disabled") === "true"),
     };
   }
   const CONTROLS = ["Share file", "toggle", "Document actions"];
@@ -252,8 +252,15 @@ describe("markdown document opening state", () => {
     expect(headerGroup(), "a failed read drops the toggle and the menu, and Share moves right").toEqual({
       status: [], controls: CONTROLS, disabled: [false, true, true],
     });
-    // A failed read never opens, so the toggle does not promise that it will.
-    expect(screen.getByTestId("view-actions").querySelector("button:not([aria-label])")?.getAttribute("title")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Edit", description: "dohc could not open this file." });
+    expect(toggle.getAttribute("title")).toBe("dohc could not open this file.");
+    const user = userEvent.setup();
+    screen.getByRole("button", { name: "Share file" }).focus();
+    await user.tab();
+    expect(document.activeElement).toBe(toggle);
+    await user.keyboard("{Enter} ");
+    await user.click(toggle);
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
   });
 
   it("offers Try again when any text file's read fails, and reads it again", async () => {
@@ -301,8 +308,8 @@ describe("markdown document opening state", () => {
       ),
     );
     expect(
-      (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
-    ).toBe(true);
+      screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled"),
+    ).toBe("true");
     expect(
       (screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly,
     ).toBe(true);
