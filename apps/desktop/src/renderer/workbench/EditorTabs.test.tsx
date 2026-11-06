@@ -53,11 +53,12 @@ function renderTabs(activeTab: string) {
 }
 
 describe("EditorTabs strip scrolling", () => {
-  it("gives every tab's close the tooltip Close, with the close-tab shortcut", () => {
+  it("names the close-tab shortcut in the active tab's close tooltip, and only Close on the others", () => {
     renderTabs("b.md");
-    for (const path of ["a.md", "b.md", "c.md"]) {
-      expect(screen.getByRole("button", { name: `Close ${path}` }).getAttribute("title")).toBe("Close (Ctrl+W)");
-    }
+    const title = (path: string) => screen.getByRole("button", { name: `Close ${path}` }).getAttribute("title");
+    expect(title("b.md")).toBe("Close (Ctrl+W)");
+    expect(title("a.md")).toBe("Close");
+    expect(title("c.md")).toBe("Close");
   });
 
   it.each([

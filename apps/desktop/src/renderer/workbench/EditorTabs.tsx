@@ -260,7 +260,8 @@ const Tab = memo(function Tab(props: {
         <button
           type="button"
           aria-label={`Close ${name}`}
-          title={`Close (${shortcutTitle("close-tab", window.dohcDesktop?.platform)})`}
+          // Ctrl+W closes only the active tab, so only its close names it.
+          title={props.active ? `Close (${shortcutTitle("close-tab", window.dohcDesktop?.platform)})` : "Close"}
           tabIndex={-1}
           // Don't let a press on the close button arm the drag above.
           onPointerDown={(event) => event.stopPropagation()}
