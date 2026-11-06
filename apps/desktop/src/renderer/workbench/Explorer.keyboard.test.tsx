@@ -196,6 +196,19 @@ describe("active and picked rows", () => {
       .getAllByRole("treeitem")
       .filter((item) => item.className.includes(TINT) || item.className.includes("bg-selected"))
       .map((item) => item.dataset.path);
+  const edged = () =>
+    screen
+      .getAllByRole("treeitem")
+      .filter((item) => item.querySelector('[data-testid="tree-row-open-edge"]'))
+      .map((item) => item.dataset.path);
+  async function openNotes() {
+    const user = userEvent.setup();
+    const props = explorerProps(expanded);
+    const view = render(<Fixture {...props} />);
+    await user.click(row("notes.md"));
+    view.rerender(<Fixture {...props} {...opened("notes.md")} />);
+    return user;
+  }
 
   it("marks no row active when the active tab is not a tree path", () => {
     render(<Fixture {...explorerProps({ ...expanded, ...opened(untitled) })} />);
@@ -261,6 +274,35 @@ describe("active and picked rows", () => {
 
     expect(marked()).toEqual(["apps"]);
     expect(row("apps").className).toContain(TINT);
+  });
+
+  it("edges the open file among picked rows, and keeps the edge after focus leaves", async () => {
+    const user = await openNotes();
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual(["notes.md"]);
+
+    await user.click(screen.getByRole("button", { name: "After tree" }));
+    expect(edged()).toEqual(["notes.md"]);
+    expect(row("notes.md").className).toContain(TINT);
+  });
+
+  it("edges neither the open file alone nor a picked row that is not open", async () => {
+    await openNotes();
+    expect(edged()).toEqual([]);
+
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual(["notes.md"]);
+    expect(row("apps/reading-list/index.html").className).toContain(TINT);
+  });
+
+  it("removes the edge when the pick clears", async () => {
+    await openNotes();
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual(["notes.md"]);
+
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
+    expect(edged()).toEqual([]);
+    expect(marked()).toEqual(["notes.md"]);
   });
 });
 

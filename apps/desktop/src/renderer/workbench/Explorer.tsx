@@ -376,6 +376,7 @@ export const TreeRow = memo(function TreeRow(props: {
       ? "text-success"
       : ""
     : glyphTone(props.picked || props.active);
+  const openEdge = !props.dropPreview && props.picked && props.active;
   const dropClass = blocked
     ? target
       ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
@@ -417,12 +418,12 @@ export const TreeRow = memo(function TreeRow(props: {
         // The open file's row is active: the selected fill and medium weight.
         // Picked rows, the ones Delete and drag would act on when they are
         // not just the open file, take the text-selection tint instead. An
-        // open file among them keeps its weight. The keyboard-focused row
-        // draws the 1px accent line inside its own rounded box, so the
-        // tree's scroller cannot clip it on a row scrolled to an edge. An
-        // allowed drop target is a success tint with no ring or bar, so it
-        // never reads as focus. A blocked target adds a danger ring and a
-        // danger bar.
+        // open file among them keeps its weight and gains a 2px ink edge. The
+        // keyboard-focused row draws the 1px accent line inside its own
+        // rounded box, so the tree's scroller cannot clip it on a row
+        // scrolled to an edge. An allowed drop target is a success tint with
+        // no ring or bar, so it never reads as focus. A blocked target adds a
+        // danger ring and a danger bar. A drop preview hides the edge.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
@@ -436,6 +437,13 @@ export const TreeRow = memo(function TreeRow(props: {
       >
         {blocked && target ? (
           <span aria-hidden className="absolute bottom-1 left-0 top-1 w-0.5 rounded-full bg-danger" />
+        ) : null}
+        {openEdge ? (
+          <span
+            aria-hidden
+            data-testid="tree-row-open-edge"
+            className="absolute bottom-1.5 left-0.5 top-1.5 w-0.5 rounded-full bg-ink"
+          />
         ) : null}
         <IndentGuides depth={row.depth} />
         {row.isFolder ? (
