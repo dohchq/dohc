@@ -431,7 +431,7 @@ export interface CliServerOptions {
   // The engine's id for that run when dohc dispatched it as agent work, or
   // null. The engine reads the run's agent from it, so a read from the run
   // moves only that agent's place, whatever the command line says. Any other
-  // read is that of agents outside a run.
+  // read is that of connected agents.
   dispatchedRunId(workspaceId: string): string | null;
   // The secret dohc gave that run's process, or null. Only a request that
   // carries it is the run's; any other caller in the workspace is not.

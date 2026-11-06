@@ -3874,7 +3874,7 @@ describe("chatDispatchService", () => {
     expect((await fixture.chat.getThread({ workspaceId: WORKSPACE_ID, threadId })).thread.lane).toBe("posts");
   });
 
-  it("fails a runner self-test whose reply did not come from the run", async () => {
+  it("ends a runner self-test as unconfirmed when its reply did not come from the run", async () => {
     const fixture = await createFixture({ runner: { command: "claude -p" } });
 
     const resultPromise = fixture.service.runnerSelfTest(WORKSPACE_ID, "default");
@@ -3892,12 +3892,16 @@ describe("chatDispatchService", () => {
       origin: "cli",
       body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
     });
-    call.process.emitExit(0);
 
-    await expect(resultPromise).resolves.toMatchObject({
+    // The check ends on that reply, without waiting for the runner to exit.
+    await expect(resultPromise).resolves.toEqual({
       ok: false,
-      detail: "Runner exited before reporting self-test success.",
+      unconfirmed: true,
+      detail: "Nova replied without this check's credential, so its replies would show as Agent. Check the Command in Nova's details.",
+      logPath: join(fixture.stateRoot, "run-logs", `${call.options.env.DOHC_RUN_ID}.log`),
     });
+    expect(fixture.killCalls).toContainEqual({ pid: -call.process.pid!, signal: "SIGTERM" });
+    call.process.emitExit(null, "SIGTERM");
   });
 
   it("refuses a runner self-test on a workspace without a capture before resolving a store", async () => {

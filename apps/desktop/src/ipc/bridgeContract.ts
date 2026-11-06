@@ -5943,6 +5943,8 @@ export const RunnerSelfTestResult = z.object({
   detail: z.string().min(1).max(2_000),
   // The run's log, when the check started a runner.
   logPath: z.string().min(1).max(4_096).optional(),
+  // The runner replied, but not as the check's run, so the check can't pass.
+  unconfirmed: z.literal(true).optional(),
 }).strict();
 export type RunnerSelfTestResult = z.infer<typeof RunnerSelfTestResult>;
 

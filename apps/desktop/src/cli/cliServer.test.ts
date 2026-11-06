@@ -3078,6 +3078,15 @@ describe("CLI socket server", () => {
       await invoke("reply", { ...args, attachments: [] });
       expect(await lastAuthor()).toBe("human");
     }
+    // An answer never repeats the secret a request carried: the run's, another,
+    // or a malformed one, whether the request worked or failed.
+    for (const secret of [RUN_SECRET, "c".repeat(64), "C".repeat(64)]) {
+      for (const thread of [posted.threadId, "th_missing"]) {
+        const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "reply", args: { ...args, thread }, runSecret: secret });
+        expect(response.ok).toBe(thread === posted.threadId && secret !== "C".repeat(64));
+        expect(JSON.stringify(response)).not.toContain(secret);
+      }
+    }
     callerRunSecret = RUN_SECRET;
     await invoke("reply", { ...args, attachments: [] });
     expect(await lastAuthor()).toBe("agent");
