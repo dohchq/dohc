@@ -200,7 +200,8 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     const page = desktop.page;
     await openMyAgent(page);
 
-    // A reply that lands while its chat is on screen leaves no notice.
+    // The first reply lands while its chat is on screen. The end of the test
+    // checks that it left no row in Notices.
     const composer = page.getByTestId("chats-lane-composer");
     await composer.fill("audit the projections");
     await composer.press("Enter");
@@ -262,6 +263,11 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     }
     // The wash clears on its own.
     await expect(landed).toHaveCount(0);
+
+    // Both replies exist now. The only Nova row is the one just opened at the
+    // second reply, so the reply that landed on screen left none.
+    await page.getByTestId("notice-center-toggle").click();
+    await expect(center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" })).toHaveCount(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
