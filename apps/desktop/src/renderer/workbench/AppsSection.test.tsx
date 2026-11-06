@@ -83,7 +83,6 @@ function Harness(props: HarnessProps) {
     onActivateTab: noop,
     onCloseTab: noop,
     onCloseAllTabs: noop,
-    onNewUntitledTextFile: noop,
     onCollapseFolders: noop,
     onSetFolderExpanded: noop,
     onToggleFolder: noop,

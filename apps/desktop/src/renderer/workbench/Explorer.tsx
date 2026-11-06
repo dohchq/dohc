@@ -126,7 +126,6 @@ export interface ExplorerProps {
   onActivateTab: (groupId: string, path: string) => void;
   onCloseTab: (groupId: string, path: string) => void;
   onCloseAllTabs: () => void;
-  onNewUntitledTextFile: () => void;
   onCollapseFolders: () => void;
   onSetFolderExpanded: (path: string, expanded: boolean) => void;
   onToggleFolder: (path: string) => void;
@@ -1838,12 +1837,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
-              <SectionActionButton
-                label="New untitled text file"
-                onClick={props.onNewUntitledTextFile}
-              >
-                <FilePlus2 size={13} aria-hidden />
-              </SectionActionButton>
               <SectionActionButton
                 label="Close all editors"
                 disabled={openEditorCount === 0}
