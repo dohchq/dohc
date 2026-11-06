@@ -52,7 +52,7 @@ describe("work reference registration and resolution", () => {
     const hidden = await denialBytes(await handler(request("stranger", `/sync/work-references/${ref}`)));
     const missing = await denialBytes(await handler(request("reader", `/sync/work-references/${"Z".repeat(43)}`)));
     expect(hidden).toBe(missing);
-    expect((await handler(request("owner", `/sync/shares/${shareId}/revoke`, jsonBody({})))).status).toBe(200);
+    expect((await handler(request("owner", `/sync/shares/${shareId}/revoke`, {method: "POST"}))).status).toBe(200);
     expect(await denialBytes(await handler(request("reader", `/sync/work-references/${ref}`)))).toBe(missing);
   });
 
@@ -199,6 +199,7 @@ describe("work reference registration and resolution", () => {
     const mixed = await read();
     expect(mixed.references).toEqual(one.references);
     expect(mixed.hasMore).toBe(false);
+    expect(await read()).toEqual(mixed);
     expect(mixed.nextAfter.length).toBe(one.nextAfter.length);
     expect(empty.nextAfter.length).toBe(one.nextAfter.length);
     const objects = vi.spyOn(storage, "objectMoment");
@@ -444,7 +445,7 @@ describe("work reference registration and resolution", () => {
     storage.workReferenceDatasetAccess = async () => {entered(); await waiting; return () => true;};
     const read = handler(request("reader", `/sync/work-references/${ref}`));
     await suspended;
-    await handler(request("owner", `/sync/shares/${shareId}/revoke`, jsonBody({})));
+    expect((await handler(request("owner", `/sync/shares/${shareId}/revoke`, {method: "POST"}))).status).toBe(200);
     release();
     expect((await read).status).toBe(404);
   });

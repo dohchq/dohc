@@ -50,7 +50,7 @@ it("tests the filtered primary key field rather than the row envelope id", () =>
 
 it("checks transactional reference targets through current dataset reads and guards the registration revision", async () => {
   const rules: DatasetDefinition = {...definition, operations: [...definition.operations,
-    {operationId: id(8), name: "remove", label: "Remove", tableId: id(2), kind: "delete", access: "owner", readOnly: false, fieldIds: [id(3), id(4)]},
+    {operationId: id(8), name: "remove", label: "Remove", tableId: id(2), kind: "delete", access: "owner", readOnly: false, fieldIds: []},
   ]};
   const source = datasetOperations.generateDatasetOperations(rules);
   const schema = schemaSql.replace("name TEXT NOT NULL)", "name TEXT NOT NULL,_record_version INTEGER NOT NULL DEFAULT 1)");
