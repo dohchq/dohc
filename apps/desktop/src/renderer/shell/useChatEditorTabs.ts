@@ -103,8 +103,7 @@ export function useChatEditorTabs(input: {
     // A sidebar channel click focuses its tab, including its current thread.
     // A message link still commands a jump inside that tab.
     const focusOnly = entry.nav && entry.nav.level !== "channels" && chatEditorPath(entry.nav) === path &&
-      (nav.level === "channel" || nav.level === "feed" ||
-        (nav.level === "dm" && !nav.focusMessageId));
+      (nav.level === "feed" || ((nav.level === "channel" || nav.level === "dm") && !nav.focusMessageId));
     if (focusOnly && nav.level === "dm" && entry.nav?.level === "dm" &&
       JSON.stringify(entry.nav.dm) !== JSON.stringify(nav.dm)) {
       entry.nav = { ...entry.nav, dm: nav.dm };

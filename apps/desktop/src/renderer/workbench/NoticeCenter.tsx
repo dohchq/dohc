@@ -38,7 +38,7 @@ export type NoticeAction = {
 
 // What opening a row comes to: null once its target opened, or a sentence
 // that takes the place of the row's text, such as why the target is gone.
-export type RowOpen = string | null | void | Promise<string | null>;
+export type RowOpen = Promise<string | null>;
 
 export type Notice = {
   // Sync/update notices use a fixed id; agent notices carry their own
@@ -1090,9 +1090,9 @@ export function NoticeCenter(props: {
       next.delete(key);
       return next;
     });
-    const settle = (note: string | null | void) => {
+    const settle = (note: string | null) => {
       if (controller.signal.aborted) return;
-      if (note === null || note === undefined) {
+      if (note === null) {
         (modalReturnTarget() ?? toggleRef.current)?.focus({ preventScroll: true });
         setOpen(false);
         return;
@@ -1101,10 +1101,6 @@ export function NoticeCenter(props: {
       setRowNotes((current) => new Map(current).set(key, note));
     };
     const result = run(controller.signal);
-    if (!(result instanceof Promise)) {
-      settle(result);
-      return;
-    }
     opening.current = { key, controller };
     setOpeningKey(key);
     const done = () => {
