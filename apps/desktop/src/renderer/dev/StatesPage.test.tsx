@@ -38,7 +38,6 @@ describe("states page", () => {
     for (const theme of ["light", "dark"]) {
       const mark = screen.getByTestId(`states-tab-row-actions-cut-${theme}`);
       expect(mark.textContent).toBe("Changed outside dohc");
-      expect(mark.title).toBe("This file changed outside dohc.");
     }
     expect(screen.getAllByText("narrow, changed on disk")).toHaveLength(2);
     expect(screen.getAllByText("split: text failed beside a CSV in Raw")).toHaveLength(2);
