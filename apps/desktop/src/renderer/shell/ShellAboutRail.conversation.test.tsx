@@ -501,7 +501,7 @@ describe("Links for an open conversation", () => {
     expect(failed.textContent).toBe("dohc could not load the links.Try again");
     expect(notices.report).toHaveBeenCalledExactlyOnceWith({
       identity: "about-conversation-links:wire-general",
-      message: "dohc could not load the links.",
+      message: expect.stringContaining("disk is busy"),
       cause: error,
       retry: expect.any(Function),
     });

@@ -1,6 +1,7 @@
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { Link2Off } from "lucide-react";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { ipcErrorMessage } from "../ipcError";
 import { RetryRow } from "../ui/controls";
 import { Ref } from "../ui/Ref";
 import { SkeletonLines } from "../ui/SkeletonRows";
@@ -83,8 +84,7 @@ export type ConversationLinksView =
   | { status: "unlisted" }
   | { status: "ready"; files: MentionedFile[]; more: boolean; building: boolean; partial: boolean };
 
-// The row and its toast say the same sentence. The error itself is the
-// row's cause, for Details.
+// The row says the sentence. Its toast adds the reason when dohc knows one.
 const LINKS_FAILED = "dohc could not load the links.";
 
 const authorKey = (author: Author) => `${author.kind}\0${author.presentation.group}\0${author.displayName}`;
@@ -120,7 +120,7 @@ function AboutConversationLinks(props: {
   const retry = useRef(() => {});
   const onError = useCallback((error: unknown) => {
     setFailed(key);
-    notices.report({ identity, message: LINKS_FAILED, cause: error, retry: () => retry.current() });
+    notices.report({ identity, message: ipcErrorMessage(error, LINKS_FAILED), cause: error, retry: () => retry.current() });
   }, [identity, key, notices]);
   const { pages, status, load, loadMore } = useChatLinks({ workspaceId, channelWireId, onError });
   const read = useCallback(() => {
