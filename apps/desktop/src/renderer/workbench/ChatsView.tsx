@@ -4411,7 +4411,7 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span>read-only</span>
+              <span className="text-muted">read-only</span>
             )}
           </div>
         ) : dispatchState?.paused ? (
@@ -4431,7 +4431,7 @@ export function ChatsView(props: {
                 Resume
               </button>
             ) : (
-              <span>read-only</span>
+              <span className="text-muted">read-only</span>
             )}
           </div>
         ) : dispatchState && (liveRunId !== null ||
@@ -5285,7 +5285,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-subtle">
+                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-muted">
                             via {agent.owner}
                           </span>
                         }

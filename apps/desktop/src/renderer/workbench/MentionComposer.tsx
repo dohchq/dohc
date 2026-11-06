@@ -120,6 +120,8 @@ function menuQueryAt(value: string, caret: number): boolean {
 // the @ menu's people and files.
 const BAR_BUTTON =
   "grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink disabled:opacity-40";
+// A person or agent's role, such as "your agent", reads as words, not a hint.
+const ROLE_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-muted";
 const COMPOSER_INSET = { stream: "mx-5 mb-4 mt-1", thread: "mx-4 mb-4 mt-1", narrow: "mx-3 mb-3 mt-1" } as const;
 
 export function MentionComposer(props: {
@@ -749,7 +751,7 @@ export function MentionComposer(props: {
                   {candidate.handle}
                 </span>
                 {(candidate.description ?? candidate.label).toLocaleLowerCase() === candidate.handle.toLocaleLowerCase() ? null : (
-                  <span className={MENU_DETAIL}>{candidate.description ?? candidate.label}</span>
+                  <span className={ROLE_DETAIL}>{candidate.description ?? candidate.label}</span>
                 )}
               </button>
             </li>
