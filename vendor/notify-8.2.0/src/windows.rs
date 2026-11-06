@@ -20,8 +20,8 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_OPERATION_ABORTED, ERROR_SUCCESS, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_NOTIFY_ENUM_DIR, ERROR_OPERATION_ABORTED,
+    ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
@@ -330,11 +330,18 @@ fn start_read(
 
 unsafe extern "system" fn handle_event(
     error_code: u32,
-    _bytes_written: u32,
+    bytes_written: u32,
     overlapped: *mut OVERLAPPED,
 ) {
     let overlapped: Box<OVERLAPPED> = Box::from_raw(overlapped);
     let request: Box<ReadDirectoryRequest> = Box::from_raw(overlapped.hEvent as *mut _);
+
+    fn emit_event(event_handler: &Mutex<dyn EventHandler>, res: Result<Event>) {
+        if let Ok(mut guard) = event_handler.lock() {
+            let f: &mut dyn EventHandler = &mut *guard;
+            f.handle_event(res);
+        }
+    }
 
     match error_code {
         ERROR_OPERATION_ABORTED => {
@@ -351,17 +358,22 @@ unsafe extern "system" fn handle_event(
                 return;
             }
         }
-        ERROR_SUCCESS => {
+        ERROR_SUCCESS | ERROR_NOTIFY_ENUM_DIR => {
             // Success, continue to handle the event
         }
         _ => {
-            // Some unidentified error occurred, log and unwatch the directory, then return.
+            // Some unidentified error occurred. Log it, unwatch the directory, and report the
+            // error so the caller can watch it again. Unwatch first: a watch the caller adds in
+            // response must reach the server after this unwatch, or the unwatch removes it.
             log::error!(
                 "unknown error in ReadDirectoryChangesW for directory {}: {}",
                 request.data.dir.display(),
                 error_code
             );
             request.unwatch();
+            let err = Error::io(std::io::Error::from_raw_os_error(error_code as i32))
+                .add_path(request.data.dir.clone());
+            emit_event(&request.event_handler, Err(err));
             ReleaseSemaphore(request.data.complete_sem, 1, ptr::null_mut());
             return;
         }
@@ -374,6 +386,14 @@ unsafe extern "system" fn handle_event(
         request.handle,
         request.action_tx,
     );
+
+    // Windows discards the details of changes that overflow the buffer. It reports that as a
+    // zero-byte completion or as ERROR_NOTIFY_ENUM_DIR. Tell the caller to rescan.
+    if error_code == ERROR_NOTIFY_ENUM_DIR || (error_code == ERROR_SUCCESS && bytes_written == 0) {
+        let event = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        emit_event(&request.event_handler, Ok(event));
+        return;
+    }
 
     // The FILE_NOTIFY_INFORMATION struct has a variable length due to the variable length
     // string as its last member. Each struct contains an offset for getting the next entry in
@@ -412,13 +432,6 @@ unsafe extern "system" fn handle_event(
             );
 
             let newe = Event::new(EventKind::Any).add_path(path);
-
-            fn emit_event(event_handler: &Mutex<dyn EventHandler>, res: Result<Event>) {
-                if let Ok(mut guard) = event_handler.lock() {
-                    let f: &mut dyn EventHandler = &mut *guard;
-                    f.handle_event(res);
-                }
-            }
 
             let event_handler = |res| emit_event(&request.event_handler, res);
 
