@@ -208,9 +208,10 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     const agentReplies = page.getByTestId("chats-lane-message").filter({ hasText: REPORT });
     await expect(agentReplies).toHaveCount(1);
 
-    // Ask again with the chat closed, so the reply arrives as a notice.
-    await page.getByTestId(activityPin("search")).click();
-    await expect(page.getByTestId("chats-view")).toHaveCount(0);
+    // Ask again with the chat closed, so the reply arrives as a notice. The
+    // conversation is an editor tab: another sidebar view leaves it on screen.
+    await page.getByRole("button", { name: "Close Nova", exact: true }).click();
+    await expect(page.getByTestId("chats-lane-message")).toHaveCount(0);
     // The agent's conversation is its channel's chat lane, not its posts.
     await page.evaluate(async (workspaceId) => {
       const api = (window as unknown as {
@@ -228,23 +229,41 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
       await api.sendChatMessage({ workspaceId, threadId: conversation.id, body: "also audit the export totals" });
     }, workspaceId);
 
+    // With UI_AUDIT_SHOT_DIR set, saves the window in both themes.
+    const shots = async (name: string) => {
+      const dir = process.env.UI_AUDIT_SHOT_DIR;
+      if (!dir) return;
+      await mkdir(dir, { recursive: true });
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(dir, `${name}-${theme}.png`) });
+      }
+    };
+
+    // The reply arrives as a toast with its Open, before it fades.
+    const toastOpen = page.getByTestId("sent-notice-toast").filter({ hasText: "Nova" }).getByTestId("sent-notice-toast-open");
+    await expect(toastOpen).toBeVisible();
+    await toastOpen.hover();
+    await shots("notice-toast-open-hover");
+
     await page.getByTestId("notice-center-toggle").click();
     const center = page.getByTestId("notice-center");
     const row = center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" }).first();
     await expect(row).toBeVisible();
     await row.hover();
-    await waitForVisibleAnimations(page);
-    if (process.env.UI_AUDIT_SHOT_DIR) {
-      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
-      for (const theme of ["light", "dark"]) {
-        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-        await waitForVisibleAnimations(page);
-        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `notice-row-hover-${theme}.png`) });
-      }
-    }
+    await shots("notice-row-hover");
     // The whole row is the target, with the pointer.
     expect(await row.evaluate((node) => getComputedStyle(node).cursor === "pointer"
       || getComputedStyle(node.querySelector("[data-notice-open]")!, "::after").cursor === "pointer")).toBe(true);
+    // The row's own Open is the toast's button.
+    await row.getByRole("button", { name: "Open", exact: true }).hover();
+    await shots("notice-row-open-hover");
+    // The keyboard reaches the row through its one stop, and rings the row.
+    await page.mouse.move(0, 0);
+    await page.keyboard.press("ArrowDown");
+    await expect(row.locator("[data-notice-open]")).toBeFocused();
+    await shots("notice-row-focus");
 
     // A press anywhere on the row, not only its Open, lands on the reply.
     await row.click();
