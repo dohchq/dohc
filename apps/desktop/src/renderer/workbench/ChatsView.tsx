@@ -21,6 +21,7 @@ import { ThreadedChat } from "./ThreadedChat";
 import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
 import { ChatLane } from "./ChatLane";
+import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
 import {
@@ -202,7 +203,8 @@ export type ChatsInvitation = { shareId: string; inputs: number };
 export type ChatsNav =
   | { level: "channels" }
   | { level: "feed" }
-  | { level: "channel"; channel: ChatChannelRecord }
+  // An agent DM's conversation, at a message when one is named.
+  | { level: "channel"; channel: ChatChannelRecord; focusMessageId?: string }
   | {
       level: "thread";
       channel: ChatChannelRecord;
@@ -3662,11 +3664,14 @@ export function ChatsView(props: {
     }
     setFlashMessageId(messageId);
     const token = liveToken.current;
+    requestAnimationFrame(() => {
+      if (token === liveToken.current) focusMessage(document, messageId);
+    });
     window.setTimeout(() => {
       if (token === liveToken.current) {
         setFlashMessageId((current) => (current === messageId ? null : current));
       }
-    }, 1_200);
+    }, TARGET_FLASH_MS);
   }, []);
 
   useEffect(() => {
@@ -4848,6 +4853,7 @@ export function ChatsView(props: {
             agentSetup={props.agentSetup}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
+            {...(nav.focusMessageId === undefined ? {} : { focusMessageId: nav.focusMessageId })}
             header={top}
             notice={agentProblem ? (
               <AgentProblemLine words={agentProblem.words} action={agentProblem.action} off={"off" in agentProblem} onAction={props.onSetupAgent} />

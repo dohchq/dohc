@@ -49,7 +49,7 @@ export function useTypingRecoveryNotices(input: {
                     void importedRecovery(result.momentId, failure.path);
                   } else if (result.outcome !== "missing") {
                     showSuccessNotice(`dohc recovered your typing in "${failure.path}".`, undefined, undefined,
-                      {label: "Open History", run: openHistory});
+                      {label: "Open History", run: openHistory}, {to: "history"});
                   } else showWarningNotice("This kept copy is no longer on this computer.");
                 }
                 void refresh();
@@ -63,6 +63,7 @@ export function useTypingRecoveryNotices(input: {
               details: failure.reason === "drawing-unavailable" ? [["File", failure.path]] : [["File", failure.path], ["Reason", failure.detail]],
               kind: noticeKind,
               repeat: true,
+              target: {to: "file", path: failure.path},
               ...(failure.checkpointId ? {
                 identity,
                 action: {label: "Copy your typing", run: () => {void actOnCopy("copy");}, additional: [{label: "Discard your typing", run: requestDiscard}]},

@@ -149,7 +149,7 @@ describe("MarkdownEditor heading navigation", () => {
       expect(
         view.container
           .querySelectorAll("h2")[1]
-          ?.classList.contains("dohc-outline-target-flash"),
+          ?.classList.contains("dohc-target-flash"),
       ).toBe(true),
     );
 
@@ -168,7 +168,7 @@ describe("MarkdownEditor heading navigation", () => {
     expect(
       view.container
         .querySelectorAll("h2")[1]
-        ?.classList.contains("dohc-outline-target-flash"),
+        ?.classList.contains("dohc-target-flash"),
     ).toBe(true);
   });
 });
@@ -202,7 +202,7 @@ describe("MarkdownEditor block navigation", () => {
     await waitFor(() => expect(scrollIntoView, "drop the blockTarget effect -> nothing scrolls, and an engine-backed search result opens at the top of the document again.").toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(
-        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+        view.container.querySelector(".dohc-target-flash")?.textContent,
       ).toBe("Second para"),
     );
 
@@ -211,14 +211,14 @@ describe("MarkdownEditor block navigation", () => {
     // queued frame and listeners.
     view.rerender(renderEditor());
     expect(
-      view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+      view.container.querySelector(".dohc-target-flash")?.textContent,
     ).toBe("Second para");
 
     view.rerender(renderEditor({ index: 3, nonce: 2 }));
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
     await waitFor(() =>
       expect(
-        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+        view.container.querySelector(".dohc-target-flash")?.textContent,
       ).toBe("Third para"),
     );
   });
@@ -236,7 +236,7 @@ describe("MarkdownEditor block navigation", () => {
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(
-        view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+        view.container.querySelector(".dohc-target-flash")?.textContent,
       ).toBe("Third para"),
     );
   });
@@ -271,7 +271,7 @@ describe("MarkdownEditor block navigation", () => {
     // Every element the reveal scrolled, and the flashed text it drew.
     function revealDom(view: { container: HTMLElement }) {
       const flashed = Array.from(
-        view.container.querySelectorAll<HTMLElement>(".dohc-outline-target-flash"),
+        view.container.querySelectorAll<HTMLElement>(".dohc-target-flash"),
       );
       return {
         elements: flashed,
@@ -405,7 +405,7 @@ describe("MarkdownEditor block navigation", () => {
     const view = render(renderEditor({ index: 2, nonce: 1 }));
     await screen.findByTestId("markdown-editor");
     await waitFor(() =>
-      expect(view.container.querySelector(".dohc-outline-target-flash")).toBeTruthy(),
+      expect(view.container.querySelector(".dohc-target-flash")).toBeTruthy(),
     );
 
     expect(revealCalls.length, "pass `pos + 1` as moveCursorTo in scrollToBlock -> the reveal takes the caret over, and this records the argument that did it.").toBeGreaterThan(0);

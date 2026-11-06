@@ -677,7 +677,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         data-continues={continues ? "true" : "false"}
         data-open={open ? "true" : undefined}
         className={`relative flex flex-col ${
-          props.flashMessageId === message.id ? "ring-2 ring-inset ring-agent/30" : ""
+          props.flashMessageId === message.id ? "dohc-target-flash" : ""
         }`}
       >
         {newDay && anchor === "end" ? (

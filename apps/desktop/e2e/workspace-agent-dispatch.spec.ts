@@ -186,6 +186,87 @@ test("the agent dispatches a fresh successful run for each human message", async
   }
 });
 
+test("an agent's reply in Notices opens its conversation at the reply, washed and focused", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "agent-dispatch-notice-open-e2e";
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedRunnerSettings(temp, "report");
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
+    const page = desktop.page;
+    await openMyAgent(page);
+
+    // A reply that lands while its chat is on screen leaves no notice.
+    const composer = page.getByTestId("chats-lane-composer");
+    await composer.fill("audit the projections");
+    await composer.press("Enter");
+    const agentReplies = page.getByTestId("chats-lane-message").filter({ hasText: REPORT });
+    await expect(agentReplies).toHaveCount(1);
+
+    // Ask again with the chat closed, so the reply arrives as a notice.
+    await page.getByTestId(activityPin("search")).click();
+    await expect(page.getByTestId("chats-view")).toHaveCount(0);
+    await page.evaluate(async () => {
+      const api = (window as unknown as {
+        dohcDesktop: {
+          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
+          listChatChannels(payload: { workspaceId: string }): Promise<{ channels: Array<{ id: string; kind: string }> }>;
+          listChannelThreads(payload: { workspaceId: string; channelId: string }): Promise<{ threads: Array<{ id: string }> }>;
+          sendChatMessage(payload: { workspaceId: string; threadId: string; body: string }): Promise<unknown>;
+        };
+      }).dohcDesktop;
+      const { workspaces } = await api.getWorkspaceRegistry();
+      const workspaceId = workspaces[0]!.workspaceId;
+      const { channels } = await api.listChatChannels({ workspaceId });
+      const agent = channels.find((channel) => channel.kind === "agent")!;
+      const { threads } = await api.listChannelThreads({ workspaceId, channelId: agent.id });
+      await api.sendChatMessage({ workspaceId, threadId: threads[0]!.id, body: "also audit the export totals" });
+    });
+
+    await page.getByTestId("notice-center-toggle").click();
+    const center = page.getByTestId("notice-center");
+    const row = center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" }).first();
+    await expect(row).toBeVisible();
+    await row.hover();
+    await waitForVisibleAnimations(page);
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `notice-row-hover-${theme}.png`) });
+      }
+    }
+    // The whole row is the target, with the pointer.
+    expect(await row.evaluate((node) => getComputedStyle(node).cursor === "pointer"
+      || getComputedStyle(node.querySelector("[data-notice-open]")!, "::after").cursor === "pointer")).toBe(true);
+
+    // A press anywhere on the row, not only its Open, lands on the reply.
+    await row.click();
+    await expect(center).toHaveCount(0);
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
+    const landed = page.locator('[data-testid="chats-lane-message"].dohc-target-flash');
+    await expect(landed).toHaveCount(1);
+    await expect(landed).toContainText(REPORT);
+    await expect(landed).toBeFocused();
+    await expect(landed).toHaveAttribute("data-message-id", await agentReplies.nth(1).getAttribute("data-message-id") ?? "");
+    if (process.env.UI_AUDIT_SHOT_DIR) {
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `notice-landed-reply-${theme}.png`) });
+      }
+    }
+    // The wash clears on its own.
+    await expect(landed).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("an agent's question with choices is a poll; picking one answers it and the answer reaches the next run", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

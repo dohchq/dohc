@@ -19,6 +19,7 @@ export interface DocumentSaveFailure {
   details?: ReadonlyArray<ErrorDetailField>;
   retry?: (() => void) | null;
   action?: ShellError["action"];
+  target?: ShellError["target"];
   onDismiss?: () => void;
   kind?: ShellErrorKind;
   identity?: string;
@@ -176,6 +177,7 @@ export function useDocumentSaveNotices(input: {
         ...saveFailureNotice(path, reason),
         ...(cause === undefined ? {} : { cause }),
         identity: identity(path),
+        target: { to: "file", path },
         // The engine refuses every save over a deleted file until the file is
         // back, and only the person chooses to bring it back.
         ...(reason === "deleted"
@@ -262,7 +264,7 @@ export function useDocumentSaveNotices(input: {
     // One row per document: setting the edits aside replaces the failure.
     const replacement = ({ workspaceId: replaced, path, setAside, failure }: DocumentReplacement): void => {
       if (!current() || replaced !== owner) return;
-      const notice = { title: path, details: [["File", path, path.length]] as const, identity: `document-replacement:${owner}:${path}` };
+      const notice = { title: path, details: [["File", path, path.length]] as const, identity: `document-replacement:${owner}:${path}`, target: { to: "file", path } as const };
       if (failure) {
         const message = failure.setAsideFailed ? REPLACED_DOCUMENT_UNSAVED
           : setAside ? `${REPLACED_DOCUMENT_NOT_SHOWN} Find your earlier edits in Notices.` : REPLACED_DOCUMENT_NOT_SHOWN;
