@@ -4438,6 +4438,13 @@ mod tests {
         .await
     }
 
+    /// Await `wait`, failing the test by name if it takes longer than 10 s.
+    async fn bounded<T>(name: &str, wait: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(10), wait)
+            .await
+            .unwrap_or_else(|_| panic!("timed out: {name}"))
+    }
+
     /// Commit a pulled page's cursor.
     async fn commit_page(f: &CursorFixture, page: &Value) -> Result<Value, WireError> {
         let ctx = RequestContext::unbounded();
@@ -4890,23 +4897,27 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn closing_while_an_apply_waits_releases_its_token_before_the_actor_stops() {
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            let (relay, f) = half_pull_fixture("close-while-apply-waits", true).await;
+        // Each wait below fails by name after 10 s. This bound only backs them up.
+        tokio::time::timeout(std::time::Duration::from_secs(150), async {
+            let setup = half_pull_fixture("close-while-apply-waits", true);
+            let (relay, f) = bounded("fixture setup", setup).await;
             let previous = f.pull_token();
-            let waiting = f.collections_waiting().await;
+            let before = f.collections_waiting();
+            let waiting = bounded("waiting before the fetch", before).await;
             relay.release();
-            let fetched = f
-                .service
-                .sync_fetch_pull(
-                    &RequestContext::unbounded(),
-                    Some(f.handle.clone()),
-                    json!({"workspaceId": f.workspace_id}),
-                )
+            let ctx = RequestContext::unbounded();
+            let fetch = f.service.sync_fetch_pull(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({"workspaceId": f.workspace_id}),
+            );
+            let fetched = bounded("fetch page one", fetch)
                 .await
                 .expect("fetch page one");
             let token = f.pull_token().expect("this fetch's token");
             assert_ne!(Some(&token), previous.as_ref());
-            let hold = f.service.hold_actor(&f.handle).await;
+            let hold = f.service.hold_actor(&f.handle);
+            let hold = bounded("hold the actor", hold).await;
             let (entered, admitted) = tokio::sync::oneshot::channel();
             let (resume, resumed) = tokio::sync::oneshot::channel();
             let service = Arc::clone(&f.service);
@@ -4928,20 +4939,24 @@ mod tests {
                 resumed.await.expect("resume the waiting apply");
                 applying.await
             });
-            admitted.await.expect("apply reached its actor read");
+            bounded("apply reaches its actor read", admitted)
+                .await
+                .expect("apply reached its actor read");
             assert_eq!(f.open.pulls_in_flight.load(Ordering::SeqCst), 1);
-            assert!(f.open.pending_pull.lock().await.is_none());
+            let pending = f.open.pending_pull.lock();
+            assert!(bounded("pending page lock", pending).await.is_none());
             let service = Arc::clone(&f.service);
             let handle = f.handle.clone();
             let closing = tokio::spawn(async move { service.workspace_close(Some(handle)).await });
-            while f.service.open(Some(&f.handle)).is_ok() {
-                tokio::task::yield_now().await;
-            }
+            // Close cancels this right after it removes the handle.
+            let removed = f.open.pull_fetch_cancel.cancelled();
+            bounded("close removes the handle", removed).await;
             drop(hold);
-            let closed = closing.await.expect("close task");
+            let closed = bounded("close", closing).await.expect("close task");
             closed.expect("close workspace");
             resume.send(()).expect("resume apply after close");
-            assert!(applying.await.expect("apply task").is_err());
+            let answered = bounded("apply after close", applying).await;
+            assert!(answered.expect("apply task").is_err());
 
             let CursorFixture {
                 scratch,
@@ -4955,16 +4970,17 @@ mod tests {
             } = f;
             drop(service);
             drop(open);
-            let f = CursorFixture::open_at(
+            let reopen = CursorFixture::open_at(
                 scratch,
                 workspaces,
                 workspace_id,
                 reconcile_collections,
                 relay,
-            )
-            .await;
+            );
+            let f = bounded("reopen", reopen).await;
             assert_eq!(f.pull_token(), previous);
-            assert_eq!(f.collections_waiting().await, waiting);
+            let after = f.collections_waiting();
+            assert_eq!(bounded("waiting after reopen", after).await, waiting);
             let applied: i64 = f
                 .engine_db()
                 .query_row(
@@ -4974,7 +4990,7 @@ mod tests {
                 )
                 .expect("count applied envelopes");
             assert_eq!(applied, 0, "no envelope of the fetched page applied");
-            f.close().await;
+            bounded("final close", f.close()).await;
         })
         .await
         .expect("close and the waiting apply finish");
