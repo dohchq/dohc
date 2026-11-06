@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { JsonValue } from "../protocol";
 import { VersionedLiveAdapter } from "../versioned/versionedLiveAdapter";
 import { decodeMadeWorkReference, decodeWorkReferenceResolution } from "./workReferences";
 
 const REFERENCE = "A".repeat(42) + "_";
 
-function adapter(result: unknown) {
+function adapter(result: JsonValue) {
   const requests: { method: string; params: unknown; workspace: unknown }[] = [];
   const live = new VersionedLiveAdapter(
     {
