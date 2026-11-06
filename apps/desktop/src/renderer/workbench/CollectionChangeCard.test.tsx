@@ -3,15 +3,23 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { DATASET_SERVER_NOT_FOUND, ipcWireError } from "../../ipc/errorWords";
-import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
+import type { CollectionChangeRow } from "../../workspaces/collectionChange";
+import { COLLECTION_CHANGE_FILE, loadCollectionChange, undoCollectionChange } from "../collections/collectionChangeFlow";
 import { ask, proposalPath, volunteers, world, type World } from "../collections/collectionChangeFlow.testHarness";
 import { formatClock } from "../time";
 import { CollectionChangeCard } from "./CollectionChangeCard";
+
+// The flow as it is, with Load and Undo replaceable for a test that needs an undoable change.
+vi.mock("../collections/collectionChangeFlow", async importOriginal => {
+  const flow = await importOriginal<typeof import("../collections/collectionChangeFlow")>();
+  return { ...flow, loadCollectionChange: vi.fn(flow.loadCollectionChange), undoCollectionChange: vi.fn(flow.undoCollectionChange) };
+});
 
 const posted: ChatMessageRecord = { id: "message-1", threadId: "thread-1", presentation: { group: "agent", hue: null, self: false },
   authorKind: "agent", authorDisplayName: "Claude Code", body: "Here's the due date you asked for.", createdAtMs: 3_000 };
 const onReply = vi.fn(async (_input: { body: string; resolves: boolean; attach?: string }) => undefined);
 const onError = vi.fn();
+const onNotice = vi.fn();
 let place: World;
 // Cards remember what they showed for the session, so each test posts its own message.
 let message = posted, posts = 0;
@@ -23,11 +31,13 @@ beforeEach(() => {
   localStorage.clear();
   onReply.mockClear();
   onError.mockClear();
+  onNotice.mockClear();
+  vi.mocked(undoCollectionChange).mockClear();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const card = () => render(<CollectionChangeCard workspaceId="w" message={message} path={proposalPath} locked={false}
-  onReply={onReply} onError={onError} testIdPrefix="lane" />);
+  onReply={onReply} onError={onError} onNotice={onNotice} testIdPrefix="lane" />);
 const row = (text: string) => screen.getByText(text).closest("li")!;
 
 it("shows a collaborator's unapplied edit as its own row with its author", async () => {
@@ -87,6 +97,8 @@ it("applies the rows it showed and answers the message as the person who clicked
   await waitFor(() => expect(onReply).toHaveBeenCalledWith({ body: "Applied the change to Volunteers.", resolves: true }));
   expect(place.head().revisionSha256).toBe(proposal.revisionSha256);
   expect(onError).not.toHaveBeenCalled();
+  // The card shows it applied, so no notice says so.
+  expect(onNotice).not.toHaveBeenCalled();
 });
 
 it("applies the change after records came, and its reply attaches the change as it applied it", async () => {
@@ -123,6 +135,88 @@ it("offers Try again for an Applied reply that didn't post, which posts it", asy
   (onError.mock.calls[0]![2] as () => void)();
   await waitFor(() => expect(onReply).toHaveBeenCalledTimes(2));
   expect(onReply).toHaveBeenLastCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
+});
+
+it("offers Try again for an Apply that fails after the chat closed, which prepares the change from the Collection as it is now", async () => {
+  const proposal = ask(place); const view = card();
+  const apply = await screen.findByTestId("lane-change-apply");
+  place.control.refuse = new Error("dohc lost its connection to the engine.");
+  fireEvent.click(apply);
+  // The chat closes before the engine answers.
+  view.unmount();
+  await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc lost its connection to the engine.", expect.any(Error), expect.any(Function)));
+  // A volunteer signed up before Try again.
+  place.recount(13, 12);
+  (onError.mock.calls[0]![2] as () => void)();
+  await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Applied the change to Volunteers"));
+  expect(place.actions().filter(action => action === "prepareMigration")).toHaveLength(2);
+  expect(onReply).toHaveBeenCalledWith({ body: "Applied the change to Volunteers.", resolves: true, attach: expect.stringMatching(COLLECTION_CHANGE_FILE) });
+  const { attach } = onReply.mock.calls[0]![0] as { attach: string };
+  expect(JSON.parse(place.files[attach]!).rows).toContainEqual(expect.objectContaining({ kind: "migration", records: 13 }));
+  expect(place.head().revisionSha256).toBe(proposal.revisionSha256);
+  expect(onError).toHaveBeenCalledTimes(1);
+});
+
+it("says the files changed when Try again finds they no longer make the change shown", async () => {
+  const proposal = ask(place); const view = card();
+  const apply = await screen.findByTestId("lane-change-apply");
+  place.control.refuse = new Error("dohc lost its connection to the engine.");
+  fireEvent.click(apply);
+  view.unmount();
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+  place.files["volunteers/dataset.json"] = JSON.stringify({ ...JSON.parse(place.files["volunteers/dataset.json"]!), name: "Helpers" });
+  (onError.mock.calls[0]![2] as () => void)();
+  await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+  expect(onError).toHaveBeenLastCalledWith("Its files changed after it was sent. Review the change to apply it.", null, undefined);
+  expect(place.head().revisionSha256).not.toBe(proposal.revisionSha256);
+  expect(onReply).not.toHaveBeenCalled();
+  expect(onNotice).not.toHaveBeenCalled();
+});
+
+it("offers Try again for an Undo that fails after the chat closed, and says once it undid the change", async () => {
+  const proposal = ask(place);
+  const renamed: CollectionChangeRow = { kind: "collection-renamed", key: "collection:name", from: "Volunteers", to: "Helpers" };
+  vi.mocked(loadCollectionChange).mockResolvedValueOnce({ proposal, rows: [renamed], state: { kind: "applied", current: true } });
+  vi.mocked(undoCollectionChange).mockRejectedValueOnce(new Error("dohc couldn't prepare the undo. Try again.")).mockResolvedValueOnce(undefined);
+  const view = card();
+  fireEvent.click(await screen.findByTestId("lane-change-undo"));
+  view.unmount();
+  await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc couldn't prepare the undo. Try again.", expect.any(Error), expect.any(Function)));
+  (onError.mock.calls[0]![2] as () => void)();
+  await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid the change to Volunteers"));
+  expect(undoCollectionChange).toHaveBeenCalledTimes(2);
+  expect(onReply).toHaveBeenCalledWith({ body: "Undid the change to Volunteers.", resolves: false });
+  expect(onError).toHaveBeenCalledTimes(1);
+});
+
+it("says it applied the change after the chat closed even when its reply didn't post, and Try again only posts the reply", async () => {
+  const proposal = ask(place); const view = card();
+  const apply = await screen.findByTestId("lane-change-apply");
+  // The reply's own words don't say the change applied.
+  onReply.mockRejectedValueOnce(new Error("dohc couldn't send that message."));
+  fireEvent.click(apply);
+  view.unmount();
+  await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Applied the change to Volunteers"));
+  expect(onError).toHaveBeenCalledWith("dohc couldn't send that message.", expect.any(Error), expect.any(Function));
+  expect(place.head().revisionSha256).toBe(proposal.revisionSha256);
+  (onError.mock.calls[0]![2] as () => void)();
+  await waitFor(() => expect(onReply).toHaveBeenCalledTimes(2));
+  expect(onReply).toHaveBeenLastCalledWith({ body: "Applied the change to Volunteers.", resolves: true });
+  expect(onNotice).toHaveBeenCalledTimes(1);
+});
+
+it("says it undid the change after the chat closed even when its reply didn't post", async () => {
+  const proposal = ask(place);
+  const renamed: CollectionChangeRow = { kind: "collection-renamed", key: "collection:name", from: "Volunteers", to: "Helpers" };
+  vi.mocked(loadCollectionChange).mockResolvedValueOnce({ proposal, rows: [renamed], state: { kind: "applied", current: true } });
+  vi.mocked(undoCollectionChange).mockResolvedValueOnce(undefined);
+  onReply.mockRejectedValueOnce(new Error("dohc couldn't send that message."));
+  const view = card();
+  fireEvent.click(await screen.findByTestId("lane-change-undo"));
+  view.unmount();
+  await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid the change to Volunteers"));
+  expect(onError).toHaveBeenCalledWith("dohc couldn't send that message.", expect.any(Error), expect.any(Function));
+  expect(onNotice).toHaveBeenCalledTimes(1);
 });
 
 it("names the server when it refuses the change, with no Try again", async () => {

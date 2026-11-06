@@ -63,6 +63,8 @@ export function ChatLane(props: {
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  // What a change card's Apply or Undo did, when it finishes after the chat closed.
+  onNotice?: (message: string) => void;
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
@@ -526,6 +528,7 @@ export function ChatLane(props: {
         onOpenPath={props.onOpenPath}
         onReply={(input) => replyToChange(message, changeFile, input)}
         onError={onError}
+        onNotice={props.onNotice}
         testIdPrefix="chats-lane"
       /> : decision ? <DecisionStatus
         decision={decision}
@@ -540,7 +543,7 @@ export function ChatLane(props: {
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
       /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, onError, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, onError, props.onNotice, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (

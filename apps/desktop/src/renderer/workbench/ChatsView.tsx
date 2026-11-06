@@ -520,6 +520,8 @@ export function ChatsView(props: {
   // A retry, when given, is the failure's Try again. An archive refused for
   // live editing also names the bookmark's page.
   onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string) => void;
+  // What a change card's Apply or Undo did, when it finishes after the chat closed.
+  onNotice?: (message: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
   onBookmarkArchived?: (path: string) => void;
   // Removing a member is undoable for a while. The shell shows that notice
@@ -4839,6 +4841,7 @@ export function ChatsView(props: {
             loadFileHeadings={loadFileHeadings}
             onOpenPath={props.onOpenPath}
             onError={props.onError}
+            onNotice={props.onNotice}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
