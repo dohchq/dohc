@@ -2,12 +2,18 @@ import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { engineDaemonPids } from "./helpers/daemonKill";
-import { launchDesktopApp, within } from "./helpers/desktopApp";
+import { launchDesktopApp, within, type LaunchedDesktopApp } from "./helpers/desktopApp";
+import { DOCUMENT_END } from "./helpers/keys";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
   openWorkspaceFromFirstRun,
+  waitForWorkspaceFile,
+  writeWorkspaceFiles,
 } from "./helpers/workspace";
+
+const EDIT = "Saved before the signal.";
 
 function isRunning(pid: number): boolean {
   try {
@@ -20,17 +26,32 @@ function isRunning(pid: number): boolean {
 
 // The launched app leads its own process group, and on Linux the engine leads
 // another. A stop signal, such as Ctrl+C in a terminal, reaches dohc only. dohc
-// quits, stops the engine at the end of its quit, and records no crash.
-async function quitsCleanlyOn(send: (pids: { group: number; main: number }) => void): Promise<void> {
+// ends, records no crash, and the engine stops. The next start opens the
+// workspace with the saved edit and shows no notice.
+async function stopsCleanlyOn(
+  send: (pids: { group: number; main: number }) => void,
+  { finishesQuit }: { finishesQuit: boolean },
+): Promise<void> {
   const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let stopped: LaunchedDesktopApp | null = null;
+  let reopened: LaunchedDesktopApp | null = null;
   try {
-    desktop = await launchDesktopApp({ workspace: temp });
-    const { page, app, logs } = desktop;
+    await writeWorkspaceFiles(temp, [{ path: "stop.md", contents: "# Stop\n\nBefore the signal.\n" }]);
+    stopped = await launchDesktopApp({ workspace: temp });
+    const { page, app, logs } = stopped;
     const child = app.process();
     const pid = child.pid;
     if (pid === undefined) throw new Error("Electron app has no pid.");
-    await openWorkspaceFromFirstRun(page, temp);
+    const opened = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, opened.workspaceId, "stop.md");
+    await explorerRow(page, "stop.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toContainText("Before the signal.");
+    await editor.click();
+    await page.keyboard.press(DOCUMENT_END);
+    await page.keyboard.type(` ${EDIT}`);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+    await expect.poll(() => readFile(join(temp.rootPath, "stop.md"), "utf8")).toContain(EDIT);
     const engines = await engineDaemonPids(pid);
     expect(engines).not.toHaveLength(0);
 
@@ -38,30 +59,55 @@ async function quitsCleanlyOn(send: (pids: { group: number; main: number }) => v
     const main = await app.evaluate(() => process.pid);
     const outputEnded = new Promise<true>((resolve) => child.once("close", () => resolve(true)));
     send({ group: pid, main });
-    expect(await within(outputEnded, 60_000), "dohc quits on the signal").toBe(true);
+    expect(await within(outputEnded, 60_000), "dohc ends on the signal").toBe(true);
     const report = await readFile(join(temp.homeDir, "crash-report.json"), "utf8").catch(() => null);
     expect(report, "The stop records no crash").toBeNull();
-    const quitLine = logs.find((entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"));
-    expect(quitLine?.text.trim() ?? "no quit line", "The quit finishes within its budget")
-      .toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
-    expect(engines.filter(isRunning), "The quit stops the engine").toEqual([]);
+    if (finishesQuit) {
+      const quitLine = logs.find((entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"));
+      expect(quitLine?.text.trim() ?? "no quit line", "The quit finishes within its budget")
+        .toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
+      expect(engines.filter(isRunning), "The quit stops the engine").toEqual([]);
+    } else {
+      // Electron ends dohc before its quit finishes (#3411). The engine then
+      // stops on its own once its input closes.
+      await expect.poll(() => engines.filter(isRunning), { message: "The engine stops", timeout: 30_000 })
+        .toEqual([]);
+    }
+
+    reopened = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(reopened.page, temp);
+    await waitForWorkspaceFile(reopened.page, opened.workspaceId, "stop.md");
+    await explorerRow(reopened.page, "stop.md").click();
+    await expect(reopened.page.getByTestId("markdown-editor"), "The saved edit survives the stop")
+      .toContainText(EDIT);
+    await expect(reopened.page.locator('[data-testid="notice-toasts"] > *'), "The next start shows no notice")
+      .toHaveCount(0);
   } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
+    // The signal already ended the first app. Closing it attaches its logs.
+    await stopped?.close().catch((error: unknown) => console.error("[stop-signal] closing the stopped app:", error));
+    await cleanupDesktopWorkspace(reopened, temp);
   }
 }
 
 test.describe("stop signals", () => {
   test.skip(process.platform !== "linux", "The engine leads its own process group on Linux only.");
 
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
-    test(`${signal} sent to dohc's process group quits dohc and records no engine crash`, async () => {
-      test.setTimeout(120_000);
-      await quitsCleanlyOn(({ group }) => process.kill(-group, signal));
+  // A SIGTERM or SIGHUP sent to the group also reaches Electron's GPU process,
+  // and Electron then ends dohc before its quit finishes (#3411).
+  const groupStops = [
+    { signal: "SIGTERM", verb: "ends", finishesQuit: false },
+    { signal: "SIGINT", verb: "quits", finishesQuit: true },
+    { signal: "SIGHUP", verb: "ends", finishesQuit: false },
+  ] as const;
+  for (const { signal, verb, finishesQuit } of groupStops) {
+    test(`${signal} sent to dohc's process group ${verb} dohc and keeps the saved work`, async () => {
+      test.setTimeout(180_000);
+      await stopsCleanlyOn(({ group }) => process.kill(-group, signal), { finishesQuit });
     });
   }
 
-  test("SIGTERM sent to dohc alone quits dohc, stops the engine and records no crash", async () => {
-    test.setTimeout(120_000);
-    await quitsCleanlyOn(({ main }) => process.kill(main, "SIGTERM"));
+  test("SIGTERM sent to dohc alone quits dohc, stops the engine and keeps the saved work", async () => {
+    test.setTimeout(180_000);
+    await stopsCleanlyOn(({ main }) => process.kill(main, "SIGTERM"), { finishesQuit: true });
   });
 });
