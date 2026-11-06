@@ -96,6 +96,9 @@ fn prepared_file_relay() -> PagedRelay {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops,
             next_cursor: 2,
             has_more: false,
@@ -103,6 +106,117 @@ fn prepared_file_relay() -> PagedRelay {
     )]);
     relay.blobs = blobs;
     relay
+}
+
+#[test]
+fn prepared_owner_pull_learns_reference_page() {
+    use dohc_engine_domain::work_references::{
+        WorkReferenceMapping, WorkReferenceResolution, WorkTarget, WorkTargetState,
+        resolve_work_reference, work_reference_page_after,
+    };
+
+    let reference = "R".repeat(43);
+    let target = WorkTarget::File {
+        version_id: "main".into(),
+        object_id: "prepared-object-0".into(),
+    };
+    let run = |prepared: bool| {
+        let (_scratch, path, mut engine) = open_store();
+        seed_identity(&mut engine);
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .unwrap();
+        let mut relay = prepared_file_relay();
+        let first = relay.pages.get_mut(&0).unwrap();
+        first.work_references = vec![WorkReferenceMapping {
+            reference: reference.clone(),
+            target: target.clone(),
+            created_at_ms: 1,
+        }];
+        first.next_reference_after = Some("7".into());
+        first.reference_has_more = true;
+        first.next_cursor = 1;
+        first.has_more = true;
+        let second_op = first.ops.pop().unwrap();
+        relay.pages.insert(
+            1,
+            PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
+                ops: vec![second_op],
+                next_cursor: 2,
+                has_more: false,
+            },
+        );
+        let client = RelaySyncClient::new(relay);
+        let result = if prepared {
+            let page = client.fetch_pull(&mut engine, "ws", &NoFaults).unwrap();
+            assert_eq!(
+                resolve_work_reference(&engine, "ws", &reference).unwrap(),
+                WorkReferenceResolution::Unknown
+            );
+            assert_eq!(
+                work_reference_page_after(&engine, "ws", "owner").unwrap(),
+                None
+            );
+            assert_eq!(prepared_counts(&engine), (0, 0));
+            let offline = RelaySyncClient::new(PagedRelay::new([]));
+            offline.apply_pull(
+                &mut engine,
+                &mut Default::default(),
+                "ws",
+                &page,
+                &NoFaults,
+                &NoLiveLeases,
+                2_000,
+            )
+        } else {
+            client.pull_chat_workspace(
+                &mut engine,
+                &mut Default::default(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                2_000,
+            )
+        }
+        .unwrap();
+        let SyncPassOutcome::Complete {
+            applied: 2,
+            fetched: 2,
+            refused: 0,
+            has_more,
+            pending_cursor: Some(cursor),
+            ..
+        } = result
+        else {
+            panic!("unexpected pull: {result:?}");
+        };
+        let resolution = resolve_work_reference(&engine, "ws", &reference).unwrap();
+        assert!(matches!(&resolution, WorkReferenceResolution::Found {
+            target: learned, state: WorkTargetState::Live, path: Some(path), ..
+        } if learned == &target && path == "prepared-0.txt"));
+        assert!(has_more);
+        assert_eq!(cursor.cursor, 2);
+        assert_eq!(prepared_counts(&engine), (2, 2));
+        assert_eq!(
+            *client.transport().reference_pulls.lock().unwrap(),
+            [(None, true), (None, false)]
+        );
+        commit(&client, &mut engine, &cursor);
+        drop(engine);
+        let engine = EngineStore::open(&path, 3_000).unwrap();
+        assert_eq!(
+            resolve_work_reference(&engine, "ws", &reference).unwrap(),
+            resolution
+        );
+        let after = work_reference_page_after(&engine, "ws", "owner").unwrap();
+        assert_eq!(after.as_deref(), Some("7"));
+        (resolution, after, read_relay_cursor(&engine, "ws").unwrap())
+    };
+
+    assert_eq!(run(true), run(false));
 }
 
 fn prepared_counts(engine: &EngineStore) -> (i64, i64) {
@@ -417,6 +531,9 @@ fn prepared_pull_keeps_operation_page_and_payload_limits() {
         let client = RelaySyncClient::new(PagedRelay::new([(
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops,
                 next_cursor: count,
                 has_more: true,
@@ -486,6 +603,9 @@ fn prepared_pull_keeps_operation_page_and_payload_limits() {
         let client = RelaySyncClient::new(PagedRelay::new([(
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![envelope("limit-peer", 0, "probe.padding", payload)],
                 next_cursor: 1,
                 has_more: false,

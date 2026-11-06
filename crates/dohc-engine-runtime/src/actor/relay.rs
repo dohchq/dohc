@@ -832,6 +832,7 @@ mod deferred_relay_tests {
                     started.notify_one();
                     release.notified().await;
                     Ok(RelayIoResponse::Push(PushResponse {
+                        registered_references: Vec::new(),
                         settlement_refusals: Vec::new(),
                         hosted_refusals: Vec::new(),
                         redundant_recoveries: Vec::new(),

@@ -848,6 +848,7 @@ pub struct PreparedOrdinaryPull {
     ops: std::sync::Mutex<Vec<ReplicationEnvelope>>,
     cursor: i64,
     has_more: bool,
+    reference_page: (Vec<WorkReferenceMapping>, Option<String>, bool),
     repairs: BaseRepairAnswers,
     pull_token: String,
     previous_pull_token: Option<String>,
@@ -2895,6 +2896,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             ops: std::sync::Mutex::new(ops),
             cursor,
             has_more,
+            reference_page,
             repairs,
             pull_token,
             previous_pull_token,
@@ -2968,7 +2970,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
         Ok((
             Box::new(OrdinaryFetch {
-                reference_page,
+                reference_page: prepared.reference_page.clone(),
                 identity,
                 queued,
                 ordered,
