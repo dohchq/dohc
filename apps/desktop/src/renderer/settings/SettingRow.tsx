@@ -289,10 +289,13 @@ export function TextControl(props: {
 export function SwitchControl(props: {
   label: string;
   // An element whose words name the switch. Its name then wins over `label`
-  // while that element is on screen.
+  // while that element exists.
   labelledBy?: string;
   // The hover words, such as what a click does.
   tooltip?: string;
+  // What a screen reader says after the name, in place of the tooltip, so a
+  // tooltip that repeats the name is not read twice.
+  description?: string;
   checked: boolean;
   disabled?: boolean;
   // The change it asked for is still running.
@@ -308,6 +311,7 @@ export function SwitchControl(props: {
       aria-label={props.label}
       aria-labelledby={props.labelledBy}
       title={props.tooltip}
+      aria-description={props.description}
       aria-checked={props.checked}
       aria-busy={props.busy || undefined}
       disabled={props.disabled}

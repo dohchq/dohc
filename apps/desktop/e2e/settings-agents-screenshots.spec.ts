@@ -69,6 +69,10 @@ test("@ui-audit Settings › Agents with an agent on and one off, and focus on a
     const novaSwitch = row("default").getByRole("switch");
     await expect(novaSwitch).toHaveAttribute("aria-checked", "true");
     await expect(row("vega").getByRole("switch")).toHaveAttribute("aria-checked", "false");
+    // Both themes show the same settled section: the Add tiles have looked
+    // for their tools, and the MCP config has loaded or said why not.
+    await expect(section.getByLabel(/^Looking for /)).toHaveCount(0);
+    await expect(section.locator('[data-testid="mcp-config-copy"]:enabled, [data-testid="mcp-unavailable"]').first()).toBeVisible();
     await shoot(page, section, "settings-agents");
 
     // Tab from the agent's name to its switch, past Check when it takes focus.

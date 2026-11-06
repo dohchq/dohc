@@ -88,9 +88,12 @@ it("names an agent's switch by the agent, says what a click does, and dims a row
   const on = within(row("Claude Code")).getByRole("switch", { name: "Claude Code" });
   expect(on.getAttribute("aria-checked")).toBe("true");
   expect(on.title).toBe("Turn off Claude Code");
+  // Read after the name, so it leaves the name out.
+  expect(on.getAttribute("aria-description")).toBe("Turn off");
   const off = within(row("Codex")).getByRole("switch", { name: "Codex" });
   expect(off.getAttribute("aria-checked")).toBe("false");
   expect(off.title).toBe("Turn on Codex");
+  expect(off.getAttribute("aria-description")).toBe("Turn on");
   // The off row's name and mark go muted; the on row keeps its ink.
   const name = (agent: string) => within(row(agent)).getByText(agent).closest("button")!;
   const mark = (agent: string) => row(agent).querySelector(`span[title="${agent}"]`)!;

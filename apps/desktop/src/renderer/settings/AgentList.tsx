@@ -292,7 +292,8 @@ function AgentRow(props: {
           ) : null}
           {launched ? (
             <SwitchControl label={agent.name} labelledBy={nameId}
-              tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`} checked={agent.enabled}
+              tooltip={`${agent.enabled ? "Turn off" : "Turn on"} ${agent.name}`}
+              description={agent.enabled ? "Turn off" : "Turn on"} checked={agent.enabled}
               onChange={(enabled) => props.onChange((current) => ({ ...current, enabled }))} />
           ) : switchSpace}
           <Menu
