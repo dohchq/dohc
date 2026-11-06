@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { engineDaemonPids } from "./helpers/daemonKill";
 import { launchDesktopApp, within, type LaunchedDesktopApp } from "./helpers/desktopApp";
+import { momentTextsForPath } from "./helpers/engineDb";
 import { DOCUMENT_END } from "./helpers/keys";
 import {
   cleanupDesktopWorkspace,
@@ -26,8 +27,8 @@ function isRunning(pid: number): boolean {
 
 // The launched app leads its own process group, and on Linux the engine leads
 // another. A stop signal, such as Ctrl+C in a terminal, reaches dohc only. dohc
-// ends, records no crash, and the engine stops. The next start opens the
-// workspace with the saved edit and shows no notice.
+// ends, records no crash, and the engine stops with the edit in its store. The
+// next start opens the workspace with the edit and shows no notice.
 async function stopsCleanlyOn(
   send: (pids: { group: number; main: number }) => void,
   { finishesQuit }: { finishesQuit: boolean },
@@ -73,17 +74,32 @@ async function stopsCleanlyOn(
       await expect.poll(() => engines.filter(isRunning), { message: "The engine stops", timeout: 30_000 })
         .toEqual([]);
     }
+    // The file alone would pass the editor check below: dohc imports a file that
+    // differs from its store as an outside edit.
+    const stored = momentTextsForPath(temp.rootPath, "stop.md");
+    expect(stored.some((text) => text.includes(EDIT)), "The store keeps the saved edit").toBe(true);
 
     reopened = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(reopened.page, temp);
     await waitForWorkspaceFile(reopened.page, opened.workspaceId, "stop.md");
     await explorerRow(reopened.page, "stop.md").click();
-    await expect(reopened.page.getByTestId("markdown-editor"), "The saved edit survives the stop")
+    await expect(reopened.page.getByTestId("markdown-editor"), "The next start shows the saved edit")
       .toContainText(EDIT);
+    // At start, dohc raises a notice for a crash report or for typing kept in
+    // History. Both reads here must find nothing for those notices to show.
+    const startup = await reopened.page.evaluate(async (workspaceId) => {
+      const api = window.dohcDesktop!;
+      const [crash, kept] = await Promise.all([api.readCrashReport({}), api.getCaptureRecoveryStatus({ workspaceId })]);
+      return { crash: crash.report, kept: kept.captureRecoveries };
+    }, opened.workspaceId);
+    expect(startup, "The next start finds no crash and no kept typing").toEqual({ crash: null, kept: [] });
     await expect(reopened.page.locator('[data-testid="notice-toasts"] > *'), "The next start shows no notice")
       .toHaveCount(0);
+    await expect(reopened.page.getByTestId("notice-center-toggle"), "Notices has no unread row")
+      .toHaveAttribute("aria-label", "Notices");
   } finally {
-    // The signal already ended the first app. Closing it attaches its logs.
+    // Closing the first app attaches its logs, and stops it if the test failed
+    // before the signal.
     await stopped?.close().catch((error: unknown) => console.error("[stop-signal] closing the stopped app:", error));
     await cleanupDesktopWorkspace(reopened, temp);
   }
