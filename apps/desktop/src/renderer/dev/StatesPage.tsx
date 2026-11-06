@@ -51,7 +51,7 @@ import { SETTINGS_SECTIONS } from "../settings/settingsRegistry";
 import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
-import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, EmptyState, GhostButton, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
@@ -1606,6 +1606,11 @@ function Pane(props: { theme: "light" | "dark" }) {
           <DangerButton size="compact" data-force-state="focus-visible">Delete</DangerButton>
           <DangerButton size="compact" disabled>Delete</DangerButton>
         </Specimen>
+        <Specimen label="danger row">
+          <DangerButton size="row">Delete</DangerButton>
+          <DangerButton size="row" data-force-state="hover">Delete</DangerButton>
+          <DangerButton size="row" disabled>Delete</DangerButton>
+        </Specimen>
         <Specimen label="secondary: rest, hover, focus-visible, disabled">
           <SecondaryButton>Cancel</SecondaryButton>
           <SecondaryButton data-force-state="hover">Cancel</SecondaryButton>
@@ -1618,10 +1623,17 @@ function Pane(props: { theme: "light" | "dark" }) {
           <SecondaryButton size="compact" data-force-state="focus-visible">Cancel</SecondaryButton>
           <SecondaryButton size="compact" disabled>Cancel</SecondaryButton>
         </Specimen>
-        <Specimen label="secondary row: rest, hover, aria-disabled">
+        <Specimen label="secondary row: rest, hover, aria-disabled, disabled">
           <SecondaryButton size="row">Open</SecondaryButton>
           <SecondaryButton size="row" data-force-state="hover">Open</SecondaryButton>
           <SecondaryButton size="row" aria-disabled="true">Open</SecondaryButton>
+          <SecondaryButton size="row" disabled>Open</SecondaryButton>
+        </Specimen>
+        <Specimen label="ghost: rest, hover, focus-visible, disabled">
+          <GhostButton>Change</GhostButton>
+          <GhostButton data-force-state="hover">Change</GhostButton>
+          <GhostButton data-force-state="focus-visible">Change</GhostButton>
+          <GhostButton disabled>Change</GhostButton>
         </Specimen>
         <Specimen label="icon: rest, hover, focus-visible, disabled">
           <IconButton aria-label="More"><MoreHorizontal size={14} aria-hidden /></IconButton>

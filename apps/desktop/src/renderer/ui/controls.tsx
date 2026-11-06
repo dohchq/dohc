@@ -14,39 +14,42 @@ function cx(...parts: Array<string | false | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
+// A disabled button keeps its shape and drops its color: a primary or danger
+// confirm takes the line fill, and the label turns subtle, with no hover. An
+// icon button is subtle at rest, so it fades instead.
 const primaryButtonClass =
-  "h-8 rounded-lg bg-accent px-3 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
+  "h-8 rounded-lg bg-accent px-3 text-[13px] font-medium text-bg transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
 const secondaryButtonClass =
-  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
+  "h-8 rounded-lg border border-line bg-transparent px-3 text-[13px] text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle";
 const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 const ghostButtonClass =
-  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50";
+  "inline-flex h-6 items-center gap-2 whitespace-nowrap rounded-md px-2 text-xs text-muted transition-colors enabled:hover:bg-hover enabled:hover:text-ink disabled:text-subtle";
 
 type ActionButtonProps = NativeButtonProps & { size?: "default" | "compact" };
 type SecondaryButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 type DangerButtonProps = NativeButtonProps & { size?: "default" | "compact" | "row" };
 const compactPrimaryButtonClass =
-  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 // The secondary recipe at a table row's height, for a control inside a
 // cell. `aria-disabled` keeps a button that says why it cannot run in the
 // tab order, where `disabled` would drop it.
 const rowSecondaryButtonClass =
-  "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted";
+  "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors enabled:not-aria-disabled:hover:bg-hover enabled:not-aria-disabled:hover:text-ink disabled:text-subtle aria-disabled:cursor-default aria-disabled:text-subtle";
 const compactSecondaryButtonClass =
-  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:cursor-wait disabled:opacity-50";
+  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted enabled:hover:bg-hover enabled:hover:text-ink disabled:cursor-wait disabled:text-subtle";
 // The primary recipe on the danger fill, for the confirm of an action that
 // removes or revokes something. Its label clears AA at rest and on hover in
-// both themes (tokens.test.ts guards the pairs). Disabled, it keeps a danger
-// tint under a faded label, so it turns solid red only once it can act.
+// both themes (tokens.test.ts guards the pairs). Disabled, it looks like a
+// disabled primary, so it turns red only once pressing it will act.
 const dangerButtonClass =
-  "h-8 rounded-lg bg-danger-fill px-3 text-[13px] font-medium text-on-danger transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-danger-tint disabled:text-danger-disabled";
+  "h-8 rounded-lg bg-danger-fill px-3 text-[13px] font-medium text-on-danger transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:bg-line disabled:text-subtle";
 const compactDangerButtonClass =
-  "h-7 cursor-pointer rounded-md bg-danger-fill px-2.5 text-[11px] font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-danger-tint disabled:text-danger-disabled";
+  "h-7 cursor-pointer rounded-md bg-danger-fill px-2.5 text-[11px] font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 // The danger confirm at the secondary row button's height, so a row's
 // confirm takes its place without the row growing.
 const rowDangerButtonClass =
-  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger-fill px-2 text-xs font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-danger-tint disabled:text-danger-disabled";
+  "inline-flex h-6 cursor-pointer items-center rounded-md bg-danger-fill px-2 text-xs font-semibold text-on-danger enabled:hover:opacity-90 disabled:cursor-wait disabled:bg-line disabled:text-subtle";
 
 /** Filled brand-accent CTA — at most one per surface. */
 export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
