@@ -1,5 +1,6 @@
 import { handleForName, normalizeHandle, scanMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
 import { authorizeShareAction } from "./shareAuthorization";
+import { linkChatOrigin } from "./relayLogInputs";
 import { filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
@@ -26,16 +27,29 @@ export function readPushMessage(storage: StorageContext, relaySeq: number): Push
   const row = storage.db.prepare(`SELECT workspace_id, payload_json, origin_id FROM sync_relay_log
     WHERE relay_seq = ? AND op_kind = 'chat.message.append' AND relay_admission IS NULL AND settlement_admission_json IS NULL`).get(relaySeq);
   if (!row) return null;
-  let p: Record<string, unknown>;
-  try {p = JSON.parse(String(row.payload_json)) as Record<string, unknown>;} catch {return null;}
-  if (!p || typeof p.threadId !== "string" || typeof p.messageId !== "string" || typeof p.body !== "string" ||
-    !["human", "agent", "automation", "link"].includes(String(p.authorKind))) return null;
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload.threadId !== "string" || typeof payload.messageId !== "string" || typeof payload.body !== "string" ||
+    !["human", "agent", "automation", "link"].includes(String(payload.authorKind))) return null;
   // Link authors have no account identity. Other ingress paths admit authorUserId before append.
-  if (p.authorKind === "link" ? row.origin_id !== `relay:share-link:${p.linkPrincipalId}` : typeof p.authorUserId !== "string") return null;
-  return {workspaceId: String(row.workspace_id), threadId: p.threadId, messageId: p.messageId, relaySeq,
-    payloadJson: String(row.payload_json), body: p.body, authorKind: String(p.authorKind),
-    authorUserId: p.authorKind === "link" ? null : String(p.authorUserId),
-    senderLabel: pushPlainText(p.authorDisplayName, "Someone")};
+  if (payload.authorKind === "link"
+    ? typeof payload.linkPrincipalId !== "string" || row.origin_id !== linkChatOrigin(payload.linkPrincipalId)
+    : typeof payload.authorUserId !== "string") return null;
+  return {
+    workspaceId: String(row.workspace_id),
+    threadId: payload.threadId,
+    messageId: payload.messageId,
+    relaySeq,
+    payloadJson: String(row.payload_json),
+    body: payload.body,
+    authorKind: String(payload.authorKind),
+    authorUserId: payload.authorKind === "link" ? null : String(payload.authorUserId),
+    senderLabel: pushPlainText(payload.authorDisplayName, "Someone"),
+  };
 }
 
 export function pushChatResolver(storage: StorageContext, workspaceId: string): ChatShareThreadResolver {

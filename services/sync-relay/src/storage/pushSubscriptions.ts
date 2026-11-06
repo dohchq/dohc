@@ -124,3 +124,14 @@ export function removePushSubscription(storage: StorageContext, input: {installa
   storage.tx(() => storage.db.prepare(`DELETE FROM ${PUSH_SUBSCRIPTIONS} WHERE installation_id = ? AND account_user_id = ?`)
     .run(input.installationId, input.userId));
 }
+
+/** A terminal provider response can remove only the binding that was sent. */
+export function removePushSubscriptionGeneration(storage: StorageContext, input: {
+  installationId: string;
+  userId: string;
+  generation: number;
+}): void {
+  storage.tx(() => storage.db.prepare(`DELETE FROM ${PUSH_SUBSCRIPTIONS}
+    WHERE installation_id = ? AND account_user_id = ? AND generation = ?`)
+    .run(input.installationId, input.userId, input.generation));
+}

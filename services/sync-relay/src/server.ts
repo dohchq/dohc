@@ -127,6 +127,7 @@ export interface CreateSyncRelayHandlerOptions {
   resolveAccountSession?: ResolveAccountSession;
   // This server's VAPID public key. Absent means alerts are unavailable here.
   pushVapidPublicKey?: string;
+  pushHosts?: ReadonlySet<string>;
   nowMs?: () => number;
   // Maps a verified email to its account id. An unknown or unverified address returns null.
   // Absent means email-addressed grants are unavailable; grants by user id still work.
@@ -207,6 +208,7 @@ export function createSyncRelayHandler({
   resolveActor,
   resolveAccountSession,
   pushVapidPublicKey,
+  pushHosts,
   nowMs = () => Date.now(),
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
@@ -480,7 +482,7 @@ export function createSyncRelayHandler({
   }) : undefined;
 
   const push = namedBrowserSessionLimits && resolveAccountSession ? createPushRoutes({
-    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, vapidPublicKey: pushVapidPublicKey,
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, vapidPublicKey: pushVapidPublicKey, pushHosts,
     limits: namedBrowserSessionLimits, nowMs,
     resolveAccountSession: async (request) => {
       const session = await resolveAccountSession(request);

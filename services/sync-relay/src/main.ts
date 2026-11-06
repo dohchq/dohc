@@ -315,7 +315,7 @@ const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
 const pushConfig = (() => {
   try {return readPushConfig(process.env);}
-  catch {fatal("FATAL: Invalid push sender configuration.");}
+  catch (error) {fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid push sender configuration."}`);}
 })();
 const pushVapidPublicKey = pushConfig?.publicKey;
 
@@ -400,6 +400,7 @@ const relayApplication = createSyncRelayHandler({
   resolveActor,
   ...(resolveAccountSession ? {resolveAccountSession} : {}),
   ...(pushVapidPublicKey ? {pushVapidPublicKey} : {}),
+  ...(pushConfig ? {pushHosts: pushConfig.hosts} : {}),
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   lookupUserEmails: async userIds => {
@@ -738,6 +739,14 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 
 let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
 const pushSender = createPushSender({storage: storage as StorageContext, config: pool ? pushConfig : undefined,
+  async lookupAccountName(userId, signal) {
+    signal.throwIfAborted();
+    const result = await pool!.query<{name: string | null}>({
+      text: 'SELECT name FROM "user" WHERE id = $1 LIMIT 1', values: [userId], query_timeout: 5000,
+    });
+    signal.throwIfAborted();
+    return result.rows[0]?.name ?? null;
+  },
   async sessionIsValid(session, signal) {
     signal.throwIfAborted();
     const query = {text: `SELECT 1 FROM "session" s JOIN "user" u ON u.id = s."userId"

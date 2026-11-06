@@ -2,14 +2,16 @@ import { createDecipheriv, createECDH, createPublicKey, hkdfSync, verify } from 
 import { EventEmitter } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
 import { readPushConfig } from "./pushConfig";
-import { createPushSender, preparePushRequest, sendPushRequest, validatePushEndpoint, isPublicPushAddress, type PushTransport } from "./pushSender";
+import { DEFAULT_PUSH_HOSTS } from "./pushEndpoints";
+import { createPushSender as createSender, preparePushRequest, sendPushRequest, validatePushEndpoint, isPublicPushAddress, type PushTransport } from "./pushSender";
+import { observeRelayWrites } from "./relayWriteChanges";
 import { appendLogBatchInTransaction } from "./storage/log";
-import { claimPushDelivery, finishPushDelivery, PUSH_DELIVERY_ATTEMPTS, PUSH_DELIVERY_EXPIRY_MS, PUSH_DELIVERY_LEASE_MS,
+import { claimPushDelivery, configurePushDeliveries, finishPushDelivery, nextPushDeliveryAt, PUSH_DELIVERY_ATTEMPTS, PUSH_DELIVERY_EXPIRY_MS, PUSH_DELIVERY_LEASE_MS,
   PUSH_RECIPIENT_PENDING_LIMIT, PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE } from "./storage/pushDeliveries";
 import type { StorageContext } from "./storage/context";
 import { chatChannelCreate, chatThreadCreate, chatMessageAppend, sequenced, testStorage, closeTestStorages,
   closeTestStorage, reopenTestStorage, storagePath, testHandler, request, jsonBody, json,
-  linkRequest, linkSecret, resolveTestActor, inspectDatabase, RELAY_EXCHANGE_KEY, SHARE_WEB_ORIGIN } from "./testing";
+  linkRequest, linkSecret, resolveTestActor, inspectDatabase, moment, putBlob, RELAY_EXCHANGE_KEY, SHARE_WEB_ORIGIN } from "./testing";
 
 type TestHttpsOptions = {agent: boolean; signal: AbortSignal; maxHeaderSize: number;
   lookup(host: string, options: {all: boolean}, callback: (...args: unknown[]) => void): void};
@@ -30,9 +32,31 @@ const publicAddress = {address: "8.8.8.8", family: 4};
 const lookup = vi.fn(async () => [publicAddress]);
 const rows = (s: StorageContext) => s.db.prepare("SELECT * FROM sync_relay_push_deliveries ORDER BY rowid").all();
 const deferred = () => {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise, resolve};};
+const createPushSender = (options: Omit<Parameters<typeof createSender>[0], "lookupAccountName"> &
+  Partial<Pick<Parameters<typeof createSender>[0], "lookupAccountName">>) => createSender({
+    lookupAccountName: userId => userId === "owner" ? "Owner" : "Alice",
+    ...options,
+  });
+
+function decryptedPayload(body: Buffer): Record<string, unknown> {
+  const salt = body.subarray(0, 16);
+  const serverKey = body.subarray(21, 21 + body[20]!);
+  const shared = browser.computeSecret(serverKey);
+  const info = Buffer.concat([Buffer.from("WebPush: info\0"), browser.getPublicKey(), serverKey]);
+  const ikm = Buffer.from(hkdfSync("sha256", shared, auth, info, 32));
+  const key = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16));
+  const nonce = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: nonce\0"), 12));
+  const encrypted = body.subarray(21 + serverKey.length);
+  const decipher = createDecipheriv("aes-128-gcm", key, nonce);
+  decipher.setAuthTag(encrypted.subarray(-16));
+  const clear = Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]);
+  expect(clear.at(-1)).toBe(2);
+  return JSON.parse(clear.subarray(0, -1).toString()) as Record<string, unknown>;
+}
 
 async function fixture(kind: "channel" | "dm" = "channel") {
   const storage = await testStorage() as StorageContext;
+  configurePushDeliveries(storage, true);
   storage.claimWorkspace({workspaceId, ownerUserId: "owner", createdAtMs: 1});
   const append = (ops: ReturnType<typeof chatMessageAppend>[], originId = "owner") => storage.appendLogBatch({workspaceId, originId,
     ops: sequenced(ops, storage.maxOriginSeq(workspaceId, originId) + 1).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
@@ -50,7 +74,7 @@ async function fixture(kind: "channel" | "dm" = "channel") {
   }};
 }
 
-afterEach(async () => {vi.restoreAllMocks(); lookup.mockClear(); httpsRequestMock.mockReset(); await closeTestStorages();});
+afterEach(async () => {vi.useRealTimers(); vi.restoreAllMocks(); lookup.mockClear(); httpsRequestMock.mockReset(); await closeTestStorages();});
 
 it.each(["desktop", "agent", "named", "browser"])("records deliveries for %s ingress after authenticated admission", async ingress => {
   const f = await fixture();
@@ -109,6 +133,9 @@ it("records one delivery for overlapping mention, DM, and prior participation; r
   expect(rows(f.storage)[0]!.reason).toBe("mention");
   f.message("@Alice secret text");
   expect(rows(f.storage)).toHaveLength(1);
+  f.bind({sessionId: "replacement-session"});
+  f.append([chatMessageAppend("message", threadId, "@Alice", {authorUserId: "owner"})], "another-origin");
+  expect(rows(f.storage)).toHaveLength(1);
   const original = f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 0, limit: 100}).rows.filter(r => r.originId === "owner");
   f.storage.appendLogBatch({workspaceId, originId: "owner", ops: original});
   expect(rows(f.storage)).toHaveLength(1);
@@ -161,16 +188,17 @@ it("recovers expired leases after reopening, fences old workers, and stops at th
   expect(claimPushDelivery(reopened, now + 400_000)).toBeNull();
 });
 
-it.each(["revoked", "session", "generation", "account", "message", "key", "expired"])("drops %s work before transport", async reason => {
+it.each(["revoked", "session", "generation", "account", "message", "expired"])("drops %s work before transport", async reason => {
   const f = await fixture(); f.message();
   if (reason === "revoked") f.storage.revokeShare(shareId, Date.now());
   if (reason === "generation") f.bind({sessionId: "new-session"});
   if (reason === "account") f.bind({userId: "bob", sessionId: "session-bob"});
-  if (reason === "key") f.bind({vapidKeyId: "f".repeat(64)});
+  if (reason === "expired") f.storage.replicaViewTx(() => f.storage.db.prepare(
+    "UPDATE sync_relay_push_subscriptions SET expires_at_ms = ?").run(Date.now() + 1000));
   if (reason === "message") f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_log WHERE op_kind='chat.message.append'").run());
   const transport = vi.fn<PushTransport>(async () => 201);
   const sender = createPushSender({storage: f.storage, config, lookup, transport,
-    sessionIsValid: async () => reason !== "session", now: () => Date.now() + (reason === "expired" ? PUSH_DELIVERY_EXPIRY_MS + 1 : 0),
+    sessionIsValid: async () => reason !== "session", now: () => Date.now() + (reason === "expired" ? 2000 : 0),
     resolveAlertLink: () => "/l/opaque-reference"});
   await sender.runOnce(); await sender.close();
   expect(transport).not.toHaveBeenCalled();
@@ -244,9 +272,11 @@ it("encrypts only the bounded label, reference, reason, stable tag, delivery id,
   expect(rows(f.storage)[0]!.state).toBe("sent");
 });
 
-it("stays unavailable without a complete key pair and refuses mismatched keys", () => {
+it("stays unavailable without configuration and names missing values in partial configuration", () => {
   expect(readPushConfig({})).toBeUndefined();
-  expect(readPushConfig({DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY: config.publicKey})).toBeUndefined();
+  expect(() => readPushConfig({DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY: config.publicKey})).toThrow(
+    "Missing push configuration: DOHC_RELAY_PUSH_VAPID_PRIVATE_KEY, DOHC_RELAY_PUSH_VAPID_SUBJECT.");
+  expect(() => readPushConfig({DOHC_RELAY_PUSH_HOSTS: "push.example.test"})).toThrow("DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY");
   const other = createECDH("prime256v1"); other.generateKeys();
   expect(() => readPushConfig({DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY: config.publicKey,
     DOHC_RELAY_PUSH_VAPID_PRIVATE_KEY: other.getPrivateKey().toString("base64url"),
@@ -307,12 +337,12 @@ it("bounds recipient backlog and persists the attempt rate across retries", asyn
   expect(claimPushDelivery(f.storage, now + 60_000)).not.toBeNull();
 });
 
-it("does not invalidate a replacement binding after an old send returns gone", async () => {
+it.each([404, 410])("does not invalidate a same-account replacement after an old send returns %s", async status => {
   const f = await fixture(); f.message();
   const sender = createPushSender({storage: f.storage, config, lookup, sessionIsValid: async () => true,
-    resolveAlertLink: () => "/l/opaque-reference", transport: async () => {f.bind({userId: "bob", sessionId: "session-bob"}); return 410;}});
+    resolveAlertLink: () => "/l/opaque-reference", transport: async () => {f.bind({sessionId: "new-session"}); return status;}});
   await sender.runOnce(); await sender.close();
-  expect(f.storage.readPushSubscription(installationId)?.userId).toBe("bob");
+  expect(f.storage.readPushSubscription(installationId)).toMatchObject({userId: "alice", sessionId: "new-session", generation: 2});
 });
 
 it("keeps retries durable through transport errors and rechecks access on the next attempt", async () => {
@@ -393,11 +423,212 @@ it("counts repeated attempts durably within the recipient's minute", async () =>
 
 it("drains newly committed work from the relay write observer", async () => {
   const f = await fixture(); const transport = vi.fn<PushTransport>(async () => 201);
+  vi.useFakeTimers();
   const sender = createPushSender({storage: f.storage, config, lookup, transport, sessionIsValid: async () => true,
     resolveAlertLink: () => "/l/opaque-reference"});
   try {
-    sender.start(); f.message();
-    await expect.poll(() => rows(f.storage).map(row => row.state)).toEqual(["sent"]);
+    sender.start();
+    await sender.runOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    f.message();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rows(f.storage).map(row => row.state)).toEqual(["sent"]);
     expect(transport).toHaveBeenCalledTimes(1);
   } finally {await sender.close();}
+});
+
+it("drops an old key binding after sender key rotation without changing its generation", async () => {
+  const f = await fixture();
+  f.message();
+  const replacement = createECDH("prime256v1");
+  replacement.generateKeys();
+  const rotatedConfig = readPushConfig({
+    DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY: replacement.getPublicKey().toString("base64url"),
+    DOHC_RELAY_PUSH_VAPID_PRIVATE_KEY: Buffer.concat([Buffer.alloc(32), replacement.getPrivateKey()]).subarray(-32).toString("base64url"),
+    DOHC_RELAY_PUSH_VAPID_SUBJECT: config.subject,
+    DOHC_RELAY_PUSH_HOSTS: "push.example.test",
+  })!;
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config: rotatedConfig, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.close();
+  expect(f.storage.readPushSubscription(installationId)?.generation).toBe(1);
+  expect(rows(f.storage)[0]!.generation).toBe(1);
+  expect(rows(f.storage)[0]!.state).toBe("dropped");
+  expect(transport).not.toHaveBeenCalled();
+});
+
+it("sends one delivery to each device of the same account", async () => {
+  const f = await fixture();
+  f.bind({installationId: "installation-000000002", endpoint: "https://push.example.test/send/second"});
+  f.message();
+  expect(rows(f.storage)).toHaveLength(2);
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.runOnce();
+  expect(await sender.runOnce()).toBe(false);
+  await sender.close();
+  expect(transport.mock.calls.map(([prepared]) => prepared.destination.url.pathname).sort())
+    .toEqual(["/send/device", "/send/second"]);
+  expect(rows(f.storage).map(row => row.state)).toEqual(["sent", "sent"]);
+});
+
+it("retries after the send deadline aborts the transport", async () => {
+  const f = await fixture();
+  f.message();
+  vi.useFakeTimers();
+  const entered = deferred();
+  const transport = vi.fn<PushTransport>(async (_prepared, signal) => {
+    entered.resolve();
+    return new Promise<number>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once: true}));
+  });
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  const sent = sender.runOnce();
+  await entered.promise;
+  await vi.advanceTimersByTimeAsync(10_000);
+  await sent;
+  expect(rows(f.storage)[0]).toMatchObject({state: "pending", attempts: 1, lease_token: null});
+  transport.mockResolvedValue(201);
+  await vi.advanceTimersByTimeAsync(2000);
+  await sender.runOnce();
+  await sender.close();
+  expect(rows(f.storage)[0]).toMatchObject({state: "sent", attempts: 2});
+});
+
+it("does not record new deliveries while sending is unconfigured", async () => {
+  const f = await fixture();
+  const sender = createPushSender({storage: f.storage, config: undefined, sessionIsValid: async () => true});
+  f.message();
+  expect(rows(f.storage)).toEqual([]);
+  await sender.close();
+});
+
+it("claims and finishes durably without notifying relay write observers", async () => {
+  const f = await fixture();
+  f.message();
+  const observer = vi.fn();
+  const stop = observeRelayWrites(f.storage, observer);
+  const now = Date.now();
+  const delivery = claimPushDelivery(f.storage, now)!;
+  finishPushDelivery(f.storage, delivery, "retry", now);
+  await Promise.resolve();
+  stop();
+  expect(observer).not.toHaveBeenCalled();
+  expect(nextPushDeliveryAt(f.storage, now)).toBe(now + 2000);
+  const path = storagePath(f.storage);
+  closeTestStorage(f.storage);
+  const reopened = reopenTestStorage(path) as StorageContext;
+  expect(rows(reopened)[0]).toMatchObject({state: "pending", attempts: 1, available_at_ms: now + 2000});
+});
+
+it("uses the same Windows subdomain policy when resolving the send destination", async () => {
+  const windowsConfig = readPushConfig({
+    DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY: config.publicKey,
+    DOHC_RELAY_PUSH_VAPID_PRIVATE_KEY: Buffer.concat([Buffer.alloc(32), vapid.getPrivateKey()]).subarray(-32).toString("base64url"),
+    DOHC_RELAY_PUSH_VAPID_SUBJECT: config.subject,
+    DOHC_RELAY_PUSH_HOSTS: ".notify.windows.com",
+  })!;
+  await expect(validatePushEndpoint("https://wns1.notify.windows.com/send/device", DEFAULT_PUSH_HOSTS, lookup))
+    .resolves.toMatchObject({address: publicAddress.address, family: 4});
+  await expect(validatePushEndpoint("https://wns2.notify.windows.com/send/device", windowsConfig.hosts, lookup))
+    .resolves.toMatchObject({address: publicAddress.address, family: 4});
+  await expect(validatePushEndpoint("https://evilnotify.windows.com/send/device", DEFAULT_PUSH_HOSTS, lookup))
+    .rejects.toThrow("Unsafe push endpoint");
+  expect(lookup).toHaveBeenCalledTimes(2);
+});
+
+it("waits for a lease or the recipient rate window before waking again", async () => {
+  const f = await fixture();
+  f.message();
+  const now = (Math.floor(Date.now() / 60_000) + 1) * 60_000 + 1000;
+  const delivery = claimPushDelivery(f.storage, now)!;
+  expect(nextPushDeliveryAt(f.storage, now)).toBe(now + PUSH_DELIVERY_LEASE_MS);
+  finishPushDelivery(f.storage, delivery, "retry", now);
+  f.storage.replicaViewTx(() => f.storage.db.prepare("UPDATE sync_relay_push_rate SET attempts = ?")
+    .run(PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE));
+  expect(nextPushDeliveryAt(f.storage, now)).toBe((Math.floor(now / 60_000) + 1) * 60_000);
+});
+
+it.each(["human", "agent"])("uses the server account name for a %s author", async authorKind => {
+  const f = await fixture();
+  f.append([chatMessageAppend("label", threadId, "@Alice", {
+    authorUserId: "owner", authorKind, authorDisplayName: "Claude", authorOwnerDisplayName: "Claimed owner",
+  })]);
+  const transport = vi.fn<PushTransport>(async prepared => {
+    expect(decryptedPayload(prepared.body).label).toBe(authorKind === "agent"
+      ? "Claude (Kim's agent) mentioned you in Team"
+      : "Kim mentioned you in Team");
+    return 201;
+  });
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    lookupAccountName: userId => userId === "owner" ? "Kim" : null,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.close();
+  expect(transport).toHaveBeenCalledOnce();
+  expect(rows(f.storage)[0]!.state).toBe("sent");
+});
+
+it.each(["human", "agent"])("excludes own-account %s posts without trusted agent provenance", async authorKind => {
+  const f = await fixture("dm");
+  f.append([chatMessageAppend("self", threadId, "@Alice", {
+    authorUserId: "alice", authorKind, authorDisplayName: "Planner", authorOwnerDisplayName: "Alice",
+  })], "alice");
+  expect(rows(f.storage)).toEqual([]);
+});
+
+it.each(["rename", "delete"] as const)("drops a queued file-chat alert after the file %s", async operation => {
+  const f = await fixture();
+  await putBlob(testHandler(f.storage), "owner", workspaceId, "plan");
+  f.storage.createShare({
+    share: {shareId: "file-share", workspaceId, granterUserId: "owner", createdAtMs: 1,
+      selectorJson: JSON.stringify({paths: ["docs"], versionId: null, access: "view"}), labels: {subjectName: "Docs"}},
+    grant: {grantId: "file-grant", shareId: "file-share", principalKind: "user", principalUserId: "alice", principalEmail: null,
+      access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
+  });
+  f.append([
+    moment("docs/plan.md", "plan", {objectId: "plan"}),
+    chatThreadCreate("file-thread", "", {channelWireId: null, channelSlug: null, linkedObjectId: "plan", linkedAtMs: 2}),
+    chatMessageAppend("file-message", "file-thread", "@Alice", {authorUserId: "owner"}),
+  ]);
+  expect(rows(f.storage)).toHaveLength(1);
+  f.append([moment(operation === "rename" ? "private/plan.md" : "docs/plan.md", "plan", {
+    objectId: "plan", operation, beforePath: "docs/plan.md", beforeContent: "plan",
+    afterPath: operation === "rename" ? "private/plan.md" : null,
+    afterContent: operation === "rename" ? "plan" : null,
+  })]);
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.close();
+  expect(rows(f.storage)[0]!.state).toBe("dropped");
+  expect(transport).not.toHaveBeenCalled();
+});
+
+it("drops a queued alert when the dependent grant's parent is revoked", async () => {
+  const f = await fixture();
+  f.storage.tx(() => {
+    f.storage.db.prepare(`INSERT INTO sync_relay_share_grants
+      (grant_id, share_id, principal_kind, principal_user_id, principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
+      VALUES ('parent', ?, 'link', NULL, NULL, 'read-write', 1, 'active', 1, NULL, NULL)`).run(shareId);
+    f.storage.db.prepare("UPDATE sync_relay_share_grants SET parent_grant_id = 'parent' WHERE grant_id = 'grant'").run();
+  });
+  f.message();
+  expect(rows(f.storage)).toHaveLength(1);
+  f.storage.tx(() => f.storage.db.prepare(
+    "UPDATE sync_relay_share_grants SET status = 'revoked', revoked_at_ms = ? WHERE grant_id = 'parent'").run(Date.now()));
+  expect(f.storage.getShareGrant("grant")?.status).toBe("active");
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.close();
+  expect(rows(f.storage)[0]!.state).toBe("dropped");
+  expect(transport).not.toHaveBeenCalled();
 });

@@ -341,8 +341,16 @@ The browser mints `installationId` once: 16 random bytes in base64url.
 - `POST /api/push/subscribe` takes `{installationId, vapidKeyId, endpoint, p256dh, auth, expiresAtMs}`.
 - `POST /api/push/unsubscribe` takes `{installationId}`.
 
-Status and unsubscribe return `{ok: true, available: false}` when the relay has no `DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY`. Subscribe receives 409.
+Configure all three relay values: `DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY`, `DOHC_RELAY_PUSH_VAPID_PRIVATE_KEY`, and `DOHC_RELAY_PUSH_VAPID_SUBJECT`.
+The keys are a matching P-256 pair in base64url. The subject is a contact URI, such as `mailto:admin@example.com`.
+Keep the private key on the relay and reuse the pair after a restart. Rotating the pair requires browsers to subscribe again.
+Partial configuration stops the relay and names each missing value.
+With no push configuration set, status and unsubscribe return `{ok: true, available: false}`. Subscribe receives 409.
 Otherwise each returns `{ok: true, available: true, vapidPublicKey, vapidKeyId, enabled, generation, fingerprint}`.
+`DOHC_RELAY_PUSH_HOSTS` optionally replaces the allowed push hosts with a comma-separated list.
+The defaults are `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com`, and `.notify.windows.com`.
+A leading dot matches subdomains, such as a browser endpoint under `notify.windows.com`.
+Subscribe receives 409 when its endpoint is outside that list.
 `fingerprint` is the hex SHA-256 of the stored endpoint. The server never returns an endpoint.
 Alerts are on only for the account sign-in that turned them on, until that sign-in or the browser subscription expires.
 When another account signs in on the same browser and subscribes with the same `installationId` and `endpoint`, the alerts move to that account.

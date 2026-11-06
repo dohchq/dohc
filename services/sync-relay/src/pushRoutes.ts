@@ -16,6 +16,7 @@ import {
 import { badRequest, errorResponse, relayError, RelayError } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import type { SyncRelayStorage } from "./storage";
+import { DEFAULT_PUSH_HOSTS, pushEndpointUrl } from "./pushEndpoints";
 
 const cacheHeaders = {"cache-control": "private, no-store"};
 const SUBSCRIBE_KEYS = "auth,endpoint,expiresAtMs,installationId,p256dh,vapidKeyId";
@@ -52,6 +53,7 @@ export function createPushRoutes(options: {
   publicOrigin: string;
   exchangeKey: string;
   vapidPublicKey: string | undefined;
+  pushHosts?: ReadonlySet<string>;
   limits: {maxPendingRequests: number; timeoutMs: number};
   nowMs: () => number;
 }) {
@@ -106,6 +108,9 @@ export function createPushRoutes(options: {
       if (!isPushKeyId(vapidKeyId)) throw badRequest("vapidKeyId is invalid");
       if (vapidKeyId !== vapid.keyId) throw new RelayError("conflict", "the server's alert key changed");
       if (!isPushEndpoint(endpoint)) throw badRequest("endpoint is invalid");
+      if (!pushEndpointUrl(endpoint, options.pushHosts ?? DEFAULT_PUSH_HOSTS)) {
+        throw new RelayError("conflict", "alerts are not set up for this push service");
+      }
       if (!isP256PublicKey(p256dh)) throw badRequest("p256dh is invalid");
       if (!isPushAuthSecret(auth)) throw badRequest("auth is invalid");
       if (expiresAtMs !== null && (typeof expiresAtMs !== "number" || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= nowMs)) {

@@ -36,7 +36,7 @@ async function fixture(relayOverride?: (incoming: Request) => Promise<Response>)
     return {userId, sessionId: `sign-in-${userId}`, expiresAtMs: Number.MAX_SAFE_INTEGER};
   });
   const relay = createSyncRelayHandler({storage, resolveActor: () => {throw new UnauthorizedError();}, resolveAccountSession,
-    pushVapidPublicKey: vapid, shareWebOrigin: origin, relayExchangeKey: exchangeKey,
+    pushVapidPublicKey: vapid, pushHosts: new Set(["push.example.test"]), shareWebOrigin: origin, relayExchangeKey: exchangeKey,
     namedBrowserSessionLimits: {...limits, maxSessions: 8, retentionMs: 60_000}});
   const forwarded: Request[] = [];
   const web = createShareWebApplication({relayUrl: "http://relay.invalid", publicRelayUrl: "https://relay.test", publicHosts: new Set(["share.example.test"]),
