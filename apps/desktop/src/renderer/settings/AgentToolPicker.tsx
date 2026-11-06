@@ -59,7 +59,7 @@ export function AgentToolPicker(props: {
           }}
           className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${selected ? "border-accent bg-selected ring-1 ring-accent" : "border-line bg-panel enabled:hover:bg-hover"} disabled:cursor-default`}>
           <span className="flex items-center justify-between gap-2">
-            <span className="min-w-0 text-[13px] font-medium text-ink">{tool.name}</span>
+            <span className="min-w-0 truncate text-[13px] font-medium text-ink">{tool.name}</span>
             {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
           </span>
           <span className="block text-[11px] text-muted">{loading ? "Detecting…" : !result ? "Not checked" : detected?.probe === "detected" ? `Detected · ${detected.version}` : detected?.executable ? "Version probe failed" : "Not found"}</span>
