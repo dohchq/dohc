@@ -393,6 +393,42 @@ it("keeps the workspace attachment unchanged when the document that first attach
   expect(f.starts).toHaveLength(1);
 });
 
+it("lists a moved document again for its restore after its replica lets it go", async () => {
+  const f = await fixture(); f.add(); f.share("share-overlap", ["docs"]);
+  await f.waitStarted(1); await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  const moved = {workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath, shareId: scope.shareId};
+  const document = {workspaceId: scope.workspaceId, mainVersionId: "main" as const, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
+  const move = (path: string) => f.raw.prepare("UPDATE sync_relay_object_moments SET path=? WHERE object_id=?").run(path, binding.objectId);
+  move("elsewhere/a.md"); f.host.reconcile();
+  await vi.waitFor(() => expect(f.events.filter(event => event.startsWith(`release ${binding.objectId} `))).toHaveLength(1), {timeout: 10_000});
+  await vi.waitFor(() => expect(f.updates.at(-1)?.departing).toEqual([]), {timeout: 10_000});
+  await f.waitPasses();
+  const releases = f.events.filter(event => event.startsWith(`release ${binding.objectId} `));
+  expect(releases).toHaveLength(1);
+  expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: null, hostDrainedAtMs: null});
+  f.storage.createLiveCommittedDeliveryStore(f.history);
+  // Restore starts at its binding's path, between selections that still see it away.
+  move(binding.currentPath);
+  const plan = f.storage.readStopRestorePlan({operationId: "restore", ownerUserId: "owner-1", document,
+    shareId: scope.shareId, grantId: scope.grantId, restorePointCursor: 0, restorePointReceiptDigest: binding.lineageClaimId, maxOutputBytes: 1_000_000});
+  f.storage.beginStopRestore(plan.intent, 40);
+  expect(f.storage.serviceActivationRetirement(binding)).toBeNull();
+  // The stand-in replica holds the document while the real restore remains unfinished.
+  f.pending.add(binding.objectId);
+  move("elsewhere/a.md"); f.host.reconcile();
+  await vi.waitFor(() => expect(f.updates.at(-1)?.departing, "A restore must list the moved document as departing again.").toEqual([moved]), {timeout: 10_000});
+  expect(f.updates.at(-1)?.documents.map(row => row.path)).toEqual(["docs/b.md"]);
+  await f.waitPasses();
+  expect(f.events.filter(event => event.startsWith(`release ${binding.objectId} `))).toEqual(releases);
+  expect(f.storage.declineStopRestore({operationId: "restore", workspaceId: scope.workspaceId, ownerUserId: "owner-1"}, 60).phase).toBe("declined");
+  f.pending.delete(binding.objectId); f.host.reconcile();
+  await vi.waitFor(() => expect(f.updates.at(-1)?.departing).toEqual([]), {timeout: 10_000});
+  await f.waitPasses();
+  expect(f.events.filter(event => event.startsWith(`release ${binding.objectId} `))).toEqual(releases);
+  expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: null, hostDrainedAtMs: null});
+  expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled();
+});
+
 // Proves: a departed document is released only once its workspace's replica
 // confirms it gone, while a sibling keeps the workspace attached. Pause fences
 // its admission at once, though its enrollment waits for that release.
