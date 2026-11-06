@@ -558,6 +558,38 @@ function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean 
   );
 }
 
+// Two tabs over a strip of paper, the first active. An unsaved tab draws its
+// dot in its close's slot. `tab` and `close` force a state on the active tab
+// and on its close.
+const UNSAVED_TABS = [{ path: "trip/plan.md" }, { path: "notes.md" }];
+const UNSAVED_RECOVERY: ReadonlySet<string> = new Set(["notes.md"]);
+const UNSAVED_ACTIVE_TAB = '[role="tab"][data-active]';
+function UnsavedTabStrip(props: { dirty: boolean; recovered: boolean; tab?: string; close?: string }) {
+  return (
+    <div className="w-[360px] overflow-hidden rounded-lg border border-line">
+      <div data-force-state={props.tab} data-force-target={props.tab ? UNSAVED_ACTIVE_TAB : undefined}>
+        <div data-force-state={props.close} data-force-target={props.close ? `${UNSAVED_ACTIVE_TAB} button` : undefined}>
+          <EditorTabs
+            groupId="states"
+            groupNumber={1}
+            tabs={UNSAVED_TABS}
+            activeTab="trip/plan.md"
+            activeTabDirty={props.dirty}
+            recoveryPaths={props.recovered ? UNSAVED_RECOVERY : NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        </div>
+      </div>
+      <div className="h-4 bg-bg" />
+    </div>
+  );
+}
+
 const RELAY_ERROR ="dohc could not reach the sync relay. Check your connection.";
 const FOLDER = "C:\\Users\\ice\\Research";
 
@@ -3494,6 +3526,25 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Olive"]'>
             <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* Each strip holds a tab list, so the part holds them at rest. */}
+      <Section part="tab-unsaved" title="Unsaved tabs" menusAtRest>
+        <Specimen label="the active tab, unsaved">
+          <UnsavedTabStrip dirty recovered={false} />
+        </Specimen>
+        <Specimen label="an inactive tab holding recovered changes">
+          <UnsavedTabStrip dirty={false} recovered />
+        </Specimen>
+        <Specimen label="hover on the unsaved active tab">
+          <UnsavedTabStrip dirty recovered tab="hover" />
+        </Specimen>
+        <Specimen label="the pointer on its close">
+          <UnsavedTabStrip dirty recovered tab="hover" close="hover" />
+        </Specimen>
+        <Specimen label="keyboard focus on the unsaved active tab">
+          <UnsavedTabStrip dirty recovered tab="focus-visible" />
         </Specimen>
       </Section>
     </section>

@@ -110,6 +110,16 @@ const STRIP_FADE = "pointer-events-none absolute top-1 bottom-px z-[6] w-6 from-
 const STRIP_BUTTON =
   "grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink focus-visible:-outline-offset-2";
 
+// An unsaved tab's dot and its close share the close's 16px slot, and each
+// hides exactly while the other shows: on hover, while the keyboard focuses
+// the tab (the moment its ring draws), and while the close has focus. Opacity,
+// not visibility, so the dot's label stays in the tab's name. The tab's named
+// group keeps focus in an enclosing group, such as the editor's, from hiding
+// the dot.
+const CLOSE_SLOT = "[grid-area:1/1]";
+const DIRTY_DOT_SWAP = "group-hover/tab:opacity-0 keyboard:group-focus-visible/tab:opacity-0 group-has-[:focus]/tab:opacity-0";
+const DIRTY_CLOSE_SWAP = "opacity-0 group-hover/tab:opacity-100 keyboard:group-focus-visible/tab:opacity-100 focus:opacity-100";
+
 // Scrolls only the strip, and only when the tab is not already clear of the
 // fades: scrollIntoView would also scroll every scrolling ancestor, the
 // window included. A tab's offsetLeft is its position in the strip's
@@ -210,7 +220,7 @@ const Tab = memo(function Tab(props: {
       // In a split, an inactive group's active tab recedes to muted text.
       // The strip scrolls, so the focus ring is drawn inset, where the
       // scroller cannot clip it.
-      className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] focus-visible:-outline-offset-2 [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
+      className={`group group/tab relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] focus-visible:-outline-offset-2 [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
         props.active
           ? `z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink ${INACTIVE_GROUP_TAB}`
           : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-hover hover:text-ink"
@@ -226,35 +236,43 @@ const Tab = memo(function Tab(props: {
           </span>
         </>
       ) : null}
-      {props.dirty ? (
-        <span
-          data-testid="tab-dirty"
-          aria-label="Unsaved changes"
-          className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink"
-        />
-      ) : null}
       {/* The drawing's 8px from glyph to name; the glyph is muted on the
           active tab and subtle on the rest. */}
       <span className="flex items-center gap-2">
         <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? "text-muted" : "text-subtle"} />
         <span className="max-w-44 truncate">{name}</span>
       </span>
-      <button
-        type="button"
-        aria-label={`Close ${name}`}
-        tabIndex={-1}
-        // Don't let a press on the close button arm the drag above.
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          props.onClose(props.groupId, props.path);
-        }}
-        className={`grid size-4 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${
-          props.active ? "" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
-        }`}
-      >
-        <X size={12} aria-hidden />
-      </button>
+      {/* The close's slot. An unsaved tab shows its dot here, so it is as
+          wide as a saved one. Hover, keyboard focus on the tab, or focus on
+          the close swap the dot for the close, at once. The dot is an image,
+          so every browser reads its label into the tab's name; ARIA does not
+          name a span with no role. */}
+      <span className="grid size-4 shrink-0 place-items-center">
+        {props.dirty ? (
+          <span
+            data-testid="tab-dirty"
+            role="img"
+            aria-label="Unsaved changes"
+            className={`pointer-events-none size-1.5 rounded-full bg-ink ${CLOSE_SLOT} ${DIRTY_DOT_SWAP}`}
+          />
+        ) : null}
+        <button
+          type="button"
+          aria-label={`Close ${name}`}
+          tabIndex={-1}
+          // Don't let a press on the close button arm the drag above.
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onClose(props.groupId, props.path);
+          }}
+          className={`grid size-4 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${CLOSE_SLOT} ${
+            props.dirty ? DIRTY_CLOSE_SWAP : props.active ? "" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
+          }`}
+        >
+          <X size={12} aria-hidden />
+        </button>
+      </span>
     </div>
   );
 });
@@ -900,9 +918,9 @@ export const EditorTabs = memo(function EditorTabs(props: {
     reveal();
     measure();
     strip.addEventListener("scroll", measure, { passive: true });
-    // Tab opens/closes re-run this effect (deps), as does a dirty dot changing
-    // tab width — the observer covers the container resizing under the same
-    // tabs (panel toggle, window resize).
+    // Tab opens/closes re-run this effect (deps). The observer covers the
+    // container resizing under the same tabs (panel toggle, window resize).
+    // An unsaved dot sits in the close's slot and never changes a tab's width.
     const resize =
       typeof ResizeObserver === "undefined"
         ? null
@@ -916,7 +934,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
       strip.removeEventListener("scroll", measure);
       resize?.disconnect();
     };
-  }, [drag, props.tabs, props.activeTab, props.activeTabDirty]);
+  }, [drag, props.tabs, props.activeTab]);
   return (
     <div
       ref={frameRef}

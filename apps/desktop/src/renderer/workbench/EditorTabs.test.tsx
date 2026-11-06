@@ -1073,33 +1073,6 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(thumb.style.transform).toBe("translateX(0px)");
   });
 
-  it("re-measures when the active tab becomes dirty", () => {
-    const { rerender } = renderTabs("a.md");
-    const strip = screen.getByRole("tablist");
-    const thumb = screen.getByTestId("tab-strip-scrollbar");
-    Object.defineProperty(strip, "scrollWidth", { value: 600 });
-    Object.defineProperty(strip, "clientWidth", { value: 200 });
-    expect(thumb.style.display).toBe("none");
-
-    rerender(
-      <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={tabs}
-        activeTab="a.md"
-        activeTabDirty
-        recoveryPaths={new Set<string>()}
-        onActivate={noop}
-        onClose={noop}
-        onContextMenu={noop}
-        onMove={noop}
-        onMoveToGroup={noop}
-        onCreateGroupRight={noop}
-      />,
-    );
-    expect(thumb.style.display).toBe("");
-  });
-
   it("scrolls the strip when the thumb is dragged", () => {
     const strip = overflowStrip();
     const thumb = screen.getByTestId("tab-strip-scrollbar");
