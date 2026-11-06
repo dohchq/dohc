@@ -111,6 +111,11 @@ function ValueInput({ field, value, disabled, describedBy, onChange }: { field: 
       onChange(field.type === "number" ? raw === "" ? null : Number(raw) : raw === "" && field.type !== "text" ? null : raw);
     }} />;
 }
+/** Field and button columns share the table's width down to this floor; past it the table scrolls sideways. */
+const FIELD_COLUMN_FLOOR = 160;
+/** Fits a row's two icon buttons. */
+const ACTIONS_COLUMN = 80;
+
 function Cell({ field, value }: { field: TransactionalField; value: AppBackendJson | undefined }) {
   if (field.type === "checkbox" && typeof value === "boolean") {
     const Icon = value ? CheckSquare : Square;
@@ -122,7 +127,7 @@ function Cell({ field, value }: { field: TransactionalField; value: AppBackendJs
     return <span className="flex flex-wrap gap-1">{values.map((entry, index) => <span key={index} className="max-w-full truncate rounded border border-line bg-panel-2 px-1.5 py-0.5 text-[12px] text-ink">{display(entry)}</span>)}</span>;
   }
   if (field.type === "checkbox") return <span className="text-[13px] text-ink">{value === true ? "Yes" : value === false ? "No" : "—"}</span>;
-  return <span className="truncate text-[13px] text-ink">{display(value) || "—"}</span>;
+  return <span className="block truncate text-[13px] text-ink">{display(value) || "—"}</span>;
 }
 
 const sameRecord = (a: TransactionalRow, b: TransactionalRow) => JSON.stringify(a.id) === JSON.stringify(b.id);
@@ -488,24 +493,25 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         void execute({operation,input:{id:row.id,expectedVersion:row.version,values:{[fieldId]:value}},key:crypto.randomUUID(),label:"Moved the record"});}} /></Suspense> : null}
     {failure && !busy && !visualBusy && (visual || !page) ? <CollectionUnavailable waiting={failure.wait !== null} words={failure.wait?.ended ? WAIT_ENDED : failure.words} onRetry={failure.retry} /> : null}
     {/* The table always shows its columns, so an empty Collection already says what a record holds. */}
-    {!visual && page ? <div className="min-h-0 overflow-auto"><table className="w-full border-collapse text-[13px]">
+    {!visual && page ? <div className="min-h-0 overflow-auto"><table className="w-full table-fixed border-collapse text-[13px]" style={{ minWidth: (columns - 1) * FIELD_COLUMN_FLOOR + ACTIONS_COLUMN }}>
+      <colgroup>{Array.from({ length: columns - 1 }, (_, index) => <col key={index} />)}<col style={{ width: ACTIONS_COLUMN }} /></colgroup>
       <thead className="sticky top-0 bg-bg"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
-        <span className="flex items-center gap-1.5">{supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} />{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : <><FieldTypeIcon type={field.type} />{field.name}</>}
+        <span className="flex items-center gap-1.5">{supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex min-w-0 items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} /><span className="min-w-0 truncate">{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</span></button> : <><FieldTypeIcon type={field.type} /><span className="min-w-0 truncate">{field.name}</span></>}
         {props.fieldMarks?.has(field.name) ? <AutomationFieldMark automations={props.fieldMarks.get(field.name)!} /> : null}</span>
       </th>)}{props.buttons?.fields.map(field => <th key={`button:${field}`} scope="col" className="border-b border-line px-3 py-2 text-left font-medium text-muted"><span className="block truncate">{field}</span></th>)}<th scope="col" className="border-b border-line"><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
-        return <td key={field.fieldId} className="max-w-72 px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
+        return <td key={field.fieldId} className="px-3 py-2 text-ink">{attachment ? <CollectionAttachmentCell key={String(row.values[field.fieldId])} scope={scope} fieldName={field.name} fileId={String(row.values[field.fieldId])} disabled={disabled || editor !== null} read={(request, signal) => props.readFile!({ ...request, read: { operationId: read!.operationId, fieldId: field.fieldId, input: { limit: 1, filters: [{ fieldId: field.fieldId, value: row.values[field.fieldId]! }] } } }, signal)} onError={onError} /> : null}{edit && canInput(field) ? <button type="button" aria-label={`Edit ${field.name} for record ${row.id}`} disabled={disabled || editor !== null} className="block w-full truncate rounded text-left" onClick={event => {
           trigger.current = event.currentTarget; setDraft({ [field.fieldId]: row.values[field.fieldId] ?? null }); setInvalid({}); setEditor({ kind: "edit", operation: edit, row, field });
         }}>{field.type === "attachment" ? "Change file" : <Cell field={field} value={row.values[field.fieldId]} />}</button> : attachment ? null : field.type === "attachment" && row.values[field.fieldId] && props.copy?.offline ? <span className="text-[13px] text-muted">File available when online</span> : <Cell field={field} value={row.values[field.fieldId]} />}</td>;
-      })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className="max-w-72 px-3 py-2">{props.buttons!.render(field, row)}</td>)}<td className="px-3 py-2"><div className="flex justify-end gap-2"><IconButton title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>)}
+      })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className="px-3 py-2">{props.buttons!.render(field, row)}</td>)}<td className="px-3 py-2"><div className="flex justify-end gap-2"><IconButton title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>)}
       {page.rows.length === 0 && (query.search || !canCreate) ? <tr><td colSpan={columns} className="px-3 py-2 text-muted">{query.search ? "No records match. Try a shorter search." : "No records yet. Refresh to check for new submissions."}</td></tr> : null}
       {createInRow ? <tr ref={createRow} aria-label="New record" className="border-b border-line" onKeyDown={event => {
         if (event.defaultPrevented || isComposingKey(event)) return;
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeEditor(); }
         else if (event.key === "Enter" && event.target instanceof HTMLInputElement && event.target.type !== "checkbox" && event.target.type !== "file") { event.preventDefault(); submitEditor(); }
-      }}>{fields.map(field => <td key={field.fieldId} className="max-w-72 px-3 py-1.5 align-top">{createFields.includes(field) ? <div className="flex flex-col gap-1">{valueInput(field)}{fieldError(field)}</div> : null}</td>)}{props.buttons?.fields.map(field => <td key={`button:${field}`} />)}<td className="px-3 py-1.5 align-top"><div className="flex justify-end gap-2">
+      }}>{fields.map(field => <td key={field.fieldId} className="px-3 py-1.5 align-top">{createFields.includes(field) ? <div className="flex flex-col gap-1">{valueInput(field)}{fieldError(field)}</div> : null}</td>)}{props.buttons?.fields.map(field => <td key={`button:${field}`} />)}<td className="px-3 py-1.5 align-top"><div className="flex justify-end gap-2">
         <IconButton title="Cancel" aria-label="Cancel" disabled={disabled} onClick={closeEditor}><X size={15} strokeWidth={1.9} aria-hidden /></IconButton>
         <IconButton title="Create record" aria-label="Create record" disabled={disabled} onClick={submitEditor}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
       </div></td></tr> : null}
