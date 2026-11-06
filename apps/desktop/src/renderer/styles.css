@@ -880,6 +880,12 @@ body {
   font-weight: 600;
 }
 
+/* A cell ends at its padding. Of type, not child: the column-resize handle
+ * is a widget inside the cell, after its last paragraph. */
+.dohc-notion-editor :is(th, td) > p:last-of-type {
+  margin-bottom: 0;
+}
+
 /* Tiptap cell-selection tint. */
 .dohc-notion-editor .selectedCell {
   background: var(--dohc-selection);
