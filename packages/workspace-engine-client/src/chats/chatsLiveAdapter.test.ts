@@ -458,7 +458,7 @@ describe("ChatsLiveAdapter", () => {
     const { adapter } = loopbackAdapter();
     const channel = await adapter.ensureGeneralChannel({ workspaceId: "workspace" });
     const started = await adapter.startChannelThread({
-      authorActorKey: null, workspaceId: "workspace", channelId: channel.id,
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.channelId,
       author: { kind: "agent", displayName: "Connected agent" }, body: "Joining the thread",
     });
     const reply = await adapter.sendMessage({
@@ -473,7 +473,7 @@ describe("ChatsLiveAdapter", () => {
     const { adapter } = loopbackAdapter();
     const channel = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "default", name: "Nova" });
     const started = await adapter.startChannelThread({
-      authorActorKey: null, workspaceId: "workspace", channelId: channel.id,
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.channelId,
       author: { kind: "human", displayName: "Sam" }, body: "Please look", origin: "cli",
     });
     expect((await adapter.listAgentUnreadRequests("workspace")).map(row => row.messageId)).toEqual([started.message.id]);

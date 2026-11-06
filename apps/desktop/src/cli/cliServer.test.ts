@@ -580,7 +580,7 @@ describe("CLI socket server", () => {
     let candidates: NonNullable<typeof template>[] = [];
     const messages = vi.spyOn(store!, "listMessages").mockImplementation(async input => input.threadId === thread.id ? candidates : []);
     const mentions = vi.spyOn(store!, "listAgentUnreadRequests").mockImplementation(async () => candidates.map(row => ({
-      threadId: thread.id, messageId: row.id, handle: "agent", authorKind: "human" as const, createdAtMs: row.createdAtMs,
+      threadId: thread.id, messageId: row.id, authorKind: "human" as const, createdAtMs: row.createdAtMs,
     })));
     let cursor: string | undefined;
     const watch = async () => {
@@ -728,7 +728,7 @@ describe("CLI socket server", () => {
           recoverOrigin: async () => { throw new Error("Unexpected recovery"); },
           pull: async () => {
             messageSpy.mockImplementation(async input => input.threadId === thread.id ? [...messages, older] : []);
-            spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, handle: "agent", authorKind: "human" as const, createdAtMs: 0 }]);
+            spy.mockImplementation(async (...args) => [...await original(...args), { threadId: thread.id, messageId: older.id, authorKind: "human" as const, createdAtMs: 0 }]);
             return { fetched: 1, applied: 1, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: 1, sharingDeclined: [] };
           },
         },
