@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import { Overlay } from "./Overlay";
-import { DangerButton, SecondaryButton } from "./ui/controls";
-import { SkeletonRows } from "./ui/SkeletonRows";
+import { DangerButton, GhostButton, SecondaryButton } from "./ui/controls";
+import { CollectionAffectedApps } from "./CollectionAffectedApps";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 
 export interface CollectionDeletePreview {
@@ -35,6 +36,7 @@ export function CollectionDeleteDialog(props: CollectionDeleteDialogProps) {
 function Delete(props: CollectionDeleteDialogProps) {
   const [page, setPage] = useState<CollectionDeletePreview | null>(null), [busy, setBusy] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false), [exported, setExported] = useState(false), [exporting,setExporting] = useState(false);
+  const [failed, setFailed] = useState<{ after?: string } | null>(null), [details, setDetails] = useState(false), detailsId = useId();
   const alive = useRef(true), request = useRef(0), lock = useRef(false), lifetime = useRef(new AbortController());
   const scope = { workspaceId: props.workspaceId, datasetId: props.datasetId };
   async function load(after?: string) {
@@ -43,15 +45,20 @@ function Delete(props: CollectionDeleteDialogProps) {
     try {
       const result = await props.onLoad({ ...scope, after, limit: 50 }, lifetime.current.signal);
       if (!alive.current || request.current !== token) return;
-      if (!result.irreversible || !/^[a-f0-9]{64}$/.test(result.reviewToken) || result.cursor.datasetId !== props.datasetId || result.cursor.workspaceId !== props.workspaceId || result.name !== props.name) throw Error("dohc returned a different Collection. Refresh it.");
-      if (after && (!page || !sameCursor(result.cursor, page.cursor) || result.reviewToken !== page.reviewToken)) throw Error("The Collection changed while loading affected apps. Refresh it.");
-      setPage(result); setAcknowledged(false);
-    } catch (error) { if (alive.current && request.current === token && !lifetime.current.signal.aborted) {setPage(null);setAcknowledged(false);props.onError("Could not read the deletion preview.", error, () => { void load(); });} }
+      if (!result.irreversible || !/^[a-f0-9]{64}$/.test(result.reviewToken) || result.cursor.datasetId !== props.datasetId || result.cursor.workspaceId !== props.workspaceId || result.name !== props.name) throw Error("dohc returned a different Collection. Try again.");
+      // Delete sends the first page's cursor and review token, so a later page from another state starts the review again.
+      if (after && (!page || !sameCursor(result.cursor, page.cursor) || result.reviewToken !== page.reviewToken)) {
+        setPage(null); setFailed(null); setAcknowledged(false);
+        props.onError("This Collection changed. Check its apps again.", null, null);
+        void load(); return;
+      }
+      setPage(result); setFailed(null); setAcknowledged(false);
+    } catch (error) { if (alive.current && request.current === token && !lifetime.current.signal.aborted) {setFailed({ after });setAcknowledged(false);props.onError("Could not read the deletion preview.", error, () => { void load(after); });} }
     finally { if (alive.current && request.current === token) setBusy(false); }
   }
   useEffect(() => { alive.current = true; lifetime.current = new AbortController(); void load(); return () => { alive.current = false; request.current++; lifetime.current.abort(); }; }, []);
   async function deleteCollection() {
-    if (!alive.current || lock.current || busy || exporting || !page || !acknowledged) return;
+    if (!alive.current || lock.current || busy || exporting || !page || failed || !acknowledged) return;
     lock.current = true; const token = ++request.current; setBusy(true);
     try {
       const result = await props.onDelete({ ...scope, expected: page.cursor, reviewToken: page.reviewToken, acknowledge: true }, lifetime.current.signal);
@@ -62,19 +69,28 @@ function Delete(props: CollectionDeleteDialogProps) {
     finally { lock.current = false; if (alive.current && request.current === token) setBusy(false); }
   }
   return <><Overlay appearance="warning" onClose={busy || exporting ? undefined : props.onClose} panelProps={{ role: "dialog", "aria-modal": true, "aria-labelledby": "delete-collection-title" }}>
-    <section className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink">
+    <section className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-6 overflow-auto rounded-xl border border-line bg-panel p-6 text-ink">
+      <div className="flex flex-col gap-2">
       <h2 id="delete-collection-title" className="m-0 text-base font-semibold">Delete {props.name} permanently?</h2>
       <p className="m-0 text-[13px] text-muted">This deletes every table, record, upload, history entry, and app grant in this Collection. {props.folder ? <>The <span className="wrap-anywhere">{props.folder}</span> folder and its files stay.</> : "Its files stay."} Find them in Files.</p>
       <p className="m-0 text-[13px] text-danger">This cannot be undone on this host, even with a recovery file.</p>
-      <p className="m-0 text-[13px] text-muted">Save a recovery file first to preserve a separate copy. Recovery requires another clean host with this workspace's identity. That host must never have stored or deleted this Collection.</p>
-      <div className="min-h-0 overflow-auto"><h3 className="mb-2 mt-0 text-[12px] font-semibold">Affected apps</h3>
-        {!page ? busy ? <SkeletonRows rows={2} label="Loading affected apps…" /> : <p className="m-0 text-[12px] text-muted">Refresh to see affected apps.</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No affected apps on this page.</p>}
+      <div>
+        <GhostButton className="-ml-2" aria-expanded={details} aria-controls={detailsId} onClick={() => setDetails(open => !open)}>
+          {details ? "Hide details" : "Details"}<ChevronDown size={12} aria-hidden className={`transition-transform ${details ? "rotate-180" : ""}`} />
+        </GhostButton>
+        <p id={detailsId} hidden={!details} className="m-0 mt-1 text-[13px] text-muted">Save a recovery file first to preserve a separate copy. Recovery requires another clean host with this workspace's identity. That host must never have stored or deleted this Collection.</p>
       </div>
-      <div className="flex gap-2"><SecondaryButton disabled={busy} onClick={()=>void load()}>Refresh preview</SecondaryButton>{page?.nextCursor && <SecondaryButton disabled={busy} onClick={() => void load(page.nextCursor!)}>More apps</SecondaryButton>}</div>
-      {props.onExport && <SecondaryButton disabled={busy} onClick={() => setExporting(true)}>{exported ? "Save another recovery file" : "Save recovery file first"}</SecondaryButton>}
+      </div>
+      <CollectionAffectedApps page={page} failed={failed !== null} busy={busy} loadingLabel="Loading affected apps…" retryTestId="collection-delete-apps-retry"
+        onRetry={() => void load(failed?.after)} onMore={after => void load(after)} />
+      <div className="flex flex-col gap-3">
       {exported&&<p className="m-0 text-[12px] text-muted">Recovery file saved</p>}
-      <label className="flex items-start gap-2 text-[13px] text-ink"><input type="checkbox" checked={acknowledged} disabled={busy || !page} onChange={event => setAcknowledged(event.target.checked)} />I understand that dohc cannot undo this deletion.</label>
-      <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><DangerButton disabled={busy || !page || !acknowledged} onClick={() => void deleteCollection()}>{lock.current ? "Deleting…" : "Delete Collection permanently"}</DangerButton></div>
+      <label className="flex items-start gap-2 text-[13px] text-ink"><input type="checkbox" checked={acknowledged} disabled={busy || !page || failed !== null} onChange={event => setAcknowledged(event.target.checked)} />I understand that dohc cannot undo this deletion.</label>
+      <div className="flex items-center gap-2">
+        {props.onExport && <SecondaryButton disabled={busy} onClick={() => setExporting(true)}>{exported ? "Save another recovery file" : "Save recovery file first"}</SecondaryButton>}
+        <div className="ml-auto flex gap-2"><SecondaryButton disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><DangerButton disabled={busy || !page || failed !== null || !acknowledged} onClick={() => void deleteCollection()}>{lock.current ? "Deleting…" : "Delete permanently"}</DangerButton></div>
+      </div>
+      </div>
     </section>
   </Overlay>{exporting&&props.onExport&&<CollectionRecoveryExportDialog collectionName={props.name} onExport={props.onExport} onClose={()=>setExporting(false)} onError={props.onError} onSaved={path=>{if(!alive.current)return;setExported(true);props.onSaved?.(path);}}/>}</>;
 }

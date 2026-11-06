@@ -159,6 +159,7 @@ A divider only separates a fixed header or footer from a list that scrolls.
 ### Buttons
 
 Put Cancel, then one primary, at the right.
+A secondary step that comes before the decision, such as `Save recovery file first`, sits at the left of the same row.
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
 Never label a button `OK`, `Yes`, or `Confirm`.
