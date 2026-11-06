@@ -1240,13 +1240,6 @@ body {
   gap: 6px;
 }
 
-.dohc-code-block-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--dohc-agent);
-}
-
 .dohc-code-language-select {
   border: 1px solid transparent;
   border-radius: 6px;

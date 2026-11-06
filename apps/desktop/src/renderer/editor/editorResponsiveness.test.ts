@@ -480,7 +480,7 @@ describe("editor chrome reuse", () => {
     const view = mount(doc(paragraph("lead"), codeBlock("const a = 1;", "javascript")), [makeCodeBlockChromePlugin(() => report)]);
     const button = view.dom.querySelector<HTMLButtonElement>(".dohc-code-copy-btn")!;
     const status = view.dom.querySelector(".dohc-code-block-toolbar [role='status']")!;
-    expect(button.getAttribute("aria-label")).toBe("copy code");
+    expect(button.getAttribute("aria-label")).toBe("Copy code");
 
     button.click();
     await vi.advanceTimersByTimeAsync(0);
@@ -493,7 +493,7 @@ describe("editor chrome reuse", () => {
     button.click();
     await vi.advanceTimersByTimeAsync(0);
     expect(button.title).toBe(COPY_WORDS.failed);
-    expect(button.getAttribute("aria-label")).toBe("copy code");
+    expect(button.getAttribute("aria-label")).toBe("Copy code");
     expect(report).toHaveBeenCalledWith({
       message: "dohc could not copy to the clipboard. Document is not focused.",
       cause: refusal,
