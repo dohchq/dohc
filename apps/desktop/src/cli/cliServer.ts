@@ -4114,7 +4114,8 @@ async function watchMessages(
 ): Promise<CliResultByVerb["watch"]> {
   if (request.args.actor !== "agent") throw new CliCommandError("Chat watch is for agents. Use chat inbox for your unread threads.");
   connectionSignal?.throwIfAborted();
-  const context = await workspaceContextForRequest(request, options);
+  // Watch credits no run, so it takes no run credential.
+  const context = await workspaceContextForRequest(request, options, undefined);
   const scope = { version: 1 as const, workspaceId: context.workspaceId, group: request.args.group ?? null, thread: request.args.thread ?? null };
   let seen: string[] = [];
   if (request.args.cursor !== undefined) {

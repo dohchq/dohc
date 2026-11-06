@@ -567,6 +567,7 @@ describe("chat runner process", () => {
         profile: { tool: "codex", executable: join(scratch, executable) },
         dohcTools: "all",
         prompt: "",
+        runSecret: "a".repeat(64),
         assertMayStart: () => undefined,
       });
     }
