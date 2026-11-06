@@ -70,11 +70,16 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
     await shoot(page, "agent-tool-cards");
+    // The dialog keeps its top when a pick adds the profile under the cards.
+    const dialogTop = async () => (await page.getByTestId("chats-add-agent").boundingBox())?.y;
+    const topBeforePick = await dialogTop();
     for (const tool of ["Claude Code", "Codex"]) {
       const card = page.getByRole("button", { name: tool, exact: true });
       await expect(card).toBeEnabled();
       await card.click();
       await expect(page.getByText("Conversation through stdin")).toBeVisible();
+      await expect(card).toBeFocused();
+      expect(await dialogTop()).toBe(topBeforePick);
       await shoot(page, `agent-profile-${tool.toLowerCase().replaceAll(" ", "-")}`);
     }
     await page.getByText("Advanced", { exact: true }).click();

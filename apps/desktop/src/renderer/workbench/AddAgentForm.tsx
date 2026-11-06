@@ -20,6 +20,10 @@ const LABEL_CLASS = "text-[11px] font-medium text-muted";
 const INPUT_CLASS =
   "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
 const HINT_CLASS = "m-0 text-[11px] leading-relaxed text-muted";
+// Fits the dialog under Overlay's 6rem top and above its 1rem bottom and the
+// toasts, so picking a tool grows it downward and its body scrolls. Below the
+// 12rem floor the backdrop scrolls instead.
+const DIALOG_HEIGHT_CLASS = "max-h-[max(12rem,calc(100vh_-_7rem_-_var(--dohc-toast-room,0px)))]";
 
 type CheckState =
   | { status: "idle" }
@@ -135,7 +139,7 @@ export function AddAgentForm(props: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="chats-add-agent-title"
-        className="dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
+        className={`dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5 ${DIALOG_HEIGHT_CLASS}`}
       >
         <div className="flex items-center gap-2">
           <ChatAvatar presentation={ownAgentPresentation} name={preview} kind="agent" size="strip" />
@@ -144,6 +148,7 @@ export function AddAgentForm(props: {
           </h3>
         </div>
 
+        <div data-testid="chats-add-agent-body" className="-mx-5 -my-1 flex min-h-0 flex-col gap-4 overflow-y-auto px-5 py-1">
         <div className="flex flex-col gap-1">
           <label htmlFor="chats-add-agent-agent-name" className={LABEL_CLASS}>Agent name</label>
           <input
@@ -189,6 +194,7 @@ export function AddAgentForm(props: {
         </div>
 
         </details>
+        </div>
 
         {error ? (
           <p data-testid="chats-add-agent-error" role="alert" className="m-0 text-[11px] text-danger">
