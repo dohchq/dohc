@@ -356,6 +356,7 @@ describe("CloudSyncSettings", () => {
   it("marks a pause by a connected agent with the plug, and your agent's with the agent mark", () => {
     for (const [author, mark, words] of [
       [{ kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "human-sam", depth: 0 }, "connected", "Paused by connected agent Claude ·"],
+      [{ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "human-sam", depth: 0 }, "connected", "Paused by connected agent Agent ·"],
       [{ kind: "agent", agentId: "claude", onBehalfOf: "human-sam", depth: 1 }, "agent", "Paused by agent claude ·"],
     ] as const) {
       render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, syncPause: { atMs: PAUSED_AT, author } })} />);

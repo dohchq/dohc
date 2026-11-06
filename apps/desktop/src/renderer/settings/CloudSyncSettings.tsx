@@ -416,14 +416,14 @@ function SyncPausedLine(props: { pause: SyncPause }) {
   const { author } = props.pause;
   const time = formatChatTime(props.pause.atMs);
   // A person pause from another installation id (a copied or reset registry)
-  // names nobody. A connected agent takes the plug beside the name it gave.
+  // names nobody. A connected agent takes the plug beside the name it gave, or "Agent".
   const connected = author.kind === "agent" && isConnectedAgentId(author.agentId);
   const Mark = connected ? Plug : Sparkles;
   const by = author.kind === "agent" ? (
     <span className="text-agent">
       <Mark size={12} strokeWidth={1.9} aria-hidden data-agent-mark={connected ? "connected" : "agent"} className="mr-0.5 inline align-[-2px]" />
       <span className="sr-only">{connected ? "connected agent " : "agent "}</span>
-      {shownAgentName(author.agentName) ?? author.agentId}
+      {shownAgentName(author.agentName) ?? (connected ? "Agent" : author.agentId)}
     </span>
   ) : author.self ? "you" : null;
   return (
