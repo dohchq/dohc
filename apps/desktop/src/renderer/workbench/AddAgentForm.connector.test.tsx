@@ -33,6 +33,11 @@ it("requires an agent name and saves it alongside the selected tool and owner", 
   const f = fixture();
   render(<AddAgentForm {...f.props} />);
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
+  const codex = screen.getByRole("button", { name: "Codex" });
+  expect(codex.getAttribute("aria-pressed")).toBe("true");
+  expect(codex.querySelector("svg.lucide-check")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Claude Code" }).getAttribute("aria-pressed")).toBe("false");
+  expect(document.querySelectorAll("svg.lucide-check")).toHaveLength(1);
   expect(screen.getByTestId("chats-add-agent-submit").hasAttribute("disabled")).toBe(true);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   expect(screen.getByTestId("chats-add-agent-preview").textContent).toBe("Posts as Nova");
