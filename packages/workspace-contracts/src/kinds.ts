@@ -19,6 +19,7 @@ type KindGlyphId =
   | "file-code"
   | "file-braces"
   | "file-type"
+  | "file-headphone"
   | "pen-tool"
   | "image"
   | "database";
@@ -113,7 +114,7 @@ export const FILE_KIND_RECORDS = {
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   audio: {
-    displayKind: "audio", name: "Audio", glyphId: "file", displayNameRule: "basename",
+    displayKind: "audio", name: "Audio", glyphId: "file-headphone", displayNameRule: "basename",
     extensions: ["m4a", "mp3", "wav", "ogg"],
     opens: { surface: "tab", content: "asset" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
