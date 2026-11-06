@@ -90,12 +90,13 @@ export function ChatAvatar(props: {
     );
   }
   const agent = kind === "agent";
-  const connected = agent && props.presentation.connected === true;
-  const Mark = connected ? Plug : Sparkles;
+  // A share's agent post is "unknown": it takes the plug as well.
+  const plug = agent ? props.presentation.connected : undefined;
+  const Mark = plug ? Plug : Sparkles;
   return (
     <span
       aria-hidden
-      data-agent-mark={agent ? (connected ? "connected" : "agent") : undefined}
+      data-agent-mark={agent ? (plug === true ? "connected" : plug ?? "agent") : undefined}
       title={props.name}
       className={`inline-grid shrink-0 place-items-center border font-semibold ${
         SIZES[size]

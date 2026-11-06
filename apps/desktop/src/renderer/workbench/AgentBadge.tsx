@@ -41,11 +41,13 @@ export function AgentBadge(props: {
   const descriptionId = useId();
   const { author } = props;
   // A connected agent wrote outside a run dohc started: the plug, and a card
-  // that names it as reported.
-  const connected = props.presentation?.connected === true;
+  // that names it as reported. A share's agent post could be either kind, so
+  // it takes the plug and its card claims no kind.
+  const plug = props.presentation?.connected;
+  const connected = plug === true;
   const label = connected ? "connected agent" : "agent";
-  const Mark = connected ? Plug : Sparkles;
-  const ownAgent = !connected && props.presentation?.self && settings && author.authorAgentId
+  const Mark = plug ? Plug : Sparkles;
+  const ownAgent = !plug && props.presentation?.self && settings && author.authorAgentId
     ? listAgents(settings).find(({ id }) => id === author.authorAgentId) ?? null
     : null;
   const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
@@ -129,12 +131,14 @@ export function AgentBadge(props: {
         >
           <span className="font-medium">
             {author.authorDisplayName}
-            {connected ? <span className="text-muted"> {AS_REPORTED}</span> : null}
+            {plug ? <span className="text-muted"> {AS_REPORTED}</span> : null}
           </span>
-          <span className="text-muted">
-            {connected ? "Connected agent"
-              : author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
-          </span>
+          {plug === "unknown" ? null : (
+            <span className="text-muted">
+              {connected ? "Connected agent"
+                : author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
+            </span>
+          )}
           {reported ? (
             <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">
               {reported.slice(0, -AS_REPORTED.length)}<span className="whitespace-nowrap">{AS_REPORTED}</span>

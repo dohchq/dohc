@@ -147,11 +147,14 @@ it("repaints every avatar of the changed agent without reading or rerendering it
 });
 
 describe("ChatAvatar mark", () => {
-  it("draws a connected agent's plug and your agent's sparkle for the same name", () => {
+  it("draws a connected agent's plug, a share's agent post's plug, and your agent's sparkle for the same name", () => {
     const { container } = render(<>
       <ChatAvatar name="Claude" kind="agent" presentation={{ ...neutralPresentation, connected: true }} />
+      <ChatAvatar name="Claude" kind="agent" presentation={{ ...neutralPresentation, connected: "unknown" }} />
       <ChatAvatar name="Claude" kind="agent" presentation={neutralPresentation} />
     </>);
-    expect([...container.querySelectorAll("[data-agent-mark]")].map((mark) => mark.getAttribute("data-agent-mark"))).toEqual(["connected", "agent"]);
+    const marks = [...container.querySelectorAll("[data-agent-mark]")];
+    expect(marks.map((mark) => mark.getAttribute("data-agent-mark"))).toEqual(["connected", "unknown", "agent"]);
+    expect(marks.map((mark) => mark.querySelector(".lucide-plug") !== null)).toEqual([true, true, false]);
   });
 });

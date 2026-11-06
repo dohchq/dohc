@@ -24,12 +24,16 @@ function local(kind: "human" | "agent" | "automation", origin: "renderer" | "cli
     author: kind === "agent" ? { kind, claimedName: "handshake" } : kind === "automation" ? { kind, automationId: "job" } : { kind } });
   return message({ author: { kind, displayName: "Renamed" }, authorActorKey: serializeActorKey(actor.key), ...(origin === "cli" ? { origin } : {}) });
 }
-function request(remote = true, workspaceId = "w", agentColors: Record<string, "blue" | "rose"> = {}) {
+// Thread "shared" is in a joined shared channel; every other thread is the workspace's own.
+function request(remote = true, workspaceId = "w", agentColors: Record<string, "blue" | "rose"> = {}, shareView?: RegistryEntry["shareView"]) {
   let workspace: RegistryEntry = { workspaceId, rootPath: "C:/w", kind: "personal", mode: "local-first", lastOpenedAt: 0,
-    sharedChannels: [{ shareId: "s", channelWireId: "wire", access: "read-write", granterEmail: null,
+    sharedChannels: [{ shareId: "s", channelWireId: "wire-shared", access: "read-write", granterEmail: null,
       relayUrl: "https://relay.test", recipientUserId: "alice", ...(remote ? { serverUrl: issuer } : {}) }],
-    ...(remote ? { remote: { serverUrl: issuer, ownerUserId: "alice" } } : {}) };
-  const store = { findThreadChannelId: vi.fn(async () => "channel"), getChannelWireId: vi.fn(async () => "wire") };
+    ...(remote ? { remote: { serverUrl: issuer, ownerUserId: "alice" } } : {}), ...(shareView ? { shareView } : {}) };
+  const store = {
+    findThreadChannelId: vi.fn(async ({ threadId }: { threadId: string }) => threadId),
+    getChannelWireId: vi.fn(async ({ channelId }: { channelId: string }) => `wire-${channelId}`),
+  };
   const assertCurrent = vi.fn();
   const present = createActorPresentationRequest({ agentColors: () => agentColors, readWorkspace: () => workspace, store, installationId: "device", credentials, assertCurrent });
   return { present, store, assertCurrent, replace: () => { workspace = { ...workspace, lastOpenedAt: 1 }; } };
@@ -84,17 +88,24 @@ describe("chat presentation admission", () => {
     expect(edit).toMatchObject({ connected: true });
     expect(runEdit).not.toHaveProperty("connected");
   });
-  it("marks a connected agent's post and edit from a share, whose author key is unknown", async () => {
-    // A received file share gives no issuer, so no post in it has a key. A share
-    // serves no run id either, so every agent post through one shows the plug.
-    const r = request(false);
+  it("marks every agent post from a share with the plug and no kind, and a received edit by its agent id", async () => {
+    // A share serves no run id, so an agent post through one could be a run's or a
+    // connected agent's. A received file share gives no issuer, so its posts have no key.
+    const shareView = { shareId: "received", granterEmail: null, genericChatWritable: false, grantedSelector: { paths: ["notes"], versionId: null, access: "view" as const } };
+    const shares = [[request(false, "w", {}, shareView), "t"], [request(), "shared"]] as const;
     const post = message({ author: { kind: "agent", displayName: "Claude" } });
+    const runPost = message({ author: { kind: "agent", displayName: "Claude" }, authorAgentId: "claude" });
     expect(chatActorForPresentation(post, null).key.kind).toBe("unknown");
-    expect(await r.present(post, "t")).toMatchObject({ connected: true });
-    for (const row of [message({ author: { kind: "agent", displayName: "Claude" }, authorAgentId: "claude" }), message({ author: { kind: "human", displayName: "Claude" } })]) {
-      expect(await r.present(row, "t")).not.toHaveProperty("connected");
+    for (const [r, thread] of shares) {
+      for (const row of [post, runPost]) expect(await r.present(row, thread)).toMatchObject({ connected: "unknown" });
+      expect(await r.present(message({ author: { kind: "human", displayName: "Claude" } }), thread)).not.toHaveProperty("connected");
     }
-    // A received edit by an agent on behalf of another device's person has no key either.
+    // This device's own agent posts in a joined channel keep the key it wrote.
+    expect(await shares[1][0].present(local("agent"), "shared")).not.toHaveProperty("connected");
+    // The same posts in the workspace's own thread keep their kind.
+    expect(await shares[1][0].present(post, "t")).toMatchObject({ connected: true });
+    expect(await shares[1][0].present(runPost, "t")).not.toHaveProperty("connected");
+    // A received edit names its agent's id, so it keeps its kind with no key.
     const [edit, runEdit] = createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined })([
       { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "local:device" },
       { kind: "agent", agentId: "claude", onBehalfOf: "local:device" },
