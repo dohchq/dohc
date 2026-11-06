@@ -11,7 +11,8 @@ import { claimPushDelivery, finishPushDelivery, nextPushDeliveryAt, PUSH_DELIVER
 import type { StorageContext } from "./storage/context";
 import { chatChannelCreate, chatThreadCreate, chatMessageAppend, sequenced, testStorage, closeTestStorages,
   closeTestStorage, reopenTestStorage, storagePath, testHandler, request, jsonBody, json,
-  linkRequest, linkSecret, resolveTestActor, inspectDatabase, moment, putBlob, RELAY_EXCHANGE_KEY, SHARE_WEB_ORIGIN } from "./testing";
+  linkRequest, linkSecret, resolveTestActor, inspectDatabase, moment, putBlob, seedLinkGrant, seedDependentGrant,
+  RELAY_EXCHANGE_KEY, SHARE_WEB_ORIGIN } from "./testing";
 
 type TestHttpsOptions = {agent: boolean; signal: AbortSignal; maxHeaderSize: number;
   lookup(host: string, options: {all: boolean}, callback: (...args: unknown[]) => void): void};
@@ -70,6 +71,24 @@ async function fixture(kind: "channel" | "dm" = "channel", pushConfigured = true
   bind();
   return {storage, append, bind, message(body = "@Alice secret text", id = "message") {
     append([chatMessageAppend(id, threadId, body, {authorUserId: "owner", authorDisplayName: "Owner"})]);
+  }};
+}
+
+async function fileChatFixture(recipientUserId = "alice") {
+  const f = await fixture();
+  await putBlob(testHandler(f.storage), "owner", workspaceId, "plan");
+  f.storage.createShare({
+    share: {shareId: "file-share", workspaceId, granterUserId: "owner", createdAtMs: 1,
+      selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), labels: {subjectName: "Docs"}},
+    grant: {grantId: "file-grant", shareId: "file-share", principalKind: "user", principalUserId: recipientUserId, principalEmail: null,
+      access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
+  });
+  f.append([
+    moment("docs/plan.md", "plan", {objectId: "plan"}),
+    chatThreadCreate("file-thread", "", {channelWireId: null, channelSlug: null, linkedObjectId: "plan", linkedAtMs: 2}),
+  ]);
+  return {...f, message() {
+    f.append([chatMessageAppend("file-message", "file-thread", "@Alice", {authorUserId: "owner"})]);
   }};
 }
 
@@ -655,19 +674,8 @@ it.each(["agent", "automation"])("does not count the owner's %s posts as thread 
 });
 
 it.each(["rename", "delete"] as const)("drops a queued file-chat alert after the file %s", async operation => {
-  const f = await fixture();
-  await putBlob(testHandler(f.storage), "owner", workspaceId, "plan");
-  f.storage.createShare({
-    share: {shareId: "file-share", workspaceId, granterUserId: "owner", createdAtMs: 1,
-      selectorJson: JSON.stringify({paths: ["docs"], versionId: null, access: "view"}), labels: {subjectName: "Docs"}},
-    grant: {grantId: "file-grant", shareId: "file-share", principalKind: "user", principalUserId: "alice", principalEmail: null,
-      access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
-  });
-  f.append([
-    moment("docs/plan.md", "plan", {objectId: "plan"}),
-    chatThreadCreate("file-thread", "", {channelWireId: null, channelSlug: null, linkedObjectId: "plan", linkedAtMs: 2}),
-    chatMessageAppend("file-message", "file-thread", "@Alice", {authorUserId: "owner"}),
-  ]);
+  const f = await fileChatFixture();
+  f.message();
   expect(rows(f.storage)).toHaveLength(1);
   f.append([moment(operation === "rename" ? "private/plan.md" : "docs/plan.md", "plan", {
     objectId: "plan", operation, beforePath: "docs/plan.md", beforeContent: "plan",
@@ -684,18 +692,15 @@ it.each(["rename", "delete"] as const)("drops a queued file-chat alert after the
 });
 
 it("drops a queued alert when the dependent grant's parent is revoked", async () => {
-  const f = await fixture();
-  f.storage.tx(() => {
-    f.storage.db.prepare(`INSERT INTO sync_relay_share_grants
-      (grant_id, share_id, principal_kind, principal_user_id, principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
-      VALUES ('parent', ?, 'link', NULL, NULL, 'read-write', 1, 'active', 1, NULL, NULL)`).run(shareId);
-    f.storage.db.prepare("UPDATE sync_relay_share_grants SET parent_grant_id = 'parent' WHERE grant_id = 'grant'").run();
-  });
+  const f = await fileChatFixture("bob");
+  seedLinkGrant(f.storage, {shareId: "file-share", grantId: "parent", secretHash: "parent-secret-hash", access: "view"});
+  expect(seedDependentGrant(f.storage, {shareId: "file-share", parentGrantId: "parent", grantId: "dependent",
+    principalUserId: "alice", createdAtMs: 3_000}).ok).toBe(true);
   f.message();
   expect(rows(f.storage)).toHaveLength(1);
   f.storage.tx(() => f.storage.db.prepare(
     "UPDATE sync_relay_share_grants SET status = 'revoked', revoked_at_ms = ? WHERE grant_id = 'parent'").run(Date.now()));
-  expect(f.storage.getShareGrant("grant")?.status).toBe("active");
+  expect(f.storage.getShareGrant("dependent")?.status).toBe("active");
   const transport = vi.fn<PushTransport>(async () => 201);
   const sender = createPushSender({storage: f.storage, config, lookup, transport,
     sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
