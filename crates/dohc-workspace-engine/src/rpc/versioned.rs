@@ -1612,14 +1612,18 @@ mod tests {
             let text = format!("{}€", "x".repeat(size - 3));
             let path = format!("size-{size}.txt");
             let params = json!({ "versionId": "main", "publish": true, "path": path, "sha256": dohc_engine_storage::hex_sha256(text.as_bytes()), "bytesBase64": base64::engine::general_purpose::STANDARD.encode(text.as_bytes()) });
-            let result = write_for_test(
-                &service,
-                &handle,
-                size as u64,
-                &path,
-                "versionedText.writeBlob",
-                params,
-            )
+            // A busy store asks the caller to retry after a backoff, as a
+            // client does; a checkpoint can hold it for seconds.
+            let result = crate::rpc::test_common::retry_engine_store_busy(|| {
+                write_for_test(
+                    &service,
+                    &handle,
+                    size as u64,
+                    &path,
+                    "versionedText.writeBlob",
+                    params.clone(),
+                )
+            })
             .await;
             if size > dohc_engine_domain::MAX_TEXT_BYTES {
                 assert!(result.is_err());
