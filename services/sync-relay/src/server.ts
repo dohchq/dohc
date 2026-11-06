@@ -57,6 +57,7 @@ import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
+import { createAgentConnectionRoutes } from "./agentConnectionRoutes";
 import { accountDisplayName } from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
@@ -704,6 +705,21 @@ export function createSyncRelayHandler({
     publicEditRelease,
   );
 
+  const { respondToAgentSignIn, respondToLinkAgents } = createAgentConnectionRoutes({
+    storage,
+    linkKey,
+    shareWebOrigin,
+    relayExchangeKeyConfigured: relayExchangeKeyHash !== undefined,
+    hasValidRelayExchangeKey,
+    nowMs,
+    newId,
+    newLinkBearer,
+    linkExchangeRateLimiter,
+    linkExchangeGlobalRateLimiter,
+    requireShareWorkspace,
+    publicEditRelease,
+  });
+
   const respondToLinkChat = createLinkChatRoutes({
     storage,
     linkKey,
@@ -776,6 +792,14 @@ export function createSyncRelayHandler({
       if (route.route === "link-handoff") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         return respondToLinkHandoff(request);
+      }
+      if (
+        route.route === "agent-clients" ||
+        route.route === "agent-authorizations" ||
+        route.route === "agent-token" ||
+        route.route === "agent-introspect"
+      ) {
+        return await respondToAgentSignIn(request, route);
       }
       if (route.route === "link-redeem") {
         if (request.method !== "POST") throw relayError("method_not_allowed");
@@ -966,6 +990,10 @@ export function createSyncRelayHandler({
         route.route === "share-revoke"
       ) {
         return await respondToShareGrantTransition(request, route, actor);
+      }
+
+      if (route.route === "share-link-agents" || route.route === "share-link-agent-disconnect") {
+        return respondToLinkAgents(request, route, actor);
       }
 
       if (route.route === "share-log" || route.route === "share-blob") {

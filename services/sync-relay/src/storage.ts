@@ -133,6 +133,7 @@ import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
+import * as agentConnectionStorage from "./storage/agentConnections";
 import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
@@ -1634,6 +1635,50 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   appendLinkChatPost(input: Parameters<typeof linkChatStorage.appendLinkChatPost>[1]): linkChatStorage.AppendLinkChatPostResult {
     return linkChatStorage.appendLinkChatPost(this, input);
+  }
+
+  registerAgentClient(input: Parameters<typeof agentConnectionStorage.registerAgentClient>[1]): boolean {
+    return agentConnectionStorage.registerAgentClient(this, input);
+  }
+
+  getAgentClient(clientId: string): agentConnectionStorage.AgentClientRow | null {
+    return agentConnectionStorage.getAgentClient(this, clientId);
+  }
+
+  beginAgentAuthorization(input: Parameters<typeof agentConnectionStorage.beginAgentAuthorization>[1]): boolean {
+    return agentConnectionStorage.beginAgentAuthorization(this, input);
+  }
+
+  readAgentAuthorization(requestHash: string, nowMs: number): agentConnectionStorage.AgentAuthorizationRow | null {
+    return agentConnectionStorage.readAgentAuthorization(this, requestHash, nowMs);
+  }
+
+  decideAgentAuthorization(input: Parameters<typeof agentConnectionStorage.decideAgentAuthorization>[1]): agentConnectionStorage.AgentAuthorizationDecision {
+    return agentConnectionStorage.decideAgentAuthorization(this, input);
+  }
+
+  redeemAgentAuthorizationCode(input: Parameters<typeof agentConnectionStorage.redeemAgentAuthorizationCode>[1]): agentConnectionStorage.AgentTokenGrantResult {
+    return agentConnectionStorage.redeemAgentAuthorizationCode(this, input);
+  }
+
+  refreshAgentTokens(input: Parameters<typeof agentConnectionStorage.refreshAgentTokens>[1]): agentConnectionStorage.AgentTokenGrantResult {
+    return agentConnectionStorage.refreshAgentTokens(this, input);
+  }
+
+  authenticateAgentAccessToken(accessTokenHash: string, nowMs: number): agentConnectionStorage.AgentConnectionRow | null {
+    return agentConnectionStorage.authenticateAgentAccessToken(this, accessTokenHash, nowMs);
+  }
+
+  recordAgentConnectionAction(connectionId: string, atMs: number): void {
+    agentConnectionStorage.recordAgentConnectionAction(this, connectionId, atMs);
+  }
+
+  listAgentConnections(input: Parameters<typeof agentConnectionStorage.listAgentConnections>[1]): agentConnectionStorage.AgentConnectionPage {
+    return agentConnectionStorage.listAgentConnections(this, input);
+  }
+
+  disconnectAgentConnection(input: Parameters<typeof agentConnectionStorage.disconnectAgentConnection>[1]): agentConnectionStorage.AgentConnectionRow | null {
+    return agentConnectionStorage.disconnectAgentConnection(this, input);
   }
 
   fetchLogCoordinate(input: {

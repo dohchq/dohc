@@ -44,6 +44,35 @@ function validatePublicLinkAccess(value: unknown, release?: PublicEditRelease): 
 
 const MAX_EMAIL_CHARS = 320;
 
+// The share and an active grant of `kind` on it, when the actor owns both
+// the share and its workspace right now. Anything else is a generic 404.
+// Lifecycle steps must reach any active grant, including one that is no
+// longer current, so this is not the current-grant rule.
+export function requireOwnedShareGrant(
+  storage: Pick<SyncRelayStorage, "getShare" | "getShareGrant" | "workspaceIsOwnedBy">,
+  kind: "link" | "user",
+  shareId: string,
+  grantId: string,
+  actor: { userId: string },
+  allowRevoked = false,
+): SyncRelayShareWithGrantRow {
+  const share = storage.getShare(shareId);
+  const grant = storage.getShareGrant(grantId);
+  if (
+    !share ||
+    share.granterUserId !== actor.userId ||
+    !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
+    !grant ||
+    grant.shareId !== share.shareId ||
+    grant.principalKind !== kind ||
+    (kind === "user" && !grant.principalUserId) ||
+    (!allowRevoked && (grant.status !== "active" || grant.revokedAtMs !== null))
+  ) {
+    throw notFound();
+  }
+  return { share, grant };
+}
+
 export function createShareGrantRoutes(
   storage: Pick<SyncRelayStorage,
     | "getShare"
@@ -105,33 +134,13 @@ export function createShareGrantRoutes(
     requireEditableSelector(access, selectorJson);
     return access;
   };
-  // The share and an active grant of `kind` on it, when the actor owns both
-  // the share and its workspace right now. Anything else is a generic 404.
-  // Lifecycle steps must reach any active grant, including one that is no
-  // longer current, so this is not the current-grant rule.
-  function requireOwnedGrant(
+  const requireOwnedGrant = (
     kind: "link" | "user",
     shareId: string,
     grantId: string,
     actor: { userId: string },
     allowRevoked = false,
-  ): SyncRelayShareWithGrantRow {
-    const share = storage.getShare(shareId);
-    const grant = storage.getShareGrant(grantId);
-    if (
-      !share ||
-      share.granterUserId !== actor.userId ||
-      !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
-      !grant ||
-      grant.shareId !== share.shareId ||
-      grant.principalKind !== kind ||
-      (kind === "user" && !grant.principalUserId) ||
-      (!allowRevoked && (grant.status !== "active" || grant.revokedAtMs !== null))
-    ) {
-      throw notFound();
-    }
-    return { share, grant };
-  }
+  ): SyncRelayShareWithGrantRow => requireOwnedShareGrant(storage, kind, shareId, grantId, actor, allowRevoked);
 
   const dependentSetConflict = async (
     dependents: SyncRelayShareGrantRow[],
