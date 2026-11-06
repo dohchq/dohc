@@ -336,6 +336,7 @@ export function openSyncRelayStorage(
     const storage = new SqliteSyncRelayStorage(
       db,
       {
+        pushConfigured: options.pushConfigured ?? false,
         workspaceQuotaBytes,
         blobGraceMs,
         linkSessionsPerGrantLimit,

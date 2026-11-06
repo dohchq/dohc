@@ -10,13 +10,6 @@ export const PUSH_RECIPIENT_PENDING_LIMIT = 100;
 export const PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE = 30;
 const TABLE = "sync_relay_push_deliveries";
 const MARKER = "push-deliveries-v1";
-const configuredStorages = new WeakSet<StorageContext>();
-
-export function configurePushDeliveries(storage: StorageContext, enabled: boolean): void {
-  if (enabled) configuredStorages.add(storage);
-  else configuredStorages.delete(storage);
-}
-
 const schema = {
   sync_relay_push_rate: `CREATE TABLE sync_relay_push_rate (
     account_user_id TEXT NOT NULL, minute INTEGER NOT NULL, attempts INTEGER NOT NULL,
@@ -72,7 +65,7 @@ export function initializePushDeliveries(db: SqliteDb): void {
 
 /** Runs inside the message append transaction. No network work may enter here. */
 export function recordPushDeliveries(storage: StorageContext, relaySeq: number, nowMs = Date.now()): void {
-  if (!configuredStorages.has(storage)) return;
+  if (!storage.options.pushConfigured) return;
   const message = readPushMessage(storage, relaySeq);
   if (!message) return;
   const first = storage.db.prepare(`SELECT relay_seq FROM sync_relay_log WHERE workspace_id = ?

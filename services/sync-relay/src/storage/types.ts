@@ -1320,6 +1320,7 @@ export interface SqliteDb {
 }
 
 export interface OpenSyncRelayStorageOptions {
+  pushConfigured?: boolean;
   liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;

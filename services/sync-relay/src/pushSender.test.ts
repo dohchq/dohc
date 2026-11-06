@@ -6,7 +6,7 @@ import { DEFAULT_PUSH_HOSTS } from "./pushEndpoints";
 import { createPushSender as createSender, preparePushRequest, sendPushRequest, validatePushEndpoint, isPublicPushAddress, type PushTransport } from "./pushSender";
 import { observeRelayWrites } from "./relayWriteChanges";
 import { appendLogBatchInTransaction } from "./storage/log";
-import { claimPushDelivery, configurePushDeliveries, finishPushDelivery, nextPushDeliveryAt, PUSH_DELIVERY_ATTEMPTS, PUSH_DELIVERY_EXPIRY_MS, PUSH_DELIVERY_LEASE_MS,
+import { claimPushDelivery, finishPushDelivery, nextPushDeliveryAt, PUSH_DELIVERY_ATTEMPTS, PUSH_DELIVERY_EXPIRY_MS, PUSH_DELIVERY_LEASE_MS,
   PUSH_RECIPIENT_PENDING_LIMIT, PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE } from "./storage/pushDeliveries";
 import type { StorageContext } from "./storage/context";
 import { chatChannelCreate, chatThreadCreate, chatMessageAppend, sequenced, testStorage, closeTestStorages,
@@ -54,9 +54,8 @@ function decryptedPayload(body: Buffer): Record<string, unknown> {
   return JSON.parse(clear.subarray(0, -1).toString()) as Record<string, unknown>;
 }
 
-async function fixture(kind: "channel" | "dm" = "channel") {
-  const storage = await testStorage() as StorageContext;
-  configurePushDeliveries(storage, true);
+async function fixture(kind: "channel" | "dm" = "channel", pushConfigured = true) {
+  const storage = await testStorage({pushConfigured}) as StorageContext;
   storage.claimWorkspace({workspaceId, ownerUserId: "owner", createdAtMs: 1});
   const append = (ops: ReturnType<typeof chatMessageAppend>[], originId = "owner") => storage.appendLogBatch({workspaceId, originId,
     ops: sequenced(ops, storage.maxOriginSeq(workspaceId, originId) + 1).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
@@ -501,11 +500,24 @@ it("retries after the send deadline aborts the transport", async () => {
 });
 
 it("does not record new deliveries while sending is unconfigured", async () => {
-  const f = await fixture();
+  const f = await fixture("channel", false);
   const sender = createPushSender({storage: f.storage, config: undefined, sessionIsValid: async () => true});
   f.message();
   expect(rows(f.storage)).toEqual([]);
   await sender.close();
+});
+
+it("records configured deliveries before the sender is constructed or started", async () => {
+  const f = await fixture();
+  f.message();
+  expect(rows(f.storage)).toEqual([expect.objectContaining({state: "pending", attempts: 0, account_user_id: "alice"})]);
+  const transport = vi.fn<PushTransport>(async () => 201);
+  const sender = createPushSender({storage: f.storage, config, lookup, transport,
+    sessionIsValid: async () => true, resolveAlertLink: () => "/l/opaque-reference"});
+  await sender.runOnce();
+  await sender.close();
+  expect(transport).toHaveBeenCalledOnce();
+  expect(rows(f.storage)[0]!.state).toBe("sent");
 });
 
 it("claims and finishes durably without notifying relay write observers", async () => {

@@ -7,7 +7,7 @@ import type { PushConfig } from "./pushConfig";
 import { pushEndpointUrl } from "./pushEndpoints";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { StorageContext } from "./storage/context";
-import { claimPushDelivery, configurePushDeliveries, finishPushDelivery, nextPushDeliveryAt, ownsPushLease, type PushDelivery } from "./storage/pushDeliveries";
+import { claimPushDelivery, finishPushDelivery, nextPushDeliveryAt, ownsPushLease, type PushDelivery } from "./storage/pushDeliveries";
 import { readPushSubscription, removePushSubscriptionGeneration, type PushSubscriptionRow } from "./storage/pushSubscriptions";
 
 const SEND_TIMEOUT_MS = 10_000;
@@ -155,7 +155,6 @@ export function createPushSender(options: {
   onError?: () => void;
 }) {
   const {storage, config} = options;
-  configurePushDeliveries(storage, config !== undefined);
   const now = options.now ?? Date.now;
   let closed = false;
   let started = false;

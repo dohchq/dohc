@@ -322,7 +322,8 @@ const pushVapidPublicKey = pushConfig?.publicKey;
 const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
   allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
     `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
-const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
+const storageOptions = { workspaceQuotaBytes, pushConfigured: Boolean(pool && pushConfig),
+  ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
 const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
 // Worker files are disposable materializations. The relay database retains authority and recovery history.
