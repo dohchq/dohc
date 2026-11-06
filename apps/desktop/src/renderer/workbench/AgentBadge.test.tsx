@@ -120,4 +120,19 @@ describe("agent badge", () => {
     fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
     expect(screen.getByRole("tooltip").textContent).not.toContain("(as reported)");
   });
+
+  it("marks a share's agent post with the plug, and a card that claims no kind", () => {
+    // A share serves no run id, so its agent posts could be a run's or a connected agent's.
+    const share = { group: "agent-share", hue: null, self: false, connected: "unknown" } as const;
+    for (const name of ["Scout", "Agent"]) {
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: name, authorOwnerDisplayName: "Ada" }} presentation={share} />);
+      const badge = screen.getByTestId("chats-post-agent-badge");
+      expect(badge.getAttribute("aria-label")).toBe("agent");
+      expect(badge.querySelector(".lucide-plug")).not.toBeNull();
+      fireEvent.focus(badge);
+      // No second line: neither "Connected agent" nor an owner.
+      expect(screen.getByRole("tooltip").textContent).toBe(`${name} (as reported)`);
+      cleanup();
+    }
+  });
 });

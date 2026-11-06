@@ -1691,7 +1691,9 @@ export const ActorPresentation = z.object({
   // The Settings agent that wrote your agent's message in one of its runs. Its Settings color wins over `hue`.
   agentId: z.string().min(1).max(64).optional(),
   // A connected agent, writing outside a run dohc started: it takes the plug.
-  connected: z.literal(true).optional(),
+  // "unknown" is an agent post that came through a share, which serves no run
+  // id, so it could be either kind. It takes the plug and claims no kind.
+  connected: z.union([z.literal(true), z.literal("unknown")]).optional(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
 export const AgentColorChangedEvent = z.object({
