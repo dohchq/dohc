@@ -3286,7 +3286,7 @@ describe("the move guard over a real relay and live host", () => {
     const carriedInTime = guardPulls.endedInWait && moved !== undefined && moved.includes(text);
     if (!input.unbound) throw new Error("A guarded move here says what its pull must show.");
     if (input.unbound === "drained" && !guardPulls.endedInWait) {
-      throw new Error(`The guard's wait ran out before its pulls ended, ${Math.round(elapsedMs)} ms into the move. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
+      throw new Error(`The guard's wait ran out before its catch-up ended, ${Math.round(elapsedMs)} ms into the move. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
     }
     expect(guardPulls.shared, "another pass was running when the guard's catch-up began").toBe(false);
     if (pull === undefined) throw new Error(`The guard's catch-up ran no pull, ${Math.round(elapsedMs)} ms into the move.`);
@@ -3405,13 +3405,18 @@ describe("the move guard over a real relay and live host", () => {
   // left before each edit, and pulls nothing between the edit and the move.
   it.skipIf(engine.missing)("carries the accepted edit on an unbound device whose pull has nothing else to do", async () => {
     const fixture = await openLiveMoveFixture({ workspaceId: "guard-carries-unbound", compiledRelayMain, engineExecutable: engine.require(),
-      pages: ["peer-alone", "peer-slow"], peer: true });
+      pages: ["peer-alone", "peer-slow", "warm-up"], peer: true });
     try {
       const { peer } = fixture;
+      // Starts the peer's Markdown reader before the first move: its cold start is a separate, known slowness (#3356), not the guard's wait.
+      const warmUp = async () => {
+        await drain(peer);
+        await fixture.waitPublished("warm-up", await fixture.edit("warm-up", marker("warm-up")));
+        await drain(peer);
+      };
       const recorded = timings.length;
       const carriedInTime = [
-        await editThenMove(fixture, peer, { name: "peer-alone", guarded: true, proxyDelayMs: 0, unbound: "drained",
-          beforeEdit: () => drain(peer) }),
+        await editThenMove(fixture, peer, { name: "peer-alone", guarded: true, proxyDelayMs: 0, unbound: "drained", beforeEdit: warmUp }),
         await editThenMove(fixture, peer, { name: "peer-slow", guarded: true, proxyDelayMs: PROXY_DELAY_MS, unbound: "drained",
           beforeEdit: () => drain(peer) }),
       ];
