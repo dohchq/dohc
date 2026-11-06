@@ -127,6 +127,32 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("Explorer Files", () => {
+  it("shows nothing below the Files header before the first listing", () => {
+    render(<Explorer {...explorerProps({ mode: "files", listed: false, files: [], folders: [] })} />);
+
+    expect(screen.queryByText("No files")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
+    expect(screen.queryByRole("tree")).toBeNull();
+  });
+
+  it("shows No files after an empty listing", () => {
+    render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [] })} />);
+
+    expect(within(section("Files")).getByText("No files")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
+    expect(screen.queryByRole("tree")).toBeNull();
+  });
+
+  it("shows the tree after a listing with a file", () => {
+    render(<Explorer {...explorerProps({ mode: "files", files: [file("notes.md")], folders: [] })} />);
+
+    expect(within(screen.getByRole("tree")).getByRole("treeitem", { name: "notes.md" })).toBeTruthy();
+    expect(screen.queryByText("No files")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
+  });
+});
+
 describe("Explorer Home", () => {
   it("orders its sections Pinned, Recent, Pages, Collections, Apps, Other files", () => {
     render(<Explorer {...explorerProps({ pinned: ["notes.md"], recentFiles: ["budget.csv"] })} />);

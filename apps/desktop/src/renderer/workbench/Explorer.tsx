@@ -2065,14 +2065,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           {filesExpanded ? (
             <>
               {empty ? (
-                <button
-                  type="button"
-                  onClick={() => props.onNewPage("")}
-                  className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
-                >
-                  <FilePlus2 size={13} aria-hidden />
-                  Create your first file
-                </button>
+                props.listed && (
+                  <div className="px-3 py-1.5 text-[11px] text-subtle">
+                    No files
+                  </div>
+                )
               ) : (
                 <ul
                   ref={workspaceTreeRef}
