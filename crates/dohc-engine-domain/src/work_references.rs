@@ -369,7 +369,12 @@ pub fn learn_work_reference_page(
             reason: "invalid work reference cursor",
         });
     }
-    learn_work_references(store, workspace_id, mappings)?;
+    if !mappings.is_empty() {
+        learn_work_references(store, workspace_id, mappings)?;
+    }
+    if work_reference_page_after(store, workspace_id, scope_id)?.as_deref() == next_after {
+        return Ok(());
+    }
     store.write_with(&dohc_engine_storage::NoFaults, |tx| {
         tx.execute("INSERT INTO work_reference_sync_pages VALUES (?1,?2,?3) \
             ON CONFLICT(workspace_id,scope_id) DO UPDATE SET after_reference=excluded.after_reference",

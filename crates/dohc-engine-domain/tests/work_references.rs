@@ -21,6 +21,61 @@ const DATASET: &str = "0b5e8f0e-4c1a-4d36-9a52-1f0c2b7d9e10";
 const TABLE: &str = "6f1d2c3b-8a9e-4f70-b1c2-d3e4f5a6b7c8";
 
 #[test]
+fn learning_reference_pages_writes_only_changed_state() {
+    use dohc_engine_domain::work_references::{
+        WorkReferenceMapping, learn_work_reference_page, work_reference_page_after,
+    };
+
+    let (_scratch, _db, mut store) = fresh();
+    write(&mut store, MAIN, "plan.md", "plan", "Plan", 2);
+    let changes = |store: &EngineStore| {
+        store
+            .read_with(|conn| Ok::<_, DomainError>(conn.total_changes()))
+            .unwrap()
+    };
+    let before = changes(&store);
+    for _ in 0..2 {
+        learn_work_reference_page(&mut store, WS, "owner", &[], None).unwrap();
+        assert_eq!(changes(&store), before);
+        assert_eq!(count(&store, "work_reference_sync_pages"), 0);
+    }
+    for after in [Some("7"), Some(""), None] {
+        let before = changes(&store);
+        learn_work_reference_page(&mut store, WS, "owner", &[], after).unwrap();
+        assert_eq!(changes(&store), before + 1);
+        assert_eq!(
+            work_reference_page_after(&store, WS, "owner")
+                .unwrap()
+                .as_deref(),
+            after
+        );
+        learn_work_reference_page(&mut store, WS, "owner", &[], after).unwrap();
+        assert_eq!(changes(&store), before + 1);
+    }
+    let mapping = WorkReferenceMapping {
+        reference: "B".repeat(43),
+        target: WorkTarget::File {
+            version_id: MAIN.into(),
+            object_id: "plan".into(),
+        },
+        created_at_ms: 3,
+    };
+    let before = changes(&store);
+    learn_work_reference_page(
+        &mut store,
+        WS,
+        "owner",
+        std::slice::from_ref(&mapping),
+        None,
+    )
+    .unwrap();
+    assert_eq!(found(&store, &mapping.reference).0, mapping.target);
+    assert_eq!(changes(&store), before + 1);
+    learn_work_reference_page(&mut store, WS, "owner", &[mapping], None).unwrap();
+    assert_eq!(changes(&store), before + 1);
+}
+
+#[test]
 fn learned_references_resolve_after_local_rows_without_creating_outbox_entries() {
     use dohc_engine_domain::work_references::{
         WorkReferenceMapping, acknowledge_work_references, learn_work_references,
