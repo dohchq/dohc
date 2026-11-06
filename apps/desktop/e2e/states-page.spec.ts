@@ -442,7 +442,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       }
     }
     // An overflowing strip fades only the edges it can still scroll past,
-    // 24px each, and its active tab sits clear of them. Each specimen must
+    // 40px each, and its active tab sits clear of them. Each specimen must
     // really overflow the way its label says, or its capture proves nothing.
     for (const theme of THEMES) {
       for (const [at, left, right] of [["start", false, true], ["middle", true, true], ["end", true, false]] as const) {
@@ -460,7 +460,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         if (shown.left !== left || shown.right !== right) {
           failures.push(`the strip at the ${at} (${theme}) fades left ${shown.left} and right ${shown.right}`);
         }
-        if (shown.before < (left ? 24 : 0) || shown.after < (right ? 24 : 0)) {
+        if (shown.before < (left ? 40 : 0) || shown.after < (right ? 40 : 0)) {
           failures.push(`the strip at the ${at} (${theme}) shows its active tab under a fade or cut`);
         }
       }

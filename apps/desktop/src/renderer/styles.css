@@ -425,7 +425,7 @@ body {
   display: none;
 }
 
-/* An edge the strip can still scroll past fades its last 24px, so a name
+/* An edge the strip can still scroll past fades its last 40px, so a name
  * cut there reads as continuing. EditorTabs sets the attributes and draws
  * the fades (STRIP_FADE) after the strip. They are the chrome's fill drawn
  * over the tabs, not a mask on the strip: a masked strip changed how

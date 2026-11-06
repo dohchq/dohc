@@ -97,18 +97,21 @@ const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-activ
 // An edge the strip can still scroll past fades over this width. A revealed
 // tab stops clear of the fade, its joins included, where the strip has room
 // for both.
-const EDGE_FADE = 24;
+const EDGE_FADE = 40;
 const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
-// The fade is the chrome's own fill drawn over the tab names, w-6 being
-// EDGE_FADE. It starts under the strip's top band, where the split's accent
-// line runs, and stops above the hairline; it sits above the other tabs and
-// under the active one (z-10), and takes no clicks.
-const STRIP_FADE = "pointer-events-none absolute top-1 bottom-px z-[6] w-6 from-panel to-transparent";
+// The fade is the strip's own fill drawn over the tab names, w-10 being
+// EDGE_FADE. Its outer 16px are solid, so a cut name shows no fragment of
+// two or three letters, and the rest fades in. It starts under the strip's
+// top band, where the split's accent line runs, and stops above the
+// hairline; it sits above the other tabs and under the active one (z-10),
+// and takes no clicks.
+const STRIP_FADE =
+  "pointer-events-none absolute top-1 bottom-px z-[6] w-10 from-panel from-40% to-transparent";
 // The last of the strip's buttons meets the pane edge, where the window edge
 // or the split's separator cuts off an outset focus ring. All of them draw
 // it inset, so the ring keeps one shape as focus moves along them.
 const STRIP_BUTTON =
-  "grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink focus-visible:-outline-offset-2";
+  "grid w-7 shrink-0 place-items-center border-b border-line text-muted hover:text-ink focus-visible:-outline-offset-2";
 
 // An unsaved tab's dot and its close share the close's 16px slot, and each
 // hides exactly while the other shows: on hover, while the keyboard focuses
@@ -1021,7 +1024,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         title="New editor group right"
         disabled={empty || TAB_KINDS[parseTab(props.activeTab)?.kind ?? "removed"].singleton}
         onClick={() => props.onCreateGroupRight(props.groupId)}
-        className={`${STRIP_BUTTON} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle`}
+        className={`${STRIP_BUTTON} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
       >
         <Columns2 size={14} aria-hidden />
       </button>
