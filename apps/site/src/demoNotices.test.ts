@@ -8,8 +8,9 @@ import { beforeAll, expect, it } from "vitest";
 const demoRules = readFileSync(join(import.meta.dirname, "demo.css"), "utf8")
   .replace(/^@(?:import|source) [^;]+;$/gmu, "");
 
-// The demo mounts the notice center in its activity bar. No positioned box
-// sits between it and the demo window.
+// The demo mounts the toasts and the Notices panel in its activity bar. Above
+// 720px the demo window places them. At 720px or less the workbench places
+// them, and it is as wide as the window.
 beforeAll(() => {
   const style = document.createElement("style");
   style.textContent = demoRules;
@@ -18,21 +19,24 @@ beforeAll(() => {
     <div class="demo-window">
       <div class="demo-workbench">
         <nav><div>
-          <div data-testid="notice-toasts"></div>
+          <div data-testid="notice-toasts"><div role="alert"></div></div>
           <div data-testid="notice-center" role="dialog"></div>
         </div></nav>
       </div>
     </div>`;
 });
 
-it("places the notice toasts against the demo window, not the page", () => {
+it("places the notice toasts against the demo window and keeps them inside", () => {
   const toasts = document.querySelector('[data-testid="notice-toasts"]')!;
   expect(getComputedStyle(toasts).position).toBe("absolute");
+  expect(getComputedStyle(toasts).maxWidth).toBe("calc(100% - 24px)");
+  expect(getComputedStyle(toasts.firstElementChild!).maxWidth).toBe("100%");
 });
 
 it("places the Notices panel against the demo window and keeps it inside", () => {
   const panel = document.querySelector('[data-testid="notice-center"]')!;
   const style = getComputedStyle(panel);
   expect(style.position).toBe("absolute");
+  expect(style.maxWidth).toBe("calc(100% - 68px)");
   expect(style.maxHeight).toBe("calc(100% - 100px)");
 });

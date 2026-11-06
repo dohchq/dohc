@@ -92,13 +92,24 @@
 }
 
 /* The desktop places its toasts and Notices against the app window, which is
-   the page here. The demo places them against the demo window instead. */
+   the page here. The demo places them against the demo window instead. On a
+   phone that window is narrower than the page, so their widths also stop at
+   the window, less the desktop's margins. */
 .demo-window [data-testid="notice-toasts"],
 .demo-window [data-testid="notice-center"] {
   position: absolute;
 }
 
+.demo-window [data-testid="notice-toasts"] {
+  max-width: calc(100% - 24px);
+}
+
+.demo-window [data-testid="notice-toasts"] > * {
+  max-width: 100%;
+}
+
 .demo-window [data-testid="notice-center"] {
+  max-width: calc(100% - 68px);
   max-height: calc(100% - 100px);
 }
 
