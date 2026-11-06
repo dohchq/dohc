@@ -40,6 +40,7 @@ import {
   DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
   DocumentControls,
   LossyNoteNoticeView,
+  LOSSY_NOTE_TITLE,
   MarkdownSourceStrip,
   OPENING_TITLE,
   OpeningState,
@@ -3155,7 +3156,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               </LossyNoteNoticeView>
             }>
               <ViewActions onShare={noop} actions={
-                <DocumentControls toggle={{ label: "Edit", disabled: true, title: "This note has parts dohc can't show." }} menu={null} />
+                <DocumentControls toggle={{ label: "Edit", disabled: true, title: LOSSY_NOTE_TITLE }} menu={null} />
               } />
             </TabRowActionsSpecimen>
           </Specimen>

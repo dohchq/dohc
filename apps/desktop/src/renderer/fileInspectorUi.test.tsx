@@ -21,7 +21,6 @@ describe("DocumentControls", () => {
       render(<DocumentControls toggle={{ label: "Edit", disabled: true, title: reason, onClick }} menu={null} />);
       const toggle = screen.getByRole("button", { name: "Edit", description: reason });
       expect(toggle.getAttribute("title")).toBe(reason);
-      expect(toggle.getAttribute("aria-description")).toBe(reason);
       expect(toggle.getAttribute("aria-disabled")).toBe("true");
       await user.tab();
       expect(document.activeElement).toBe(toggle);

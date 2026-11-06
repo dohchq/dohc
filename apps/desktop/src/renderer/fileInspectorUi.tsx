@@ -86,6 +86,8 @@ export function ViewActions(props: {
   return slot ? createPortal(content, slot) : null;
 }
 
+export const LOSSY_NOTE_TITLE = "This note has parts dohc can't show.";
+
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";
 
 // The wait before a slow open says so, the same wait as the loading lines'
@@ -138,16 +140,12 @@ export function DocumentControls(props: {
         aria-pressed={toggle.pressed}
         disabled={toggle.disabled && !toggle.title}
         aria-disabled={toggle.disabled && !!toggle.title || undefined}
-        aria-description={toggle.disabled ? toggle.title : undefined}
         title={toggle.title}
-        onClick={(event) => {
-          if (toggle.disabled) {
-            event.preventDefault();
-            return;
-          }
+        onClick={() => {
+          if (toggle.disabled) return;
           toggle.onClick?.();
         }}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
       >
         {toggle.label}
       </button>
@@ -310,7 +308,7 @@ export function LossyNoteNoticeView(props: { held?: boolean; children: ReactNode
         <Lock aria-hidden size={12} className="shrink-0" />
         {props.held
           ? "dohc held a change, because saving it would rewrite parts it can't show."
-          : "This note has parts dohc can't show."}
+          : LOSSY_NOTE_TITLE}
       </span>
       <span className="flex shrink-0 items-center gap-3">{props.children}</span>
     </div>

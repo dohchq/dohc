@@ -466,6 +466,7 @@ describe("markdown document opening state", () => {
     expect(
       (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
     ).toBe(false);
+    expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).not.toBe("true");
 
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
