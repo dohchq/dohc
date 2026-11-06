@@ -2232,7 +2232,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="pending share" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-pending-${theme}`} truncate quietWhenCalm state="pending-share" shown="pending-share" />}
@@ -2246,7 +2246,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="held: file in use" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-held-${theme}`} truncate quietWhenCalm state="file-locked" shown="file-locked" />}
@@ -2273,7 +2273,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="narrow, changed on disk">
-          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`}>
+          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`} dirty>
             <ViewActions
               onShare={noop}
               status={
