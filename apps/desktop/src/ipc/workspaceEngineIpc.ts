@@ -20,6 +20,7 @@ import {
 import { registerOperations } from "./operationTable";
 import { CHANNELS } from "./channels";
 import { engineMomentDetailForIpc, listEngineMomentsForIpc, momentPersonName, type EngineMomentAuthorNames } from "./engineHistoryIpc";
+import { shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import { createRunLocator, recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
 import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
@@ -297,10 +298,11 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
     // Your agents use the Settings name of their id, as record History does, with or without a run.
-    // Another person's runs show as "Agent". Their other agents use their handshake label.
+    // Another person's runs show as "Agent". Their other agents use their handshake label,
+    // or "Agent" when a character in it could hide or reorder text.
     function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
       return {
-        agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
+        agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : shownAgentName(author.agentId) ?? "Agent",
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         presentations,
