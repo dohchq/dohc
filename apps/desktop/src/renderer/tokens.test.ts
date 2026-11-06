@@ -57,6 +57,11 @@ describe("state fills", () => {
     expect(palette.dark.scrim).toBe("rgba(0, 0, 0, 0.65)");
   });
 
+  // A skeleton bar is not a selection, so it keeps 11% when the selected fill moves.
+  it("and an 11% skeleton fill in both themes", () => {
+    for (const mode of ["light", "dark"] as const) expect(inkAlpha(palette[mode].skeleton, "skeleton")).toBe(0.11);
+  });
+
   it("tell a hovered row from a selected one on every surface", () => {
     for (const mode of ["light", "dark"] as const) {
       for (const surface of SURFACES) {
@@ -229,7 +234,7 @@ describe("styles.css mirrors tokens.ts", () => {
   }
 
   it("state utilities map to their semantic tokens", () => {
-    for (const state of ["hover", "selected", "scrim"] as const) {
+    for (const state of ["hover", "selected", "skeleton", "scrim"] as const) {
       expect(block("@theme inline")).toContain(`--color-${state}: var(--dohc-${state});`);
     }
   });

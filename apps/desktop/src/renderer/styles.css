@@ -39,6 +39,8 @@
   --dohc-ink: #1c1b18;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
   --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  /* The fill of loading bars. */
+  --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.40);
   --dohc-muted: #55524a;
   --dohc-subtle: #7f7b6e;
@@ -72,6 +74,7 @@
   --dohc-ink: #f6f4ee;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
   --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.65);
   --dohc-muted: #a9a599;
   --dohc-subtle: #7d7a6e;
@@ -101,6 +104,7 @@
   --color-ink: var(--dohc-ink);
   --color-hover: var(--dohc-hover);
   --color-selected: var(--dohc-selected);
+  --color-skeleton: var(--dohc-skeleton);
   --color-scrim: var(--dohc-scrim);
   --color-muted: var(--dohc-muted);
   --color-subtle: var(--dohc-subtle);

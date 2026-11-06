@@ -90,6 +90,7 @@ describe("SkeletonRows", () => {
       "w-[90%]",
       "w-[54%]",
     ]);
+    for (const line of lines) expect([line.classList.contains("bg-skeleton"), line.classList.contains("bg-selected")]).toEqual([true, false]);
   });
 
   it("repeats the widths for more rows", () => {

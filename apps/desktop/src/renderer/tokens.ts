@@ -16,6 +16,7 @@ export interface ThemeTokens {
   ink: string;
   hover: string;
   selected: string;
+  skeleton: string;
   scrim: string;
   muted: string;
   subtle: string;
@@ -43,6 +44,8 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // selection (see the contrast test).
     hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
     selected: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
+    // The fill of loading bars.
+    skeleton: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
     scrim: "rgba(0, 0, 0, 0.40)",
     muted: "#55524a",
     // Decorative text must clear 3.0:1 on every surface it sits on —
@@ -81,6 +84,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     ink: "#f6f4ee",
     hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
     selected: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
+    skeleton: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
     // Black dims a near-black page far less than a paper one, so dark needs
     // more of it for the page behind a dialog to recede.
     scrim: "rgba(0, 0, 0, 0.65)",
@@ -111,6 +115,7 @@ export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
   ink: "--dohc-ink",
   hover: "--dohc-hover",
   selected: "--dohc-selected",
+  skeleton: "--dohc-skeleton",
   scrim: "--dohc-scrim",
   muted: "--dohc-muted",
   subtle: "--dohc-subtle",
