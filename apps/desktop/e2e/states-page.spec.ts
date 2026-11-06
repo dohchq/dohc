@@ -576,6 +576,64 @@ test("@states-page @states-baselines every shared part matches its baseline in b
   });
 });
 
+// An unsaved tab draws its dot in its close's slot, so a tab has one width
+// saved, unsaved, hovered, with the pointer on its close, and focused from
+// the keyboard. The states are forced through the browser, as the capture
+// forces them, and the widths come from layout. It compares no pixels, so it
+// runs on every platform.
+const TAB_WIDTH_SLACK = 0.5;
+test("@states-page @tab-unsaved-width an unsaved tab keeps its width in every state", async () => {
+  test.setTimeout(120_000);
+  await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
+    await page.setViewportSize({ width: WIDTH, height: 900 });
+    await expect(page.getByTestId("first-run-open-share")).toBeVisible();
+    await page.evaluate((hash) => {
+      window.location.hash = hash;
+    }, STATES_PAGE_HASH);
+    await expect(page.getByTestId("states-page")).toBeVisible();
+    await page.evaluate(() => document.fonts.ready);
+    await showOnly(page, "tab-unsaved");
+    await parkPointer(page);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
+    await forceMarkedStates(cdp, '[data-testid="states-page"] [data-part="tab-unsaved"]');
+
+    const failures: string[] = [];
+    for (const theme of THEMES) {
+      const strip = (state: string) => page.getByTestId(`states-tab-unsaved-${state}-${theme}`);
+      const width = async (state: string, tab: string) => {
+        const box = await strip(state).locator(tab).boundingBox();
+        if (!box) throw new Error(`the ${state} strip (${theme}) has no box for ${tab}`);
+        return box.width;
+      };
+      const active = '[role="tab"][data-active]';
+      const inactive = '[role="tab"]:not([data-active])';
+      const sameWidth = async (tab: string, states: string[]) => {
+        const widths = await Promise.all(states.map((state) => width(state, tab)));
+        if (Math.max(...widths) - Math.min(...widths) > TAB_WIDTH_SLACK) {
+          failures.push(`${tab} (${theme}) is ${states.map((state, index) => `${widths[index]}px ${state}`).join(", ")}`);
+        }
+      };
+      await sameWidth(active, ["clean", "dirty", "hover", "close", "focus"]);
+      await sameWidth(inactive, ["clean", "recovered"]);
+
+      // The forced states must have taken, or the widths prove nothing: the
+      // dot shows at rest, and the close shows in its place on hover and
+      // keyboard focus.
+      const opacity = (state: string, part: string) =>
+        strip(state).locator(`${active} ${part}`).evaluate((el) => getComputedStyle(el).opacity);
+      for (const [state, dot, close] of [["dirty", "1", "0"], ["hover", "0", "1"], ["focus", "0", "1"]] as const) {
+        const shown = [await opacity(state, '[data-testid="tab-dirty"]'), await opacity(state, "button")];
+        if (shown[0] !== dot || shown[1] !== close) {
+          failures.push(`the ${state} strip (${theme}) shows the dot at ${shown[0]} and the close at ${shown[1]}`);
+        }
+      }
+    }
+    expect(failures, "a tab keeps one width in every state").toEqual([]);
+  });
+});
+
 test("@states-page the page stays closed without the dev-tools grant", async () => {
   test.setTimeout(120_000);
   await withDesktop({ DOHC_DEV_TOOLS: "0" }, async (page) => {

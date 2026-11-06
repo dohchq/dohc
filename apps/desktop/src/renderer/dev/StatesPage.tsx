@@ -560,13 +560,13 @@ function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean 
 
 // Two tabs over a strip of paper, the first active. An unsaved tab draws its
 // dot in its close's slot. `tab` and `close` force a state on the active tab
-// and on its close.
+// and on its close. states-page.spec.ts measures the tabs by `testId`.
 const UNSAVED_TABS = [{ path: "trip/plan.md" }, { path: "notes.md" }];
 const UNSAVED_RECOVERY: ReadonlySet<string> = new Set(["notes.md"]);
 const UNSAVED_ACTIVE_TAB = '[role="tab"][data-active]';
-function UnsavedTabStrip(props: { dirty: boolean; recovered: boolean; tab?: string; close?: string }) {
+function UnsavedTabStrip(props: { testId: string; dirty: boolean; recovered: boolean; tab?: string; close?: string }) {
   return (
-    <div className="w-[360px] overflow-hidden rounded-lg border border-line">
+    <div data-testid={props.testId} className="w-[360px] overflow-hidden rounded-lg border border-line">
       <div data-force-state={props.tab} data-force-target={props.tab ? UNSAVED_ACTIVE_TAB : undefined}>
         <div data-force-state={props.close} data-force-target={props.close ? `${UNSAVED_ACTIVE_TAB} button` : undefined}>
           <EditorTabs
@@ -3531,20 +3531,23 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* Each strip holds a tab list, so the part holds them at rest. */}
       <Section part="tab-unsaved" title="Unsaved tabs" menusAtRest>
+        <Specimen label="saved, for the width">
+          <UnsavedTabStrip testId={`states-tab-unsaved-clean-${theme}`} dirty={false} recovered={false} />
+        </Specimen>
         <Specimen label="the active tab, unsaved">
-          <UnsavedTabStrip dirty recovered={false} />
+          <UnsavedTabStrip testId={`states-tab-unsaved-dirty-${theme}`} dirty recovered={false} />
         </Specimen>
         <Specimen label="an inactive tab holding recovered changes">
-          <UnsavedTabStrip dirty={false} recovered />
+          <UnsavedTabStrip testId={`states-tab-unsaved-recovered-${theme}`} dirty={false} recovered />
         </Specimen>
         <Specimen label="hover on the unsaved active tab">
-          <UnsavedTabStrip dirty recovered tab="hover" />
+          <UnsavedTabStrip testId={`states-tab-unsaved-hover-${theme}`} dirty recovered tab="hover" />
         </Specimen>
         <Specimen label="the pointer on its close">
-          <UnsavedTabStrip dirty recovered tab="hover" close="hover" />
+          <UnsavedTabStrip testId={`states-tab-unsaved-close-${theme}`} dirty recovered tab="hover" close="hover" />
         </Specimen>
         <Specimen label="keyboard focus on the unsaved active tab">
-          <UnsavedTabStrip dirty recovered tab="focus-visible" />
+          <UnsavedTabStrip testId={`states-tab-unsaved-focus-${theme}`} dirty recovered tab="focus-visible" />
         </Specimen>
       </Section>
     </section>
