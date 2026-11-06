@@ -308,7 +308,7 @@ export function createShareReadQueries(
         };
       },
     );
-    storage.indexReceivedWorkTargets([...observed.values()]);
+    if (observed.size) storage.indexReceivedWorkTargets([...observed.values()]);
     return { ops: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
 
