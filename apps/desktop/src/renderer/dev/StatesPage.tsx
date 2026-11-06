@@ -239,7 +239,7 @@ function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
 
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; dirty?: boolean; children: ReactNode }) {
   const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
@@ -251,7 +251,7 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
             groupNumber={1}
             tabs={[{ path }]}
             activeTab={path}
-            activeTabDirty={false}
+            activeTabDirty={props.dirty ?? false}
             recoveryPaths={NO_RECOVERY}
             onActivate={noop}
             onClose={noop}
@@ -2218,7 +2218,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="saving" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenCalm state="saving" shown="saving" />}
