@@ -33,6 +33,20 @@ const expectForcedTarget = (mark: HTMLElement) =>
   expect(mark.querySelector(mark.dataset.forceTarget ?? ""), mark.dataset.forceTarget).not.toBeNull();
 
 describe("states page", () => {
+  it("keeps the narrow file-row specimens in both themes", () => {
+    render(<StatesPage parts={new Set(["tab-row-actions", "file-view-actions"])} />);
+    for (const theme of ["light", "dark"]) {
+      const narrow = screen.getByTestId(`states-tab-row-actions-narrow-${theme}`);
+      expect(narrow.classList.contains("w-[360px]")).toBe(true);
+      expect(narrow.querySelector("[data-testid=editor-tabs]")?.classList.contains("@container/file-row")).toBe(true);
+      const mark = screen.getByTestId(`states-tab-row-actions-cut-${theme}`);
+      expect(mark.getAttribute("aria-label")).toBe("Changed outside dohc");
+      expect(mark.title).toBe("This file changed outside dohc.");
+    }
+    expect(screen.getAllByText("narrow, changed on disk")).toHaveLength(2);
+    expect(screen.getAllByText("split: text failed beside a CSV in Raw")).toHaveLength(2);
+  });
+
   it("opens only at its address and only with the dev-tools grant", () => {
     expect(statesPageRequested(STATES_PAGE_HASH, true)).toBe(true);
     expect(statesPageRequested(STATES_PAGE_HASH, false)).toBe(false);

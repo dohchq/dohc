@@ -95,13 +95,26 @@ describe("StateMark", () => {
     expect(screen.getByTestId("mark").getAttribute("title")).toBe("The disk is full.");
   });
 
+  it.each(KEYS)("keeps the %s name and title when CSS hides its words", (key) => {
+    render(<StateMark testId="mark" state={key} shown={key} truncate />);
+    const chip = screen.getByLabelText(SAVE_STATE[key].label);
+    expect(chip).toBe(screen.getByTestId("mark"));
+    expect(chip.title).toBe(SAVE_STATE[key].title ?? "");
+    expect(chip.classList.contains("@max-[480px]/file-row:gap-0")).toBe(true);
+    const words = chip.querySelector(".truncate")!;
+    expect(words.textContent).toBe(SAVE_STATE[key].label);
+    expect(words.classList.contains("@max-[480px]/file-row:sr-only")).toBe(true);
+  });
+
   // jsdom lays nothing out, so this reads the rules that size the header: a
-  // narrow window cuts the chip's label, never Try again.
-  it("keeps Try again whole in a narrow header and cuts the chip's label instead", () => {
+  // narrow row hides the chip's words, never Try again.
+  it("keeps Try again whole beside a state mark in a query container", () => {
     const { container } = render(
       <ViewActions status={<StateMark testId="mark" truncate state="read-only" shown="read-only-transition" onRetry={() => undefined} />} />,
     );
     const status = container.querySelector<HTMLElement>("[data-view-status]")!;
+    expect(screen.getByTestId("view-actions").classList.contains("@container/file-row")).toBe(true);
+    expect(screen.getByTestId("view-actions").classList.contains("w-full")).toBe(true);
     // Each column is as narrow as its item allows, so the button's own minimum counts.
     expect(status.className).toContain("auto-cols-[minmax(auto,max-content)]");
     const retry = screen.getByTestId("mark-retry");
@@ -117,7 +130,7 @@ describe("StateMark", () => {
 
   // A narrow header cuts the label short. The chip then takes focus and its
   // tooltip carries the whole label and what it means. Its test id and text
-  // stay as they were, and its title gives way to the tooltip while cut.
+  // stay as they were, and its title stays while cut.
   describe("cut short", () => {
     // jsdom lays nothing out, so the test says how wide the label is.
     function laidOut(scrollWidth: number, clientWidth: number) {
@@ -158,7 +171,7 @@ describe("StateMark", () => {
       render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
       const chip = screen.getByTestId("mark");
       expect(chip.getAttribute("tabindex")).toBe("0");
-      expect(chip.getAttribute("title"), "the browser's own tooltip repeats this one a moment after hover").toBeNull();
+      expect(chip.getAttribute("title")).toBe(SAVE_STATE["pending-share"].title);
       expect(screen.queryByRole("tooltip")).toBeNull();
 
       await userEvent.setup().tab();
