@@ -880,10 +880,15 @@ body {
   font-weight: 600;
 }
 
-/* A cell ends at its padding. Of type, not child: the column-resize handle
- * is a widget inside the cell, after its last paragraph. */
-.dohc-notion-editor :is(th, td) > p:last-of-type {
+/* A cell ends at its padding when a paragraph ends it. A block with no space
+ * above it takes the paragraph's 12px instead; headings and rules keep their
+ * own, which is larger. */
+.dohc-notion-editor :is(th, td) > p {
   margin-bottom: 0;
+}
+
+.dohc-notion-editor :is(th, td) > p + :is(p, ul, ol, blockquote, pre, table) {
+  margin-top: 12px;
 }
 
 /* Tiptap cell-selection tint. */

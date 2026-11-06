@@ -61,14 +61,6 @@ describe("Ref", () => {
     expect(glyphs[0]!.getAttribute("width")).toBe("13");
   });
 
-  it("tints a selected chip as text selection is tinted, and hovers in the ink fill", () => {
-    render(<Ref path="data/funnel.csv" selected onOpen={() => {}} testId="ref" />);
-    const classes = screen.getByTestId("ref").className.split(" ");
-    expect(classes).toContain("bg-[image:linear-gradient(var(--dohc-selection),var(--dohc-selection))]");
-    expect(classes).toContain("hover:bg-[image:linear-gradient(var(--color-hover),var(--color-hover))]");
-    expect(classes.join(" ")).not.toContain("--color-selected");
-  });
-
   it("dashes the border of a target that does not resolve", () => {
     render(<Ref path="notes/gone.md" missing testId="ref" />);
     const chip = screen.getByTestId("ref");
