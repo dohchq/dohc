@@ -38,9 +38,26 @@ type Palette = {
   groups: string[];
   font: string;
   edgeAlpha: number;
+  nodeDim: number;
+  labelDim: number;
 };
 
-const DIM = 0.12;
+// While a node is emphasised, the other nodes stay clickable, so they dim only
+// as far as every node colour keeps 3:1 and every label 4.5:1 on both
+// surfaces (GraphCanvas.test.ts). Links aren't targets, so they dim further.
+export const NODE_TOKEN = { light: "subtle", dark: "muted" } as const;
+export const NODE_DIM = { light: 0.88, dark: 0.56 } as const;
+export const LABEL_DIM = { light: 0.88, dark: 0.75 } as const;
+const LINK_DIM = 0.12;
+
+// A label's opacity, given its zoom fade and how far another node is
+// emphasised. While one is, a label still fading shows not at all, so a
+// dimmed label is either at LABEL_DIM or hidden, never below 4.5:1.
+export function labelOpacity(fade: number, emphasis: number, dim: number, own: boolean): number {
+  const rest = 1 - (1 - dim) * emphasis;
+  if (own) return Math.max(fade * rest, emphasis);
+  return emphasis > 0 && fade < 1 ? 0 : fade * rest;
+}
 const LABEL_LIMIT = 600;
 // Above this many links on screen, links draw as hairlines (under a device pixel).
 const DENSE_LINKS = 1000;
@@ -53,17 +70,19 @@ const FADE_MS = 140;
 function readPalette(surface: "bg" | "panel"): Palette {
   const style = getComputedStyle(document.documentElement);
   const token = (name: string) => style.getPropertyValue(`--dohc-${name}`).trim() || "#888";
-  const dark = document.documentElement.dataset.theme === "dark";
+  const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   return {
     bg: token(surface),
     ink: token("ink"),
-    node: token(dark ? "muted" : "subtle"),
+    node: token(NODE_TOKEN[theme]),
     edge: token("ink"),
     label: token("muted"),
     match: token("match"),
     groups: GROUP_HUES.map((hue) => token(`hue-${hue}`)),
     font: style.getPropertyValue("--font-sans").trim() || "system-ui, sans-serif",
-    edgeAlpha: dark ? 0.2 : 0.16,
+    edgeAlpha: theme === "dark" ? 0.2 : 0.16,
+    nodeDim: NODE_DIM[theme],
+    labelDim: LABEL_DIM[theme],
   };
 }
 
@@ -423,7 +442,9 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (count === 0) return false;
     const { display } = options;
     const highlight = lit >= 0 && mix > 0;
-    const rest = highlight ? 1 - (1 - DIM) * mix : 1;
+    const dimmed = (floor: number) => (highlight ? 1 - (1 - floor) * mix : 1);
+    const rest = dimmed(palette.nodeDim);
+    const linkRest = dimmed(LINK_DIM);
     const sx = (i: number) => px(i) * k + tx;
     const sy = (i: number) => py(i) * k + ty;
     const minR = options.local ? 2.5 : 1.25;
@@ -435,7 +456,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     const lineWidth = Math.max(0.35, Math.min(2.4, (0.4 + display.linkThickness * 1.6) * Math.sqrt(Math.min(k, 2))));
     const strokeWidth = (links: number, wide: number) => (links > DENSE_LINKS ? Math.min(wide, HAIRLINE / dpr) : wide);
     ctx.strokeStyle = palette.edge;
-    ctx.globalAlpha = palette.edgeAlpha * rest;
+    ctx.globalAlpha = palette.edgeAlpha * linkRest;
     ctx.beginPath();
     let shown = 0;
     for (let l = 0; l < source.length; l++) {
@@ -463,7 +484,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     }
     if (display.arrows && k > 0.25) {
       ctx.fillStyle = palette.edge;
-      ctx.globalAlpha = Math.min(0.55, palette.edgeAlpha * 2.5) * rest;
+      ctx.globalAlpha = Math.min(0.55, palette.edgeAlpha * 2.5) * linkRest;
       ctx.beginPath();
       const size = Math.max(3, 5 * Math.min(k, 1.5));
       for (let l = 0; l < source.length; l++) {
@@ -628,7 +649,7 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
         labelAlpha[i] = fade;
         if (fade !== goal) labelsFading = true;
       }
-      const alpha = own ? Math.max(fade * rest, mix) : fade * rest;
+      const alpha = labelOpacity(fade, highlight ? mix : 0, palette.labelDim, own);
       if (alpha < 0.03) return;
       for (let r = r0; r <= r1; r++) taken.fill(1, r * cols + c0, r * cols + c1 + 1);
       ctx.globalAlpha = alpha;
