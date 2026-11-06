@@ -187,6 +187,8 @@ export function FailedRunLine(props: {
   busy: boolean;
   onRetry?: () => void;
   onOpenAgentSettings?: () => void;
+  // The agent whose own chat this is, where any message asks it.
+  chatAgentId?: string;
   className?: string;
   children?: ReactNode;
 }) {
@@ -220,6 +222,7 @@ export function FailedRunLine(props: {
               step={props.failed.nextStep}
               testIdPrefix={props.testIdPrefix}
               onOpenAgentSettings={props.onOpenAgentSettings}
+              chatAgentId={props.chatAgentId}
             />
           </span>
         </span>
@@ -228,15 +231,21 @@ export function FailedRunLine(props: {
   );
 }
 
-// What to do instead of Try again: mention the agent, or, when the @ menu
-// can't offer it, a step in Settings, which opens the Agents page.
+// What to do instead of Try again: message the agent, in its own chat or by
+// its @handle elsewhere, or, when a message won't wake it, a step in
+// Settings, which opens the Agents page.
 function FailedRunNextStep(props: {
   step: NonNullable<ChatDispatchFailedRun["nextStep"]>;
   testIdPrefix: string;
   onOpenAgentSettings?: () => void;
+  chatAgentId?: string;
 }) {
   const { step } = props;
-  if (step.kind === "mention") return <>Mention @{step.handle} to ask again.</>;
+  if (step.kind === "message") {
+    return <>{step.agentId === props.chatAgentId ? `Message ${step.name} to ask again.`
+      : step.handle ? `Mention @${step.handle} to ask again.`
+      : `Message ${step.name} in its own chat to ask again.`}</>;
+  }
   const action = step.kind === "add-agent" ? "Add an agent"
     : step.kind === "turn-on" ? `Turn ${step.name} on`
     : `Set up ${step.name}`;

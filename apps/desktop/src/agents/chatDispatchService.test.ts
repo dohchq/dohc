@@ -3202,7 +3202,7 @@ describe("chatDispatchService", () => {
 
     expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).failedRun).toEqual({
       runId: claim.run.runId, triggerMessageId: trigger.messageId, words,
-      nextStep: { kind: "mention", handle: "Nova" }, retryable: false,
+      nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" }, retryable: false,
     });
     // The notice keeps its words. The mention is for the conversation only.
     expect(fixture.notices[0]!.title).toBe(`${words.split(".")[0]} in "Run the request."`);
@@ -3211,12 +3211,14 @@ describe("chatDispatchService", () => {
     expect(fixture.requeues).toEqual([]);
   });
 
-  // The line names the @handle the composer inserts, which drops spaces and
-  // punctuation. A name with no handle can't be mentioned, so it gets no line.
+  // The step carries the agent's id, so its own chat can say to message it,
+  // and the @handle the composer inserts, which drops spaces and
+  // punctuation. A name with no handle carries none: elsewhere the line says
+  // to message it in its own chat.
   it.each([
-    { agentName: "Codex (Work)", nextStep: { kind: "mention", handle: "CodexWork" } },
-    { agentName: "\u{1F98A}", nextStep: undefined },
-  ])("names the agent's handle in the line to ask again: %j", async ({ agentName, nextStep }) => {
+    { agentName: "Codex (Work)", nextStep: { kind: "message", agentId: "default", name: "Codex (Work)", handle: "CodexWork" } },
+    { agentName: "\u{1F98A}", nextStep: { kind: "message", agentId: "default", name: "\u{1F98A}" } },
+  ])("names the agent and its handle in the step to ask again: %j", async ({ agentName, nextStep }) => {
     const fixture = await createFixture({ agentName });
     await stubRunnerPath(fixture, { node: true });
     const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
@@ -3255,7 +3257,7 @@ describe("chatDispatchService", () => {
   // A run with nothing to try again says to mention its agent. A run that
   // couldn't start, or needs Node.js, keeps its own next step instead.
   it.each([
-    { exitCode: 0, node: true, words: "Nova didn't reply. Its run ended without a reply.", nextStep: { kind: "mention", handle: "Nova" } },
+    { exitCode: 0, node: true, words: "Nova didn't reply. Its run ended without a reply.", nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } },
     {
       exitCode: 7,
       node: false,
@@ -3278,7 +3280,7 @@ describe("chatDispatchService", () => {
   });
 
   it.each([
-    { reason: "timed out after 30m", words: "Nova didn't reply. It ran past its 30-minute limit.", nextStep: { kind: "mention", handle: "Nova" } },
+    { reason: "timed out after 30m", words: "Nova didn't reply. It ran past its 30-minute limit.", nextStep: { kind: "message", agentId: "default", name: "Nova", handle: "Nova" } },
     { reason: "runner failed to start: spawn ENOENT", words: "Nova didn't reply. It couldn't start: spawn ENOENT", nextStep: undefined },
   ])("says what to do next, with no Try again, on a run that ended with %j", async ({ reason, words, nextStep }) => {
     const fixture = await createFixture();

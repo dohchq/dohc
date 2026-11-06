@@ -560,6 +560,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         busy={retryBusy}
         onRetry={failedRun.retryable ? onRetryFailedRun : undefined}
         onOpenAgentSettings={onOpenAgentSettings}
+        chatAgentId={nav.channel.kind === "agent" ? nav.channel.agentId : undefined}
         className={className}
       >
         {askedBy ? <RunAskedBy message={askedBy} /> : null}

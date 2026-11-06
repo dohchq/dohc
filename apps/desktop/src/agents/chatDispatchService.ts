@@ -867,19 +867,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
     // Running these again would repeat what they did, so the person asks
-    // the agent again instead, with the @handle the composer inserts. When
-    // the @ menu can't offer the agent, the step is in Settings: add an
-    // agent, set it up or turn it on, in the order its DM checks them, by
-    // the full name its DM and Settings show. A
-    // run that couldn't start or needs Node.js has its own next step, and a
-    // name with no handle can't be mentioned.
+    // the agent again instead, in a message the chat words, with the @handle
+    // the composer inserts. A message won't wake an agent that's gone, off
+    // or not set up, so its step is in Settings, in the order its DM checks
+    // them, by the full name its DM and Settings show. A run that couldn't
+    // start or needs Node.js has its own next step.
     const handle = agent ? handleForName(agent.name) : "";
     const nextStep: ChatDispatchFailedRun["nextStep"] = !ASKS_AGAIN.has(outcome) || needsNodeJs(outcome, nodeAvailable) ? undefined
       : !agent ? { kind: "add-agent" }
       : !agent.launch ? { kind: "set-up", name: agent.name }
       : !agent.enabled ? { kind: "turn-on", name: agent.name }
-      : handle ? { kind: "mention", handle }
-      : undefined;
+      : { kind: "message", agentId: agent.id, name: agent.name, ...(handle ? { handle } : {}) };
     return {
       lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),

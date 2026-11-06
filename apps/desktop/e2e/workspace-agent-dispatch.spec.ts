@@ -303,9 +303,9 @@ test("a runner that exits silently says why under the message and posts a notice
     await expect(toasts).toContainText("Nova didn't reply");
     // The same words sit under the message that asked. Running it again
     // would repeat what it did, so the line offers no Try again and says to
-    // ask the agent again instead.
+    // ask the agent again instead. In its own chat a message asks it.
     const words = "Nova didn't reply. Its run ended with an error.";
-    const nextStep = "Mention @Nova to ask again.";
+    const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
     await expect(line.getByRole("status")).toHaveText([words, nextStep]);
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
@@ -352,12 +352,12 @@ test("a runner that exits silently says why under the message and posts a notice
       }
     }
 
-    // A post in a group says the same under its opening message.
+    // A post in a group says it under its opening message, by the @handle.
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     const postLine = page.getByTestId("chats-run-failed");
-    await expect(postLine.getByRole("status")).toHaveText([words, nextStep]);
+    await expect(postLine.getByRole("status")).toHaveText([words, "Mention @Nova to ask again."]);
     await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {

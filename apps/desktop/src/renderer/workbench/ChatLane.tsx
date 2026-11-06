@@ -121,6 +121,7 @@ export function ChatLane(props: {
   const { workspaceId, onError } = props;
   const channelId = props.channel.id;
   const agentDm = props.channel.kind === "agent";
+  const chatAgentId = agentDm ? props.channel.agentId : undefined;
   const agentOffer = useAgentOffer({
     workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
   });
@@ -547,9 +548,10 @@ export function ChatLane(props: {
         className="mt-1"
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
         {...(props.onOpenAgentSettings ? { onOpenAgentSettings: props.onOpenAgentSettings } : {})}
+        {...(chatAgentId ? { chatAgentId } : {})}
       /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (
