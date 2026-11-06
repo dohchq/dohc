@@ -1,7 +1,8 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
 import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
-import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import { createAccountSessionResolver, createSessionActorResolver, UnauthorizedError, type ResolveAccountSession, type ResolveActor } from "@dohc/workspace-auth/session";
+import { parsePushVapidPublicKey } from "./pushRoutes";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -287,8 +288,9 @@ let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string
 let lookupUserDisplayName: (
   userId: string,
 ) => Promise<string | null> | string | null;
-const resolveAccountActor: ResolveActor = testAuthSeam
-  ? createTestActorResolver()
+// The test seam has no browser sign-ins, so it serves no push subscriptions.
+const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession} = testAuthSeam
+  ? {actor: createTestActorResolver()}
   : await (async () => {
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
@@ -306,8 +308,16 @@ const resolveAccountActor: ResolveActor = testAuthSeam
         baseURL: process.env.SYNC_RELAY_AUTH_BASE_URL ?? `http://localhost:${requestedPort || 1788}`,
         secret,
       });
-      return createSessionActorResolver(auth);
+      return {actor: createSessionActorResolver(auth), session: createAccountSessionResolver(auth)};
   })();
+const resolveAccountActor = accountResolvers.actor;
+const resolveAccountSession = accountResolvers.session;
+// Only the public key. Without it the browser chat page reports alerts unavailable.
+const pushVapidPublicKey = process.env.DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY || undefined;
+if (pushVapidPublicKey !== undefined) {
+  try { parsePushVapidPublicKey(pushVapidPublicKey); }
+  catch { fatal("FATAL: DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY must be a base64url P-256 public key."); }
+}
 
 const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
   allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
@@ -388,6 +398,8 @@ const relayApplication = createSyncRelayHandler({
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
+  ...(resolveAccountSession ? {resolveAccountSession} : {}),
+  ...(pushVapidPublicKey ? {pushVapidPublicKey} : {}),
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   lookupUserEmails: async userIds => {

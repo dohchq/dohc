@@ -15,6 +15,7 @@ import {readOwnerAppResponses} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
 import {createNamedRecipientChat} from "./namedRecipientChat";
+import {createPushRoutes} from "./pushRoutes";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -29,7 +30,7 @@ import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreR
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
 import { randomUUID } from "node:crypto";
 import { createNamedLiveBrowserHttp, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
-import type { ResolveActor } from "@dohc/workspace-auth/session";
+import type { ResolveAccountSession, ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
 import {
@@ -122,6 +123,10 @@ export interface CreateSyncRelayHandlerOptions {
   heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
+  // The browser sign-in behind a cookie, for state bound to it such as push subscriptions.
+  resolveAccountSession?: ResolveAccountSession;
+  // This server's VAPID public key. Absent means alerts are unavailable here.
+  pushVapidPublicKey?: string;
   nowMs?: () => number;
   // Maps a verified email to its account id. An unknown or unverified address returns null.
   // Absent means email-addressed grants are unavailable; grants by user id still work.
@@ -200,6 +205,8 @@ export function createSyncRelayHandler({
   heldDocumentHost = () => undefined,
   storage,
   resolveActor,
+  resolveAccountSession,
+  pushVapidPublicKey,
   nowMs = () => Date.now(),
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
@@ -470,6 +477,16 @@ export function createSyncRelayHandler({
   const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
     resolveActor, lookupUserDisplayName, claimPendingShares, activity: discussionActivity, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
+  }) : undefined;
+
+  const push = namedBrowserSessionLimits && resolveAccountSession ? createPushRoutes({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, vapidPublicKey: pushVapidPublicKey,
+    limits: namedBrowserSessionLimits, nowMs,
+    resolveAccountSession: async (request) => {
+      const session = await resolveAccountSession(request);
+      if (accountIsFenced(storage, session.userId)) throw notFound();
+      return session;
+    },
   }) : undefined;
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
@@ -743,6 +760,9 @@ export function createSyncRelayHandler({
       }
       if (pathname.startsWith("/sync/named-chat/")) {
         return namedChat ? await namedChat(request) : errorResponse(notFound());
+      }
+      if (pathname.startsWith("/sync/push/")) {
+        return push ? await push(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
       if (route.route === "link-exchange") {

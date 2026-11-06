@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import type { WorkspaceAuth } from "./betterAuth";
-import { createSessionActorResolver, UnauthorizedError } from "./session";
+import { accountSessionFrom, createAccountSessionResolver, createSessionActorResolver, UnauthorizedError } from "./session";
 
 vi.mock("./betterAuth", () => {
   throw new Error("Session helpers must not initialize Better Auth.");
@@ -35,4 +35,28 @@ it("does not turn a session lookup failure into an actor", async () => {
   getSession.mockRejectedValueOnce(failure);
   await expect(resolve(new Request("https://workspace.example/files"), "workspace-one"))
     .rejects.toBe(failure);
+});
+
+it("binds an account session to the validated sign-in, never to request fields", async () => {
+  const getSession = vi.fn(async () => ({
+    user: { id: "session-user" },
+    session: { id: "sign-in-1", userId: "session-user", expiresAt: new Date(5_000) },
+  }));
+  const resolve = createAccountSessionResolver({ api: { getSession } } as unknown as WorkspaceAuth);
+  const request = new Request("https://workspace.example/push?userId=caller-user&sessionId=forged", {
+    headers: { cookie: "session=token" },
+  });
+  await expect(resolve(request)).resolves.toEqual({ userId: "session-user", sessionId: "sign-in-1", expiresAtMs: 5_000 });
+  expect(getSession).toHaveBeenCalledExactlyOnceWith({ headers: request.headers });
+});
+
+it("refuses an account session without a validated, consistent sign-in", async () => {
+  const resolve = createAccountSessionResolver({ api: { getSession: async () => null } } as unknown as WorkspaceAuth);
+  await expect(resolve(new Request("https://workspace.example/push"))).rejects.toMatchObject(new UnauthorizedError());
+  expect(() => accountSessionFrom({ user: { id: "a" }, session: { id: "s", userId: "b", expiresAt: 1 } }))
+    .toThrow(UnauthorizedError);
+  expect(() => accountSessionFrom({ user: { id: "a" }, session: { id: "", userId: "a", expiresAt: 1 } }))
+    .toThrow(UnauthorizedError);
+  expect(() => accountSessionFrom({ user: { id: "a" }, session: { id: "s", userId: "a", expiresAt: "never" } }))
+    .toThrow(UnauthorizedError);
 });

@@ -677,6 +677,9 @@ export interface SyncRelayStorage {
   retirementJournalEvidence(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, deliveryIds: readonly string[]):
     {receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[]; absent: string[]};
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readPushSubscription(installationId: string): import("./pushSubscriptions").PushSubscriptionRow | null;
+  bindPushSubscription(input: import("./pushSubscriptions").BindPushSubscriptionInput): import("./pushSubscriptions").PushSubscriptionRow;
+  removePushSubscription(input: {installationId: string; userId: string}): void;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;

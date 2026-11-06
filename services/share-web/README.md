@@ -331,6 +331,25 @@ They require the recipient account cookie, configured public Origin, and relay e
 The desktop transport also accepts `hold` on `GET /sync/shares/:shareId/log`.
 It retains its existing envelope, channel filtering, and cursor contract.
 
+### Alerts on this device
+
+A signed-in browser keeps one push subscription per installation on this server.
+Each endpoint is a POST with a JSON body, the public Origin, and the account session cookie.
+The browser mints `installationId` once: 16 random bytes in base64url.
+
+- `POST /api/push/status` takes `{installationId}` and returns the installation's state.
+- `POST /api/push/subscribe` takes `{installationId, vapidKeyId, endpoint, p256dh, auth, expiresAtMs}`.
+- `POST /api/push/unsubscribe` takes `{installationId}`.
+
+Status and unsubscribe return `{ok: true, available: false}` when the relay has no `DOHC_RELAY_PUSH_VAPID_PUBLIC_KEY`. Subscribe receives 409.
+Otherwise each returns `{ok: true, available: true, vapidPublicKey, vapidKeyId, enabled, generation, fingerprint}`.
+`fingerprint` is the hex SHA-256 of the stored endpoint. The server never returns an endpoint.
+Alerts are on only for the account sign-in that turned them on, until that sign-in or the browser subscription expires.
+When another account signs in on the same browser and subscribes with the same `installationId` and `endpoint`, the alerts move to that account.
+Another installation's endpoint, or another account's installation with a different endpoint, receives 409. A changed `vapidKeyId` also receives 409.
+Link holders and signed-out browsers receive 401.
+The trusted relay endpoints are POSTs to `/sync/push/status`, `/sync/push/subscribe`, and `/sync/push/unsubscribe`.
+
 
 ## Storage and recovery
 

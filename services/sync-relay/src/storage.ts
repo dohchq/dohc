@@ -122,6 +122,7 @@ import * as blobsStorage from "./storage/blobs";
 import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
+import * as pushStorage from "./storage/pushSubscriptions";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as collectionWriteStorage from "./storage/collectionWrites";
@@ -726,6 +727,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
     return noticeStorage.postAutomationWake(this, input);
+  }
+
+  readPushSubscription(installationId: string): pushStorage.PushSubscriptionRow | null {
+    return this.readTx(() => pushStorage.readPushSubscription(this, installationId));
+  }
+
+  bindPushSubscription(input: pushStorage.BindPushSubscriptionInput): pushStorage.PushSubscriptionRow {
+    return pushStorage.bindPushSubscription(this, input);
+  }
+
+  removePushSubscription(input: {installationId: string; userId: string}): void {
+    pushStorage.removePushSubscription(this, input);
   }
 
   postNotice(input: noticeStorage.PostNoticeInput): void {

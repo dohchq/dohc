@@ -83,6 +83,7 @@ export function fenceAccount(storage: StorageContext, key: string, userId: strin
     storage.db.prepare("DELETE FROM sync_relay_link_sessions WHERE grant_id IN (SELECT g.grant_id FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id) WHERE s.granter_user_id=?)").run(userId);
     storage.db.prepare("UPDATE sync_relay_service_host_enrollments SET enabled=0,retired=1 WHERE owner_user_id=?").run(userId);
     storage.db.prepare("DELETE FROM sync_relay_live_session_tickets WHERE principal_id=? OR workspace_id IN (SELECT workspace_id FROM sync_relay_workspaces WHERE owner_user_id=?)").run(userId,userId);
+    storage.db.prepare("DELETE FROM sync_relay_push_subscriptions WHERE account_user_id=?").run(userId);
     storage.db.prepare("INSERT INTO sync_relay_account_deletions VALUES(?,'fenced',?)").run(accountHash, JSON.stringify(manifest));
     return {phase: "fenced", manifest};
   });
