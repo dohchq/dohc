@@ -86,11 +86,13 @@ function shell(bridge: ReturnType<typeof collectionBridge>, workspace: Workspace
   return <RegistryShell bridge={bridge} workspace={workspace} />;
 }
 
-// Opens a notice's Details unless it is open, then copies its report.
-async function copyDetails(user: { click: (element: Element) => Promise<void> }, notice: HTMLElement) {
+// Opens a notice's Details unless it is open, then copies its report. A
+// plain click moves no pointer, so copying a row doesn't read it and close
+// its toast.
+async function copyDetails(notice: HTMLElement) {
   const closed = within(notice).queryByRole("button", { name: "Details" });
-  if (closed) await user.click(closed);
-  await user.click(within(notice).getByRole("button", { name: "Copy details" }));
+  if (closed) await act(async () => { fireEvent.click(closed); });
+  await act(async () => { fireEvent.click(within(notice).getByRole("button", { name: "Copy details" })); });
 }
 
 function focusAfterMinimum() {
@@ -857,7 +859,8 @@ describe("ended Edit Collection shares", () => {
   });
 
   it.each(["no file open", "docs/shared.md open"])("keeps one toast and one row when a background refresh refuses with %s", async openFile => {
-    const user = userEvent.setup();
+    // userEvent's setup gives the test a clipboard to read.
+    userEvent.setup();
     const bridge = collectionBridge();
     bridge.getWorkspaceUiState.mockResolvedValue(storedStateWithTabs(openFile === "no file open" ? [] : ["docs/shared.md"]));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
@@ -884,7 +887,7 @@ describe("ended Edit Collection shares", () => {
     };
     const copyToast = async () => {
       await navigator.clipboard.writeText("");
-      await copyDetails(user, screen.getByTestId("workspace-shell-error"));
+      await copyDetails(screen.getByTestId("workspace-shell-error"));
       return navigator.clipboard.readText();
     };
     const copyBoth = async (cause?: string) => {
@@ -898,7 +901,7 @@ describe("ended Edit Collection shares", () => {
       expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
       expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
       await navigator.clipboard.writeText("");
-      await copyDetails(user, row);
+      await copyDetails(row);
       const rowCopy = await navigator.clipboard.readText();
       checkCopy(rowCopy, cause);
       expect(rowCopy).toBe(toastCopy);
