@@ -290,9 +290,14 @@ export class EngineYDocArrivals {
  */
 export class LiveDocumentEditAppliedError extends Error {}
 
-/** Who a main-side document edit is recorded under. */
+/**
+ * Who a main-side document edit is recorded under. agentName is the name a
+ * connected agent gave itself: a file write's moment shows it, and a live
+ * edit does not record it yet.
+ */
 export interface LiveDocumentEditOrigin {
   actorOriginId?: string;
+  agentName?: string;
   attribution: ChangeAttributionWire;
 }
 

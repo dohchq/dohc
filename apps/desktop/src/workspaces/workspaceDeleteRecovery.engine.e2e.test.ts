@@ -307,6 +307,7 @@ it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's ren
     }
     expect(await capture.fileObjectIdForPath("folder/tracked.txt")).toBe(object);
     expect(await readFile(join(rootPath, "folder/tracked.txt"), "utf8")).toBe("typed after move\n");
+    // The MCP Undo above gave the name "dohc-mcp". The same agent without a name is the same author.
     const replay = await history.undoHistoryOperation({ workspaceId: workspace.workspaceId, operationId, requestId: `move-undo:${operationId}`,
       author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId } });
     expect(replay).toMatchObject({ deduped: true, momentCount: 4 });

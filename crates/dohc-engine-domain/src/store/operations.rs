@@ -274,9 +274,30 @@ pub fn undo_request_fingerprint(
             b"history.undo",
             ws.as_bytes(),
             operation.as_bytes(),
-            author.unwrap_or("").as_bytes(),
+            without_agent_name(author.unwrap_or("")).as_bytes(),
         ])
     })
+}
+
+// The name a connected agent gave itself is a History label, never an
+// identity, so the same agent's Undo under another name, or none, is the
+// same request.
+fn without_agent_name(author: &str) -> std::borrow::Cow<'_, str> {
+    let Ok(serde_json::Value::Array(mut authors)) = serde_json::from_str(author) else {
+        return author.into();
+    };
+    let mut named = false;
+    for entry in &mut authors {
+        named |= entry
+            .as_object_mut()
+            .and_then(|entry| entry.remove("agentName"))
+            .is_some();
+    }
+    if named {
+        serde_json::Value::Array(authors).to_string().into()
+    } else {
+        author.into()
+    }
 }
 
 fn checked_undo_request_in(

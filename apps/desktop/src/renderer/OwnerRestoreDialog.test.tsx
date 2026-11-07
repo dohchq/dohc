@@ -337,6 +337,41 @@ it("marks the agent the owner's change declared beside the authenticated owner",
   // The declared person stays out of the row; the server's owner is the authority it names.
   expect(row.textContent?.split("Change details")[0]).not.toContain("local-person");
 });
+it("marks a connected agent's change with the plug, and a guest's agent as the guest's", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!, base = reviewFixture();
+  // The first change is a connected agent's that gave no name. The second is a guest's, by an agent whose id
+  // reverses the text after it. The third is a connected agent's that calls itself Claude.
+  const changes = [{authority: owner, agent: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local-person", depth: 0}},
+    {authority: reader, agent: {kind: "agent", agentId: `trip${String.fromCodePoint(0x202e)}agent`, onBehalfOf: "reader", depth: 0}},
+    {authority: owner, agent: {kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "local-person", depth: 0}}];
+  const review = {...base, acceptedEvents: base.acceptedEvents.map((event, index) => {
+    const change = changes[index];
+    return change ? {...event, metadata: {...event.metadata, accepted: {...event.metadata.accepted, authority: change.authority}, authorSnapshot: [change.agent]}} : event;
+  })};
+  f.call.mockImplementation(input => input.action === "review" ? Promise.resolve({status: f.status(), result: review}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  const badges = screen.getAllByTestId("owner-restore-change-agent-badge");
+  const shownName = (badge: HTMLElement) => badge.parentElement!.nextElementSibling!.textContent;
+  const connected = badges.filter(badge => badge.getAttribute("aria-label") === "connected agent");
+  const plugged = connected.find(badge => shownName(badge) === "Claude")!;
+  const unnamed = connected.find(badge => badge !== plugged)!;
+  const run = badges.find(badge => badge.getAttribute("aria-label") === "agent")!;
+  fireEvent.focus(plugged);
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Claude (as reported)");
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Connected agent");
+  fireEvent.blur(plugged);
+  // An agent that gave no name shows as "Agent", not by dohc's id for it, and nothing marks it as reported.
+  expect(shownName(unnamed)).toBe("Agent");
+  fireEvent.focus(unnamed);
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toBe("AgentConnected agent");
+  fireEvent.blur(unnamed);
+  fireEvent.focus(run);
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Account reader");
+  // Neither the card nor the row shows the id.
+  expect(run.closest("li")!.textContent!.split("Change details")[0]).not.toContain("trip");
+  expect(run.parentElement!.nextElementSibling!.textContent).toBe("Agent");
+});
 
 it("allows declining content replacement after access stops", async () => {
   const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();

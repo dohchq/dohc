@@ -8,6 +8,7 @@ import { settingsWithAgent } from "../../testing/agentSettings";
 const mine = { group: "agent-mine", hue: null, self: true } as const;
 const theirs = { group: "agent-theirs", hue: null, self: false } as const;
 const ada = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } };
+const REPORTED = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
 
 function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?: string; authorAgentId?: string }, presentation: typeof mine | typeof theirs, settings = settingsWithAgent({ name: "Nova", launch: { command: "local-tool --private-path" } }, ada)) {
   render(<AgentSettingsProvider settings={settings}>
@@ -86,5 +87,60 @@ describe("agent badge", () => {
     fireEvent.click(screen.getByTestId("chats-post-agent-badge"));
     expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Ada");
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("marks a connected agent with the plug and a card that names it as reported, and your run's Claude as an agent", () => {
+    const connected = { group: "agent-connected", hue: null, self: true, connected: true } as const;
+    render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Claude", authorOwnerDisplayName: "Ada" }} presentation={connected} />);
+    const badge = screen.getByTestId("chats-post-agent-badge");
+    expect(badge.getAttribute("aria-label")).toBe("connected agent");
+    fireEvent.focus(badge);
+    const card = screen.getByRole("tooltip", { hidden: true }).textContent ?? "";
+    expect(card).toContain("Claude (as reported)");
+    expect(card).toContain("Connected agent");
+    expect(card).not.toContain("Owned by");
+    cleanup();
+    render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Claude", authorOwnerDisplayName: "Ada", authorAgentId: "claude" }} presentation={mine} />);
+    expect(screen.getByTestId("chats-post-agent-badge").getAttribute("aria-label")).toBe("agent");
+    fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+    expect(screen.getByRole("tooltip", { hidden: true }).textContent).not.toContain("(as reported)");
+  });
+
+  it("says \"(as reported)\" once on a connected agent's card: on its reported line, else on a name it gave", () => {
+    const connected = { group: "agent-connected", hue: null, self: true, connected: true } as const;
+    const card = (authorDisplayName: string, authorReported?: typeof REPORTED, named?: boolean) => {
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName, ...(authorReported ? { authorReported } : {}) }}
+        presentation={connected} {...(named === undefined ? {} : { named })} />);
+      fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+      const text = screen.getByRole("tooltip", { hidden: true }).textContent;
+      cleanup();
+      return text;
+    };
+    expect(card("Scout", REPORTED)).toBe("ScoutConnected agentClaude Code 2.1 · Claude Opus 5.5 (as reported)");
+    expect(card("Scout")).toBe("Scout (as reported)Connected agent");
+    // dohc shows "Agent" for an agent that gave no name, so the agent reported none.
+    expect(card("Agent")).toBe("AgentConnected agent");
+    // Where the caller knows the agent gave "Agent" itself, it did report it.
+    expect(card("Agent", undefined, true)).toBe("Agent (as reported)Connected agent");
+  });
+
+  it("marks a share's agent post with the plug, and a card that claims no kind", () => {
+    // A share serves no run id, so its agent posts could be a run's or a connected agent's.
+    const share = { group: "agent-share", hue: null, self: false, connected: "unknown" } as const;
+    const card = (authorDisplayName: string, authorReported?: typeof REPORTED) => {
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName, authorOwnerDisplayName: "Ada", ...(authorReported ? { authorReported } : {}) }} presentation={share} />);
+      const badge = screen.getByTestId("chats-post-agent-badge");
+      expect(badge.getAttribute("aria-label")).toBe("agent");
+      expect(badge.querySelector(".lucide-plug")).not.toBeNull();
+      fireEvent.focus(badge);
+      const text = screen.getByRole("tooltip", { hidden: true }).textContent;
+      cleanup();
+      return text;
+    };
+    // No second line: neither "Connected agent" nor an owner. "(as reported)"
+    // goes once, and not on the "Agent" dohc shows for an agent that gave no name.
+    expect(card("Scout")).toBe("Scout (as reported)");
+    expect(card("Agent")).toBe("Agent");
+    expect(card("Scout", REPORTED)).toBe("ScoutClaude Code 2.1 · Claude Opus 5.5 (as reported)");
   });
 });

@@ -955,6 +955,38 @@ mod tests {
         );
     }
     #[test]
+    fn history_operation_undo_replays_without_the_name_an_agent_gave() {
+        let named = r#"[{"agentId":"dohc-mcp","agentName":"Mover agent","kind":"agent","onBehalfOf":"person"}]"#;
+        let unnamed = r#"[{"agentId":"dohc-mcp","kind":"agent","onBehalfOf":"person"}]"#;
+        let other = r#"[{"agentId":"writer","kind":"agent","onBehalfOf":"person"}]"#;
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "old.md", "seed", "Before.\n");
+        rename(&mut store, root.path(), "old.md", "new.md", "rename", OP);
+        let mut undo_as = |author: &str| {
+            test_undo_in_turns(
+                &mut store,
+                WS,
+                OP,
+                "undo",
+                Some(author),
+                root.path(),
+                Arc::new(NoFaults),
+                10,
+            )
+        };
+        let result = undo_as(named).unwrap();
+        assert!(!result.deduped);
+        let replay = undo_as(unnamed).unwrap();
+        assert!(replay.deduped);
+        assert_eq!(replay.moments, result.moments);
+        assert!(matches!(
+            undo_as(other),
+            Err(RuntimeError::Domain(
+                DomainError::IdempotencyKeyReuseMismatch
+            ))
+        ));
+    }
+    #[test]
     fn history_operation_whole_group_refuses_occupied_or_moved_objects() {
         for occupied in [true, false] {
             let (root, mut store) = fixture();

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
-import { Sparkles, TriangleAlert } from "lucide-react";
+import { Plug, Sparkles, TriangleAlert } from "lucide-react";
+import { isConnectedAgentId, shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
@@ -392,12 +393,15 @@ export function CloudSyncSettings(props: {
 function SyncPausedLine(props: { pause: SyncPause }) {
   const { author } = props.pause;
   const time = formatChatTime(props.pause.atMs);
-  // A person pause from another installation id (a copied or reset registry) names nobody.
+  // A person pause from another installation id (a copied or reset registry)
+  // names nobody. A connected agent takes the plug beside the name it gave, or "Agent".
+  const connected = author.kind === "agent" && isConnectedAgentId(author.agentId);
+  const Mark = connected ? Plug : Sparkles;
   const by = author.kind === "agent" ? (
     <span className="text-agent">
-      <Sparkles size={12} strokeWidth={1.9} aria-hidden className="mr-0.5 inline align-[-2px]" />
-      <span className="sr-only">agent </span>
-      {author.agentId}
+      <Mark size={12} strokeWidth={1.9} aria-hidden data-agent-mark={connected ? "connected" : "agent"} className="mr-0.5 inline align-[-2px]" />
+      <span className="sr-only">{connected ? "connected agent " : "agent "}</span>
+      {shownAgentName(author.agentName) ?? (connected ? "Agent" : author.agentId)}
     </span>
   ) : author.self ? "you" : null;
   return (

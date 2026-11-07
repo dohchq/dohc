@@ -7,6 +7,8 @@ import {useRequestSequence} from "./useRequestSequence";
 import {ipcErrorMessage} from "./ipcError";
 import {ownerRestoreOutcomes} from "./ownerRestoreOutcomes";
 import {AgentBadge} from "./workbench/AgentBadge";
+import {neutralPresentation} from "./workbench/actorPresentation";
+import {escapeHiddenText, isConnectedAgentId, shownAgentName} from "@dohc/workspace-contracts/actor-presentation";
 import type {OwnerRestoreOptions, OwnerRestorePhase, OwnerRestorePlan, OwnerRestoreReview, OwnerRestoreStatus} from "../ipc/ownerRestoreContract";
 
 type State = {kind: "loading"} | {kind: "options"; options: OwnerRestoreOptions}
@@ -67,13 +69,19 @@ function ChangeList({label, events, emails}: {label: string; events: OwnerRestor
       {events.slice(start, start + 50).map(({metadata}) => {
         const {authority, receipt, receivedAtMs} = metadata.accepted;
         const agent = metadata.authorSnapshot?.find(entry => entry.kind === "agent");
+        // A guest gives both the name and the id, so either shows only when nothing in it hides or reorders text.
+        // A connected agent's id is dohc's, not a name it gave.
+        const given = shownAgentName(agent?.agentName) ?? (isConnectedAgentId(agent?.agentId) ? undefined : shownAgentName(agent?.agentId));
+        const agentName = given ?? "Agent";
         return <li key={receipt.deliveryId}>
           {author(authority, emails)}
           {agent ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
-            author={{authorDisplayName: agent.agentName ?? agent.agentId, authorOwnerDisplayName: "Owner"}} />
-            <span className="min-w-0 break-all text-agent">{agent.agentName ?? agent.agentId}</span></span> : null}
+            presentation={isConnectedAgentId(agent.agentId) ? {...neutralPresentation, connected: true} : undefined}
+            named={given !== undefined}
+            author={{authorDisplayName: agentName, authorOwnerDisplayName: author(authority, emails)}} />
+            <span className="min-w-0 break-all text-agent">{agentName}</span></span> : null}
           <span> · {time(receivedAtMs)}</span>
-          <details><summary className="cursor-pointer">Change details</summary><pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(metadata, null, 2)}</pre></details>
+          <details><summary className="cursor-pointer">Change details</summary><pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{escapeHiddenText(JSON.stringify(metadata, null, 2))}</pre></details>
         </li>;
       })}
     </ol>

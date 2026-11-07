@@ -1,5 +1,5 @@
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Sparkles } from "lucide-react";
+import { Plug, Sparkles } from "lucide-react";
 import type { ActorPresentation, ChatReportedAgentRecord } from "../../ipc/bridgeContract";
 import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
@@ -31,6 +31,9 @@ export function AgentBadge(props: {
   // The agent's token where its avatar shows, so the sparkle takes the avatar's hue.
   // Its `self` says the message is your person's, which a name alone never proves.
   presentation?: ActorPresentation;
+  // Whether the agent gave the name shown. Left out, "Agent" is dohc's word
+  // for an agent that gave none, since a chat post stores the two alike.
+  named?: boolean;
   // What shows in place of the sparkle, such as the agent's face, which
   // then says whose agent it is on hover or focus.
   children?: ReactNode;
@@ -40,11 +43,21 @@ export function AgentBadge(props: {
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
-  const ownAgent = props.presentation?.self && settings && author.authorAgentId
+  // A connected agent wrote outside a run dohc started: the plug, and a card
+  // that names it as reported. A share's agent post could be either kind, so
+  // it takes the plug and its card claims no kind.
+  const plug = props.presentation?.connected;
+  const connected = plug === true;
+  const label = connected ? "connected agent" : "agent";
+  const Mark = plug ? Plug : Sparkles;
+  const ownAgent = !plug && props.presentation?.self && settings && author.authorAgentId
     ? listAgents(settings).find(({ id }) => id === author.authorAgentId) ?? null
     : null;
   const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
   const reported = reportedAgentLine(author.authorReported);
+  // A plug card says "(as reported)" once: on the reported line when it has
+  // one, else on a name the agent gave.
+  const nameAsReported = Boolean(plug) && !reported && (props.named ?? author.authorDisplayName !== "Agent");
   const trigger = useRef<HTMLSpanElement>(null);
   const tooltip = useRef<HTMLSpanElement>(null);
   const [place, setPlace] = useState<ReturnType<typeof resolveFloatingMenuPosition> | null>(null);
@@ -91,7 +104,7 @@ export function AgentBadge(props: {
         data-testid={`${props.testIdPrefix}-agent-badge`}
         data-chat-escape-local="true"
         tabIndex={0}
-        aria-label="agent"
+        aria-label={label}
         aria-describedby={open ? descriptionId : undefined}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
@@ -103,8 +116,8 @@ export function AgentBadge(props: {
         }}
         className="inline-flex rounded"
       >
-        {props.children ?? <Sparkles size={12} strokeWidth={1.9} aria-hidden />}
-        <span className="sr-only">agent</span>
+        {props.children ?? <Mark size={12} strokeWidth={1.9} aria-hidden />}
+        <span className="sr-only">{label}</span>
       </span>
       {open ? (
         <span
@@ -122,10 +135,16 @@ export function AgentBadge(props: {
           }}
           className="dohc-popover dohc-pop-in fixed z-50 flex w-max max-w-72 flex-col gap-1 overflow-y-auto rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
         >
-          <span className="font-medium">{author.authorDisplayName}</span>
-          <span className="text-muted">
-            {author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
+          <span className="font-medium">
+            {author.authorDisplayName}
+            {nameAsReported ? <span className="text-muted"> {AS_REPORTED}</span> : null}
           </span>
+          {plug === "unknown" ? null : (
+            <span className="text-muted">
+              {connected ? "Connected agent"
+                : author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
+            </span>
+          )}
           {reported ? (
             <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">
               {reported.slice(0, -AS_REPORTED.length)}<span className="whitespace-nowrap">{AS_REPORTED}</span>

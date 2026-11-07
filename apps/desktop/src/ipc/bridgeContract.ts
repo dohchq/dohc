@@ -1651,6 +1651,10 @@ export const ActorPresentation = z.object({
   group: z.string(),
   hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose"]).nullable(),
   self: z.boolean(),
+  // A connected agent, writing outside a run dohc started: it takes the plug.
+  // "unknown" is an agent post that came through a share, which serves no run
+  // id, so it could be either kind. It takes the plug and claims no kind.
+  connected: z.union([z.literal(true), z.literal("unknown")]).optional(),
 });
 export type ActorPresentation = z.infer<typeof ActorPresentation>;
 export const AgentColorChangedEvent = z.object({

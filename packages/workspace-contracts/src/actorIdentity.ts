@@ -1,4 +1,4 @@
-import type { MomentAuthor } from "./engine";
+import { UNNAMED_AGENT_ID, type MomentAuthor } from "./engine";
 
 declare const actorKeyBrand: unique symbol;
 type ActorKeyBrand = { readonly [actorKeyBrand]: true };
@@ -88,7 +88,7 @@ function branded<T extends object>(value: T): T & ActorKeyBrand {
 /** The admitted handshake name is the claim. Settings names are display labels only. */
 export function canonicalClaimedName(handshakeName?: string | null): string {
   return handshakeName === undefined || handshakeName === null || handshakeName === ""
-    ? "dohc-mcp"
+    ? UNNAMED_AGENT_ID
     : handshakeName;
 }
 
@@ -139,8 +139,8 @@ export function deriveLocalActor(input: {
 /**
  * Read ingested chat with its thread-bound trusted issuer and relay-verified authorUserId.
  * Names and kinds remain claims. Missing identity never borrows the reader's credentials.
- * Until agent registration exists, another device's authorDisplayName is its claimedName.
- * That device's original handshake claim is unavailable. Do not invent a placeholder here.
+ * The caller gives an agent's claimedName: chat keys another device's agent post by its
+ * run's agent, else as the unnamed agent, as that device does. None is invented here.
  * A link holder is its link grant and link principal, which only the relay writes; it has no account.
  */
 export function deriveRelayChatActor(input: {

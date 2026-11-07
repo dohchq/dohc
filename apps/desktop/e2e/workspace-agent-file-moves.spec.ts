@@ -38,8 +38,9 @@ test("an MCP move and delete each show one History row under the agent", async (
     await openHistoryView(page);
     const moved = page.locator('[data-testid="engine-moment-open"][data-moment-path^="archive/plans/"]');
     await expect(moved).toHaveCount(1);
-    // History shows a connected agent as the unnamed agent, whatever name it gives.
-    await expect(moved.getByTestId("engine-moment-source")).toHaveText("Agent");
+    // History shows the name a connected agent gave, beside the plug.
+    await expect(moved.getByTestId("engine-moment-source")).toHaveText("Mover agent");
+    await expect(moved.locator('[data-agent-mark="connected"]')).toHaveCount(1);
     const deleted = page.locator('[data-testid="engine-moment-open"][data-moment-path="old.txt"]');
     // The setup write and the agent's delete.
     await expect(deleted).toHaveCount(2);
@@ -58,7 +59,7 @@ test("an MCP move and delete each show one History row under the agent", async (
       expect(await readChange(ctx, { id: change.id })).toMatchObject({ ok: true, change: { id: change.id } });
     }
     await moved.click();
-    await expect(page.getByTestId("engine-diff-source")).toHaveText("Agent");
+    await expect(page.getByTestId("engine-diff-source")).toHaveText("Mover agent");
     expect(await undoOperation(ctx, { operationId: move.operationId })).toEqual({ ok: false, reason: "Undo for a folder move isn't available yet. Move it back yourself." });
     const fileMove = await moveWorkspacePath(ctx, { fromPath: "archive/plans/notes.txt", toPath: "archive/plans/renamed.txt" }, "Mover agent");
     expect(fileMove).toMatchObject({ ok: true, undo: { available: true } });
