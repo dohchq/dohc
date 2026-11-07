@@ -1045,6 +1045,7 @@ fn channel_summary_names_the_agent_that_wrote_the_opening_message() {
                 options: Vec::new(),
                 attachments: Vec::new(),
                 author_agent_id: Some("codex".to_owned()),
+                author_reported: None,
                 named_agent_ids: Vec::new(),
                 now_ms: 20,
                 request_id: None,
