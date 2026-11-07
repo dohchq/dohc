@@ -159,6 +159,96 @@ describe("Explorer Home", () => {
     expect(onNewPage).toHaveBeenCalledWith("");
   });
 
+  it("says when Pages, Collections or Apps has nothing, in a line the arrows pass over", async () => {
+    const user = userEvent.setup();
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [],
+          folders: [],
+          dataCollections: [],
+          collectionFolders: new Set(),
+          appFolders: new Set(),
+          apps: apps({ state: { status: "ready", workspaceId: "workspace-1", apps: [] } }),
+          onIncludeArchivedCollections: vi.fn(),
+        })}
+      />,
+    );
+
+    const lines = {
+      pages: "No pages yet.",
+      collections: "No Collections yet.",
+      apps: "No apps yet. Any folder with a web app in it shows up here.",
+    };
+    for (const [id, words] of Object.entries(lines)) {
+      const line = screen.getByTestId(`explorer-${id}-empty`);
+      expect(line.textContent).toBe(words);
+      // The header's toggle reads the line, since focus never lands on it.
+      expect(screen.getByTestId(`explorer-${id}-toggle`).getAttribute("aria-describedby")).toBe(line.id);
+    }
+    expect(screen.queryByTestId("sites-count")).toBeNull();
+
+    screen.getByTestId("explorer-pages-toggle").focus();
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-collections-toggle"));
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
+
+    // A folded section shows no line, and its toggle no longer points at one.
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
+    expect(screen.getByTestId("explorer-apps-toggle").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("holds Apps' place while its first read runs, and says nothing yet", () => {
+    render(<Explorer {...explorerProps({ apps: apps({ state: { status: "loading" } }) })} />);
+
+    expect(section("Apps")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
+    expect(screen.queryByTestId("sites-row")).toBeNull();
+  });
+
+  it("shows an empty Apps section in a workspace of your own, and none in a share view", () => {
+    const empty = apps({ state: { status: "ready", workspaceId: "workspace-1", apps: [] } });
+    const view = render(<Explorer {...explorerProps({ apps: empty })} />);
+    expect(screen.getByTestId("explorer-apps-empty")).toBeTruthy();
+
+    view.rerender(<Explorer {...explorerProps({ apps: empty, shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
+
+    view.rerender(<Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(rowLabels("Apps")).toEqual(["Trip"]);
+
+    // A share that holds only an app shows no Pages either.
+    view.rerender(<Explorer {...explorerProps({ files: [file("trip/index.html")], folders: ["trip"], dataCollections: [], collectionFolders: new Set(),
+      shareView: { granterEmail: "sam@example.com" } })} />);
+    expect(rowLabels("Apps")).toEqual(["Trip"]);
+    expect(screen.queryByRole("region", { name: "Pages" })).toBeNull();
+    expect(screen.queryByTestId("explorer-pages-empty")).toBeNull();
+  });
+
+  // Show archived Collections clears the list and reads it again. Until that
+  // read lands, the list is not known to be empty.
+  it("holds Collections' place while its list is read again, and says nothing yet", () => {
+    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
+      includeArchivedCollections: true, collectionsUnknown: "reading" })} />);
+
+    expect(section("Collections")).toBeTruthy();
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    expect(screen.queryByTestId("collections-failed")).toBeNull();
+    expect(screen.getByTestId("explorer-collections-toggle").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("leaves Try again in Collections' place when that read fails, and still says nothing", () => {
+    const onRetryCollections = vi.fn();
+    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
+      includeArchivedCollections: true, collectionsUnknown: "failed", onRetryCollections })} />);
+
+    expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("collections-failed")).getByRole("button", { name: "Try again" }));
+    expect(onRetryCollections).toHaveBeenCalledOnce();
+  });
+
   it("waits for the first listing before drawing any section", () => {
     render(<Explorer {...explorerProps({ listed: false })} />);
 
