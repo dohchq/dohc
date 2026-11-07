@@ -487,6 +487,10 @@ const DAY_DIVIDER = "mb-1.5 mt-2.5 flex items-center gap-3 text-[12px] font-medi
 // The divider's top margin. A divider becomes the pinned copy once it rises
 // past this line, where the copy sits, so the swap moves nothing.
 const DAY_DIVIDER_TOP = 10;
+// A mark above each divider by the divider's height and bottom margin. It
+// rises past the pinned copy's line as the divider reaches the copy's bottom
+// edge, so the copy steps aside while the next day's divider passes under it.
+const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%_-_6px)] h-0";
 
 // A row is a face column and the text, at the spacing each place gives it.
 // The stream stops text at 720px; a thread's panel is narrower than that.
@@ -516,11 +520,14 @@ export function continuesRun(previous: ChatMessageRecord | undefined, message: C
 // The day pinned at the top of the list for its topmost visible row, or null.
 // A row that starts its day carries that day's divider; any other row's
 // divider is further up, out of view. The day is pinned only once its divider
-// has risen to the pinned copy's place, so the two never show at once.
+// has risen to the pinned copy's place, so the two never show at once. While
+// another day's divider is passing under the copy's place, nothing is pinned,
+// so the copy never hides that day.
 export function pinnedChatDay(
   topRow: { day: string; startsDay: boolean; dividerFullyVisible: boolean } | null,
+  dividerUnderPin = false,
 ): string | null {
-  if (!topRow || topRow.startsDay && topRow.dividerFullyVisible) return null;
+  if (!topRow || dividerUnderPin || topRow.startsDay && topRow.dividerFullyVisible) return null;
   return topRow.day;
 }
 
@@ -620,17 +627,21 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   indexesRef.current = indexes;
   const topMessageId = useRef<string | null>(null);
   const clippedDividers = useRef(new Set<string>());
+  // Dividers whose mark has risen past the line: under the pinned copy or above.
+  const risenMarks = useRef(new Set<string>());
   const dividers = useRef(new Map<string, HTMLElement>());
+  const marks = useRef(new Map<string, HTMLElement>());
   const dividerObserver = useRef<IntersectionObserver | null>(null);
   const updateTopDay = useCallback(() => {
     const messages = messagesRef.current;
     const at = topMessageId.current === null ? undefined : indexesRef.current.get(topMessageId.current);
     const message = at === undefined ? undefined : messages[at];
+    const underPin = [...risenMarks.current].some(id => !clippedDividers.current.has(id));
     const label = at === undefined || !message ? null : pinnedChatDay({
       day: formatChatDay(message.createdAtMs),
       startsDay: at === 0 || !sameChatDay(messages[at - 1]!.createdAtMs, message.createdAtMs),
       dividerFullyVisible: !clippedDividers.current.has(message.id),
-    });
+    }, underPin);
     setTopDay(current => current === label ? current : label);
   }, []);
   const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
@@ -638,26 +649,33 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     if (id === topMessageId.current) return;
     topMessageId.current = id;
     // A jump can carry a divider from below the pane to above it with no
-    // threshold crossed, so the new top row's divider is observed afresh. Its
-    // first entry says which side of the top edge it is on.
-    const divider = id === null ? undefined : dividers.current.get(id);
-    if (divider && dividerObserver.current) {
-      dividerObserver.current.unobserve(divider);
-      dividerObserver.current.observe(divider);
+    // threshold crossed, so the visible rows' dividers and marks are observed
+    // afresh. Each first entry says which side of the line it is on.
+    const observer = dividerObserver.current;
+    if (observer) {
+      for (const viewable of info.viewableItems) {
+        for (const edge of [dividers.current.get(viewable.item.id), marks.current.get(viewable.item.id)]) {
+          if (!edge) continue;
+          observer.unobserve(edge);
+          observer.observe(edge);
+        }
+      }
     }
     updateTopDay();
   }, [updateTopDay]);
-  // Rows mount and unmount as Legend virtualizes, so each divider joins and
-  // leaves the observer through its ref.
-  const observeDivider = useCallback((divider: HTMLElement | null) => {
-    if (!divider) return;
-    const id = divider.dataset.dayDivider!;
-    dividers.current.set(id, divider);
-    dividerObserver.current?.observe(divider);
+  // Rows mount and unmount as Legend virtualizes, so each divider and its
+  // mark join and leave the observer through their refs.
+  const observeDayEdge = useCallback((edge: HTMLElement | null) => {
+    if (!edge) return;
+    const mark = edge.dataset.dayMark;
+    const id = mark ?? edge.dataset.dayDivider!;
+    const edges = mark === undefined ? dividers.current : marks.current;
+    edges.set(id, edge);
+    dividerObserver.current?.observe(edge);
     return () => {
-      if (dividers.current.get(id) === divider) dividers.current.delete(id);
-      dividerObserver.current?.unobserve(divider);
-      clippedDividers.current.delete(id);
+      if (edges.get(id) === edge) edges.delete(id);
+      dividerObserver.current?.unobserve(edge);
+      (mark === undefined ? clippedDividers : risenMarks).current.delete(id);
     };
   }, []);
   const listShown = !props.loading && props.messages.length > 0;
@@ -668,22 +686,26 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     const observer = new IntersectionObserver((entries) => {
       let changed = false;
       for (const entry of entries) {
-        const id = (entry.target as HTMLElement).dataset.dayDivider!;
+        const target = entry.target as HTMLElement;
+        const mark = target.dataset.dayMark;
+        const id = mark ?? target.dataset.dayDivider!;
+        const above = (mark === undefined ? clippedDividers : risenMarks).current;
         // Crossing or above the pinned copy's line.
-        const clipped = entry.rootBounds !== null && entry.boundingClientRect.top < entry.rootBounds.top;
-        if (clipped === clippedDividers.current.has(id)) continue;
+        const risen = entry.rootBounds !== null && entry.boundingClientRect.top < entry.rootBounds.top;
+        if (risen === above.has(id)) continue;
         changed = true;
-        if (clipped) clippedDividers.current.add(id);
-        else clippedDividers.current.delete(id);
+        if (risen) above.add(id);
+        else above.delete(id);
       }
       if (changed) updateTopDay();
     }, { root: scroller, rootMargin: `-${DAY_DIVIDER_TOP}px 0px 0px 0px`, threshold: [0, 1] });
     dividerObserver.current = observer;
-    for (const divider of dividers.current.values()) observer.observe(divider);
+    for (const edge of [...dividers.current.values(), ...marks.current.values()]) observer.observe(edge);
     return () => {
       observer.disconnect();
       dividerObserver.current = null;
       clippedDividers.current.clear();
+      risenMarks.current.clear();
       // A list shown again reports its top row afresh.
       topMessageId.current = null;
       setTopDay(null);
@@ -779,10 +801,11 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           <span
             data-testid={`${props.testIdPrefix}-day`}
             data-day-divider={message.id}
-            ref={observeDivider}
-            className={`${sizes.divider} ${DAY_DIVIDER}`}
+            ref={observeDayEdge}
+            className={`relative ${sizes.divider} ${DAY_DIVIDER}`}
           >
             {formatChatDay(message.createdAtMs)}
+            <span aria-hidden data-day-mark={message.id} ref={observeDayEdge} className={DAY_DIVIDER_MARK} />
           </span>
         ) : null}
         {props.dividerAfterFirst && at === 1 ? (
@@ -894,7 +917,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         </AgentColorScope>
       </li>
     );
-  }, [props, candidates, reactionsByMessage, density, anchor, observeDivider]);
+  }, [props, candidates, reactionsByMessage, density, anchor, observeDayEdge]);
   if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
     return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
       <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />

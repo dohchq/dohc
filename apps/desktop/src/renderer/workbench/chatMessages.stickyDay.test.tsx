@@ -96,6 +96,31 @@ describe("ChatMessageList pinned day", () => {
     expect(screen.queryByTestId("list-sticky-day")).toBeNull();
   });
 
+  it("steps aside while the next day's divider passes under it", () => {
+    render(<ChatMessageList testIdPrefix="list" messages={messages} loading={false} emptyLabel="Empty" />);
+    const observer = FakeObserver.current!;
+    const dividers = screen.getAllByTestId("list-day");
+    const first = dividers.find(node => node.dataset.dayDivider === "m-0")!;
+    const next = dividers.find(node => node.dataset.dayDivider === "m-1")!;
+    const nextMark = next.querySelector<HTMLElement>("[data-day-mark]")!;
+    expect(observer.observed.has(nextMark)).toBe(true);
+
+    // The first day's divider is above the pane, its rows still at the top.
+    observer.deliver(first, -60);
+    showTop(0);
+    expect(screen.getByTestId("list-sticky-day").textContent).toBe(formatChatDay(messages[0]!.createdAtMs));
+
+    // The next day's divider reaches the pinned copy's bottom edge: its mark
+    // rises past the line, and the copy steps aside.
+    observer.deliver(nextMark, -1);
+    expect(screen.queryByTestId("list-sticky-day")).toBeNull();
+
+    // It rises past the line itself and becomes the pinned day.
+    observer.deliver(next, -1);
+    showTop(1);
+    expect(screen.getByTestId("list-sticky-day").textContent).toBe(formatChatDay(messages[1]!.createdAtMs));
+  });
+
   it("shows the day for a top row whose day started further up", () => {
     render(<ChatMessageList testIdPrefix="list" messages={messages} loading={false} emptyLabel="Empty" />);
     showTop(2);

@@ -635,6 +635,11 @@ describe("pinnedChatDay", () => {
     expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: true })).toBeNull();
     expect(pinnedChatDay(null)).toBeNull();
   });
+
+  it("pins nothing while another day's divider passes under the pinned copy", () => {
+    expect(pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: false }, true)).toBeNull();
+    expect(pinnedChatDay({ day: "Yesterday", startsDay: false, dividerFullyVisible: true }, true)).toBeNull();
+  });
 });
 
 describe("ChatMessageList memo boundary", () => {
