@@ -61,10 +61,8 @@ describe("CloudLogin", () => {
 
     render(<CloudLogin />);
 
-    // The panel says only what it knows. The failure is a notice.
-    expect((await screen.findByTestId("cloud-connection-unknown")).textContent).toBe(
-      "dohc doesn’t know whether this machine is connected.",
-    );
+    // The panel claims nothing and offers Try again. The words are a notice.
+    expect((await screen.findByTestId("cloud-connection-unknown")).textContent).toBe("Try again");
     expect(screen.queryByTestId("cloud-server-url")).toBeNull();
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc could not check this connection.");
@@ -157,7 +155,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
     const error = screen.getByRole("alert");
-    expect(error.textContent).toBe("Enter the address of your server.");
+    expect(error.textContent).toBe("Enter your server address.");
     const serverUrl = screen.getByTestId("cloud-server-url");
     expect(serverUrl.getAttribute("aria-invalid")).toBe("true");
     expect(serverUrl.getAttribute("aria-describedby")).toBe(error.id);
@@ -174,7 +172,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
     expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
-      "Enter the server address like https://dohc.example.com.",
+      "Enter a server address like https://dohc.example.com.",
     );
     const serverUrl = screen.getByTestId("cloud-server-url");
     expect(serverUrl.getAttribute("aria-invalid")).toBe("true");
@@ -197,7 +195,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
     expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
-      "dohc connects to servers only over https. Enter an https address.",
+      "Enter an HTTPS server address.",
     );
     expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
   });

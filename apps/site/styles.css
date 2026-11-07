@@ -1567,9 +1567,6 @@ main::before {
 .waitlist-field input::placeholder { color: var(--subtle); }
 .waitlist-field .btn { flex: none; padding: 10px 16px; font-size: 13px; }
 .waitlist-field .btn[aria-disabled='true'] { cursor: progress; }
-.waitlist-note { margin-top: 2px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
-.waitlist-note a { color: inherit; text-underline-offset: 3px; }
-.waitlist[data-state='joined'] .waitlist-note { display: none; }
 .waitlist-status:focus { outline: none; }
 .waitlist-status { min-height: 1.5em; margin-top: 10px; color: var(--subtle); font-size: 13px; line-height: 1.5; }
 .waitlist[data-state='error'] .waitlist-status { color: var(--ink); }

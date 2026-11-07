@@ -335,6 +335,16 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-nav-general").getAttribute("aria-current")).toBe("page");
   });
 
+  // #2887: a shared view's folder is named after its share ID.
+  it("heads a shared view's settings with what it shares", async () => {
+    render(<SettingsDialog workspaceIsReady sharedView workspaceId="ws-1" workspacePath="/home/sam/dohc/shared/k3x9q2m7"
+      workspaceName="Trip plans" onClose={() => {}} />);
+
+    const folder = await screen.findByTestId("settings-row-current-workspace");
+    expect(folder.textContent).toBe("Trip plans");
+    expect(folder.getAttribute("title")).toBe("/home/sam/dohc/shared/k3x9q2m7");
+  });
+
   it("names the section Agents and still finds it by MCP", async () => {
     const user = userEvent.setup();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);

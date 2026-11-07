@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
@@ -16,6 +17,7 @@ import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalD
 import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryRestore";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
+import { collectionChangeProposal } from "../workspaces/collectionChange";
 import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
 import { assertSourcePathsNotHeld, assertSourcePathsNotDeferred, type SourceCaptureStatus } from "../workspaces/datasetSourceCapture";
 
@@ -87,6 +89,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
     const request = DatasetRequest.parse(raw);
     let formFailure: ((error: unknown) => CreationPartial) | undefined;
     let formPartial: CreationPartial | undefined;
+    // Preparing a change reads the files as they are now, so it settles disk edits first.
+    const capturesFirst = request.action === "prepareMigration" || request.action === "askToApply";
     try {
       return await dependencies.withWorkspaceOperation(caller, request.workspaceId, async operation => {
       const current = () => {
@@ -113,7 +117,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }));
       let input: ResolvedDatasetRequest;
       if ("datasetPath" in request) {
-        if (request.action === "prepareMigration") {
+        if (capturesFirst) {
           await flushSourceCapture();
           current();
           invalidateDatasetAddresses({ workspaceId: request.workspaceId });
@@ -121,7 +125,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         const resolve = () => withSourceAdapter(adapter => resolveDatasetAddress(adapter, request.workspaceId, request.datasetPath, operation.signal));
         const datasetId = await resolve().catch(async error => {
           current();
-          if (!(error instanceof DatasetAddressUnavailableError) || request.action === "prepareMigration" || shareViewIsPresent(operation.workspace.shareView)) throw error;
+          if (!(error instanceof DatasetAddressUnavailableError) || capturesFirst || shareViewIsPresent(operation.workspace.shareView)) throw error;
           await flushSourceCapture();
           current();
           invalidateDatasetAddresses({ workspaceId: request.workspaceId });
@@ -222,7 +226,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor,datasetPath,...(sourceError ? { sourceError } : {})};
       }
       if (input.action === "discardRecovery") { await (await localHost()).discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "historyRevision", "prepareHistoryRestore", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
+      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "historyRevision", "prepareHistoryRestore", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "askToApply", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
       // Creating, approving and recovering stay with the computer that keeps the Collections.
       const server = readsData && dependencies.serverCollectionsFor ? await dependencies.serverCollectionsFor(operation.workspace, operation.signal) : null;
       current();
@@ -290,7 +294,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         preparingMigrations++;
         const review = createLocalDatasetMigrations(migrationAuthority);
         try {
-          if (request.action !== "prepareMigration") { await flushSourceCapture(); current(); }
+          if (!capturesFirst) { await flushSourceCapture(); current(); }
           const prepared = await withSourceAdapter(adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
           migrationAuthority.assertCurrent();
           const { signal } = operation;
@@ -467,6 +471,23 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         const prepared = await prepareMigration({ ...input, descriptorPath: request.datasetPath });
         current();
         return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
+      }
+      if (input.action === "askToApply") {
+        if (request.action !== "askToApply") throw new Error("This Collection request changed. Ask again.");
+        const prepared = await prepareMigration({ datasetId: input.datasetId, descriptorPath: request.datasetPath, migrationPath: input.migrationPath });
+        let proposal: ReturnType<typeof collectionChangeProposal>;
+        // The file records the change; the person who applies it prepares it again.
+        try { proposal = collectionChangeProposal(prepared, { datasetPath: request.datasetPath, migrationPath: input.migrationPath, note: input.note ?? null }); }
+        finally {
+          migrations.get(prepared.preparationId)?.clear();
+          await migrationAuthority.discardMigrationCandidate({ workspaceId: input.workspaceId, datasetId: input.datasetId, candidateId: prepared.candidate.candidateId, signal: operation.signal });
+        }
+        current();
+        const folder = request.datasetPath.includes("/") ? request.datasetPath.slice(0, request.datasetPath.lastIndexOf("/") + 1) : "";
+        const path = `${folder}changes/${randomUUID()}.json`;
+        await dependencies.createSources(operation.workspace, { [path]: `${JSON.stringify(proposal, null, 2)}
+` }, operation.signal); current();
+        return { kind: "change-asked" as const, path, changeSha256: proposal.changeSha256 };
       }
       if (input.action === "invoke") {
         try {

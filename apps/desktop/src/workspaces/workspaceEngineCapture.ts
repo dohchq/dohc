@@ -320,6 +320,9 @@ export interface WorkspaceVersionMergeResult {
   // rows themselves are open conflicts in the engine; readers page them
   // through listOpenConflictsPage instead of carrying them here.
   conflictCount: number;
+  // Protected files whose Main copy this merge replaced with the version's,
+  // in merge order. They never conflict, so the result has to name them.
+  replacedProtectedPaths: string[];
 }
 
 // One page of open conflicts, the engine's own `conflicts.list` page passed
@@ -852,9 +855,9 @@ export interface WorkspaceEngineCapture {
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
-  // A relay pull runs on the same capture chain as local batch capture and
-  // version operations. The task owns the engine pull; pushes run off the
-  // chain because they write no workspace files. Returned
+  // Apply runs on the same capture chain as local batch capture and version
+  // operations. The task owns apply, materialization, and the cursor commit.
+  // Fetch and push run off the chain. Returned
   // active-version paths are materialized with expected-event suppression so
   // watcher observations of sync writes never become new local moments.
   // Data-safety contract: the task must give every pull page to the supplied
@@ -1261,6 +1264,15 @@ export class RestoreFolderInUseError extends Error {
   constructor(readonly path: string) {
     super(`${path} shares its folder with other files.`);
     this.name = "RestoreFolderInUseError";
+  }
+}
+
+// A merge failed after some of the version's files were already in Main.
+// Its message is the failure's own, for Copy details.
+export class MergeStoppedPartwayError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause), { cause });
+    this.name = "MergeStoppedPartwayError";
   }
 }
 
@@ -1948,6 +1960,10 @@ export function createWorkspaceEngineCapture(
   const durableLocalListeners = new Set<(path: string) => void>();
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
+  // Quit cancels capture waits at once. A save dohc accepted before quit waits
+  // on this one instead, which ends when the work queued before quit has run,
+  // so the save still reaches the disk.
+  const admittedCaptureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
   // A healthy watcher batch cannot clear the workspace notice while any dead
@@ -6370,7 +6386,7 @@ export function createWorkspaceEngineCapture(
           throw new Error("The write was cancelled.");
         }
         const engine = await engineStore();
-        await engine.flushCapture?.();
+        await engine.flushCapture?.({ signal: admittedCaptureWaitAbort.signal });
         const versionId = writeOptions.versionId ?? await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
           origin: localFileOrApi(author),
@@ -6645,6 +6661,7 @@ export function createWorkspaceEngineCapture(
       shuttingDown = true;
       ydocOpenAbort.abort();
       captureWaitAbort.abort();
+      void chain.then(() => admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason));
     },
 
     settleAndCloseAllLiveSessions() {
@@ -6860,7 +6877,10 @@ export function createWorkspaceEngineCapture(
     },
 
     mergeVersionIntoMain(sourceVersionId) {
-      return enqueueResult("merge version into Main", async () => {
+      // The version's files already in Main. A failure after the first says
+      // the merge stopped partway.
+      let mergedFileCount = 0;
+      const merge = async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
@@ -6950,7 +6970,6 @@ export function createWorkspaceEngineCapture(
         }
         const materializations: MaterializeOperation[] = [];
         let conflictCount = 0;
-        let mergedFileCount = 0;
         let unchangedFileCount = 0;
         for (const path of mergeOrder) {
           if (openConflictPaths.has(path)) {
@@ -6982,6 +7001,7 @@ export function createWorkspaceEngineCapture(
         // history — restorable, so nothing is lost.
         const secrets = secretStoreFor();
         const secretChanges: SecretFileComparePage["entries"] = [];
+        const replacedProtectedPaths: string[] = [];
         {
           let secretAfterPath: string | undefined;
           do {
@@ -7014,6 +7034,7 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           mergedFileCount += 1;
+          replacedProtectedPaths.push(change.path);
           if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
             const materialized = await secrets.materializeSecretFile({
               workspaceId,
@@ -7037,8 +7058,11 @@ export function createWorkspaceEngineCapture(
         if (activeVersionId === ENGINE_MAIN_VERSION_ID) {
           await materialize(deletesBeforeWrites(materializations), policy);
         }
-        return { mergedFileCount, unchangedFileCount, conflictCount };
-      });
+        return { mergedFileCount, unchangedFileCount, conflictCount, replacedProtectedPaths };
+      };
+      return enqueueResult("merge version into Main", () => merge().catch((error: unknown) => {
+        throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
+      }));
     },
 
     async listOpenConflictsPage(afterConflictId) {
@@ -8369,6 +8393,7 @@ export function createWorkspaceEngineCapture(
         }
       } finally {
         captureWaitAbort.abort();
+        admittedCaptureWaitAbort.abort(captureWaitAbort.signal.reason);
         await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every

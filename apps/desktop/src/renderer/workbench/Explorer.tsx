@@ -47,8 +47,6 @@ import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
 import {
   applyPendingTreeMoves,
-  deleteRefusalIdentity,
-  moveRefusalIdentity,
   pendingTreeChangeSettled,
   type AnsweredTreeChange,
   type PendingTreeChange,
@@ -75,7 +73,8 @@ import type { DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
-import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { fileManagerName } from "../../workspaces/explorerMenu";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -200,11 +199,11 @@ export interface ExplorerProps {
   // Asks for a listing and answers its request.
   onRefresh: () => number;
   // Failed tree operations go to the shell's error toast and Notices row,
-  // with Try again when asking again can succeed. A failed move names
-  // itself, so a later success of the same move clears it. `livePage` names
-  // a page whose change was refused because it has live editing on.
-  onError: (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => void;
-  onChangeSucceeded?: (identity: string) => void;
+  // with Try again when asking again can succeed. `change` is the tree
+  // change that failed, so the shell can take its row back once that change
+  // happens. `livePage` names a page whose change was refused because it
+  // has live editing on.
+  onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange, livePage?: LivePageRefused) => void;
   // A finished rename, move or delete: a toast and a Notices row, with Undo
   // while main can still reverse it.
   onNotice: (message: string, undo?: () => void) => void;
@@ -589,7 +588,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onRefresh,
     onError,
     onNotice,
-    onChangeSucceeded,
     onBeginChanges,
     onPathsChanged,
     onSetFolderExpanded,
@@ -1032,12 +1030,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         for (const change of changes) {
-          const identity = change.kind === "file" || change.kind === "folder" ? `move:${change.fromPath}` : undefined;
           try {
             const result = await run(change);
             if (afterRun(change)) setPending((current) => [...current, change]);
             succeeded.push({ change, result });
-            if (identity) onChangeSucceeded?.(identity);
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
             if (options.failed) {
@@ -1050,19 +1046,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               : change.kind === "file" ? (replaced ? { path: change.toPath, action: "replace" } : { path: change.fromPath, action })
               : change.kind === "delete-file" ? { path: change.path, action: "delete" }
               : undefined;
-            // A change refused for live editing or History off keeps its refusal's
-            // identity, and Try again reruns it only when live editing refused it.
-            // Any other failed move names its source, and Try again runs it as it was asked.
+            // Try again reruns a change refused for live editing, but not one
+            // refused while History is off. It reruns any other failed move as
+            // it was asked.
             const refused = isLiveEditingRefusal(cause);
-            const refusalIdentity = (change.kind === "folder" && refused) || (change.kind === "file" && livePage)
-              ? moveRefusalIdentity(workspaceId, change)
-              : (change.kind === "delete-file" || change.kind === "delete-folder") && refused
-                ? deleteRefusalIdentity(workspaceId, change.path)
-                : undefined;
+            const isMove = change.kind === "file" || change.kind === "folder";
             const rerun = () =>
               void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered, action });
-            const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && identity ? rerun : undefined;
-            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, refused ? refusalIdentity : identity, livePage);
+            const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && isMove ? rerun : undefined;
+            onError(ipcErrorMessage(cause, "dohc could not change these files."), cause, again, change, livePage);
           }
         }
         const changedExistingPath = succeeded.some(
@@ -1089,7 +1081,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       options.answered?.(succeeded);
       return succeeded;
     },
-    [onBeginChanges, onChangeSucceeded, onError, onPathsChanged, onRefresh, workspaceId],
+    [onBeginChanges, onError, onPathsChanged, onRefresh],
   );
 
   // Undo runs as a tree change of its own: drafts settle first, the row
@@ -1410,6 +1402,33 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [pinnedApps, props.pinned],
   );
 
+  // Ends when this Explorer shows another workspace or unmounts. A reveal's
+  // failure from an earlier lifetime says nothing, even after the window
+  // comes back to this workspace.
+  const revealLifetime = useRequestSequence([workspaceId]);
+
+  // Show in File Explorer. main checks the path is inside the workspace
+  // before the OS sees it. A failure says so, and Try again repeats it.
+  const revealPath = useCallback(
+    function reveal(path: string) {
+      const lifetime = revealLifetime.current();
+      void bridge()
+        .revealExplorerPath({ workspaceId, path })
+        .catch((cause) => {
+          if (!revealLifetime.isCurrent(lifetime)) return;
+          const fileManager = fileManagerName(window.dohcDesktop?.platform);
+          onError(
+            withErrorWords(`dohc could not show ${basenameOf(path)} in ${fileManager}.`, cause),
+            cause,
+            () => {
+              if (revealLifetime.isCurrent(lifetime)) reveal(path);
+            },
+          );
+        });
+    },
+    [revealLifetime, onError, workspaceId],
+  );
+
   // Asks main what it offers here, then opens at `at`. Nothing is drawn
   // until main answers, and a menu main leaves empty does not open.
   const openMenu = useCallback(
@@ -1508,25 +1527,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           if (path) props.onUnmountShare(path);
           break;
         case "open-externally":
-          // main checks the path is inside the workspace before the OS sees it.
-          if (path) {
-            void bridge()
-              .revealExplorerPath({ workspaceId, path })
-              .catch((cause) =>
-                onError(ipcErrorMessage(cause, `dohc could not show ${basenameOf(path)} in its folder.`), cause),
-              );
-          }
+          if (path) revealPath(path);
           break;
       }
     },
     [
-      workspaceId,
+      revealPath,
       beginCreateFolder,
       beginRename,
       requestDelete,
       onModeChange,
       onTogglePin,
-      onError,
       exportZip,
       props.onImportFiles,
       props.onShare,
@@ -2418,6 +2429,20 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             performDeletes(confirmDelete);
             setConfirmDelete(null);
           }}
+          details={
+            confirmDelete.length > 1 ? (
+              <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+                {confirmDelete.map((path) => (
+                  <li
+                    key={path}
+                    className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
+                  >
+                    <span className="break-all">{path}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null
+          }
         >
           {/* Only a share view asks: its delete has no trash behind it. */}
           <p className="m-0 mt-2 text-[13px] text-muted">
@@ -2427,18 +2452,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               props.shareView?.granterEmail ?? "The person who shared it"
             } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`}
           </p>
-          {confirmDelete.length > 1 ? (
-            <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
-              {confirmDelete.map((path) => (
-                <li
-                  key={path}
-                  className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
-                >
-                  <span className="break-all">{path}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
         </ConfirmDialog>
       ) : null}
     </>

@@ -36,6 +36,13 @@ export function revealInFileManagerLabel(platform: string | undefined): string {
   return "Show in file manager";
 }
 
+// The file manager's name inside a sentence, such as a failed reveal's.
+export function fileManagerName(platform: string | undefined): string {
+  if (platform === "darwin") return "Finder";
+  if (platform === "win32") return "File Explorer";
+  return "the file manager";
+}
+
 const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
   kind: "item",
   label,

@@ -90,6 +90,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
   { method: CHATS_METHOD.agentReadListUnreadRequests, params: { runId: "run_1" } },
+  { method: CHATS_METHOD.agentReadListUnreadRequests, params: {} },
   { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
   {
     method: CHATS_METHOD.agentReadMarkThreadRead,
@@ -453,8 +454,43 @@ function loopbackAdapter(): {
 }
 
 describe("ChatsLiveAdapter", () => {
-  it("encodes every one of the 62 chats methods with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(62);
+  it("keeps a posted-thread reply that also requests a dohc agent", async () => {
+    const { adapter } = loopbackAdapter();
+    const channel = await adapter.ensureGeneralChannel({ workspaceId: "workspace" });
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.channelId,
+      author: { kind: "agent", displayName: "Connected agent" }, body: "Joining the thread",
+    });
+    const reply = await adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      author: { kind: "human", displayName: "Sam" }, body: "@Research please also look",
+      namedAgentIds: ["research"],
+    });
+    expect((await adapter.listAgentUnreadRequests("workspace")).map(row => row.messageId)).toEqual([reply.id]);
+  });
+
+  it("keeps agent DMs out of outside requests when their latest message is an agent reply", async () => {
+    const { adapter } = loopbackAdapter();
+    const channel = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "default", name: "Nova" });
+    const started = await adapter.startChannelThread({
+      authorActorKey: null, workspaceId: "workspace", channelId: channel.channelId,
+      author: { kind: "human", displayName: "Sam" }, body: "Please look", origin: "cli",
+    });
+    expect((await adapter.listAgentUnreadRequests("workspace")).map(row => row.messageId)).toEqual([started.message.id]);
+    const send = (kind: "human" | "agent", body: string) => adapter.sendMessage({
+      authorActorKey: null, workspaceId: "workspace", threadId: started.thread.id,
+      author: { kind, displayName: kind }, body, origin: "cli",
+    });
+    await send("agent", "Answered");
+    expect(await adapter.listAgentUnreadRequests("workspace")).toEqual([]);
+    await send("human", "@agent one more question");
+    expect(await adapter.listAgentUnreadRequests("workspace")).toHaveLength(2);
+    await send("agent", "Answered again");
+    expect(await adapter.listAgentUnreadRequests("workspace")).toEqual([]);
+  });
+
+  it("encodes every chats request case with the workspace handle and exact params", async () => {
+    expect(CHAT_REQUEST_CASES).toHaveLength(63);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),
@@ -1394,6 +1430,35 @@ describe("loopback poll validation", () => {
   });
 });
 
+describe("loopback reported agent validation", () => {
+  it.each([
+    { name: "40 emoji, 80 UTF-16 units", model: "\u{1F600}".repeat(40) },
+    { name: "a leading byte order mark", model: "﻿Claude Opus 5.5" },
+  ])("refuses a model of $name, as the daemon does", async ({ model }) => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "bad-report", authorKind: "agent", authorDisplayName: "Nova", body: "Done",
+      authorReported: { model },
+    } })).rejects.toThrow("invalid-input");
+    expect(await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id })).toHaveLength(1);
+  });
+
+  it("accepts a model of 32 emoji, 64 UTF-16 units", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    const model = "\u{1F600}".repeat(32);
+    await loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
+      threadId: started.thread.id, messageId: "good-report", authorKind: "agent", authorDisplayName: "Nova", body: "Done",
+      authorReported: { model },
+    } });
+    const messages = await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id });
+    expect(messages.find(message => message.id === "good-report")?.authorReported).toEqual({ model });
+  });
+});
+
 
 it("decodes agent owner display metadata without changing its verified author", () => {
   const message = decodeChatsResult(CHATS_METHOD.messageSend, {
@@ -1532,6 +1597,15 @@ describe("local chat actor key transport", () => {
     expect(rows[0]!.authorActorKey).toBe(key);
     expect(rows[1]!.authorActorKey).toBeUndefined();
   });
+});
+
+it("preserves the agent read position on unread threads", async () => {
+  const requests: Request[] = [];
+  const thread = { id: "thread", workspaceId: "workspace", title: "Thread", createdAtMs: 1, updatedAtMs: 3,
+    lastRead: { createdAtMs: 2, messageId: "read-message" } };
+  const adapter = new ChatsLiveAdapter(mockDaemon(requests, () => ({ threads: [thread], nextCursor: null })), WORKSPACE, { workspaceId: "workspace" });
+  expect(await adapter.listAgentUnreadThreads("workspace")).toEqual([thread]);
+  expect(requests[0]).toMatchObject({ method: CHATS_METHOD.agentReadListUnreadThreads });
 });
 
 it("returns exactly one chat mention page even when an empty filtered page has a continuation",async()=>{

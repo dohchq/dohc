@@ -1146,6 +1146,52 @@ describe("workspace authority owner", () => {
     await retiring;
   });
 
+  it.each(["finalize", "removeBinding"] as const)("opens a workspace again when %s fails during removal", async step => {
+    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+    const binding = test.owner.currentBinding("workspace");
+    const error = new Error("profile file is busy");
+    await expect(test.owner.retireBinding(binding, {
+      ...(step === "finalize" ? { finalize: () => { throw error; } } : {}),
+      removeBinding: () => { if (step === "removeBinding") throw error; },
+    })).rejects.toBe(error);
+
+    expect(test.disposed).toEqual([binding.attachmentId]);
+    const reopened = test.owner.acquire("workspace");
+    expect(reopened.binding.attachmentId).not.toBe(binding.attachmentId);
+    reopened.release();
+  });
+
+  it.each([true, false])("removes a workspace whose other removal failed only if it wasn't opened again (opened again: %s)", async openedAgain => {
+    const test = testOwner({ workspaceId: "workspace", rootPath: "root", label: "A" });
+    const binding = test.owner.currentBinding("workspace");
+    const finalizers: { resolve: () => void; reject: (error: unknown) => void }[] = [];
+    let bothStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bothStarted = resolve; });
+    const finalize = () => new Promise<void>((resolve, reject) => {
+      if (finalizers.push({ resolve, reject }) === 2) bothStarted();
+    });
+    const removeBinding = vi.fn(() => test.replace(null));
+    const first = test.owner.retireBinding(binding, { finalize, removeBinding });
+    const second = test.owner.retireBinding(binding, { finalize, removeBinding });
+    await started;
+    const error = new Error("trust file is busy");
+    finalizers[0]!.reject(error);
+    await expect(first).rejects.toBe(error);
+    const reopened = openedAgain ? test.owner.acquire("workspace") : null;
+    finalizers[1]!.resolve();
+
+    if (reopened) {
+      await expect(second).rejects.toThrow("This workspace changed while this ran. Try again.");
+      expect(removeBinding).not.toHaveBeenCalled();
+      expect(() => reopened.assertCurrent()).not.toThrow();
+      reopened.release();
+    } else {
+      await second;
+      expect(removeBinding).toHaveBeenCalledOnce();
+      expect(() => test.owner.currentBinding("workspace")).toThrow("This workspace is not open. Open it again.");
+    }
+  });
+
   it("keeps a blocking tombstone when cleanup fails", async () => {
     const registry = new Map<string, Workspace>([
       [

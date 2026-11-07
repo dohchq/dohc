@@ -6,6 +6,7 @@ import {
   RelayWorkspaceUnavailableError,
   RelayIdentityMissingError,
   RelayClaimRefusedError,
+  type MaterializeRelayPullPage,
   type PullWorkspaceFromRelayResult,
 } from "@dohc/workspace-contracts/relay";
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
@@ -24,14 +25,14 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 // exactly like the real capture implementation.
 const claimMock = vi.fn<() => Promise<void>>();
 const pushMock = vi.fn<RelaySyncOperations["push"]>();
-const pullMock = vi.fn<RelaySyncOperations["pull"]>();
+const pullMock = vi.fn<(materializePage: MaterializeRelayPullPage) => Promise<PullWorkspaceFromRelayResult>>();
 const recoverMock = vi.fn<RelaySyncOperations["recoverOrigin"]>();
 
 function mockOperations(): RelaySyncOperations {
   return {
     claim: claimMock,
     push: pushMock,
-    pull: pullMock,
+    pull: (runBatch) => runBatch(pullMock),
     recoverOrigin: recoverMock,
   };
 }
@@ -132,7 +133,7 @@ function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
   syncSharedChannels?: () => Promise<boolean>;
-  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  afterSuccessfulPull?: (pass: { recovered: boolean; applied: boolean }) => Promise<void>;
   afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   operations?: RelaySyncOperations;
   idlePullMs?: number;
@@ -183,6 +184,41 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("admits capture, document opens, and History while a fetch waits", async () => {
+    const {serialCapture, enqueue} = serialCaptureFake();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const operations: RelaySyncOperations = {
+      ...mockOperations(),
+      pull: async runBatch => {
+        entered.resolve();
+        await release.promise;
+        return runBatch(async materialize => {
+          events.push("apply");
+          await materialize([]);
+          events.push("commit");
+          return pullResult();
+        });
+      },
+    };
+    const sync = engine({capture: serialCapture, operations});
+    const syncing = sync.start();
+    await entered.promise;
+    try {
+      await Promise.all(["capture write", "document open", "History"].map(action => enqueue(async () => {
+        events.push(action);
+      })));
+      expect(events).toEqual(["capture write", "document open", "History"]);
+      expect(chainHeld).toBe(0);
+    } finally {
+      release.resolve();
+      await syncing;
+      await sync.stop();
+    }
+    expect(events).toEqual(["capture write", "document open", "History", "apply", "commit"]);
+  });
+
   it("opens documents and writes while a push waits on the relay, and pulls between drain passes", async () => {
     const events: string[] = [];
     const fake = serialCaptureFake();
@@ -342,7 +378,7 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(pushMock).toHaveBeenCalledTimes(pushes + 1);
     expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
-    expect(afterSuccessfulPull).toHaveBeenLastCalledWith({ recovered: true });
+    expect(afterSuccessfulPull).toHaveBeenLastCalledWith(expect.objectContaining({ recovered: true }));
     await sync.stop();
     errorSpy.mockRestore();
   });
@@ -659,7 +695,7 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(500);
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
-    expect(afterSuccessfulPull.mock.calls).toEqual([[{ recovered: true }], [{ recovered: false }]]);
+    expect(afterSuccessfulPull.mock.calls).toEqual([[expect.objectContaining({ recovered: true })], [expect.objectContaining({ recovered: false })]]);
 
     errorSpy.mockRestore();
     await sync.stop();
@@ -1427,6 +1463,33 @@ describe("relaySyncEngine", () => {
     await sync.stop();
     await vi.advanceTimersByTimeAsync(5000);
     expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+  });
+
+  it("announces a quiet pull that fetched a change it could not apply yet", async () => {
+    const onChange = vi.fn();
+    const cap = capture();
+    const sync = engine({ capture: cap, onChange });
+    await sync.start();
+    onChange.mockClear();
+
+    // Another computer's newer save waits behind an open conflict: the pull
+    // fetches it and applies nothing, and an open review must still hear it.
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 1 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledOnce();
+
+    // The echo of this computer's own upload is skipped, and a pull that
+    // fetched nothing changes nothing: both stay quiet.
+    pullMock.mockResolvedValueOnce(pullResult({ fetched: 2, skipped: 2 }));
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    sync.queuePull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(4);
+    expect(onChange).toHaveBeenCalledOnce();
+    await sync.stop();
   });
 
   it("restarts the quiet interval after every pass and leaves a failed pull's retry to the backoff", async () => {

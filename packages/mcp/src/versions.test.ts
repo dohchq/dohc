@@ -3,7 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { expect, it, vi } from "vitest";
 import { advertisedCapabilityTools } from "./capabilityExposure.fixture";
 import { createDohcMcpServer } from "./server";
-import type { ToolContext } from "./tools";
+import { listVersionConflicts, listVersions, type ToolContext } from "./tools";
 
 const tools = ["dohc_list_versions", "dohc_compare_version", "dohc_list_version_conflicts",
   "dohc_create_version", "dohc_switch_version", "dohc_merge_version", "dohc_resolve_version_conflict"];
@@ -41,4 +41,28 @@ it("offers the version tools to the owner only and sends them as the agent", asy
     expect.objectContaining({ verb: "versionResolve", args: expect.objectContaining({ actor: "agent", conflictId: "c1",
       resolution: { keep: "combined", text: "both" } }) }),
   ]);
+});
+
+it("tells the agent what each version was made from", async () => {
+  const listed = { ok: true, activeVersionId: "main", versions: [
+    { id: "main", name: "Main", kind: "main", createdAtMs: 10, canMergeIntoMain: false },
+    { id: "nested", name: "Nested", kind: "named", createdAtMs: 10, canMergeIntoMain: false, madeFromVersionId: "draft" }] };
+  const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => listed as never);
+  await expect(listVersions({ root: process.cwd(), home: process.cwd(), request })).resolves.toEqual(listed);
+});
+
+it("lists a newer version waiting behind a conflict, and refuses a malformed one", async () => {
+  const listed = { conflictId: "c1", path: "notes.md", sourceVersionId: "main", targetVersionId: "main", origin: "sync",
+    contentKind: "text", currentText: "mine", incomingText: "theirs", baseText: "base" };
+  const waiting = { code: "resolve-existing-conflict", objectId: "notes-object", originId: "computer-d", originSeq: 4,
+    message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved." };
+  let answer: unknown = { ok: true, conflicts: [{ ...listed, waiting }, listed], nextAfterConflictId: null };
+  const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => answer as never);
+  const ctx = { root: process.cwd(), home: process.cwd(), request };
+  await expect(listVersionConflicts(ctx, {})).resolves.toEqual(answer);
+  for (const malformed of [{ ...waiting, code: "conflict-wait-limit" }, { ...waiting, message: "" }, { ...waiting, originSeq: -1 },
+    { ...waiting, path: "notes.md" }]) {
+    answer = { ok: true, conflicts: [{ ...listed, waiting: malformed }], nextAfterConflictId: null };
+    await expect(listVersionConflicts(ctx, {})).resolves.toMatchObject({ ok: false });
+  }
 });

@@ -56,7 +56,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, liveEditingStoppedPaths, livePageBody, livePageTitle, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   formatSize,
@@ -113,6 +113,7 @@ import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNo
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
+import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
@@ -187,6 +188,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
+import { publishReopenKey } from "./documentVersionKey";
 import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult, type LiveStopWaitingNotice } from "./LiveDocumentsDialog";
 import { readLiveStopRefusal, liveStopMessage, liveStopOffersResume, liveStopAction, liveStopRefusalForRow, type LiveStopRefusal } from "../ipc/liveEditingStop";
 import { OpenSharedView } from "./OpenSharedView";
@@ -211,7 +213,7 @@ import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
 import { hasApps, useApps, type ExplorerApps } from "./workbench/AppsSection";
-import { deleteRefusalIdentity, moveRefusalIdentity, projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { deleteRefusalIdentity, listedMoveEnds, moveFailureIdentity, projectTreePath, type PendingTreeChange, type PendingTreeMove } from "./workbench/file-tree-optimistic";
 import {
   captureOrphanedDraft,
   loadLiveDraftRecovery,
@@ -244,7 +246,10 @@ import {
   ConflictReviewDialog,
   VersionComparePage,
   VersionMenu,
+  isVersionMergeIdentity,
+  useWorkspaceVersions,
 } from "./workbench/WorkspaceVersions";
+import { VersionsPage } from "./workbench/VersionsPage";
 import {
   ProposalReviewDialog,
   proposerName,
@@ -273,12 +278,14 @@ import {
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
+  VERSIONS_TAB_PATH,
   isViewId,
   MAX_OPEN_TABS,
   mergeSavedTabs,
   moveTab,
   moveTabToGroup,
   openTab,
+  openTabOnce,
   resizeEditorGroups,
   moveTabToNewGroup,
   newPageTabPath,
@@ -329,6 +336,35 @@ function archiveRefusalIdentity(workspaceId: string, path: string): string {
 
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
+}
+
+// A move that failed, and whether its destination was already taken.
+type FailedMove = { move: PendingTreeMove; destinationTaken: boolean };
+
+// What a listing says of a failed move: made, or its destination taken.
+function failedMoveNow(
+  failed: FailedMove,
+  files: Parameters<typeof listedMoveEnds>[1],
+  folders: Parameters<typeof listedMoveEnds>[2],
+) {
+  const ends = listedMoveEnds(failed.move, files, folders);
+  return {
+    made: ends.to && !ends.from && !failed.destinationTaken,
+    taken: ends.to && (ends.from || failed.destinationTaken),
+  };
+}
+
+// Whether a listing shows any failed move made, or its destination's state changed.
+function failedMovesChanged(
+  failed: Iterable<FailedMove>,
+  files: Parameters<typeof listedMoveEnds>[1],
+  folders: Parameters<typeof listedMoveEnds>[2],
+) {
+  for (const one of failed) {
+    const now = failedMoveNow(one, files, folders);
+    if (now.made || now.taken !== one.destinationTaken) return true;
+  }
+  return false;
 }
 
 function groupsMountingNewDocument(
@@ -970,11 +1006,66 @@ export function DesktopWorkspaceShell(props: {
       reportShellFailure({ message, cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}) }),
     [reportShellFailure],
   );
+  // A failed move's row goes once the move happens, by any route. A move made
+  // through the CLI or MCP reaches the shell only as workspace activity and
+  // the listing that follows. But a listing can come from a walk main made
+  // while it was still undoing a refused move. So a listing only raises the
+  // question: when one shows a failed move's ends changed, the shell asks for
+  // a full listing, which main walks anew, and only that answer decides. One
+  // question is out at a time. If a listing lands while it is out, the newest
+  // listing is checked against the answer after, and a change there asks again.
+  // A destination listed beside the source was taken, and counts only after
+  // an answer shows it gone, since a deleted source would look the same.
+  const listing = useRef({ files, folders });
+  listing.current = { files, folders };
+  const failedMoves = useRef(new Map<string, FailedMove>());
+  const clearFailedMove = useCallback((identity: string) => {
+    failedMoves.current.delete(identity);
+    clearIdentity(identity);
+  }, [clearIdentity]);
+  const confirming = useRef<"idle" | "asking" | "again">("idle");
+  const confirmFailedMoves = useCallback(async () => {
+    const id = workspaceId;
+    // A listing that lands during the await can set the ref, so a call reads it.
+    const askedAgain = () => confirming.current === "again";
+    do {
+      confirming.current = "asking";
+      const asked = new Map(failedMoves.current);
+      // A failed listing keeps the rows, and the next activity asks again.
+      const answer = await refreshFiles().catch(() => null);
+      if (!answer || workspaceIdRef.current !== id) continue;
+      for (const [identity, failed] of asked) {
+        if (failedMoves.current.get(identity) !== failed) continue;
+        const now = failedMoveNow(failed, answer.files, answer.folders ?? []);
+        if (now.made) clearFailedMove(identity);
+        else failed.destinationTaken = now.taken;
+      }
+    } while (
+      askedAgain() &&
+      failedMovesChanged(failedMoves.current.values(), listing.current.files, listing.current.folders)
+    );
+    confirming.current = "idle";
+  }, [workspaceId, refreshFiles, clearFailedMove]);
+  useEffect(() => {
+    if (!fileListingCommit) return;
+    if (confirming.current !== "idle") confirming.current = "again";
+    else if (failedMovesChanged(failedMoves.current.values(), files, folders)) void confirmFailedMoves();
+  }, [fileListingCommit, files, folders, confirmFailedMoves]);
   // Explorer's failures. A move refused for live editing opens Live
   // documents, at the page's row for a page, whose words name the action that
   // ran. A refused Undo keeps the Explorer's words.
   const reportExplorerError = useCallback(
-    (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
+    (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange, livePage?: LivePageRefused) => {
+      const move = change && (change.kind === "file" || change.kind === "folder") ? change : undefined;
+      const deleted = change && (change.kind === "delete-file" || change.kind === "delete-folder") ? change : undefined;
+      const identity = move ? moveFailureIdentity(workspaceId, move)
+        : deleted && isLiveEditingRefusal(cause) ? deleteRefusalIdentity(workspaceId, deleted.path) : undefined;
+      // A Try again keeps what the first failure knew of the destination.
+      if (move && identity) {
+        const ends = listedMoveEnds(move, listing.current.files, listing.current.folders);
+        const destinationTaken = failedMoves.current.get(identity)?.destinationTaken === true || (ends.from && ends.to);
+        failedMoves.current.set(identity, { move, destinationTaken });
+      }
       if (!livePage && !isLiveFolderRefusal(cause)) return reportFailureMessage(message, cause, retry, identity);
       const id = workspaceId, reveal = livePage?.path ?? null;
       reportShellFailure({ cause, ...(retry ? { retry } : {}), ...(identity !== undefined ? { identity } : {}),
@@ -1826,6 +1917,7 @@ export function DesktopWorkspaceShell(props: {
   // For a lookup that must not act on a version a later switch replaced.
   const versionEpochRef = useRef(versionEpoch);
   versionEpochRef.current = versionEpoch;
+  useEffect(() => publishReopenKey(workspaceId, versionEpoch), [workspaceId, versionEpoch]);
   const engineRebuildReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
   useEffect(() => {
@@ -1894,7 +1986,7 @@ export function DesktopWorkspaceShell(props: {
   shareViewWritableRef.current = shareViewWritable;
   const shareHadEditRef = useRef(shareView?.access === "edit");
   if (shareViewWritable) shareHadEditRef.current = true;
-  const shareReopenMessage = "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
+  const shareReopenMessage = "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays.";
   const shareWriteRefusal = shareViewEnded ? "Your access to this share ended."
     : shareViewDamaged ? !shareView?.recipientUserId || needsReopenFor === shareView ? shareReopenMessage
       : "dohc can't read what this share grants. Open the share again to restore it."
@@ -2880,11 +2972,11 @@ export function DesktopWorkspaceShell(props: {
     [openPathWithHeading],
   );
   const openVirtualTab = useCallback(
-    (path: string, recent = false) => {
+    (path: string, recent = false, once = false) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
       const current = wbRef.current;
-      const next = openTab(current, path, targetGroupId);
+      const next = (once ? openTabOnce : openTab)(current, path, targetGroupId);
       const targetAlreadyOwnsPath = current.editorGroups
         .find((group) => group.id === targetGroupId)
         ?.tabs.some((tab) => tab.path === path);
@@ -3060,17 +3152,14 @@ export function DesktopWorkspaceShell(props: {
     const current = () => workspaceIdRef.current === owner;
     const whileCurrent = (run?: () => void) => run && (() => { if (current()) run(); });
     return {
-      onError: (message: string, cause?: unknown, retry?: () => void, identity?: string, livePage?: LivePageRefused) => {
-        if (current()) reportExplorerError(message, cause, whileCurrent(retry), identity, livePage);
+      onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange, livePage?: LivePageRefused) => {
+        if (current()) reportExplorerError(message, cause, whileCurrent(retry), change, livePage);
       },
       onNotice: (message: string, undo?: () => void) => {
         if (current()) showSuccessNotice(message, whileCurrent(undo));
       },
-      onChangeSucceeded: (identity: string) => {
-        if (current()) clearIdentity(identity);
-      },
     };
-  }, [workspaceId, reportExplorerError, showSuccessNotice, clearIdentity]);
+  }, [workspaceId, reportExplorerError, showSuccessNotice]);
   const openDataCollection = useCallback(
     (datasetPath: string, tableId: string) => {
       openVirtualTab(transactionalCollectionTabPath(datasetPath, tableId), true);
@@ -3101,6 +3190,10 @@ export function DesktopWorkspaceShell(props: {
   }, [openVirtualTab]);
   const openHistoryTab = useCallback(() => {
     openVirtualTab(HISTORY_TAB_PATH);
+  }, [openVirtualTab]);
+  // Opening it again goes to the open tab, in any group.
+  const openVersionsTab = useCallback(() => {
+    openVirtualTab(VERSIONS_TAB_PATH, false, true);
   }, [openVirtualTab]);
   const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
   const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter((path) => parseTab(path).kind === "chat"), [wb.editorGroups]);
@@ -3298,6 +3391,20 @@ export function DesktopWorkspaceShell(props: {
       sidebarVisible: true,
     }));
   }, [mutateWb]);
+  const openConflictReview = useCallback(() => setConflictReviewOpen(true), []);
+  const versionMerges = useVersionMergeNotices({
+    workspaceId,
+    captureOn: captureAvailable,
+    reportShellFailure,
+    clearIdentity,
+    openHistory: openHistoryView,
+    openConflictReview,
+  });
+  const { settle: settleVersionMerges } = versionMerges;
+  const closeConflictReview = useCallback(() => {
+    setConflictReviewOpen(false);
+    settleVersionMerges();
+  }, [settleVersionMerges]);
   // Open History shows the timeline with the recovery change open beside it.
   const openCaptureRecovery = useCallback(
     (momentId: string, path: string) => {
@@ -3922,9 +4029,15 @@ export function DesktopWorkspaceShell(props: {
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
-      // A move that succeeds takes back its earlier refusal.
+      // A move that succeeds from the tree takes back every failed move of
+      // the same path, whatever its destination, since their Try again would
+      // now fail.
       for (const change of changes) {
-        if (change.kind === "folder" || change.kind === "file") clearIdentity(moveRefusalIdentity(workspaceId, change));
+        if (change.kind === "folder" || change.kind === "file") {
+          for (const [identity, failed] of failedMoves.current) {
+            if (failed.move.fromPath === change.fromPath) clearFailedMove(identity);
+          }
+        }
         if (change.kind === "delete-file" || change.kind === "delete-folder") clearIdentity(deleteRefusalIdentity(workspaceId, change.path));
       }
       // Set-aside drafts key by path, so recovery follows the same projection
@@ -3952,7 +4065,7 @@ export function DesktopWorkspaceShell(props: {
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
       );
     },
-    [clearIdentity, mutateWb, workspaceId],
+    [clearFailedMove, clearIdentity, mutateWb, workspaceId],
   );
 
   const {
@@ -4462,7 +4575,7 @@ export function DesktopWorkspaceShell(props: {
       setWorkspaceOpenFailedFor(null);
 
       const refreshInitialFiles = async () => {
-        const paintedCachedListing = await refreshFiles({ allowCached: true });
+        const paintedCachedListing = (await refreshFiles({ allowCached: true })).cached === true;
         if (cancelled || !paintedCachedListing) return;
         await refreshFiles();
       };
@@ -4666,6 +4779,7 @@ export function DesktopWorkspaceShell(props: {
       "show-search": () => mutateWb((state) => showView(state, "search")),
       "show-graph": () => mutateWb((state) => showView(state, "graph")),
       "show-history": () => mutateWb((state) => showView(state, "history")),
+      "open-versions": openVersionsTab,
       "connect-cloud": openCloud,
       "settings": () => openSettings(),
       "settings-appearance": () => openSettings("appearance"),
@@ -4708,6 +4822,7 @@ export function DesktopWorkspaceShell(props: {
       openCloud,
       openEditorGroupRight,
       openSettings,
+      openVersionsTab,
       reportShellError,
       toggleSource,
       workspaceId,
@@ -4815,7 +4930,7 @@ export function DesktopWorkspaceShell(props: {
       ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
         ? !shareView.recipientUserId || needsReopenFor === shareView
-          ? "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files."
+          ? "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays."
           : "dohc can't read what this share grants. Open the share again to restore it."
         : shareViewWritable
           ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
@@ -5337,6 +5452,10 @@ export function DesktopWorkspaceShell(props: {
     latestMomentOrder + 1,
   );
   const historyRefreshCounter = shareView ? 0 : historyRefreshFloor.current;
+  // The Versions page also re-reads on a protected file's change, which
+  // doesn't move the moment order the counter follows.
+  const newestHistoryFile = engineHistory?.entries.find((entry) => entry.kind === "file");
+  const versionsHistoryKey = `${historyRefreshCounter}\n${newestHistoryFile?.kind === "file" ? newestHistoryFile.moment.id : ""}`;
   const graphKey = shareView
     ? graphRefreshKey
     : `${graphRefreshKey}\0${latestMomentOrder}`;
@@ -5399,7 +5518,6 @@ export function DesktopWorkspaceShell(props: {
         onRefresh={onExplorerRefresh}
         onError={explorerReports.onError}
         onNotice={explorerReports.onNotice}
-        onChangeSucceeded={explorerReports.onChangeSucceeded}
         onNewCollection={setNewCollectionFolder}
       />
     </>
@@ -5436,6 +5554,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportChatsError,
+    onNotice: showSuccessNotice,
     onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,
@@ -5519,10 +5638,12 @@ export function DesktopWorkspaceShell(props: {
       : storeUpdateState.currentVersion
     : null;
   // Facts a person can paste into a report. The version comes from the
-  // updater's state; a bridge without it leaves the line out.
+  // updater's state; a bridge without it leaves the line out. A shared view
+  // goes by what it shares, so its share id rides beside the name.
   const reportFacts = useCallback(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
       ["Workspace", workspaceName(props.workspace)],
+      ["Share id", props.workspace.shareView?.shareId],
       ["Folder", props.workspace.rootPath],
       ["dohc", appVersion],
       ["Platform", bridge().platform],
@@ -5541,24 +5662,28 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
+        ...(error.paths ? { paths: error.paths } : {}),
         ...(error.command ? { command: error.command } : {}),
         ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
         details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
           [error.tone ? "Notice" : "Error", error.message],
           ...(error.title ? [["Title", error.title] as const] : []),
+          ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
           ...(error.details ?? []),
           ...reportFacts(),
         ]),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         retryBusy: error.retryBusy,
+        ...(versionMerges.retryBlocked && isVersionMergeIdentity(error.identity) ? { retryBlocked: versionMerges.retryBlocked } : {}),
         ...(error.action ? { actionLabel: error.action.label } : {}),
+        ...(error.action?.afterRetry ? { actionAfterRetry: true } : {}),
         ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map(action => action.label) } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
       })),
-    [shellErrors, reportFacts],
+    [shellErrors, reportFacts, versionMerges.retryBlocked],
   );
   // What Copy details copies, shown on request so a person can read what
   // they are about to paste. One string for both, so they never differ.
@@ -5840,6 +5965,28 @@ export function DesktopWorkspaceShell(props: {
     },
     [dismissShellError, driveLimitNotice, networkShareNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
+  // One owner for switch, create and merge, so the titlebar menu and the
+  // Versions page run the same operation and show the same state.
+  const workspaceVersions = useWorkspaceVersions({
+    workspaceId,
+    enabled: captureAvailable,
+    activeTabDirty: anyTabDirty,
+    beginLineageOperation,
+    onWorkspaceStateChanged: onVersionWorkspaceStateChanged,
+    onError: reportFailureMessage,
+    clearError: versionMerges.clear,
+    onMergeNotice: versionMerges.report,
+    onMergeOpenChange: versionMerges.onMergeOpenChange,
+    onOpenHistory: openHistoryView,
+    onConflictError: reportShellError,
+    // versionEpoch bumps whenever version state changed outside these
+    // controls, so they re-read instead of going stale.
+    refreshKey: versionEpoch,
+  });
+  const shareVersion = shareView
+    ? undefined
+    : (version: { id: string; name: string }) =>
+        setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <AgentColorContext.Provider value={setAgentColor}>
@@ -5878,30 +6025,13 @@ export function DesktopWorkspaceShell(props: {
         mutateWb={mutateWb}
         version={captureAvailable ? (
           <VersionMenu
-            workspaceId={workspaceId}
+            versions={workspaceVersions}
             // Out of the workbench, so it waits for the workspace the way
             // the inert workbench does.
             disabled={!workspaceIsReady || storeUpdateRequired}
-            activeTabDirty={anyTabDirty}
-            beginLineageOperation={beginLineageOperation}
             onOpenCompare={openVersionCompareTab}
-            onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-            onError={reportFailureMessage}
-            clearError={clearIdentity}
-            onConflictError={reportShellError}
-            {...(shareView
-              ? {}
-              : {
-                  onShareVersion: (version: { id: string; name: string }) =>
-                    setShareTarget({
-                      kind: "version",
-                      versionId: version.id,
-                      versionName: version.name,
-                    }),
-                })}
-            // versionEpoch bumps whenever version state changed outside
-            // this menu, so the selector re-reads instead of going stale.
-            refreshKey={versionEpoch}
+            onOpenAllVersions={openVersionsTab}
+            {...(shareVersion ? { onShareVersion: shareVersion } : {})}
           />
         ) : undefined}
       />
@@ -6391,6 +6521,40 @@ export function DesktopWorkspaceShell(props: {
                   key={`${tabPath}:${versionEpoch}`}
                   workspaceId={workspaceId}
                   versionId={groupTab.versionId ?? "main"}
+                />
+              )
+            );
+                case "versions": return (
+              // The same capability gate and lines as a compare tab.
+              !captureAvailable ? (
+                shareView ? (
+                  <div
+                    data-testid="versions-share-view"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    A shared view has no versions. Close this tab to go back to the shared files.
+                  </div>
+                ) : !captureDecided ? (
+                  <SkeletonRows layout="panel" label="Loading versions..." />
+                ) : (
+                  <div
+                    data-testid="versions-off"
+                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                  >
+                    {versionCompareOffCopy(syncStatus)}
+                  </div>
+                )
+              ) : (
+                <VersionsPage
+                  workspaceId={workspaceId}
+                  versions={workspaceVersions}
+                  disabled={!workspaceIsReady || storeUpdateRequired}
+                  historyKey={versionsHistoryKey}
+                  versionKey={versionEpoch}
+                  onOpenCompare={openVersionCompareTab}
+                  onReviewConflicts={() => setConflictReviewOpen(true)}
+                  onError={reportButtonError}
+                  onSettled={clearIdentity}
                 />
               )
             );
@@ -7107,13 +7271,14 @@ export function DesktopWorkspaceShell(props: {
           />
         </Overlay>
       ) : null}
+      {workspaceVersions.dialogs}
       {conflictReviewOpen ? (
         <ConflictReviewDialog
           workspaceId={workspaceId}
           onError={reportShellError}
           beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-          onClose={() => setConflictReviewOpen(false)}
+          onClose={closeConflictReview}
         />
       ) : null}
       {sharedRestore.dialog}
@@ -7179,6 +7344,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
+            workspaceName={workspaceName(props.workspace)}
             sharedView={!!shareView}
             // Main's own decision, not the renderer's settings read:
             // only main knows whether a recorder exists for this session, and

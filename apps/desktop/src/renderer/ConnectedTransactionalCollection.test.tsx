@@ -276,7 +276,7 @@ it("deletes an archived Collection with its reviewed cursor and updates the shel
   await screen.findByText("form");
   expect(backend.dataset.mock.calls.some(([input]) => input.action === "delete")).toBe(false);
   fireEvent.click(screen.getByRole("checkbox"));
-  fireEvent.click(screen.getByRole("button", { name: "Delete Collection permanently" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
   await screen.findByText("Collection deleted");
   expect(backend.dataset).toHaveBeenCalledWith({ action: "delete", workspaceId: "workspace-a", datasetPath: "data/dataset.json", expectedDatasetId: id(1), expected: deletionPreview().cursor, reviewToken: "c".repeat(64), acknowledge: true });
   expect(onLifecycleChanged).toHaveBeenCalledOnce(); expect(onNotice).toHaveBeenCalledWith("Collection deleted"); expect(onError).not.toHaveBeenCalled();
@@ -297,7 +297,7 @@ it("does not report permanent deletion in a different workspace", async () => {
   const props = { workspaceId: "workspace-a", datasetPath: "data/dataset.json", tableId: id(2), onError: vi.fn(), onFormCreated: vi.fn(), onOpenFile: vi.fn(), onOpenScheduleSettings: vi.fn(), onNotice: vi.fn(), onLifecycleChanged: vi.fn() };
   const view = render(<ConnectedTransactionalCollection {...props} />);
   fireEvent.click(await screen.findByRole("button", { name: "Delete permanently…" })); await screen.findByText("form");
-  fireEvent.click(screen.getByRole("checkbox")); fireEvent.click(screen.getByRole("button", { name: "Delete Collection permanently" }));
+  fireEvent.click(screen.getByRole("checkbox")); fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
   view.rerender(<ConnectedTransactionalCollection {...props} workspaceId="workspace-b" />);
   await act(async () => pending.resolve({ kind: "deleted", deleted: true, datasetId: id(1) }));
   expect(props.onNotice).not.toHaveBeenCalled(); expect(props.onLifecycleChanged).not.toHaveBeenCalled(); expect(props.onError).not.toHaveBeenCalled();
@@ -319,8 +319,8 @@ function buttonApproval() {
   const expected = { workspaceId: "workspace-a", datasetId: id(1), hostEpoch: "epoch", revision: 4, digest: "f".repeat(64), approvedRevisionHash: before.revisionSha256 };
   const preparation = { preparationId: id(10), previousRevision, revision: nextRevision, expected, sourceDigest: "a".repeat(64), approvalDigest: "b".repeat(64),
     schemaSql: "schema", operationSource: "source", migrationSql: "SELECT 1;", expiresAtMs: Date.now() + 600_000,
-    candidate: { candidateId: id(11), expected, approvedRevisionHash: after.revisionSha256, checkpointSha256: "a".repeat(64), expiresAtMs: Date.now() + 600_000,
-      preview: { tables: [{ table: "registrations", beforeRows: 0, afterRows: 0, changedRows: 0 }], firstPage: { changes: [], nextCursor: null } } } };
+    candidate: { candidateId: id(11), expected, approvedRevisionHash: after.revisionSha256, checkpointSha256: "a".repeat(64), changeSha256: "d".repeat(64), expiresAtMs: Date.now() + 600_000,
+      preview: { tables: [{ table: "registrations", beforeRows: 0, afterRows: 0, changedRows: 0, deletedRows: 0, beforeValues: {}, afterValues: {}, clearedValues: {} }], firstPage: { changes: [], nextCursor: null } } } };
   return { before, after, preparation, CONFIRM };
 }
 

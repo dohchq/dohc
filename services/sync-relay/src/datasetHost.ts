@@ -25,9 +25,12 @@ import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionI
 import { notFound, relayError } from "./errors";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
+import { collectionFilePresent } from "./storage/collectionFilePresence";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const ownerPrincipalKey = (workspaceId: string) => hash(JSON.stringify(["dohc-dataset-owner-v1", workspaceId]));
+// A moved folder can reach the server as a delete and a later write, and a deleted file can come straight back.
+const COLLECTION_MISSING_GRACE_MS = 120_000;
 export interface RelayDatasetHostOptions {
   storage: StorageContext;
   directory: string;
@@ -154,6 +157,17 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         targetVersionId(namedSelector) !== candidate.versionId || visibleSharePath(namedSelector, candidate.appRoot) !== candidate.appRoot) throw notFound();
     return {candidate, authorityRevision: Number(row.authority_revision), authority: {...authority, authorityToken: hash(JSON.stringify([authority.authorityToken, row.authority_revision]))}};
   }
+  // In memory, on this server's clock: a restart allows one more grace period.
+  const missingSince = new Map<string, number>();
+  /** The apps of a deleted Collection stop. Its records stay until its owner restores its files. */
+  function requireCollectionFile(workspaceId: string, datasetId: string): void {
+    const key = JSON.stringify([workspaceId, datasetId]), now = nowMs();
+    if (collectionFilePresent(storage, workspaceId, datasetId, now)) { missingSince.delete(key); return; }
+    const since = missingSince.get(key);
+    if (since !== undefined) { if (now - since >= COLLECTION_MISSING_GRACE_MS) throw relayError("app_collection_missing"); return; }
+    if (missingSince.size >= 1024) missingSince.delete(missingSince.keys().next().value!);
+    missingSince.set(key, now);
+  }
   function capability(candidate: AppPublicationCandidate, workspaceId: string, datasetId: string): AppDatasetCapability {
     const requested = candidate.capabilities.find(value => value.kind === "dataset" && value.datasetId === datasetId);
     if (!requested || requested.kind !== "dataset") throw notFound();
@@ -176,7 +190,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       if (auth.workspaceId !== workspaceId) throw notFound();
       ({candidate, authority} = namedPublication(auth, appId));
     }
-    return {capability: capability(candidate, workspaceId, datasetId), authority: {...authority, appId}};
+    const verified = capability(candidate, workspaceId, datasetId);
+    requireCollectionFile(workspaceId, datasetId);
+    return {capability: verified, authority: {...authority, appId}};
   }
   function resolveAuthority(auth: AppBackendAuth, request: {workspaceId: string; datasetId?: string; access: DatasetAccess}): DatasetAuthority {
     current();

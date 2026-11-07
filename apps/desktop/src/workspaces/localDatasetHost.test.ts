@@ -153,6 +153,33 @@ it("reopens the same recovery archive after installation was interrupted before 
   } finally { observer?.close(); }
 }, 120_000);
 
+it("finishes a restore that dohc quit partway through", async () => {
+  const sourceHost = await open(), approved = await activate(sourceHost.host);
+  await sourceHost.host.invoke(call(approved, id(6), "saved", { name: "Preserved" }));
+  const archive = await sourceHost.host.prepareExport(id(1));
+  const sourcePath = join(sourceHost.workspaceRoot, "quit.dohc-recovery");
+  await writeDatasetRecoveryExport({ workspaceRoots: [], path: sourcePath, stream: archive.stream(), signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
+  await archive.dispose(); await sourceHost.host.close();
+  let observer: DatabaseSync | undefined;
+  // dohc stops once the restore has copied a record, so nothing after that runs, cleanup included.
+  const target = await open({ assertCurrent() {
+    if (observer?.prepare("SELECT 1 FROM dohc_dataset_import_records").get()) throw Error("dohc quit");
+  } });
+  observer = new DatabaseSync(join(target.workspaceRoot, ".dohc", "local", "datasets", "state.sqlite"));
+  try {
+    const first = await target.host.prepareRecovery({ sourcePath });
+    await expect(target.host.claimRecovery({ ...first, oldHostStopped: true })).rejects.toThrow("dohc quit");
+    expect(observer.prepare("SELECT phase FROM dohc_dataset_imports").all()).toEqual([{ phase: "staging" }]);
+    observer.close(); observer = undefined;
+    await target.host.close();
+    const restarted = await open({ workspaceRoot: target.workspaceRoot });
+    const again = await restarted.host.prepareRecovery({ sourcePath });
+    expect(again.transferId).not.toBe(first.transferId);
+    expect((await restarted.host.claimRecovery({ ...again, oldHostStopped: true })).targetCursor).toBeDefined();
+    expect((await restarted.host.invoke(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Preserved" }]);
+  } finally { observer?.close(); }
+}, 120_000);
+
 it("reclaims abandoned checkpoint reservations before exposing a restarted local host", async () => {
   const first = await open(); await first.host.close();
   const path = join(first.workspaceRoot, ".dohc", "local", "datasets", "state.sqlite");
@@ -227,6 +254,7 @@ describe("local dataset owner adapter", () => {
     secondSources.files.set("items/dataset.json",JSON.stringify({...definition,datasetId:id(20),name:"Other items"}));
     const second = await activate(first.host,secondSources);
     await first.host.action({datasetId:id(20),revision:1,revisionSha256:second.revision.revisionSha256,operationId:id(6),idempotencyKey:"other",input:{name:"Keep"}});
+    first.host.archive({datasetId:id(1)});
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     await first.host.close();
@@ -248,6 +276,7 @@ describe("local dataset owner adapter", () => {
     await first.host.action(call(approved,id(6),"delete-write",{name:"Saved",fileId:uploaded.file.fileId}));
     const archive = await first.host.prepareExport(id(1)), backupPath = join(first.workspaceRoot,"saved.dohc-recovery");
     await writeDatasetRecoveryExport({ workspaceRoots: [], path:backupPath,stream:archive.stream(),signal:new AbortController().signal,maxBytes:archive.maxBytes,authorize(){}}); await archive.dispose();
+    first.host.archive({datasetId:id(1)});
     const preview = first.host.deletePreview({datasetId:id(1)});
     await first.host.deleteDataset({datasetId:id(1),expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true});
     expect(first.host.list({includeArchived:true}).datasets).toEqual([]);

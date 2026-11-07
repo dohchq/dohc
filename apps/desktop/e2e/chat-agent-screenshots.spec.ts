@@ -100,7 +100,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await page.getByTestId("chats-lane-composer").press("Enter");
     const question = page.getByTestId("chats-lane-message").filter({ hasText: "Which day do we ship?" });
     await expect(question).toHaveCount(1);
-    await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Poll open");
+    await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Unanswered");
     await shoot(page, "agent-question-open");
 
     await question.getByTestId("chats-lane-poll-option").nth(1).click();

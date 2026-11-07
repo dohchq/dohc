@@ -62,6 +62,8 @@ struct ChatMessageSendParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     author_agent_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    author_reported: Option<dohc_engine_domain::ChatReportedAgent>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     named_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
 }
@@ -152,8 +154,6 @@ struct ChatAttachmentsListFileMentionsParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatMentionsListForHandleParams {
     handle: String,
-    #[serde(default)]
-    unread_by_agent_only: bool,
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     cursor: Option<String>,
@@ -264,6 +264,8 @@ pub(super) struct MessageWire<'a> {
     automation: Option<AutomationWire<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author_agent_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_reported: Option<&'a dohc_engine_domain::ChatReportedAgent>,
 }
 
 impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
@@ -291,6 +293,7 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
             origin: message.origin.as_deref(),
             automation: message.automation.as_ref().map(AutomationWire::from),
             author_agent_id: message.author_agent_id.as_deref(),
+            author_reported: message.author_reported.as_ref(),
         }
     }
 }
@@ -524,15 +527,10 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let page_limit = chat_page_limit(params.page_limit)?;
-        let unread_filter = if params.unread_by_agent_only {
-            "unread"
-        } else {
-            "all"
-        };
         let binding = chat_cursor_binding(
             "chats.mentions.listForHandle",
             &workspace_id,
-            &[&params.handle, unread_filter],
+            &[&params.handle],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
         let after = cursor.as_ref().map(|cursor| MentionCursor {
@@ -546,7 +544,6 @@ impl EngineService {
             open.actor.chat_mentions_list_for_handle(
                 workspace_id,
                 params.handle,
-                params.unread_by_agent_only,
                 after,
                 page_limit + 1,
             ),
@@ -617,6 +614,7 @@ impl EngineService {
                         .collect(),
                     automation: params.automation.map(ChatMessageAutomation::from),
                     author_agent_id: params.author_agent_id,
+                    author_reported: params.author_reported,
                     named_agent_ids: params.named_agent_ids.unwrap_or_default(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
@@ -901,6 +899,7 @@ mod tests {
             automation: None,
             link_author: None,
             author_agent_id: None,
+            author_reported: None,
             attachments: Vec::new(),
         }
     }

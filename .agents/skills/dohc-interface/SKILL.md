@@ -68,6 +68,7 @@ Every error and empty state needs a Next. A toast usually reports a Change. A st
 - Use sentence case: `New folder`.
 - Leave the period off labels, buttons, and fragments. Full sentences keep theirs.
 - Use numerals for counts a person scans or acts on: `Delete 12 files`. Inside a sentence, a word can read better: `A file changed on two machines`.
+- A count beside a list counts every item the list holds, whatever its state. It includes items in collapsed groups or past **Show more**. A row that only groups others, such as a folder in Pages, is not an item. If more remain to load, add `+`: `24+`.
 - State the mechanism or say nothing. Cut promises such as `magically`, `just works`, `powered by AI`, `seamless`, `powerful`, and `smart`.
 - Keep sync clearly opt-in. Sync starts off, and signing in alone does not turn it on.
 
@@ -158,6 +159,7 @@ A divider only separates a fixed header or footer from a list that scrolls.
 ### Buttons
 
 Put Cancel, then one primary, at the right.
+A secondary step that comes before the decision, such as `Save recovery file first`, sits at the left of the same row.
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
 Never label a button `OK`, `Yes`, or `Confirm`.
@@ -165,7 +167,10 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 ### Focus and keys
 
 - If the dialog has a field, the first field takes focus.
-- If it has none, the dialog panel takes focus. Give the panel `aria-labelledby` on its title and `aria-describedby` on its body, so a screen reader reads both. Tab then reaches Cancel first.
+- If it has none, a `ConfirmDialog` focuses its primary, so Enter runs it. If the primary waits for a choice in the dialog, the first control takes focus. Any other dialog focuses its panel.
+- A `ConfirmDialog` that opens while someone types, in a field, editable text or an app's frame, focuses its panel, so their next Enter can't run the primary.
+- In a `ConfirmDialog`, the arrow keys move between the buttons, and a held Enter does nothing.
+- Give the panel `aria-labelledby` on its title and `aria-describedby` on its body's sentences, so a screen reader reads both. Lists and controls stay out of the description. A `ConfirmDialog` takes them in `details`.
 - Enter in a single-line field runs the primary.
 - Escape and Cancel close the dialog, except where the Dialog recipe says only its own buttons close it.
 - When the dialog closes, focus goes back to the control that opened it.
@@ -173,6 +178,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 ### While the action runs
 
 - The primary says what is happening, `Merging…`, and stays disabled. Add no status line.
+- If closing doesn't stop the action, the secondary reads **Close** and takes focus.
 - If the person can see the result, close the dialog.
 - If they cannot, the title becomes the result, `Merged 4 files into Main`, above one `Done`.
 - A failure shows in the dialog, as [Where messages go](#where-messages-go) says.
@@ -183,7 +189,7 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 - A field edited in place, such as a rename in the tree, a page title or a property pill, uses its place as its label. It still needs an accessible name. For a required name, such as a file or folder, a blur with nothing typed cancels, and Enter with nothing typed shows the error. A page title or a property value can be left empty.
 - A placeholder shows an example value or nothing. It never holds the instruction or the label.
 - Check a field when focus leaves it or the person presses the primary. Never check on each key. A length limit can count down while they type.
-- Show the error under the field in `text-danger`, after a 12px `CircleAlert`. Say what is wrong and how to fix it: `Enter a name for the version.`
+- Show the error under the field with `FieldError`: `text-danger`, after a 12px `CircleAlert` on its first line. Say what is wrong and how to fix it: `Enter a name for the version.`
 - Give the field `aria-invalid`, and point its `aria-describedby` at the error.
 - Do not disable the primary to show that a field is empty or wrong. Pressing it shows the errors and focuses the first one.
 - A disabled control says why, beside it or on its second line.
@@ -203,7 +209,7 @@ The Words rules apply, and these too:
 | Before | After |
 | --- | --- |
 | `Everything version-1 changed will be brought into Main. version-1 stays as it is, so you can keep working in it. Your unsaved changes are saved first.` | `You can keep working in version-1.` The title already says Main gets the changes. |
-| A divider, then `Versions cover text files during the alpha — other files stay exactly as they are. If Main changed in ways that clash with version-1, you'll choose what to keep, file by file.`, then a divider | Nothing. The first claim was false, and the clash step shows itself when it comes. |
+| A divider, then `Versions cover text files during the alpha — other files stay exactly as they are. If Main changed in ways that clash with version-1, you'll choose what to keep, file by file.`, then a divider | Nothing. The first claim was false, and the conflict step shows itself when it comes. |
 | A `Merging version-1 into Main…` paragraph | The primary reads `Merging…` |
 
 The title, `Merge version-1 into Main`, and the buttons, Cancel and `Merge into Main`, stay.
@@ -227,6 +233,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Toasts and Notices sit above every dialog. The bell does not: it dims with the rest of the window. Opening a dialog closes Notices.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
+- A message beside **Try again** does not end with its own `Try again.` sentence. An ending that says more stays: `Try again later.`, `…then choose Try again.`
 - A toast's worded actions sit in a row under its text, as on its Notices row. This keeps the text wide. Keep the toast's close × at the top right.
 - Put a copy control beside text a person might need to report. Copy what the person reads, one line per fact, never a log. A success has nothing to report, so it has no copy control.
 - If the copy text is exactly what the message shows, such as a command, use a Copy icon beside it.
@@ -242,7 +249,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - A later success for the same thing takes back its failure's toast and row, whichever control started it.
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
-- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A row in Notices stays unread until the pointer or keyboard focus reaches it, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
 - A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
 - F6 moves focus to the first worded action, such as **Try again**, on the toast that appeared last. With no worded action, it lands on **Details**, and with neither, on the toast.
 - A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Server disconnected**, has no × and stays until it ends.
@@ -267,7 +274,7 @@ The look in one line: warm paper, quiet graphite, one sans for every word of the
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
 
-Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
+Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, `RetryRow`, and `FieldError`.
 To inline a control's classes, copy them from that file.
 Use the recipes below only for parts it does not cover.
 
@@ -377,7 +384,7 @@ Position:
 | Panel header | `h-9` (36 px), `px-3`, the same height as the tab strip |
 | Panel content | Starts 8 px under the header |
 | Section in a panel | `mt-4` (16 px) before it, except the first. Its label row is `h-6 px-3`, and the first row follows directly. |
-| Icon button | `size-6` (24 px) in panels, rows, and toolbars. `size-7` in the title bar. `size-9` in the rail. |
+| Icon button | `size-6` (24 px) in panels, rows, and toolbars. `size-7` in the title bar. `size-9` in the rail. Inside a line of text, use a plain `button` at `size-4` (16 px), so the line keeps its height. Give it `align-top` and a `text-muted` glyph, as on the Try again beside a count in Versions. `IconButton` stays 24 px even when given `size-4`. |
 | Button | `h-8 px-3 text-[13px]` for `PrimaryButton`, `SecondaryButton`, and `DangerButton`. `h-7` compact, `h-6` in a row. `GhostButton` is `h-6 px-2 text-xs`, with `gap-2` after its icon. |
 | Card | `p-3`, with `gap-2` inside |
 | Popover | `p-3`. A menu's frame is `p-1`, because its rows bring their own `px-2`. |
@@ -402,10 +409,11 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 - Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
 - `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.
 - So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape, Delete and Backspace leave the mark as it was, so closing or removing the focused thing from the keyboard still shows where focus went.
+- A confirm dialog's buttons show the ring whenever Chromium's `:focus-visible` matches, so a dialog opened from the keyboard shows where Enter acts at once. Opened with the pointer, it shows the ring after the first Tab or arrow, as everywhere else.
 - Give a row `dohc-focus-row`: the hover fill and a 1px accent line inside its edge. A selected row keeps its fill and adds the line.
 - Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
 - Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
-- To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`.
+- To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`, except a confirm dialog's buttons, above.
 - A menu opened with the pointer marks no row, and the hover fill follows the pointer. The first arrow key marks a row with the fill. Until a row is marked, Enter and Space mark the row the menu opened on, its checked row or else its first, and run nothing. A menu opened from the keyboard marks that row at once.
 - In a panel, give the parent `px-1`.
 - A disabled menu row says why on a second line under its label. Not in a tooltip. Pass it as the `MenuItem`'s `description`; the row dims its icon and label, not its fill.
@@ -436,6 +444,10 @@ Shape is the cue, because a person can choose each agent's color. The default co
 Give every agent mark a text alternative, as `AgentBadge` does.
 `AgentName` and `AgentBadge` color the name and sparkle beside an avatar to match it. An agent label with no avatar uses `text-agent`.
 A running agent shows a 6px round `bg-agent` dot.
+
+### Chat
+
+A question's status is words and an icon, never a pill. An open question without options shows Answer beside it.
 
 ### Motion
 

@@ -52,6 +52,15 @@ describe("Ref", () => {
     expect(container.querySelector("svg")?.classList.contains(`lucide-${fileKindForPath("budget.csv").glyphId}`)).toBe(true);
   });
 
+  it("draws an object's glyph in place of the file kind's, in the same slot", () => {
+    const { container } = render(<Ref path="volunteers/changes/a.json" objectKind="collection" />);
+    const glyphs = container.querySelectorAll("svg");
+    expect(glyphs).toHaveLength(1);
+    expect(glyphs[0]!.classList.contains("lucide-table-2")).toBe(true);
+    expect(glyphs[0]!.classList.contains("text-muted")).toBe(true);
+    expect(glyphs[0]!.getAttribute("width")).toBe("13");
+  });
+
   it("dashes the border of a target that does not resolve", () => {
     render(<Ref path="notes/gone.md" missing testId="ref" />);
     const chip = screen.getByTestId("ref");

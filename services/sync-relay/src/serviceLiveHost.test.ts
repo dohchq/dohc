@@ -615,6 +615,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const unsettled = new Set<string>();
   // Once set, each registration gets a new ID and retires the one before it, as the engine does.
   let registrations: {next: number; live: number} | undefined, registrationRefusal: Error | undefined;
+  let registrationsByObject: Map<string, number> | undefined;
   const retired = (id: unknown) => registrations !== undefined && id !== registrations.live;
   const unavailable = (id: number) => new EngineRequestError(id, {code: "INVALID_PARAMS", message: "live-registration-unavailable", retry: "no"} as never);
   // Whether the engine's settlement reaches the file. Until it does, the same terminal settles again.
@@ -739,7 +740,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // Completed activations of other documents, by activation ID. Capture resumes one when named, and the owner
   // state of a registration for one reports its own adoption, with no native queue.
   const otherActivations = new Map<string, NativeOwnerActivation>();
-  let registeredActivation: unknown;
+  const registeredActivations = new Map<number, unknown>();
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
     client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async (_request: unknown, path: string, _maxBytes?: number,
@@ -790,19 +791,29 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           return reply(next);
         }
         // Native registration accepts exactly the binding and the activation it serves.
-        case "liveApplication.register":
+        case "liveApplication.register": {
           if (Object.keys(request.params).join() !== "binding,activationId") throw new Error("INVALID_PARAMS: invalid-live-registration");
           if (registrationRefusal) throw registrationRefusal;
-          registeredActivation = request.params.activationId;
-          if (!registrations) return reply({registrationId: 7});
-          registrations.live = ++registrations.next;
-          return reply({registrationId: registrations.live});
-        case "liveApplication.ownerState":
+          let registrationId: number;
+          if (!registrations) {
+            if (!registrationsByObject) registrationId = 7;
+            else {
+              const objectId = (request.params.binding as {objectId: string}).objectId;
+              if (!registrationsByObject.has(objectId)) registrationsByObject.set(objectId, 7 + registrationsByObject.size);
+              registrationId = registrationsByObject.get(objectId)!;
+            }
+          } else registrationId = registrations.live = ++registrations.next;
+          registeredActivations.set(registrationId, request.params.activationId);
+          return reply({registrationId});
+        }
+        case "liveApplication.ownerState": {
+          const registeredActivation = registeredActivations.get(request.params.registrationId as number);
           if (otherActivations.has(String(registeredActivation))) return reply({adoptionId: registeredActivation, expectedLocalSequence: 2,
             throughCursor: 0, outboxId: null, pendingBytes: 0, outboxState: "active", retryDeliveryId: null});
           return reply({adoptionId: engine.adoption.activationId, expectedLocalSequence: 2,
           throughCursor: engine.adoption.throughCursor, outboxId: native.outboxId, pendingBytes: native.outboxId ? nativeBytes() : 0,
           outboxState: native.state, retryDeliveryId: native.retryDeliveryId});
+        }
         // As the engine's, a preparation needs every queue of the activation to hold nothing deliverable and no Try again.
         case "liveApplication.prepareRetirement": {
           if (engine.prepareFailure) throw engine.prepareFailure;
@@ -1016,6 +1027,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     failDetach(error: Error | undefined) {detachFailure = error;},
     applied, lost,
     freshRegistrations() {registrations = {next: 100, live: 0};},
+    distinctRegistrations() {return registrationsByObject = new Map([[document.objectId, 7]]);},
     liveRegistration: () => registrations?.live,
     validateJournal,
     prepareEdit: (value: string) => prepareEdit(value, host.coordinate),
@@ -3432,6 +3444,425 @@ const replacementActivation = async (o: Enrolled, {name = "replacement", path = 
   o.otherActivations.set(activationId, capture);
   return {...o.sibling, path, objectId: document.objectId};
 };
+
+// Changes path lookup without adding history the fake native capture has not imported.
+const documentMoves = (o: Enrolled) => {
+  const paths = new Map<string, typeof o.sibling>();
+  const atPath = o.f.storage.objectIdAtPathInVersion.bind(o.f.storage);
+  const key = (row: {workspaceId: string; objectId: string}) => JSON.stringify([row.workspaceId, row.objectId]);
+  vi.spyOn(o.f.storage, "objectIdAtPathInVersion").mockImplementation(input => {
+    if (input.versionId !== "main") return atPath(input);
+    for (const row of paths.values()) if (row.workspaceId === input.workspaceId && row.path === input.path) return row.objectId;
+    const objectId = atPath(input), moved = objectId === undefined ? undefined : paths.get(key({workspaceId: input.workspaceId, objectId}));
+    return moved && moved.path !== input.path ? undefined : objectId;
+  });
+  return (row: typeof o.sibling, path: string) => {paths.set(key(row), {...row, path});};
+};
+
+for (const c of [
+  {moves: 1, name: "publishes a settled sibling after an enrolled document moves without losing its Edit grant"},
+  {moves: 2, name: "publishes a settled sibling after two enrolled documents move in sequence"},
+]) it(c.name, async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o), workspaces = [o.workspace];
+  const log = vi.spyOn(console, "error").mockImplementation(() => {}), registrationIds = o.distinctRegistrations();
+  const sibling = await replacementActivation(o, {name: "sibling", path: "docs/c.md"});
+  const documents = [o.sibling, sibling];
+  if (c.moves === 2) documents.push(await replacementActivation(o, {name: "ordinary", path: "docs/d.md", activationId: `ordinary-activation-${"d".repeat(64)}`}));
+  for (const row of documents.slice(1)) o.f.storage.enrollServiceHostDocument({workspaceId: row.workspaceId, ownerUserId: "owner",
+    shareId: row.shareId, path: row.path, nowMs: 35, guard() {}});
+  const documentFor = (row: typeof o.sibling) => {
+    const capture = [o.engine.capture, ...o.otherActivations.values()].find(value => value.source.objectId === row.objectId)!;
+    return {workspaceId: row.workspaceId, mainVersionId: "main" as const, objectId: row.objectId, lineageClaimId: capture.source.lineageClaimId};
+  };
+  await o.host.update({workspaces, documents, ...stay});
+  await vi.waitFor(() => {
+    for (const row of documents) {
+      expect(o.host.settled(row)).toBe(true);
+      expect(o.host.isDocumentReady(documentFor(row))).toBe(true);
+    }
+  });
+  const move = documentMoves(o);
+  const settlements = vi.spyOn(OwnerCommittedDelivery.prototype, "settle"), departedAt = new Map<string, {settlement: number; request: number}>();
+  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as
+    {method: string; params: {registrationId?: number; retirement?: {objectId: string}; terminalReceipt?: {deliveryId: string}}});
+  // The native queue holds an edit the host has not delivered when the other device moves the document.
+  o.native.binding = o.binding;
+  o.nativeEdits("before-move");
+  const queued = o.native.entries.map(entry => ({...entry, update: Buffer.from(entry.update)}));
+  for (let index = 0; index < c.moves; index++) {
+    const row = documents[index]!;
+    departedAt.set(row.objectId, {settlement: settlements.mock.calls.length, request: requests().length});
+    move(row, `elsewhere/${row.objectId}.md`);
+    expect(o.f.storage.serviceHostDocumentEnabled(row)).toBe(true);
+    expect(o.f.storage.serviceHostEnrollmentHasEditGrant({workspaceId: row.workspaceId, ownerUserId: "owner", path: row.path})).toBe(true);
+    expect(o.f.storage.serviceActivationRetirement(row)).toBeNull();
+    await o.host.update({workspaces, documents: documents.slice(index + 1), departing: documents.slice(0, index + 1)});
+    await vi.waitFor(() => expect(o.host.isDocumentReady(documentFor(row))).toBe(false));
+    await o.nextPull();
+  }
+  const remaining = documents.at(-1)!, document = documentFor(remaining), actor = {kind: "owner" as const, userId: "owner", shareId: "share"};
+  const current = o.f.storage.resolveCurrentLiveDocumentBinding({document, actor}), read = o.f.storage.readLiveUpdateJournalCut({document});
+  if (current.kind !== "current" || read.kind !== "cut") throw new Error("Missing sibling authority.");
+  const doc = new Y.Doc(), suffix = read.cut.suffix.map(row => row.bytes);
+  for (const bytes of [read.cut.checkpoint.bytes, ...suffix]) Y.applyUpdate(doc, bytes);
+  const vector = Y.encodeStateVector(doc); doc.getMap("frontmatter").set("edit", "after-moves");
+  const updateBytes = Buffer.from(Y.encodeStateAsUpdate(doc, vector)); doc.destroy();
+  const validation = o.validateJournal({document, currentPath: remaining.path, checkpoint: read.cut.checkpoint.bytes, suffix, candidate: updateBytes});
+  const accepted = o.f.storage.commitLiveUpdateJournal({host: o.host.coordinate, actor, expectedAuthority: current.authority,
+    metadata: {deliveryId: "sibling-after-moves", updateDigest: sha256(updateBytes), binding: current.binding}, cutToken: read.cut, validation, updateBytes, receivedAtMs: 50});
+  expect(accepted.result.kind).toBe("accepted");
+  const settledAt = () => requests().findIndex(request => request.method === "liveApplication.settle" && request.params.terminalReceipt?.deliveryId === "sibling-after-moves");
+  await vi.waitFor(() => expect(settledAt()).toBeGreaterThan(-1));
+  await vi.waitFor(() => expect(requests().slice(settledAt() + 1).some(request => request.method === "sync.push")).toBe(true));
+  expect(o.client().sendLiveApplication).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({metadata: expect.objectContaining({
+    accepted: expect.objectContaining({receipt: expect.objectContaining({deliveryId: "sibling-after-moves"})}),
+  })}), expect.anything());
+  expect(o.native.entries).toEqual(queued);
+  for (const [objectId, from] of departedAt) {
+    expect(settlements.mock.calls.slice(from.settlement).map(([value]) => value.objectId)).not.toContain(objectId);
+    expect(registrationIds.has(objectId)).toBe(true);
+    expect(requests().slice(from.request).filter(request => request.method === "liveApplication.settle" &&
+      (request.params.registrationId === registrationIds.get(objectId) || request.params.retirement?.objectId === objectId))).toEqual([]);
+  }
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its owner to save a recovery copy of the edits the server kept.")));
+  expect(o.host.retains(o.sibling)).toBe(true);
+  expect(k.row()).toMatchObject({copied: false});
+  const header = await o.host.readKeptEditsPage(k.row()!, undefined, o.workspace.root) as {kind: string; snapshot: string};
+  expect(header).toMatchObject({kind: "page", part: "header"});
+  await expect(o.host.readKeptEditsPage(k.row()!, {snapshot: header.snapshot, part: "update", sequence: 1, offset: 0}, o.workspace.root))
+    .resolves.toMatchObject({kind: "page", part: "update", bytesBase64: Buffer.from([7]).toString("base64")});
+  // Returning to the enrolled path must capture and activate again.
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  move(o.sibling, o.sibling.path);
+  await o.host.update({workspaces, documents: [o.sibling, remaining], departing: documents.slice(1, c.moves)});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(o.client().captureOwnerActivation.mock.calls.slice(captures).map(call => (call as unknown[])[1])).toContain(o.sibling.path);
+  expect(o.native.entries).toEqual([]);
+});
+
+for (const c of [
+  {replicaGone: false, backAtPath: false, name: "retires a document paused after it moves and activates it again on return"},
+  {replicaGone: true, backAtPath: false, name: "retires a document paused after its replica lets it go and activates it again on return"},
+  {replicaGone: true, backAtPath: true, name: "retires a document paused at its enrolled path after its replica lets it go and activates it again on Resume"},
+]) it(c.name, async () => {
+  const o = await enrolledServiceHost(), move = documentMoves(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await vi.waitFor(() => expect(o.host.settled(o.sibling)).toBe(true));
+  const removed = vi.spyOn(ServiceActivationDriver.prototype, "removeTarget");
+  // The replica initially holds the moved document; two rows let it go before Pause.
+  o.replies.pass = {departed: [o.sibling.objectId]}; o.replies.commit = {departed: [o.sibling.objectId]};
+  expect(o.f.storage.serviceKeptEditsOf(o.document).keptEdits).toEqual([]);
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(false);
+  move(o.sibling, "elsewhere/a.md");
+  await o.depart();
+  await vi.waitFor(() => expect(removed, "The moved document must leave activation.").toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path})));
+  await o.nextPull();
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  if (c.replicaGone) {
+    o.replies.pass = {}; o.replies.commit = {};
+    await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false));
+    await o.nextPull();
+    // The service stops listing a moved document once its replica lets it go.
+    expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 45})).toBeNull();
+    await o.host.update({workspaces: [o.workspace], documents: [], departing: []});
+  }
+  if (c.backAtPath) move(o.sibling, o.sibling.path);
+  const sent = o.ownerCalls().length;
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 50, guard() {}}))
+    .toMatchObject({ownerStop: "pause"});
+  const key = retirementKey(o);
+  // A document the service let go is listed again after Pause changes the selection.
+  // Otherwise no membership update follows Pause: a pass must find the new obligation.
+  if (c.replicaGone) {
+    o.replies.pass = {departed: [o.sibling.objectId]}; o.replies.commit = {departed: [o.sibling.objectId]};
+    await o.depart();
+  }
+  await vi.waitFor(() => expect(o.ownerCalls().slice(sent), "A retirement opened after the move must reach the engine.")
+    .toContainEqual(["liveApplication.reconcileActivation", expect.objectContaining(key)]));
+  await vi.waitFor(() => expect(retiringSettles(o, sent)).toContainEqual(["liveApplication.settle", expect.objectContaining({retirement: key})]));
+  expect(retiredRow(o).retired).toBe(false);
+  o.replies.pass = {}; o.replies.commit = {};
+  await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true));
+  expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]);
+  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  if (!c.backAtPath) move(o.sibling, o.sibling.path);
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: true, nowMs: 60, guard() {}}))
+    .toMatchObject({enabled: true});
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document), "The resumed document must activate after returning.").toBe(true));
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(captures);
+  expect(o.host.settled(o.sibling)).toBe(true);
+});
+
+it("retires a document paused after its moved restore ends and activates it again on return", async () => {
+  const o = await enrolledServiceHost(), move = documentMoves(o);
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  anotherEditGrant(o);
+  const removed = vi.spyOn(ServiceActivationDriver.prototype, "removeTarget");
+  const forgotten = vi.spyOn(ServiceActivationDriver.prototype, "forgetMoved");
+  o.replies.pass = {departed: [o.sibling.objectId]}; o.replies.commit = {departed: [o.sibling.objectId]};
+  move(o.sibling, "elsewhere/a.md");
+  await o.depart();
+  await vi.waitFor(() => expect(removed).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path})));
+  await o.nextPull();
+  // A restore can begin only at its binding's path. No membership update hosts this return.
+  move(o.sibling, o.sibling.path);
+  o.beginRestore();
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+  move(o.sibling, "elsewhere/a.md");
+  // Decline before the fence keeps admission open for the later Resume.
+  expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("declined");
+  await vi.waitFor(() => expect(forgotten).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path}), o.sibling.objectId));
+  const sent = o.ownerCalls().length;
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 70, guard() {}}))
+    .toMatchObject({ownerStop: "pause"});
+  const key = retirementKey(o);
+  // The document is still departing, so Pause does not change membership.
+  await vi.waitFor(() => expect(o.ownerCalls().slice(sent), "A retirement opened after a moved restore ended must reach the engine.")
+    .toContainEqual(["liveApplication.reconcileActivation", expect.objectContaining(key)]));
+  await vi.waitFor(() => expect(retiringSettles(o, sent)).toContainEqual(["liveApplication.settle", expect.objectContaining({retirement: key})]));
+  o.replies.pass = {}; o.replies.commit = {};
+  await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true));
+  expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  move(o.sibling, o.sibling.path);
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: true, nowMs: 80, guard() {}}))
+    .toMatchObject({enabled: true});
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document), "The resumed document must activate after its moved restore and return.").toBe(true));
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(captures);
+  expect(o.host.settled(o.sibling)).toBe(true);
+});
+
+for (const c of [
+  {restore: false, name: "does not repeat a moved document's held retirement after its edits are copied"},
+  {restore: true, name: "does not repeat a moved document's held retirement opened during a restore after its edits are copied"},
+]) it(c.name, async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o), move = documentMoves(o);
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  if (c.restore) anotherEditGrant(o);
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.acceptEdit("accepted-after-adoption");
+  await o.host.drain(o.document);
+  expect(o.applied.has("edit-accepted-after-adoption")).toBe(true);
+  await expect(o.host.retryKeptEdits(k.row()!, () => {})).resolves.toBe("granted");
+  const removed = vi.spyOn(ServiceActivationDriver.prototype, "removeTarget");
+  o.replies.pass = {departed: [o.sibling.objectId]}; o.replies.commit = {departed: [o.sibling.objectId]};
+  move(o.sibling, "elsewhere/a.md");
+  await o.depart();
+  await vi.waitFor(() => expect(removed).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path})));
+  await o.nextPull();
+  if (c.restore) {
+    // Open and fence the restore during a return that membership has not hosted.
+    move(o.sibling, o.sibling.path);
+    o.beginRestore();
+    expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
+    await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its restore to finish.")));
+    o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+    await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+    move(o.sibling, "elsewhere/a.md");
+  }
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner", enabled: false, nowMs: 50, guard() {}}))
+    .toMatchObject({ownerStop: "pause"});
+  if (c.restore) {
+    const fenced = retirementKey(o);
+    expect(fenced.restoreFenceGeneration).toBe(o.binding.restoreFenceGeneration + 1);
+    expect(o.f.storage.declineStopRestore(stopLookup, 60).phase).toBe("old-cut-applied");
+    await expect(o.host.declineRestore(stopLookup)).resolves.toEqual({kind: "declined"});
+    expect(retirementKey(o)).toEqual({...fenced, restoreFenceGeneration: o.binding.restoreFenceGeneration});
+  }
+  const key = retirementKey(o);
+  const reconciliations = () => o.ownerCalls().filter(([method, params]) => method === "liveApplication.reconcileActivation" &&
+    Object.entries(key).every(([field, value]) => (params as Record<string, unknown>)[field] === value)).length;
+  let copiedAt: number | undefined;
+  const forgetMoved = ServiceActivationDriver.prototype.forgetMoved;
+  const forgotten = vi.spyOn(ServiceActivationDriver.prototype, "forgetMoved").mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    const result = forgetMoved.apply(this, args);
+    if (args[0].path === o.sibling.path && args[1] === o.sibling.objectId) copiedAt ??= reconciliations();
+    return result;
+  });
+  await vi.waitFor(() => expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]}));
+  expect(k.row()).toMatchObject({retrying: false, copied: false});
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
+  await vi.waitFor(() => expect(forgotten).toHaveBeenCalledWith(expect.objectContaining({path: o.sibling.path}), o.sibling.objectId));
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
+  expect(copiedAt).toBeGreaterThan(0);
+  for (let pass = 0; pass < 3; pass++) {
+    await o.nextPull();
+    expect(reconciliations(), "The copied held retirement must not be sent again.").toBe(copiedAt);
+  }
+});
+
+it("does not repeat an at-path document's copied held retirement across later membership updates", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o), workspaces = [o.workspace], move = documentMoves(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.distinctRegistrations();
+  const sibling = await replacementActivation(o, {name: "sibling", path: "docs/c.md"});
+  o.f.storage.enrollServiceHostDocument({workspaceId: sibling.workspaceId, ownerUserId: "owner", shareId: sibling.shareId,
+    path: sibling.path, nowMs: 35, guard() {}});
+  await o.host.update({workspaces, documents: [o.sibling, sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.settled(sibling)).toBe(true));
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.acceptEdit("accepted-after-adoption");
+  await o.host.drain(o.document);
+  expect(o.applied.has("edit-accepted-after-adoption")).toBe(true);
+  await expect(o.host.retryKeptEdits(k.row()!, () => {})).resolves.toBe("granted");
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    enabled: false, nowMs: 50, guard() {}})).toMatchObject({ownerStop: "pause"});
+  const key = retirementKey(o);
+  const reconciliations = () => o.ownerCalls().filter(([method, params]) => method === "liveApplication.reconcileActivation" &&
+    Object.entries(key).every(([field, value]) => (params as Record<string, unknown>)[field] === value)).length;
+  await o.host.update({workspaces, documents: [sibling], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]}));
+  expect(k.row()).toMatchObject({retrying: false, copied: false});
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox",
+    generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
+  await vi.waitFor(() => expect(k.row()).toBeNull());
+  await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false));
+  expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 55}))
+    .toMatchObject({enabled: false, hostDrainedAtMs: 55});
+  const copiedAt = reconciliations();
+  expect(copiedAt).toBeGreaterThan(0);
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
+  expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 65})).toBeNull();
+  // Only the sibling moves. The held document stays at its path and in every departing list.
+  for (const away of [true, false]) {
+    move(sibling, away ? "elsewhere/c.md" : sibling.path);
+    await o.host.update({workspaces, documents: away ? [] : [sibling], departing: away ? [o.sibling, sibling] : [o.sibling]});
+    for (let pass = 0; pass < 3; pass++) {
+      await o.nextPull();
+      expect(reconciliations(), "The copied at-path held retirement must not be sent again after a membership update.").toBe(copiedAt);
+    }
+  }
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
+});
+
+it("does not repeat an at-path document's copied held retirement across workspace detachments", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o), workspaces = [o.workspace];
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.acceptEdit("accepted-after-adoption");
+  await o.host.drain(o.document);
+  expect(o.applied.has("edit-accepted-after-adoption")).toBe(true);
+  await expect(o.host.retryKeptEdits(k.row()!, () => {})).resolves.toBe("granted");
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    enabled: false, nowMs: 50, guard() {}})).toMatchObject({ownerStop: "pause"});
+  const key = retirementKey(o);
+  const reconciliations = () => o.ownerCalls().filter(([method, params]) => method === "liveApplication.reconcileActivation" &&
+    Object.entries(key).every(([field, value]) => (params as Record<string, unknown>)[field] === value)).length;
+  await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]}));
+  expect(k.row()).toMatchObject({retrying: false, copied: false});
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox",
+    generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
+  await vi.waitFor(() => expect(k.row()).toBeNull());
+  await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false));
+  expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 55}))
+    .toMatchObject({enabled: false, hostDrainedAtMs: 55});
+  const copiedAt = reconciliations();
+  expect(copiedAt).toBeGreaterThan(0);
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+    await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
+    expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 65 + cycle})).toBeNull();
+    await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+    for (let pass = 0; pass < 3; pass++) {
+      await o.nextPull();
+      expect(reconciliations(), "The copied at-path held retirement must not be sent again after a workspace reattachment.").toBe(copiedAt);
+    }
+  }
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
+});
+
+it("does not repeat a moved document's copied held retirement across workspace detachments", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o), workspaces = [o.workspace];
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.acceptEdit("accepted-after-adoption");
+  await o.host.drain(o.document);
+  expect(o.applied.has("edit-accepted-after-adoption")).toBe(true);
+  await expect(o.host.retryKeptEdits(k.row()!, () => {})).resolves.toBe("granted");
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    enabled: false, nowMs: 50, guard() {}})).toMatchObject({ownerStop: "pause"});
+  const key = retirementKey(o);
+  const reconciliations = () => o.ownerCalls().filter(([method, params]) => method === "liveApplication.reconcileActivation" &&
+    Object.entries(key).every(([field, value]) => (params as Record<string, unknown>)[field] === value)).length;
+  await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.engine.journals).toContainEqual({receipts: [], absent: ["refused"]}));
+  expect(k.row()).toMatchObject({retrying: false, copied: false});
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox",
+    generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
+  await vi.waitFor(() => expect(k.row()).toBeNull());
+  await vi.waitFor(() => expect(o.host.retains(o.sibling)).toBe(false));
+  expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 55}))
+    .toMatchObject({enabled: false, hostDrainedAtMs: 55});
+  expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", path: o.sibling.path, ownerUserId: "owner",
+    enabled: true, nowMs: 60, guard() {}})).toMatchObject({enabled: true, hostDrainedAtMs: null});
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
+  documentMoves(o)(o.sibling, "elsewhere/a.md");
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
+  expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 65})).toBeNull();
+  await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+  for (let pass = 0; pass < 3; pass++) await o.nextPull();
+  const movedAt = reconciliations();
+  expect(movedAt).toBeGreaterThan(0);
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+    await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
+    expect(o.f.storage.releaseServiceHostEnrollment({workspaceId: "workspace", objectId: o.sibling.objectId, nowMs: 66 + cycle})).toBeNull();
+    await o.host.update({workspaces, documents: [], departing: [o.sibling]});
+    for (let pass = 0; pass < 3; pass++) {
+      await o.nextPull();
+      expect(reconciliations(), "The copied moved held retirement must not be sent again after a workspace reattachment.").toBe(movedAt);
+    }
+  }
+  expect(o.f.storage.serviceActivationRetirement(o.document)).toMatchObject(key);
+});
+
+it("keeps an omitted moved document out of restore routes after a later workspace attach fails", async () => {
+  const {o, host} = await movedDuringRestore({covered: true});
+  const second = {...o.workspace, root: join(o.f.root, "workspace-2"), workspaceId: "workspace-2"};
+  await mkdir(second.root);
+  await host.update({workspaces: [o.workspace, second], documents: [], departing: [o.sibling]});
+  expect(o.f.storage.serviceRestoreInProgress(o.document)).toBe(true);
+  const sent = o.ownerCalls().length;
+  let creates = 0;
+  // The existing create failure applies only after the first workspace has attached and checked its origin.
+  const failSecondCreate = (method: string) => {
+    if (method === "sync.createHostedReplica" && ++creates === 2) o.replies.create = new Error("Relay unreachable.");
+  };
+  o.requestListeners.add(failSecondCreate);
+  try {
+    await expect(host.update({workspaces: [{...o.workspace, maxRegistrations: 7}, {...second, maxRegistrations: 7}],
+      documents: [], ...stay})).rejects.toThrow("Relay unreachable.");
+  } finally {
+    o.requestListeners.delete(failSecondCreate);
+    o.replies.create = undefined;
+  }
+  expect(creates).toBe(2);
+  expect(host.automationLedger("workspace")).not.toBeNull();
+  expect(host.automationLedger("workspace-2")).toBeNull();
+  for (let pass = 0; pass < 3; pass++) await o.nextPull();
+  await vi.waitFor(() => expect({drained: host.drained("workspace"), steps: o.calls(sent).filter(method =>
+    ["liveApplication.reconcileActivation", "liveApplication.releaseActivation", "liveApplication.unloadDocument"].includes(method))},
+  "An omitted moved document must open no restore route or departure steps after a failed membership update.")
+    .toEqual({drained: true, steps: []}));
+});
 
 // Proves: a restarted host's ordinary recovery of a departing document reads
 // only that document's activation, though a moved document's restore keeps its

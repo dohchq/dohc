@@ -102,7 +102,7 @@ export async function startSelfHostedLiveHost(options: {
     // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
     const still = new Set(away.map(movedKey));
     for (const key of moved) if (!still.has(key)) moved.delete(key);
-    departing.push(...away.filter(row => !moved.has(movedKey(row))));
+    departing.push(...away.filter(row => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)));
     return {targets, departing, obsolete, nextCursor: page.nextCursor};
   };
   const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>

@@ -1,3 +1,5 @@
+import { ChatMessageWaiters } from "./chatMessageWaiters";
+import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
 import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
@@ -13,6 +15,7 @@ import { readThreadDispatchState } from "../agents/threadDispatchState";
 import { UNNAMED_AGENT_ID } from "../agents/activeAgentRun";
 import {
   CLI_PROTOCOL_VERSION,
+  CHAT_WATCH_TIMEOUT_MS,
   MAX_CLI_REQUEST_BYTES,
   type CliFileWrite,
   cliRequestSchema,
@@ -24,6 +27,7 @@ import {
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
+  type CliReportedAgent,
   type CliRequest,
   type CliResultByVerb,
   type CliShowMessage,
@@ -331,6 +335,7 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal, hidden = "Histor
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  signal?: AbortSignal;
   stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?: {
@@ -610,7 +615,14 @@ function rawChatMessage(
       ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
     } : {}),
     ...agentRequestsFor(message),
+    ...reportedFor(message),
   };
+}
+
+// What an agent's client reported about itself, so an agent reading the
+// chat sees what a person sees beside the name.
+function reportedFor(message: ChatMessage) {
+  return message.authorReported ? { authorReported: { ...message.authorReported } } : {};
 }
 
 // The agents still asked to answer a message, as the engine reports them.
@@ -741,15 +753,22 @@ function claimedAgentName(
 }
 
 // Who a chat write through this socket is. An agent's message during a run
-// dohc dispatched is that run's agent's.
+// dohc dispatched is that run's agent's. What an agent reported about itself
+// rides beside its name; a person's write carries none.
 function cliChatWriter(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
   agentName?: string,
+  reported?: CliReportedAgent,
 ): PersonWriter {
   const runAgentId = actor === "agent" ? options.dispatchedAgent(context.workspaceId) : null;
-  return { via: "cli", actor, ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}) };
+  return {
+    via: "cli",
+    actor,
+    ...(runAgentId ? { agentId: runAgentId } : agentName ? { agentName } : {}),
+    ...(actor === "agent" && reported ? { reported } : {}),
+  };
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
@@ -1212,6 +1231,7 @@ function cliShowMessage(message: ChatMessage, decisionState: "open" | "resolved"
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),
     })),
     ...agentRequestsFor(message),
+    ...reportedFor(message),
   };
 }
 
@@ -1547,6 +1567,7 @@ async function notifyWrite(
   options: CliServerOptions,
   context: CliWorkspaceContext,
 ): Promise<void> {
+  signalChatWrite(context.workspaceId);
   try {
     await options.onWrite?.(context);
   } catch (error) {
@@ -2027,6 +2048,8 @@ function runMessageLinkRecoveryQueue(
 }
 
 export function disposeCliServerRuntime(options: CliServerOptions): void {
+  chatWaiters.get(options)?.close();
+  chatWaiters.delete(options);
   runMessageLinkRecoveryQueues.get(options)?.close();
   runMessageLinkRecoveryQueues.delete(options);
 }
@@ -2102,6 +2125,7 @@ interface FileChatStart {
   body: string;
   runId?: string;
   agent?: string;
+  reported?: CliReportedAgent;
 }
 
 // A comment on a file takes the path a person's does: a chat linked to the
@@ -2134,7 +2158,7 @@ async function startFileChat(
   let message: ChatMessage;
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: cliChatWriter("agent", context, options, input.agent),
+      writer: cliChatWriter("agent", context, options, input.agent, input.reported),
       threadId: thread.id,
       body,
       resolveAttachments: async () => [],
@@ -3412,6 +3436,7 @@ async function dispatchWorkspace(
         body: request.args.body,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         ...(request.args.agent ? { agent: request.args.agent } : {}),
+        ...(request.args.reported ? { reported: request.args.reported } : {}),
       };
       const requestId = request.args.requestId;
       if (requestId === undefined) return (await startFileChat(context, input, options)).result;
@@ -3419,7 +3444,7 @@ async function dispatchWorkspace(
         context,
         options,
         requestId,
-        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null],
+        [input.path, input.title, input.body, input.runId ?? null, input.agent ?? null, input.reported ?? null],
         async () => {
           const started = await startFileChat(context, input, options);
           return { done: started.created, result: started.result };
@@ -3521,11 +3546,14 @@ async function dispatchWorkspace(
       );
       // Inside a run dohc dispatched, the inbox is that run's agent's unread
       // work: its chat, and each message elsewhere that asked it. Outside a
-      // run, a self-connected agent reads every agent chat and the plain
-      // @agent mentions no dohc agent took.
+      // run, connected agents share DMs, plain @agent mentions, and replies
+      // in threads they posted in.
       const runId = options.dispatchedRunId(context.workspaceId);
       const runAgentId = runId === null ? null : options.dispatchedAgent(context.workspaceId);
-      const unread = await context.store.listAgentUnreadThreads(context.workspaceId, runId ?? undefined);
+      const mentionRows = await context.store.listAgentUnreadRequests(context.workspaceId, runId ?? undefined);
+      const unread = runId === null
+        ? [...new Set(mentionRows.map(row => row.threadId))].map(id => ({ id }))
+        : await context.store.listAgentUnreadThreads(context.workspaceId, runId);
       const agentChannelIds = new Set(
         channels
           .filter(({ engine }) => engine.kind === "agent" && (runAgentId === null || engine.agentId === runAgentId))
@@ -3555,20 +3583,13 @@ async function dispatchWorkspace(
       );
       inboxThreads.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 
-      const mentionRows = runId !== null
-        ? await context.store.listAgentUnreadRequests(context.workspaceId, runId)
-        : await context.store.listMentionsForHandle(
-          context.workspaceId,
-          "agent",
-          { unreadByAgentOnly: true },
-        );
       const messageCache = new Map<string, ChatMessage[]>();
       const mentions: CliResultByVerb["inbox"]["mentions"] = [];
       for (const mention of mentionRows) {
         const thread = loadedById.get(mention.threadId);
         if (!thread) continue;
-        // A request in the run's agent's own chat is already in its threads.
-        if (runAgentId !== null && thread.thread.channelId && agentChannelIds.has(thread.thread.channelId)) continue;
+        // Requests in an agent chat are already in the threads above.
+        if (thread.thread.channelId && agentChannelIds.has(thread.thread.channelId)) continue;
         let messages = messageCache.get(thread.thread.id);
         if (!messages) {
           messages = await context.store.listMessages({
@@ -3653,7 +3674,7 @@ async function dispatchWorkspace(
       }
       const actor = writeActor(request.args.actor, context, options);
       const started = await options.chatWrites.startThread(context, {
-        writer: cliChatWriter(actor, context, options),
+        writer: cliChatWriter(actor, context, options, request.args.agent, request.args.reported),
         channelId: channel.engine.id,
         // A chat-only group shows only its chat lane.
         ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
@@ -3712,7 +3733,7 @@ async function dispatchWorkspace(
         }
       }
       const reply = {
-        writer: cliChatWriter(actor, context, options),
+        writer: cliChatWriter(actor, context, options, request.args.agent, request.args.reported),
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
@@ -4018,10 +4039,98 @@ async function workspaceContextForRequest(
   return context;
 }
 
+const chatWaiters = new WeakMap<CliServerOptions, ChatMessageWaiters>();
+const watchCursorSchema = z.object({
+  version: z.literal(1),
+  workspaceId: z.string(),
+  group: z.string().nullable(),
+  thread: z.string().nullable(),
+  seen: z.array(z.string().min(1).max(500)).max(50_000),
+}).strict();
+
+async function watchMessages(
+  request: Extract<CliRequest, { verb: "watch" }>,
+  options: CliServerOptions,
+  connectionSignal?: AbortSignal,
+): Promise<CliResultByVerb["watch"]> {
+  if (request.args.actor !== "agent") throw new CliCommandError("Chat watch is for agents. Use chat inbox for your unread threads.");
+  connectionSignal?.throwIfAborted();
+  const context = await workspaceContextForRequest(request, options);
+  const scope = { version: 1 as const, workspaceId: context.workspaceId, group: request.args.group ?? null, thread: request.args.thread ?? null };
+  let seen: string[] = [];
+  if (request.args.cursor !== undefined) {
+    try {
+      const cursor = watchCursorSchema.parse(JSON.parse(Buffer.from(request.args.cursor, "base64url").toString("utf8")));
+      if (cursor.workspaceId !== scope.workspaceId || cursor.group !== scope.group || cursor.thread !== scope.thread) throw new Error("scope");
+      seen = cursor.seen;
+    } catch { throw new CliCommandError("This chat cursor is invalid for this workspace or filter. Use its original workspace and filters."); }
+  }
+  const encode = (ids: string[]) => {
+    const cursor = Buffer.from(JSON.stringify({ ...scope, seen: ids })).toString("base64url");
+    if (ids.length > 50_000 || cursor.length > 1_048_576) throw new CliCommandError("The chat cursor is full. Mark processed threads read, then watch without a cursor.");
+    return cursor;
+  };
+  const empty = { messages: [], cursor: request.args.cursor ?? encode([]) };
+  const seenIds = new Set(seen);
+  let waiters = chatWaiters.get(options);
+  if (!waiters) chatWaiters.set(options, waiters = new ChatMessageWaiters());
+  const signals = [connectionSignal, context.signal].filter((value): value is AbortSignal => value !== undefined);
+  return waiters.wait<CliResultByVerb["watch"]>({
+    signal: signals.length ? AbortSignal.any(signals) : undefined,
+    timeoutMs: request.args.timeoutMs ?? CHAT_WATCH_TIMEOUT_MS,
+    empty,
+    subscribe: listener => subscribeChatWrites(context.workspaceId, listener),
+    refresh: () => { void notifyRead(options, context, request.args.thread ? { threadId: request.args.thread } : undefined); },
+    query: async () => {
+      const { channels, provisioned } = await loadChannels(context);
+      if (provisioned) await notifyWrite(options, context);
+      const threads = await loadThreads(context, channels);
+      const selectedGroup = request.args.group === undefined ? undefined : exactChannel(request.args.group, channels);
+      if (request.args.group !== undefined && !selectedGroup) throw new CliCommandError("Group not found. Use chat groups to choose a Group.");
+      const selectedThread = request.args.thread === undefined ? undefined : resolveThread(request.args.thread, threads);
+      const admitted = (thread: LoadedThread) =>
+        (!selectedGroup || thread.thread.channelId === selectedGroup.engine.id) &&
+        (!selectedThread || thread.thread.id === selectedThread.thread.id);
+      const byId = new Map(threads.filter(admitted).map(thread => [thread.thread.id, thread]));
+      const candidates = new Set<string>();
+      const messages = new Map<string, CliResultByVerb["watch"]["messages"][number]>();
+      const cache = new Map<string, ChatMessage[]>();
+      const read = async (threadId: string) => {
+        let rows = cache.get(threadId);
+        if (!rows) {
+          rows = await context.store.listMessages({ workspaceId: context.workspaceId, threadId });
+          cache.set(threadId, rows);
+        }
+        return rows;
+      };
+      const add = (thread: LoadedThread, message: ChatMessage) => {
+        candidates.add(message.id);
+        if (seenIds.has(message.id)) return;
+        messages.set(message.id, {
+          threadId: cliThreadId(thread.thread.id), messageId: cliMessageId(message.id),
+          group: thread.group, author: authorForCli(message), createdAtMs: message.createdAtMs,
+          text: message.body,
+        });
+      };
+      // Keep the outside-run inbox's reach even while dohc has a run open.
+      for (const mention of await context.store.listAgentUnreadRequests(context.workspaceId)) {
+        const thread = byId.get(mention.threadId);
+        if (!thread) continue;
+        const message = (await read(mention.threadId)).find(row => row.id === mention.messageId);
+        if (message) add(thread, message);
+      }
+      const batch = [...messages.entries()].sort(([leftId, left], [rightId, right]) =>
+        left.createdAtMs - right.createdAtMs || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0)).slice(0, 100);
+      return { messages: batch.map(([, message]) => message), cursor: encode([...seen.filter(id => candidates.has(id)), ...batch.map(([id]) => id)]) };
+    },
+  });
+}
+
 export async function handleCliRequestLine(
   line: string,
   token: string,
   options: CliServerOptions,
+  signal?: AbortSignal,
 ): Promise<string> {
   let raw: unknown;
   try {
@@ -4067,7 +4176,9 @@ export async function handleCliRequestLine(
     // The caller's door labels counting only; authority never receives it.
     const { door: _door, ...request } = parsed.data;
     const completion = { replayed: false };
-    const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
+    const unvalidated = request.verb === "watch"
+      ? await watchMessages(request, options, signal)
+      : request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
       : request.verb === "chatLinks" || request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
         ? await dispatchMentionAndLinkReads(request, options)
@@ -4105,6 +4216,7 @@ function attachSocketHandler(
   const chunks: string[] = [];
   let receivedBytes = 0;
   let handled = false;
+  const cancellation = new AbortController();
   const deadline = setTimeout(() => socket.destroy(), CLI_REQUEST_DEADLINE_MS);
 
   const failOversized = () => {
@@ -4131,8 +4243,8 @@ function attachSocketHandler(
     clearTimeout(deadline);
     const line = chunks.join("");
     chunks.length = 0;
-    socket.pause();
-    const task = handleCliRequestLine(line, token, options)
+    // Keep reading so a disconnected waiter delivers its FIN immediately.
+    const task = handleCliRequestLine(line, token, options, cancellation.signal)
       .then((response) => {
         socket.end(response);
       })
@@ -4144,7 +4256,9 @@ function attachSocketHandler(
     inFlight.add(task);
   });
   socket.on("error", () => undefined);
+  socket.on("end", () => cancellation.abort());
   socket.on("close", () => {
+    cancellation.abort();
     clearTimeout(deadline);
     sockets.delete(socket);
   });
@@ -4246,6 +4360,7 @@ export async function startCliServer(
     async close() {
       if (closed) return;
       closed = true;
+      chatWaiters.get(options)?.close();
       const serverClosed = closeServer(server);
       for (const socket of sockets) socket.destroy();
       await Promise.all([serverClosed, Promise.allSettled([...inFlight])]);

@@ -24,8 +24,8 @@
 //! whose policy widens re-ingest.
 
 use crate::capture_sink::{
-    CaptureProvenance, CapturedRoot, DeferredWrites, FIRST_IMPORT_SUMMARY, PolicyState,
-    SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams,
+    CaptureProvenance, CapturedRoot, CarriedPass, DeferredWrites, FIRST_IMPORT_SUMMARY,
+    PolicyState, SelfWriteSuppression, StoreCaptureSink, StoreCaptureSinkParams,
 };
 use crate::{
     CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, CAPTURE_WRITE_DEFERRED_EVENT,
@@ -40,6 +40,7 @@ use dohc_engine_files::{
 };
 use dohc_engine_runtime::actor::{CapturePassSettlement, CapturePlacementPath};
 use dohc_engine_runtime::{ActorHandle, CollectionReconciliation, NoFaults, RuntimeError};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -157,6 +158,9 @@ struct CaptureApplyProbeInner {
     undo_placement_armed: std::sync::atomic::AtomicBool,
     undo_placement_entered: tokio::sync::Semaphore,
     undo_placement_release: tokio::sync::Semaphore,
+    undo_after_fence_armed: std::sync::atomic::AtomicBool,
+    undo_after_fence_entered: tokio::sync::Semaphore,
+    undo_after_fence_release: tokio::sync::Semaphore,
     commit_armed: std::sync::atomic::AtomicBool,
     commit_entered: tokio::sync::Semaphore,
     commit_release: tokio::sync::Semaphore,
@@ -168,7 +172,7 @@ struct CaptureApplyProbeInner {
     import_commit_armed: std::sync::atomic::AtomicBool,
     import_commit_entered: tokio::sync::Semaphore,
     import_commit_release: (Mutex<bool>, std::sync::Condvar),
-    fail_before_worker_armed: std::sync::atomic::AtomicBool,
+    fail_before_worker_armed: std::sync::atomic::AtomicU32,
     manual_initial_deadline_armed: std::sync::atomic::AtomicBool,
     manual_initial_deadline: tokio::sync::Notify,
     version_scan_count: std::sync::atomic::AtomicU64,
@@ -197,6 +201,9 @@ impl Default for CaptureApplyProbeInner {
             undo_placement_armed: std::sync::atomic::AtomicBool::new(false),
             undo_placement_entered: tokio::sync::Semaphore::new(0),
             undo_placement_release: tokio::sync::Semaphore::new(0),
+            undo_after_fence_armed: std::sync::atomic::AtomicBool::new(false),
+            undo_after_fence_entered: tokio::sync::Semaphore::new(0),
+            undo_after_fence_release: tokio::sync::Semaphore::new(0),
             commit_armed: std::sync::atomic::AtomicBool::new(false),
             commit_entered: tokio::sync::Semaphore::new(0),
             commit_release: tokio::sync::Semaphore::new(0),
@@ -208,7 +215,7 @@ impl Default for CaptureApplyProbeInner {
             import_commit_armed: std::sync::atomic::AtomicBool::new(false),
             import_commit_entered: tokio::sync::Semaphore::new(0),
             import_commit_release: (Mutex::new(false), std::sync::Condvar::new()),
-            fail_before_worker_armed: std::sync::atomic::AtomicBool::new(false),
+            fail_before_worker_armed: std::sync::atomic::AtomicU32::new(0),
             manual_initial_deadline_armed: std::sync::atomic::AtomicBool::new(false),
             manual_initial_deadline: tokio::sync::Notify::new(),
             version_scan_count: std::sync::atomic::AtomicU64::new(0),
@@ -347,6 +354,24 @@ impl CaptureApplyProbe {
         self.inner.undo_placement_release.add_permits(1);
     }
 
+    /// Pauses the next Undo after its fence releases the gates, before Undo's turns start.
+    pub fn pause_next_undo_after_fence(&self) {
+        self.inner
+            .undo_after_fence_armed
+            .store(true, Ordering::Release);
+    }
+    pub async fn wait_until_undo_after_fence_paused(&self) {
+        self.inner
+            .undo_after_fence_entered
+            .acquire()
+            .await
+            .expect("Undo probe open")
+            .forget();
+    }
+    pub fn release_undo_after_fence(&self) {
+        self.inner.undo_after_fence_release.add_permits(1);
+    }
+
     pub fn pause_next_version_commit(&self) {
         self.inner.commit_armed.store(true, Ordering::Release);
     }
@@ -446,9 +471,14 @@ impl CaptureApplyProbe {
     /// Fail the next apply before its plain worker starts. The normal
     /// all-failed acknowledgment keeps the plan dirty for a retry.
     pub fn fail_next_apply_before_worker(&self) {
+        self.fail_next_applies_before_worker(1);
+    }
+
+    /// Fail each of the next `count` applies before its plain worker starts.
+    pub fn fail_next_applies_before_worker(&self, count: u32) {
         self.inner
             .fail_before_worker_armed
-            .store(true, Ordering::Release);
+            .store(count, Ordering::Release);
     }
 
     /// Replace the production timer with a manual edge for one initial settle.
@@ -585,6 +615,23 @@ impl CaptureApplyProbe {
         }
     }
 
+    pub(crate) async fn pause_undo_after_fence_if_armed(&self) {
+        #[cfg(feature = "harness")]
+        if self
+            .inner
+            .undo_after_fence_armed
+            .swap(false, Ordering::AcqRel)
+        {
+            self.inner.undo_after_fence_entered.add_permits(1);
+            self.inner
+                .undo_after_fence_release
+                .acquire()
+                .await
+                .expect("Undo probe open")
+                .forget();
+        }
+    }
+
     pub(crate) async fn pause_version_commit_if_armed(&self) {
         #[cfg(feature = "harness")]
         {
@@ -660,7 +707,10 @@ impl CaptureApplyProbe {
         {
             self.inner
                 .fail_before_worker_armed
-                .swap(false, Ordering::AcqRel)
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
         }
         #[cfg(not(feature = "harness"))]
         {
@@ -1293,6 +1343,8 @@ impl CaptureDriver {
                 import_priority: drive_import_priority,
                 no_atomic_placement_announced: false,
                 first_import: None,
+                carried: None,
+                rules: None,
             };
             let run = drive_loop(
                 &mut env,
@@ -2270,6 +2322,12 @@ struct RealEnv {
     /// The correlation id of the workspace's unfinished first import, read
     /// at each layer start from a readable seed.
     first_import: Option<String>,
+    /// The paths a rescan found that no pass has recorded yet, until a pass
+    /// records them or a pass converges with no file held.
+    carried: Option<Arc<CarriedPass>>,
+    /// The rules the last pass captured under, or the layer was built with.
+    /// A pass under other rules records as a rescan.
+    rules: Option<Arc<PolicyState>>,
 }
 
 impl RealEnv {
@@ -2297,12 +2355,18 @@ impl RealEnv {
 
     /// Context for a live watcher-batch apply: default provenance (per-file
     /// "Updated <basename>" summaries, no correlation id), except for a file
-    /// an unfinished first import has not recorded yet.
+    /// an unfinished first import has not recorded yet, or one a baseline
+    /// found and left. A pass that reads rules other than the last
+    /// pass's records as a rescan.
     fn apply_context(&self) -> ApplyRunContext<'_> {
-        self.apply_context_with(CaptureProvenance {
-            first_import: self.first_import.clone(),
-            ..CaptureProvenance::default()
-        })
+        ApplyRunContext {
+            layer_rules: self.rules.clone(),
+            ..self.apply_context_with(CaptureProvenance {
+                first_import: self.first_import.clone(),
+                carried: self.carried.clone(),
+                ..CaptureProvenance::default()
+            })
+        }
     }
 
     fn apply_context_with(&self, provenance: CaptureProvenance) -> ApplyRunContext<'_> {
@@ -2318,6 +2382,7 @@ impl RealEnv {
             events: self.events.clone(),
             apply_probe: self.apply_probe.clone(),
             import_priority: None,
+            layer_rules: None,
         }
     }
 
@@ -2408,6 +2473,7 @@ impl DriverEnv for RealEnv {
         // would swallow the edit (the seed reflects old policy while the
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
+        self.rules = Some(Arc::new(read_capture_policy(&self.root)));
         #[cfg(feature = "harness")]
         let mut manifest_phase =
             dohc_engine_storage::capture_phase::Phase::new("manifest_seed", None, 0, false);
@@ -2529,17 +2595,20 @@ impl DriverEnv for RealEnv {
                     .or(provenance.correlation_id.as_deref())
             ),
         );
-        let (mut settled, initial_settle_timed_out) = {
+        let ((mut settled, left), initial_settle_timed_out) = {
             let initial_cancel = cancel.child_token();
             let initial_settle = async {
-                let mut settled = apply_run(
+                let mut left = BTreeSet::new();
+                note_found(&mut left, &initial.run);
+                let applied = apply_run(
                     self.initial_apply_context(&provenance, early_import),
                     &fresh.files.handle(),
                     initial,
                     &initial_cancel,
                 )
-                .await
-                .clean;
+                .await;
+                note_recorded(&mut left, &applied.recorded);
+                let mut settled = applied.clean;
                 // The open barrier must not release on a failed baseline: a
                 // caller whose first write lands before the retry could have
                 // it overwritten by the retry's capture of stale closed-period
@@ -2575,26 +2644,28 @@ impl DriverEnv for RealEnv {
                     .await
                     {
                         Ok(run) => {
-                            apply_run(
+                            note_found(&mut left, &run.run);
+                            let applied = apply_run(
                                 self.initial_apply_context(&provenance, early_import),
                                 &fresh.files.handle(),
                                 run,
                                 &initial_cancel,
                             )
-                            .await
-                            .clean
+                            .await;
+                            note_recorded(&mut left, &applied.recorded);
+                            applied.clean
                         }
                         Err(_) => false,
                     };
                 }
-                settled
+                (settled, left)
             };
             tokio::pin!(initial_settle);
             let initial_deadline = self.initial_settle_deadline();
             tokio::pin!(initial_deadline);
             tokio::select! {
                 biased;
-                settled = &mut initial_settle => (settled, false),
+                result = &mut initial_settle => (result, false),
                 () = &mut initial_deadline, if early_import => {
                     initial_cancel.cancel();
                     self.status.mark_initial_apply_timed_out();
@@ -2610,6 +2681,9 @@ impl DriverEnv for RealEnv {
         if initial_settle_timed_out {
             settled = false;
         }
+        // Later passes record what this baseline found and left with its
+        // label.
+        self.carried = carry(&provenance, left);
         if settled && !cancel.is_cancelled() {
             finish_first_import(
                 &self.actor,
@@ -2727,6 +2801,7 @@ impl DriverEnv for RealEnv {
             ) => {
                 let applied =
                     apply_run(self.apply_context(), &layer.files.handle(), run, cancel).await;
+                after_pass(&mut self.carried, &mut self.rules, &applied);
                 if applied.collection_busy_exhausted {
                     return TickIo::CollectionBusyExhausted;
                 }
@@ -2756,6 +2831,7 @@ impl DriverEnv for RealEnv {
             Ok(run) => {
                 let applied =
                     apply_run(self.apply_context(), &layer.files.handle(), run, cancel).await;
+                after_pass(&mut self.carried, &mut self.rules, &applied);
                 if applied.collection_busy_exhausted {
                     return TickIo::CollectionBusyExhausted;
                 }
@@ -2797,6 +2873,14 @@ impl DriverEnv for RealEnv {
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
         };
+        // A file a live session holds is not recorded yet, so it stays
+        // carried until the session lets it go.
+        if tick == TickIo::Converged
+            && self.carried.is_some()
+            && matches!(layer.files.handle().stats().await, Ok(stats) if stats.deferred == 0)
+        {
+            self.carried = None;
+        }
         self.actor
             .retry_pending_link_rewrites(&self.workspace_id)
             .await;
@@ -2892,6 +2976,7 @@ pub(crate) async fn reconcile_full_for_switch(
                 events,
                 apply_probe: None,
                 import_priority: None,
+                layer_rules: None,
             };
             let applied = apply_bound_run_with_handle(
                 context,
@@ -2983,6 +3068,8 @@ struct ApplyRunContext<'a> {
     apply_probe: Option<CaptureApplyProbe>,
     /// Set only for a fresh import's baseline.
     import_priority: Option<Arc<ImportPriority>>,
+    /// For a live pass, the rules the last pass captured under.
+    layer_rules: Option<Arc<PolicyState>>,
 }
 
 struct CaptureThreadOutcome {
@@ -2995,6 +3082,10 @@ struct CaptureThreadOutcome {
     /// Automation claims the ordinary file captures committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
     pending_placement_paths: Vec<CapturePlacementPath>,
+    /// The provenance the pass recorded with.
+    provenance: CaptureProvenance,
+    /// The rules the pass's capture read.
+    rules: PolicyState,
 }
 
 const OFFLINE_RECONCILE_SUMMARY: &str = "Changed while dohc was closed";
@@ -3025,7 +3116,89 @@ fn startup_provenance(
         summary: Some(summary.to_owned()),
         correlation_id: Some(pass_correlation_id("reconcile")),
         first_import,
+        carried: None,
     }
+}
+
+/// Record a live pass as a rescan unless it already has a label.
+fn record_as_rescan(provenance: &mut CaptureProvenance) {
+    if provenance.summary.is_none() {
+        provenance.summary = Some(RESCAN_SUMMARY.to_owned());
+        provenance.correlation_id = Some(pass_correlation_id("reconcile"));
+    }
+}
+
+/// Add the paths a scan found: the ones it plans to capture and the ones it
+/// could not read.
+fn note_found(left: &mut BTreeSet<String>, run: &ReconcileRun) {
+    if let ReconcileRun::Completed(plan) = run {
+        left.extend(found_paths(plan));
+    }
+}
+
+fn found_paths(plan: &ReconcilePlan) -> impl Iterator<Item = String> + '_ {
+    plan.ops
+        .iter()
+        .map(|op| op.path().to_owned())
+        .chain(plan.degraded_paths.iter().cloned())
+}
+
+/// Remove the paths a pass recorded or found it does not own.
+fn note_recorded(left: &mut BTreeSet<String>, recorded: &[String]) {
+    for path in recorded {
+        left.remove(path);
+    }
+}
+
+/// Stop carrying a baseline's label for the paths a later pass recorded.
+fn carry_past(carried: &mut Option<Arc<CarriedPass>>, recorded: &[String]) {
+    let Some(pass) = carried.as_mut() else {
+        return;
+    };
+    let paths = &mut Arc::make_mut(pass).paths;
+    note_recorded(paths, recorded);
+    if paths.is_empty() {
+        *carried = None;
+    }
+}
+
+/// What a labeled baseline found and left, for later passes to record with
+/// its label.
+fn carry(provenance: &CaptureProvenance, left: BTreeSet<String>) -> Option<Arc<CarriedPass>> {
+    (provenance.summary.is_some() && !left.is_empty()).then(|| {
+        Arc::new(CarriedPass {
+            summary: provenance.summary.clone(),
+            correlation_id: provenance.correlation_id.clone(),
+            paths: left,
+        })
+    })
+}
+
+/// Release what a live pass recorded, carry what a rescan left, and
+/// remember the rules it read. A tick calls it while it holds the apply
+/// gate, so it takes the two fields it changes.
+fn after_pass(
+    carried: &mut Option<Arc<CarriedPass>>,
+    rules: &mut Option<Arc<PolicyState>>,
+    applied: &ApplyOutcome,
+) {
+    carry_past(carried, &applied.recorded);
+    if let Some(left) = &applied.left {
+        take_over(carried, left);
+    }
+    if let Some(pass_rules) = &applied.rules {
+        *rules = Some(pass_rules.clone());
+    }
+}
+
+/// A live rescan that left paths takes over the carry. The paths the carry
+/// still holds join it, as a rebuild's rescan would find them again.
+fn take_over(carried: &mut Option<Arc<CarriedPass>>, left: &CarriedPass) {
+    let mut pass = left.clone();
+    if let Some(older) = carried.take() {
+        pass.paths.extend(older.paths.iter().cloned());
+    }
+    *carried = Some(Arc::new(pass));
 }
 
 /// Finish the first import after a clean, uncancelled pass. Every file it
@@ -3091,6 +3264,12 @@ struct ApplyOutcome {
     retired_unread: bool,
     /// Only the live driver's acknowledged pass may publish this snapshot.
     deferred_writes: Option<DeferredWrites>,
+    /// The paths the pass recorded or found it does not own.
+    recorded: Vec<String>,
+    /// The rules the pass captured under, if it could read them.
+    rules: Option<Arc<PolicyState>>,
+    /// What a live pass that recorded as a rescan found and did not record.
+    left: Option<Arc<CarriedPass>>,
 }
 
 impl ApplyOutcome {
@@ -3099,12 +3278,18 @@ impl ApplyOutcome {
         collection_busy_exhausted: false,
         retired_unread: false,
         deferred_writes: None,
+        recorded: Vec::new(),
+        rules: None,
+        left: None,
     };
     const FAILED: Self = Self {
         clean: false,
         collection_busy_exhausted: false,
         retired_unread: false,
         deferred_writes: None,
+        recorded: Vec::new(),
+        rules: None,
+        left: None,
     };
 }
 
@@ -3121,6 +3306,9 @@ impl CollectionReconcileFailure {
             collection_busy_exhausted: matches!(self, Self::BusyBudgetExhausted),
             retired_unread: false,
             deferred_writes: None,
+            recorded: Vec::new(),
+            rules: None,
+            left: None,
         }
     }
 }
@@ -3183,7 +3371,9 @@ async fn apply_bound_run_with_handle(
         events,
         apply_probe,
         import_priority,
+        layer_rules,
     } = context;
+    let live = layer_rules.is_some();
     let now_ms = wall_now_ms();
     let RootBoundRun { captured_root, run } = run;
     status.offer_collection_reconcile_after_release(leases, workspace_id);
@@ -3344,10 +3534,6 @@ async fn apply_bound_run_with_handle(
     let apply_cancel = cancel.clone();
     let apply_events = events.clone();
     let apply_captured_root = Arc::clone(&captured_root);
-    // The retained-unread loop below retires through its own sink; it must
-    // carry the same pass provenance or its deletes split the reconcile/fence
-    // history group with NULL correlation ids.
-    let retire_provenance = provenance.clone();
     let apply_provenance = provenance;
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
@@ -3365,7 +3551,7 @@ async fn apply_bound_run_with_handle(
                 actor: apply_actor,
                 workspace_id: apply_workspace.clone(),
                 version_id,
-                shadow_root: apply_root,
+                shadow_root: apply_root.clone(),
                 captured_root: Ok(apply_captured_root),
                 now_ms,
                 author_json: apply_author_json,
@@ -3373,6 +3559,15 @@ async fn apply_bound_run_with_handle(
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
             });
+            // The sink has read the rules. If they changed since the last
+            // pass, this pass records what the change found, as the rebuild
+            // after it would, so it records as a rescan.
+            if let Some(layer_rules) = layer_rules {
+                let rules = sink.files_policy();
+                if matches!(rules, PolicyState::Known(_)) && rules != &*layer_rules {
+                    record_as_rescan(sink.provenance_mut());
+                }
+            }
             sink.set_deferred_writes(apply_deferred_writes);
             #[cfg(test)]
             if let Some(wait) = apply_probe
@@ -3442,6 +3637,8 @@ async fn apply_bound_run_with_handle(
                 collection_release_generation,
                 automation_claims: sink.take_automation_claims(),
                 pending_placement_paths: sink.take_pending_placement_paths(),
+                provenance: sink.provenance_mut().clone(),
+                rules: sink.files_policy().clone(),
             });
         });
     let applied: Option<CaptureThreadOutcome> = match apply_thread {
@@ -3461,6 +3658,11 @@ async fn apply_bound_run_with_handle(
         collection_release_generation,
         automation_claims,
         mut pending_placement_paths,
+        // The retained-unread loop below retires through its own sink; it
+        // must carry the same pass provenance or its deletes split the
+        // reconcile/fence history group with NULL correlation ids.
+        provenance: retire_provenance,
+        rules: pass_rules,
     }) = applied
     else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
@@ -3679,6 +3881,18 @@ async fn apply_bound_run_with_handle(
             || result.failed_applies.contains(path)
             || plan.degraded_paths.contains(path)
     });
+    // The moments are durable whether or not the acknowledgement lands.
+    let recorded = [&result.applied_paths[..], &result.not_owned_paths[..]].concat();
+    let rules = matches!(pass_rules, PolicyState::Known(_)).then(|| Arc::new(pass_rules));
+    // A live pass that recorded as a rescan carries what it found and did
+    // not record, as a baseline does.
+    let left = if live && retire_provenance.summary.is_some() {
+        let mut left: BTreeSet<String> = found_paths(&plan).collect();
+        note_recorded(&mut left, &recorded);
+        carry(&retire_provenance, left)
+    } else {
+        None
+    };
     if completed && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
         return ApplyOutcome {
@@ -3686,6 +3900,9 @@ async fn apply_bound_run_with_handle(
             collection_busy_exhausted,
             retired_unread,
             deferred_writes: None,
+            recorded,
+            rules,
+            left,
         };
     }
     ApplyOutcome {
@@ -3693,6 +3910,9 @@ async fn apply_bound_run_with_handle(
         collection_busy_exhausted,
         retired_unread,
         deferred_writes: completed.then_some(deferred_writes),
+        recorded,
+        rules,
+        left,
     }
 }
 

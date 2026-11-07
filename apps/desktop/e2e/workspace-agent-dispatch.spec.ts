@@ -208,7 +208,7 @@ test("an agent's question with choices is a poll; picking one answers it and the
     const question = page.getByTestId("chats-lane-message").filter({ hasText: "Which day do we ship?" });
     await expect(question).toHaveCount(1);
     await expect(question.getByTestId("chats-lane-agent-badge")).toHaveText("agent");
-    await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Poll open");
+    await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Unanswered");
     const options = question.getByTestId("chats-lane-poll-option");
     await expect(options).toHaveText(["Friday", "Monday"]);
     await expect(question.getByTestId("chats-lane-decision-resolve")).toHaveCount(0);
@@ -223,6 +223,59 @@ test("an agent's question with choices is a poll; picking one answers it and the
     await expect(
       page.getByTestId("chats-lane-message").filter({ hasText: "going with Monday" }),
     ).toHaveCount(1);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("an agent's open question shows Answer, which starts the reply that answers it", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "agent-dispatch-open-question-e2e";
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedRunnerSettings(temp, "ask");
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
+    const page = desktop.page;
+    await openMyAgent(page);
+    const shoot = async (name: string) => {
+      if (!process.env.UI_AUDIT_SHOT_DIR) return;
+      await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
+      for (const theme of ["light", "dark"]) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await waitForVisibleAnimations(page);
+        await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `${name}-${theme}.png`) });
+      }
+    };
+
+    await page.getByTestId("chats-lane-composer").fill("name the file");
+    await page.getByTestId("chats-lane-composer").press("Enter");
+
+    // An open question without choices says so in words, with Answer beside it.
+    const question = page.getByTestId("chats-lane-message").filter({ hasText: "What should I call the file?" });
+    await expect(question.getByTestId("chats-lane-decision-open")).toBeVisible();
+    await shoot("open-question");
+    await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Unanswered");
+    await expect(question.getByTestId("chats-lane-poll-option")).toHaveCount(0);
+
+    // Answer opens the question's thread with the reply box focused.
+    await question.getByTestId("chats-lane-decision-resolve").click();
+    const reply = page.getByTestId("chats-lane-thread-composer");
+    await expect(reply).toBeFocused();
+    await shoot("open-question-answering");
+
+    await reply.fill("Call it notes.md");
+    await reply.press("Enter");
+    await expect(question.getByTestId("chats-lane-decision-resolved")).toHaveText("Answered");
+    await expect(question.getByTestId("chats-lane-decision-resolve")).toHaveCount(0);
+
+    // The answer reaches the agent's next run, which replies in the thread.
+    const thread = page.getByTestId("chats-lane-thread-panel");
+    await expect(thread.getByText("calling it notes.md")).toHaveCount(1);
+    await shoot("open-question-answered");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

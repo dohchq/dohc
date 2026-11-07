@@ -423,19 +423,19 @@ export function registerCloudIpcHandlers<
       },
       rollbackLabel: "join",
       cleanupFailureMessage:
-        `dohc could not close the failed download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before joining again. Forget keeps the folder. Then choose another empty folder.`,
+        `dohc could not close the failed download. Files stay in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Remove from list on its row in Manage workspaces before joining again. Its folder stays. Then choose another empty folder.`,
       failure: (error) => {
         if (error instanceof SecretFileStoreError && error.code === "key-install-unsupported") {
-          return new Error(`This drive can't store the workspace's secret key safely. Files remain in ${rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`);
+          return new Error(`This drive can't store the workspace's secret key safely. Files stay in ${rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`);
         }
         if (
           error instanceof Error &&
           /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)
         ) {
-          return new Error(`${error.message} Files remain in ${rootPath}. Choose another empty folder to try again.`);
+          return new Error(`${error.message} Files stay in ${rootPath}. Choose another empty folder to try again.`);
         }
         return new Error(
-          `dohc could not download the workspace. Files remain in ${rootPath}. Check your connection, then choose another empty folder.`,
+          `dohc could not download the workspace. Files stay in ${rootPath}. Check your connection, then choose another empty folder.`,
         );
       },
     });

@@ -45,6 +45,16 @@ interface DesktopWindowsDependencies {
   };
 }
 
+function lastOpenedWorkspaceId(workspaces: WorkspaceSummary[]): string | undefined {
+  let latest: WorkspaceSummary | undefined;
+  for (const workspace of workspaces) {
+    if (workspace.lastOpenedAt !== undefined && workspace.lastOpenedAt > (latest?.lastOpenedAt ?? -1)) {
+      latest = workspace;
+    }
+  }
+  return latest?.workspaceId;
+}
+
 export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   const {
     app, Menu, dialog, process, workspaceSummaries, currentUpdateState,
@@ -71,11 +81,14 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     lastActivatedWorkspaceId = workspaceId;
   }
 
+  // A window with no workspace of its own yet opens the workspace opened
+  // last, so the first window of a launch returns to where dohc quit.
   function prioritizePreferredWorkspace(
     workspaces: WorkspaceSummary[],
     sender: WebContents,
   ): WorkspaceSummary[] {
-    const preferredWorkspaceId = preferredWorkspaceIds.get(sender);
+    const preferredWorkspaceId =
+      preferredWorkspaceIds.get(sender) ?? lastOpenedWorkspaceId(workspaces);
     if (!preferredWorkspaceId) return workspaces;
     const index = workspaces.findIndex(
       (workspace) => workspace.workspaceId === preferredWorkspaceId,

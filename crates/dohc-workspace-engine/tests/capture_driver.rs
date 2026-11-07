@@ -145,6 +145,20 @@ async fn wait_for_text(
     }
 }
 
+/// Poll until the driver has started the files layer `count` times. A start
+/// is counted after its settle ends.
+async fn wait_for_layer_starts(probe: &CaptureApplyProbe, count: u64) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while probe.layer_start_count() < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the files layer started {} times, not {count}",
+            probe.layer_start_count()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -667,6 +681,170 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     let (summary, _) = moment_metadata(&db_path, "private/journal.md");
     assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_widening_rebuild_that_never_settles_keeps_its_label() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]
+path = \"private/**\"
+tracked = false
+",
+    );
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    // The open and the narrowing rebuild.
+    wait_for_layer_starts(&probe, 2).await;
+    let starts = probe.layer_start_count();
+
+    // Every apply fails until the widening rebuild has ended, so the rebuild
+    // never records the file.
+    probe.fail_next_applies_before_worker(u32::MAX);
+    write_file(scratch.path(), ".dohc/files.toml", b"");
+    wait_for_layer_starts(&probe, starts + 1).await;
+    probe.fail_next_applies_before_worker(0);
+
+    // After repeated identical failures the file waits for the next change on
+    // disk. An unrelated edit is that change, and a later ordinary pass
+    // records the file under the rebuild's label.
+    write_file(scratch.path(), "notes.md", b"edit");
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, _) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+}
+
+/// A widen saved while a pass scans reaches that pass's capture before the
+/// rebuild. The pass records what it found as a rescan, in its own group,
+/// and an edit it captures records with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_widen_saved_during_a_scan_records_as_a_rescan() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]
+path = \"private/**\"
+tracked = false
+",
+    );
+    write_file(scratch.path(), "private/journal.md", b"personal");
+    write_file(scratch.path(), "notes.md", b"first");
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(&transport, &handle, "notes.md", Some("first")).await;
+
+    // The edit's pass stops after its scan, and the widen lands before its
+    // capture reads the rules.
+    probe.pause_next_apply();
+    write_file(scratch.path(), "notes.md", b"second");
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .expect("the edit's pass must reach the pause");
+    write_file(scratch.path(), ".dohc/files.toml", b"");
+    probe.release();
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    wait_for_text(&transport, &handle, "notes.md", Some("second")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let (summary, group) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+    assert!(
+        group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile")),
+        "the widened file must record in the pass's own group, got {group:?}"
+    );
+    assert_eq!(
+        moment_metadata(&db_path, "notes.md"),
+        (summary, group),
+        "an edit captured in the same pass records with it"
+    );
+}
+
+/// A comment added to the rules changes no rule, so an edit captured in that
+/// pass records as an ordinary edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_beside_a_comment_added_to_the_rules_records_as_an_edit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let rules = "[[rule]]
+path = \"private/**\"
+tracked = false
+";
+    write_file(scratch.path(), ".dohc/files.toml", rules.as_bytes());
+    write_file(scratch.path(), "notes.md", b"first");
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    wait_for_text(&transport, &handle, "notes.md", Some("first")).await;
+
+    probe.pause_next_apply();
+    write_file(scratch.path(), "notes.md", b"second");
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .expect("the edit's pass must reach the pause");
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        format!(
+            "# Keep the journal private.
+{rules}"
+        )
+        .as_bytes(),
+    );
+    probe.release();
+    wait_for_text(&transport, &handle, "notes.md", Some("second")).await;
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let (summary, group) =
+        moment_metadata(&scratch.path().join(".dohc/engine/engine.db"), "notes.md");
+    assert_ne!(summary.as_deref(), Some("Found changes in the folder"));
+    assert!(
+        !group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile")),
+        "an ordinary edit records in no rescan group, got {group:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

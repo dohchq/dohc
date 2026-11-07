@@ -1,6 +1,6 @@
 import { fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { basenameOf, dirnameOf } from "../path";
-import { KindGlyph } from "./KindGlyph";
+import { KindGlyph, ObjectGlyph, type ObjectKind } from "./KindGlyph";
 
 // One reference to a workspace file, the same chip wherever it appears: chat,
 // Linked mentions, Search, History and the link picker. The kind glyph, the
@@ -23,6 +23,9 @@ export function Ref(props: {
   title?: string;
   // The listing's kind, when the caller has it; otherwise the path's.
   kind?: FileKindRecord;
+  // The object the file stands for, such as the Collection a change file
+  // changes. Its glyph replaces the file kind's.
+  objectKind?: ObjectKind;
   // A heading inside the file, shown after the name.
   heading?: string;
   folder?: boolean;
@@ -48,7 +51,9 @@ export function Ref(props: {
   }`;
   const content = (
     <>
-      <KindGlyph kind={props.kind ?? fileKindForPath(props.path)} size={13} className="text-muted" />
+      {props.objectKind
+        ? <ObjectGlyph kind={props.objectKind} size={13} className="text-muted" />
+        : <KindGlyph kind={props.kind ?? fileKindForPath(props.path)} size={13} className="text-muted" />}
       <span className="min-w-0 truncate">
         {name}
         {heading ? <span className="text-muted">{heading}</span> : null}

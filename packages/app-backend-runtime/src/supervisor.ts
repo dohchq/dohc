@@ -1,4 +1,5 @@
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetChangeDigest } from "@dohc/security-contract/dataset-artifacts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend";
 import { lstat, open } from "node:fs/promises";
@@ -63,6 +64,8 @@ export interface DatasetMigrationCandidate {
   expected: DatasetCursor;
   approvedRevisionHash: string;
   checkpointSha256: string;
+  /** The revision and migration this candidate applies, as `datasetChangeDigest` names them. */
+  changeSha256: string;
   expiresAtMs: number;
   preview: { tables: MigrationPreviewTableSummary[]; firstPage: MigrationPreviewReportPage };
 }
@@ -658,7 +661,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       try {for(let offset=0;offset<info.size;) {standing(input);const result=await file.read(buffer,0,Math.min(buffer.length,info.size-offset),offset);if(!result.bytesRead)throw new Error("dohc did not finish this preview. Preview the change again.");hash.update(buffer.subarray(0,result.bytesRead));offset+=result.bytesRead;}}finally{await file.close();}
       standing(input);if(!sameCursor(head(input).cursor,captured.cursor))throw new Error("The Collection changed during this preview. Preview the change again.");
       const result:DatasetMigrationCandidate={candidateId:randomUUID(),expected:{...captured.cursor},approvedRevisionHash:input.approvedRevisionHash,
-        checkpointSha256:hash.digest("hex"),expiresAtMs:now()+10*60_000,preview:{tables:migrated.report.tables,firstPage:readMigrationPreviewReportPage({path:reportPath,limit:100})}};
+        checkpointSha256:hash.digest("hex"),changeSha256:datasetChangeDigest({revisionSha256:input.approvedRevisionHash,migrationSql:input.migrationSql}),expiresAtMs:now()+10*60_000,preview:{tables:migrated.report.tables,firstPage:readMigrationPreviewReportPage({path:reportPath,limit:100})}};
       const candidate:Candidate={result,authorityKey:input.authorityKey,directory,path,reportPath,capacityBytes:captured.capacityBytes,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,timer:undefined!,reservations:[...reservations]};
       candidate.timer=setTimeout(()=>expireCandidate(candidate),10*60_000);candidate.timer.unref();candidates.set(result.candidateId,candidate);directory=undefined;
       reservations.length=0;return structuredClone(result);

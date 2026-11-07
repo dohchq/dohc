@@ -11,6 +11,7 @@ type VersionOperations = Pick<WorkspaceEngineCapture,
   | "createVersion"
   | "switchVersion"
   | "compareVersions"
+  | "compareVersionsChangedCount"
   | "mergeVersionIntoMain"
   | "listOpenConflictsPage"
   | "resolveConflict"
@@ -35,6 +36,7 @@ export function workspaceVersionForIpc(version: {
     createdAtMs: version.createdAtMs,
     canMergeIntoMain:
       version.kind === "named" && version.forkPoint?.versionId === "main",
+    ...(version.forkPoint ? { madeFromVersionId: version.forkPoint.versionId } : {}),
   };
 }
 
@@ -88,6 +90,11 @@ export function workspaceVersionHandlers(dependencies: {
       });
     },
 
+    async countWorkspaceVersionChanges(input) {
+      const capture = await requireVersionOperations(input.workspaceId);
+      return { count: await capture.compareVersionsChangedCount(input.versionId) };
+    },
+
     async mergeWorkspaceVersion(input) {
       const capture = await requireVersionOperations(input.workspaceId);
       const result = await capture.mergeVersionIntoMain(input.versionId);
@@ -102,6 +109,7 @@ export function workspaceVersionHandlers(dependencies: {
         mergedFileCount: result.mergedFileCount,
         unchangedFileCount: result.unchangedFileCount,
         conflictCount: result.conflictCount,
+        replacedProtectedPaths: result.replacedProtectedPaths,
         conflicts: page.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: page.nextAfterConflictId,
       };

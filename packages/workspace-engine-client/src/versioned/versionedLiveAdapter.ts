@@ -98,6 +98,7 @@ import {
 import { CONFLICT_ROW_HARD_CAP_BYTES } from "./engineTextLimits";
 
 import { decodeFileResolveResult, MAX_FILE_RESOLVE_TARGETS, MAX_FILE_RESOLVE_BYTES, type FileResolveTarget, type FileResolveResult } from "../daemon/fileResolution";
+import { decodeMadeWorkReference, decodeWorkReferenceResolution, type MadeWorkReference, type WorkReferenceResolution, type WorkTargetInput } from "../daemon/workReferences";
 
 export class VersionedAdapterCapabilityError extends Error {
   constructor(message: string) {
@@ -948,6 +949,27 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     input.signal?.throwIfAborted();
     if (result.results.length !== input.targets.length || (input.versionId !== undefined && result.versionId !== input.versionId)) {
       throw new DaemonProtocolError("files.resolve returned a different version or target count.");
+    }
+    return result;
+  }
+
+  /** Return this device's reference for a target, making one when it has none. */
+  async makeWorkReference(input: { workspaceId: string; target: WorkTargetInput; signal?: AbortSignal }): Promise<MadeWorkReference> {
+    this.assertWorkspace(input.workspaceId);
+    input.signal?.throwIfAborted();
+    const result = decodeMadeWorkReference(await this.requester.request("workReferences.make", { target: input.target }, { workspace: this.workspace }));
+    input.signal?.throwIfAborted();
+    return result;
+  }
+
+  /** Resolve a reference to the work it names here. A rename or move does not change the answer. */
+  async resolveWorkReference(input: { workspaceId: string; reference: string; signal?: AbortSignal }): Promise<WorkReferenceResolution> {
+    this.assertWorkspace(input.workspaceId);
+    input.signal?.throwIfAborted();
+    const result = decodeWorkReferenceResolution(await this.requester.request("workReferences.resolve", { reference: input.reference }, { workspace: this.workspace }));
+    input.signal?.throwIfAborted();
+    if (result.status === "found" && result.reference !== input.reference) {
+      throw new DaemonProtocolError("workReferences.resolve returned a different reference.");
     }
     return result;
   }

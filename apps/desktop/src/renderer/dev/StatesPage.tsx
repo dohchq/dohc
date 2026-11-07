@@ -24,7 +24,11 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, markDatasetServerNotFound, readError } from "../../ipc/errorWords";
+import { collectionChangeDeletes, type CollectionChangeProposal, type CollectionChangeRow } from "../../workspaces/collectionChange";
+import type { CollectionChangeReview, CollectionChangeState } from "../collections/collectionChangeFlow";
+import { CollectionChangeCardView, collectionApplyFailure, collectionDeletesMoreFailure } from "../workbench/CollectionChangeCard";
+import { CollectionChangeReviewCard } from "../workbench/CollectionChangeReviewDialog";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -100,9 +104,11 @@ import { AboutConversationLinksView, type ConversationLinksView, type MentionedF
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { MERGE_RETRY_AFTER_CLOSE } from "../shell/useVersionMergeNotices";
 import { DismissConfirm, RecoveryList } from "../RecoveryList";
 import type { OrphanedDraftRow } from "../orphanedDrafts";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
+import { NewVersionHint } from "../workbench/WorkspaceVersions";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -140,6 +146,9 @@ const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-su
 // the shell's menus get the room from their taller boxes, and the editor's
 // menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
+// The change review is 760px wide in the app, wider than a pane, so it is
+// drawn at the pane's width, as the Settings frame is, with the shadow's room.
+const REVIEW_ROOM = `${SHADOW_ROOM} w-[672px] [&>[role=dialog]]:w-full`;
 
 // The parts the page renders, when it renders only some.
 const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
@@ -860,6 +869,7 @@ function ChatThreadSpecimen() {
   return (
     <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
+        workspaceId="states"
         nav={CHAT_THREAD_NAV}
         channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={CHAT_THREAD_MESSAGES}
@@ -902,6 +912,7 @@ function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryabl
   return (
     <div className="w-[560px]">
       <ThreadMessages
+        workspaceId="states"
         nav={CHAT_THREAD_NAV}
         channelLabel={`#${CHAT_CHANNEL.name}`}
         messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
@@ -928,6 +939,104 @@ function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryabl
     </div>
   );
 }
+
+// Claude Code asks Ada to apply a change to Volunteers, and its card draws in
+// each state. Ada made the Email rule earlier; the agent made the rest.
+const CHANGE_AT = (hour: number, minute: number) => new Date(2026, 6, 8, hour, minute).getTime();
+const VOLUNTEERS = "volunteers/dataset.json";
+const VOLUNTEERS_MIGRATION = "volunteers/migrations/004-due-date.sql";
+const byAgent = (path: string, minute = 41) => ({ path, author: { name: "Claude Code", agent: true }, atMs: CHANGE_AT(14, minute) });
+const CHANGE_ROWS: CollectionChangeRow[] = [
+  { kind: "field-added", key: "field:due-date", field: "Due date", type: "date", records: 12, empty: 12, source: byAgent(VOLUNTEERS) },
+  { kind: "field-renamed", key: "field:status:name", from: "Status", to: "Stage", button: false, source: byAgent(VOLUNTEERS) },
+  { kind: "field-removed", key: "field:notes", field: "Notes", button: false, values: 12, source: byAgent(VOLUNTEERS) },
+  { kind: "action-changed", key: "action:sign-up", action: "Sign up", source: byAgent("volunteers/backend.ts", 40) },
+  { kind: "field-unique", key: "field:email:unique", field: "Email", unique: true, values: 12,
+    source: { path: VOLUNTEERS, author: { name: "Ada", agent: false }, atMs: CHANGE_AT(13, 12) } },
+  { kind: "migration", key: "migration", file: VOLUNTEERS_MIGRATION, records: 12, source: byAgent(VOLUNTEERS_MIGRATION) },
+];
+const changeProposal = (rows: CollectionChangeRow[], files: string[], note: string | null): CollectionChangeProposal => ({
+  kind: "dohc-collection-change", version: 1, datasetId: "volunteers", name: "Volunteers", datasetPath: VOLUNTEERS, migrationPath: VOLUNTEERS_MIGRATION,
+  base: { revision: 3, revisionSha256: "a".repeat(64) }, revisionSha256: "b".repeat(64), changeSha256: "c".repeat(64), files, rows, note,
+});
+const CHANGE_PROPOSAL = changeProposal(CHANGE_ROWS, [VOLUNTEERS, "volunteers/schema.sql", "volunteers/backend.ts", VOLUNTEERS_MIGRATION],
+  "Checks the email address before it saves.");
+const RENAME_PROPOSAL = changeProposal([{ kind: "field-renamed", key: "field:stage:name", from: "Stage", to: "Phase", button: false, source: byAgent(VOLUNTEERS, 52) }],
+  [VOLUNTEERS], null);
+const CHANGE_AUTHORS = {
+  ada: { authorKind: "human", authorDisplayName: "Ada", presentation: SAMPLE_ADA },
+  agent: { authorKind: "agent", authorDisplayName: "Claude Code", presentation: neutralPresentation },
+} as const;
+const changeMessage = (id: string, by: keyof typeof CHANGE_AUTHORS, body: string, minute: number): ChatMessageRecord => ({
+  id, threadId: "change-dm", ...CHANGE_AUTHORS[by], body, createdAtMs: CHANGE_AT(14, minute),
+});
+const CHANGE_MESSAGE = changeMessage("change-ask", "agent", "Here's the change.", 41);
+const RENAME_MESSAGE = changeMessage("rename-ask", "agent", "Here's the rename of Stage to Phase that you asked for.", 52);
+const changeCard = (state: CollectionChangeState | null, proposal = CHANGE_PROPOSAL, message = CHANGE_MESSAGE): ComponentProps<typeof CollectionChangeCardView> => ({
+  message, proposal, change: state === null ? null : { proposal, rows: proposal.rows, state }, loadFailure: null, phase: { kind: "idle" }, notNow: false,
+  locked: false, onOpenPath: noop, onApply: noop, onUndo: noop, onReview: noop, onNotNow: noop, onUnfold: noop, onRetryLoad: noop, testIdPrefix: "states",
+});
+const WAITING = { kind: "waiting" } as const;
+const applyFailure = collectionApplyFailure("Volunteers");
+// Two volunteers with notes signed up after the change was sent.
+const shownDeletes = collectionChangeDeletes(CHANGE_ROWS);
+const deletesMore = collectionDeletesMoreFailure(shownDeletes, { ...shownDeletes, values: shownDeletes.values + 2 });
+
+// Ada added Phone after the agent asked, then applied the change from the
+// review, so her reply attaches the change it applied. Neither message
+// mentions its file, so neither draws a chip.
+const REVIEWED_PROPOSAL = changeProposal([CHANGE_ROWS[0]!,
+  { kind: "field-added", key: "field:phone", field: "Phone", type: "text", records: 12, empty: 12,
+    source: { path: VOLUNTEERS, author: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 44) } },
+  ...CHANGE_ROWS.slice(1)], CHANGE_PROPOSAL.files, CHANGE_PROPOSAL.note);
+const attachingChange = (message: ChatMessageRecord, fileId: string): ChatMessageRecord => ({ ...message, attachments: [{
+  attachmentId: `${message.id}-change`, threadId: message.threadId, messageId: message.id, targetKind: "file",
+  pathHint: `volunteers/changes/${fileId}.json`, createdAtMs: message.createdAtMs }] });
+const REVIEWED_ASK = attachingChange(CHANGE_MESSAGE, "8d0c5b7e-2f4a-4c1e-9b3d-6a7f0e2c5d14");
+const REVIEWED_REPLY = attachingChange(changeMessage("change-reviewed", "ada", "Applied the change to Volunteers.", 47), "3f2a91c0-7b6e-4d2a-8c5f-1e9b0a4d7c36");
+
+function ChangeAppliedFromReviewSpecimen() {
+  return <div className="flex h-[720px] w-[672px] flex-col">
+    <ChatMessageList testIdPrefix="states-change-chat" messages={[REVIEWED_ASK, REVIEWED_REPLY]} loading={false} emptyLabel="No messages yet." anchor="start"
+      renderMessageFooter={message => message.id === REVIEWED_ASK.id
+        ? <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, REVIEWED_PROPOSAL, REVIEWED_ASK)} appliedBy={REVIEWED_REPLY} /> : null} />
+  </div>;
+}
+
+const DEFINITION_BEFORE = `{
+  "name": "Volunteers",
+  "fields": [
+    { "id": "name", "name": "Name", "type": "text" },
+    { "id": "email", "name": "Email", "type": "text" },
+    { "id": "status", "name": "Status", "type": "select" },
+    { "id": "notes", "name": "Notes", "type": "text" }
+  ]
+}
+`;
+const DEFINITION_AFTER = `{
+  "name": "Volunteers",
+  "fields": [
+    { "id": "name", "name": "Name", "type": "text" },
+    { "id": "email", "name": "Email", "type": "text", "unique": true },
+    { "id": "status", "name": "Stage", "type": "select" },
+    { "id": "due_date", "name": "Due date", "type": "date" }
+  ]
+}
+`;
+const CHANGE_REVIEW: CollectionChangeReview = {
+  change: { proposal: CHANGE_PROPOSAL, rows: CHANGE_ROWS, state: WAITING },
+  preparation: { preparationId: "states-preparation", revisionSha256: "b".repeat(64), approvalDigest: "d".repeat(64) },
+  files: [
+    { path: VOLUNTEERS, before: DEFINITION_BEFORE, after: DEFINITION_AFTER },
+    { path: "volunteers/schema.sql", before: "notes TEXT\n", after: "due_date TEXT\n" },
+    { path: "volunteers/backend.ts", before: "signUp(input)\n", after: "signUp(checkEmail(input))\n" },
+    { path: VOLUNTEERS_MIGRATION, before: "", after: "ALTER TABLE volunteers DROP COLUMN notes;\n" },
+  ],
+};
+const changeReview = (open: ReadonlySet<string>): ComponentProps<typeof CollectionChangeReviewCard> => ({
+  asked: CHANGE_REVIEW.change, load: { kind: "ready", review: CHANGE_REVIEW }, phase: { kind: "idle" }, open,
+  onToggle: noop, onApply: noop, onNotNow: noop, onRetry: noop, locked: false, testIdPrefix: "states",
+});
 
 const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 
@@ -1180,6 +1289,30 @@ const COLLECTIONS_WAITING_NOTICE = {
   onDismiss: noop,
 };
 
+// A failed merge while another merge dialog is open: Try again is disabled,
+// with its reason under it. The app can't show this row, since the open
+// dialog covers Notices.
+const MERGE_BLOCKED_TOAST = {
+  id: "merge-blocked",
+  title: "dohc could not merge Draft into Main",
+  message: "Try again in a moment.",
+  details: "Error: Rust engine daemon exited.",
+  atMs: 0,
+  canRetry: true,
+  retryBlocked: MERGE_RETRY_AFTER_CLOSE,
+  seen: false,
+};
+const MERGE_BLOCKED_NOTICE = {
+  id: "merge-blocked",
+  tone: "danger" as const,
+  title: MERGE_BLOCKED_TOAST.title,
+  body: MERGE_BLOCKED_TOAST.message,
+  Icon: AlertTriangle,
+  actions: [{ label: "Try again", onClick: noop, disabled: true, reason: MERGE_RETRY_AFTER_CLOSE }],
+  copyText: MERGE_BLOCKED_TOAST.details,
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1347,7 +1480,7 @@ const REFUSED_UNDO_TOAST = {
 const radioMenuItems: MenuEntry[] = [
   { id: "main", label: "Main", checked: false, onSelect: noop },
   { id: "draft", label: "Draft two", checked: true, onSelect: noop },
-  { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  { id: "new", label: "New version", icon: <Plus size={14} aria-hidden />, onSelect: noop },
   MENU_SEPARATOR,
   { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
   {
@@ -1370,7 +1503,23 @@ const fieldMenuItems: MenuEntry[] = [
       onChange: noop,
       onSubmit: noop,
       onCancel: noop,
-      hint: "Starts as a copy of Main",
+      hint: "Starts from Main",
+    },
+  },
+];
+// The versions menu before the first version, as only Main shows it: the
+// field says where the version starts, then what every version leaves alone.
+const firstVersionMenuItems: MenuEntry[] = [
+  { id: "main", label: "Main", checked: true, description: "Try changes without touching Main.", onSelect: noop },
+  {
+    id: "new",
+    field: {
+      label: "New version name",
+      value: "Draft",
+      onChange: noop,
+      onSubmit: noop,
+      onCancel: noop,
+      hint: <NewVersionHint versions={{ onMain: true, active: null }} first />,
     },
   },
 ];
@@ -1382,7 +1531,7 @@ const overflowMenuItems: MenuEntry[] = [
 ];
 const dangerMenuItems: MenuEntry[] = [
   { id: "reveal", label: "Reveal in folder", onSelect: noop },
-  { id: "forget", label: "Forget", danger: true, onSelect: noop },
+  { id: "delete", label: "Delete", danger: true, onSelect: noop },
 ];
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
@@ -1897,6 +2046,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
           </div>
           <WorkspaceErrorToast error={toast("success")} onHide={noop} />
+          <WorkspaceErrorToast error={MERGE_BLOCKED_TOAST} onRetry={noop} onHide={noop} />
         </div>
       </Section>
 
@@ -1918,6 +2068,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
             <LocalNoticeRow notice={COLLECTIONS_WAITING_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={MERGE_BLOCKED_NOTICE} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -1945,6 +2096,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="field: focus, Enter at its end, hint">
           <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={256} testId={`states-menu-field-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-first-version" title="Menu before the first version">
+        <Specimen label="only Main: field focus, hint, what versions leave alone">
+          <div className="flex h-64 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+            <MenuSpecimen label="Versions" items={firstVersionMenuItems} width={256} testId={`states-menu-first-version-${theme}`} />
           </div>
         </Specimen>
       </Section>
@@ -2600,6 +2759,62 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      <Section part="change-card" title="Collection change card">
+        <Specimen label="loading">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(null)} /></div>
+        </Specimen>
+        <Specimen label="waiting: it deletes values, Ada made one part, the agent's note sits under its code change">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} /></div>
+        </Specimen>
+        <Specimen label="applying">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "applying", words: "Applying…" }} /></div>
+        </Specimen>
+        <Specimen label="applied, which History can't undo; a later rename, applied, with Undo">
+          <div className="flex w-[672px] flex-col">
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: false })} appliedBy={changeMessage("change-applied", "ada", "Applied the change to Volunteers.", 47)} />
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: true }, RENAME_PROPOSAL, RENAME_MESSAGE)}
+              appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} />
+          </div>
+        </Specimen>
+        <Specimen label="the rename, undone">
+          <div className="w-[672px]">
+            <CollectionChangeCardView {...changeCard({ kind: "applied", current: false }, RENAME_PROPOSAL, RENAME_MESSAGE)}
+              appliedBy={changeMessage("rename-applied", "ada", "Applied the change to Volunteers.", 53)} undoneBy={changeMessage("rename-undone", "ada", "Undid the change to Volunteers.", 55)} />
+          </div>
+        </Specimen>
+        <Specimen label="failed, with Try again">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(null) }} /></div>
+        </Specimen>
+        <Specimen label="refused by the server that keeps it: no Try again">
+          <div className="w-[672px]">
+            <CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...applyFailure(markDatasetServerNotFound(new Error("Not found"), 404, { code: "not_found" })) }} />
+          </div>
+        </Specimen>
+        <Specimen label="Not now">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} notNow /></div>
+        </Specimen>
+        <Specimen label="Ada changed its files after it was sent">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard({ kind: "edited", by: { name: "Ada", agent: false }, atMs: CHANGE_AT(14, 45) })} /></div>
+        </Specimen>
+        <Specimen label="records changed after it was sent, so it would now delete more: no Apply">
+          <div className="w-[672px]"><CollectionChangeCardView {...changeCard(WAITING)} phase={{ kind: "failed", ...deletesMore }} /></div>
+        </Specimen>
+        <Specimen label="in a DM, applied from the review after Ada added Phone: the card credits her part, and her reply has no chip">
+          <ChangeAppliedFromReviewSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section part="change-review" title="Collection change review">
+        <Specimen label="ready, keyboard focus on the first row">
+          <div className={REVIEW_ROOM} data-force-state="focus focus-visible" data-force-target='[data-testid="states-change-review-row"]:first-child > button'>
+            <CollectionChangeReviewCard {...changeReview(new Set<string>())} />
+          </div>
+        </Specimen>
+        <Specimen label="the first row's file changes open">
+          <div className={REVIEW_ROOM}><CollectionChangeReviewCard {...changeReview(new Set([CHANGE_ROWS[0]!.key]))} /></div>
+        </Specimen>
+      </Section>
+
       <Section part="settings-frame" title="Settings frame">
         <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
           <div
@@ -3101,7 +3316,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             </SettingRow>
           </div>
         </Specimen>
-        <Specimen label="sync on, account unconfirmed: not syncing, with Try again">
+        <Specimen label="account unconfirmed: not syncing, with Try again and Pause sync">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
           </div>

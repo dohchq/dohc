@@ -388,7 +388,8 @@ impl RelayError {
             | RelayError::StoreBusy
             | RelayError::HostedRefusal(_)
             | RelayError::ValidationPending(_)
-            | RelayError::Local(_) => None,
+            | RelayError::Local(_)
+            | RelayError::RepairPending => None,
         }
     }
 }
@@ -582,4 +583,6 @@ pub enum RelayError {
     ValidationPending(Box<dohc_engine_collab::live_update_application::PendingValidation>),
     #[error("local sync state failed: {0}")]
     Local(String),
+    #[error("pull repairs need another fetch")]
+    RepairPending,
 }

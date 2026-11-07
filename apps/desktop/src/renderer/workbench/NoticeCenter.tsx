@@ -1,11 +1,11 @@
 import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -20,6 +20,7 @@ import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
+import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
@@ -28,6 +29,9 @@ export type NoticeAction = {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  // Why it is disabled, shown under the row's actions and read as the
+  // button's description.
+  reason?: string;
   busy?: boolean;
 };
 
@@ -41,6 +45,8 @@ export type Notice = {
   // A line after the body that no clamp hides, such as how many more
   // files a list leaves out.
   lastLine?: string;
+  // Paths the body lists, one per line under it.
+  paths?: readonly string[];
   actions?: readonly NoticeAction[];
   // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
@@ -73,6 +79,7 @@ export interface WorkspaceErrorNotice {
   title?: string;
   message: string;
   lastLine?: string;
+  paths?: readonly string[];
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   details: string;
@@ -80,8 +87,12 @@ export interface WorkspaceErrorNotice {
   atMs: number;
   canRetry: boolean;
   retryBusy?: boolean;
+  // Try again can't run yet. It shows disabled, with this as its reason.
+  retryBlocked?: string;
   // A step that fixes the cause, such as opening the file it names.
   actionLabel?: string;
+  // The step comes after Try again, so F6 lands on Try again.
+  actionAfterRetry?: boolean;
   additionalActionLabels?: string[];
   seen: boolean;
   read?: boolean;
@@ -208,13 +219,8 @@ const ROW_ACTIONS_CLASS = "-ml-1.5 mt-1 flex flex-wrap items-center gap-1";
 const ROW_ACTION_CLASS =
   "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50 aria-busy:opacity-50";
 
-// A row counts as read once the pointer or keyboard focus rests on it this
-// long: longer than crossing a row on the way to another, about when a
-// tooltip would show.
-const READ_REST_MS = 600;
-
-type RestSource = "pointer" | "focus";
-type RestHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onPointerLeave" | "onFocus" | "onBlur">;
+// A row counts as read the moment the pointer or keyboard focus reaches it.
+type ReachHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onFocus">;
 
 // A read row of this computer's is remembered by what it says, so one whose
 // words or time change is unread again.
@@ -238,12 +244,14 @@ function UnreadMark(props: { unread: boolean; testId: string; className?: string
 // A notice's title and text, in its row or its toast, clipped to fit. A
 // click on clipped text, or Show more, shows all of it in place, wrapped
 // and selectable. A body with one fact per line shows its first 3 facts
-// whole, so none is cut in half; prose clamps at 3 lines.
+// whole, so none is cut in half; prose clamps at 3 lines. Paths are facts
+// after the body, each cut in the middle to fit its line until it opens.
 function NoticeText(props: {
   title: string;
   // The title's weight and color.
   titleClass: string;
   body: string;
+  paths?: readonly string[];
   // Off for a body that is already shown whole.
   clamp?: boolean;
   // A last line shown with the whole body, such as how many more files a
@@ -259,8 +267,10 @@ function NoticeText(props: {
   const [open, setOpen] = useState(false);
   const [clipped, setClipped] = useState(false);
   const clamp = props.clamp ?? true;
-  const facts = props.body.split("\n");
-  const byFacts = clamp && facts.length > 1;
+  const lines = props.body ? props.body.split("\n") : [];
+  const paths = props.paths ?? [];
+  const facts = lines.length + paths.length;
+  const byFacts = clamp && facts > 1;
   const { onOpenChange } = props;
   const show = (next: boolean) => {
     setOpen(next);
@@ -286,7 +296,8 @@ function NoticeText(props: {
     if (body) observer.observe(body);
     return () => observer.disconnect();
   }, [open, clamp, byFacts, props.title, props.body]);
-  const hidden = clipped || (byFacts && facts.length > 3);
+  const hidden = clipped || (byFacts && facts > 3);
+  const shownPaths = byFacts && !open ? paths.slice(0, Math.max(0, 3 - lines.length)) : paths;
   // A click that ends a selection, or the second of a double click, opens nothing.
   const openOnClick = hidden && !open
     ? (event: MouseEvent<HTMLElement>) => {
@@ -316,8 +327,17 @@ function NoticeText(props: {
             onClick={openOnClick}
             className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
           >
-            {byFacts && !open ? facts.slice(0, 3).join("\n") : props.body}
+            {byFacts && !open ? lines.slice(0, 3).join("\n") : props.body}
           </p>
+        ) : null}
+        {shownPaths.length > 0 ? (
+          <ul data-testid={`${props.testId}-paths`} className="m-0 mt-0.5 list-none p-0 text-[11px] leading-snug text-muted">
+            {shownPaths.map((path) => (
+              <li key={path} title={path} className={open ? "select-text wrap-anywhere" : "flex min-w-0"}>
+                {open ? path : <PathLine path={path} />}
+              </li>
+            ))}
+          </ul>
         ) : null}
         {props.after && (open || !hidden) ? (
           <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">{props.after}</p>
@@ -540,6 +560,13 @@ function toneClass(tone: Notice["tone"]): string {
   return "text-subtle";
 }
 
+// Beside a Try again button, a message drops a closing "Try again." sentence,
+// so the notice says it once. A longer ending, such as "Try again later.",
+// or a sentence that ends in it, such as "then choose Try again.", stays.
+function besideTryAgain(message: string): string {
+  return message.replace(/([.!?])\s+Try again\.\s*$/, "$1");
+}
+
 // The toast for the newest workspace error, or the notice that something
 // finished. The states page renders it too, so it is its own piece.
 export function WorkspaceErrorToast(props: {
@@ -549,6 +576,7 @@ export function WorkspaceErrorToast(props: {
   onHide?: (id: string) => void;
 }) {
   const { error, onHide } = props;
+  const reasonId = useId();
   // A success or a warning is a notice: nothing failed.
   const notice = error.tone !== undefined;
   // A toast for something finished fades, but not while the person reads it.
@@ -557,6 +585,20 @@ export function WorkspaceErrorToast(props: {
   const [open, setOpen] = useState(false);
   const fades = error.tone === "success" && !error.stays;
   const held = pointer || focus || open;
+  const retry = error.canRetry && props.onRetry ? (
+    <button
+      type="button"
+      data-testid="workspace-shell-error-retry"
+      disabled={error.retryBusy || error.retryBlocked !== undefined}
+      aria-describedby={error.retryBlocked === undefined ? undefined : reasonId}
+      aria-busy={error.retryBusy || undefined}
+      onClick={() => props.onRetry?.(error.id)}
+      className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+    >
+      Try again
+    </button>
+  ) : null;
+  const message = retry ? besideTryAgain(error.message) : error.message;
   useEffect(() => {
     if (!fades || held || !onHide) return;
     const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
@@ -580,9 +622,10 @@ export function WorkspaceErrorToast(props: {
           : <AlertTriangle size={14} aria-hidden className={error.tone === "warning" ? "text-warning" : "text-danger"} />}
       </span>
       <NoticeText
-        title={error.title ?? error.message}
+        title={error.title ?? message}
         titleClass={error.title ? "font-medium text-ink" : "text-ink"}
-        body={error.title ? error.message : ""}
+        body={error.title ? message : ""}
+        paths={error.paths}
         after={error.lastLine}
         onOpenChange={setOpen}
         testId="workspace-shell-toast"
@@ -600,10 +643,17 @@ export function WorkspaceErrorToast(props: {
                   getText={() => error.command ?? ""} />
               </div>
             ) : null}
+            {/* A disabled control says why, where the keyboard can't miss it. */}
+            {retry && error.retryBlocked !== undefined ? (
+              <p id={reasonId} data-testid="workspace-shell-error-retry-reason" className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                {error.retryBlocked}
+              </p>
+            ) : null}
           </div>
         )}
       </NoticeText>
       {(error.actionLabel && props.onAction) || (error.additionalActionLabels?.length && props.onAction) || (error.canRetry && props.onRetry) ? <div className="flex shrink-0 flex-col gap-1">
+      {error.actionAfterRetry ? retry : null}
       {error.actionLabel && props.onAction ? (
         <button
           type="button"
@@ -621,18 +671,7 @@ export function WorkspaceErrorToast(props: {
           {label}
         </button>
       )) : null}
-      {error.canRetry && props.onRetry ? (
-        <button
-          type="button"
-          data-testid="workspace-shell-error-retry"
-          disabled={error.retryBusy}
-          aria-busy={error.retryBusy || undefined}
-          onClick={() => props.onRetry?.(error.id)}
-          className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-        >
-          Try again
-        </button>
-      ) : null}
+      {error.actionAfterRetry ? null : retry}
       </div> : null}
       {error.tone !== "success" && (error.filePaths === undefined || error.filePaths.length > 0) ? <CopyButton
         key={error.id}
@@ -660,19 +699,20 @@ export function WorkspaceErrorToast(props: {
 export function LocalNoticeRow(props: {
   notice: Notice;
   unread: boolean;
-  rest?: RestHandlers;
+  reach?: ReachHandlers;
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   onAction: (action: NoticeAction) => void;
   onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
   const { notice } = props;
+  const reasonId = useId();
   return (
     <li
       data-testid={`notice-${notice.id}`}
       data-notice-row=""
       tabIndex={-1}
       onKeyDown={props.onKeyDown}
-      {...props.rest}
+      {...props.reach}
       className={ROW_CLASS}
     >
       <UnreadMark unread={props.unread} testId={`notice-${notice.id}-unread`} />
@@ -683,6 +723,7 @@ export function LocalNoticeRow(props: {
         title={notice.title}
         titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
         body={notice.body}
+        paths={notice.paths}
         clamp={notice.filePaths === undefined}
         after={notice.lastLine}
         testId={`notice-${notice.id}`}
@@ -737,20 +778,28 @@ export function LocalNoticeRow(props: {
               </div>
             ) : null}
             {notice.actions?.length ? (
-              <div className={ROW_ACTIONS_CLASS}>
-                {notice.actions.map((action) => (
-                  <button
-                    key={action.label}
-                    type="button"
-                    disabled={action.disabled}
-                    aria-busy={action.busy || undefined}
-                    onClick={() => props.onAction(action)}
-                    className={ROW_ACTION_CLASS}
-                  >
-                    {action.label}
-                  </button>
+              <>
+                <div className={ROW_ACTIONS_CLASS}>
+                  {notice.actions.map((action, index) => (
+                    <button
+                      key={action.label}
+                      type="button"
+                      disabled={action.disabled}
+                      aria-describedby={action.reason === undefined ? undefined : `${reasonId}-${index}`}
+                      aria-busy={action.busy || undefined}
+                      onClick={() => props.onAction(action)}
+                      className={ROW_ACTION_CLASS}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+                {notice.actions.map((action, index) => action.reason === undefined ? null : (
+                  <p key={action.label} id={`${reasonId}-${index}`} className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                    {action.reason}
+                  </p>
                 ))}
-              </div>
+              </>
             ) : null}
             {notice.timeMs !== undefined ? (
               <time
@@ -851,7 +900,7 @@ export function NoticeCenter(props: {
   // Try again on a failed run's notice. The shell asks first when the run
   // would start over, and reports why it did not run.
   onRetrySentNotice?: (notice: NoticeRow) => void;
-  // Marks one notice read: the pointer or keyboard focus rested on its row.
+  // Marks one notice read: the pointer or keyboard focus reached its row.
   onReadSentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
@@ -1185,32 +1234,35 @@ export function NoticeCenter(props: {
     for (const error of [...(props.workspaceErrors ?? [])].reverse().sort(
       (a, b) => b.atMs - a.atMs,
     )) {
+      const steps: NoticeAction[] = [
+        ...(error.actionLabel && props.onWorkspaceErrorAction
+          ? [{
+              label: error.actionLabel,
+              onClick: () => props.onWorkspaceErrorAction?.(error.id),
+            }]
+          : []),
+        ...(props.onWorkspaceErrorAction ? (error.additionalActionLabels ?? []).map((label, index) => ({
+          label, onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
+        })) : []),
+      ];
+      const retry: NoticeAction[] = error.canRetry && props.onRetryWorkspaceError
+        ? [{
+            label: "Try again",
+            onClick: () => props.onRetryWorkspaceError?.(error.id),
+            disabled: error.retryBusy || error.retryBlocked !== undefined,
+            busy: error.retryBusy,
+            ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
+          }]
+        : [];
+      const message = retry.length ? besideTryAgain(error.message) : error.message;
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",
-        title: error.title ?? error.message,
-        body: error.title ? error.message : "",
+        title: error.title ?? message,
+        body: error.title ? message : "",
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.command ? { command: error.command } : {}),
-        actions: [
-          ...(error.actionLabel && props.onWorkspaceErrorAction
-            ? [{
-                label: error.actionLabel,
-                onClick: () => props.onWorkspaceErrorAction?.(error.id),
-              }]
-            : []),
-          ...(props.onWorkspaceErrorAction ? (error.additionalActionLabels ?? []).map((label, index) => ({
-            label, onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
-          })) : []),
-          ...(error.canRetry && props.onRetryWorkspaceError
-            ? [{
-                label: "Try again",
-                onClick: () => props.onRetryWorkspaceError?.(error.id),
-                disabled: error.retryBusy,
-                busy: error.retryBusy,
-              }]
-            : []),
-        ],
+        actions: error.actionAfterRetry ? [...retry, ...steps] : [...steps, ...retry],
         ...(props.onDismissWorkspaceError && !error.noDismiss
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
@@ -1226,6 +1278,7 @@ export function NoticeCenter(props: {
         copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,
         copyLabel: error.copyLabel ?? (error.tone === "warning" ? "Copy notice details" : undefined),
         filePaths: error.filePaths,
+        ...(error.paths?.length ? { paths: error.paths } : {}),
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
@@ -1535,7 +1588,7 @@ export function NoticeCenter(props: {
     for (const row of rows) row.onRead?.();
   };
   // How to read each unread row as it is now, by a name that stays with the
-  // row while its words change. A rest that ends reads what the row says then.
+  // row while its words change.
   const readers = new Map<string, () => void>();
   for (const notice of unreadNotices) readers.set(`local:${notice.id}`, () => readLocal([notice], false));
   if (setAsideUnread) readers.set("set-aside", () => readLocal([], true));
@@ -1544,57 +1597,16 @@ export function NoticeCenter(props: {
       readers.set(`sent:${sentKey(sentAccount, notice)}`, () => props.onReadSentNotice?.(notice));
     }
   }
-  const latestReaders = useRef(readers);
-  // The row the pointer rests on and the row holding focus, each waiting to
-  // be read. Closing the panel reads neither.
-  const rests = useRef<Record<RestSource, { row: string; timer: ReturnType<typeof setTimeout> } | null>>({ pointer: null, focus: null });
-  const stopRest = (by: RestSource) => {
-    const rest = rests.current[by];
-    if (rest) clearTimeout(rest.timer);
-    rests.current[by] = null;
-  };
-  // A row that goes away or is read stops its rest, which a removed row
-  // cannot do by blur or pointer leave. A row that returns waits again.
-  useLayoutEffect(() => {
-    latestReaders.current = readers;
-    for (const by of ["pointer", "focus"] as const) {
-      const row = rests.current[by]?.row;
-      if (row !== undefined && !readers.has(row)) stopRest(by);
-    }
-  });
-  useEffect(() => {
-    const current = rests.current;
-    return () => {
-      if (current.pointer) clearTimeout(current.pointer.timer);
-      if (current.focus) clearTimeout(current.focus.timer);
-      current.pointer = null;
-      current.focus = null;
+  // A row reads the moment the pointer or keyboard focus reaches it, and its
+  // mark clears before the frame paints. The pointer and focus can both reach
+  // a row before it shows read; it reads once.
+  const readOnReach = (row: string): ReachHandlers => {
+    const read = () => {
+      const reader = readers.get(row);
+      readers.delete(row);
+      if (reader) flushSync(reader);
     };
-  }, [open]);
-  const restReads = (row: string): RestHandlers => {
-    const start = (by: RestSource) => {
-      if (rests.current[by]?.row === row) return;
-      stopRest(by);
-      const timer = setTimeout(() => {
-        rests.current[by] = null;
-        // One read per rest, even when the pointer and focus both wait on the row.
-        const other = by === "pointer" ? "focus" : "pointer";
-        if (rests.current[other]?.row === row) stopRest(other);
-        latestReaders.current.get(row)?.();
-      }, READ_REST_MS);
-      rests.current[by] = { row, timer };
-    };
-    const end = (by: RestSource) => {
-      if (rests.current[by]?.row === row) stopRest(by);
-    };
-    return {
-      onPointerEnter: () => start("pointer"),
-      onPointerLeave: () => end("pointer"),
-      onFocus: () => start("focus"),
-      onBlur: (event: FocusEvent<HTMLElement>) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) end("focus");
-      },
-    };
+    return { onPointerEnter: read, onFocus: read };
   };
   // The newest error whose toast is still open. One at a time: the rest
   // wait in Notices with the count. The list is in arrival order, so two
@@ -1997,7 +2009,7 @@ export function NoticeCenter(props: {
               {recoveryRows.length > 0 ? (
                 <section
                   data-testid="notice-set-aside-edits"
-                  {...restReads("set-aside")}
+                  {...readOnReach("set-aside")}
                   className="flex gap-2 border-b border-line px-3 py-2"
                 >
                   <UnreadMark unread={setAsideUnread} testId="notice-set-aside-edits-unread" className="h-4" />
@@ -2020,7 +2032,7 @@ export function NoticeCenter(props: {
                   key={notice.id}
                   notice={notice}
                   unread={unreadNotices.includes(notice)}
-                  rest={restReads(`local:${notice.id}`)}
+                  reach={readOnReach(`local:${notice.id}`)}
                   onKeyDown={rowKeys({
                     open: firstAction(notice),
                     dismiss: notice.onDismiss,
@@ -2074,7 +2086,7 @@ export function NoticeCenter(props: {
                           data-notice-row=""
                           tabIndex={-1}
                           onKeyDown={rowKeys({ open: openNotice, dismiss: dismissNotice })}
-                          {...restReads(`sent:${key}`)}
+                          {...readOnReach(`sent:${key}`)}
                           className={ROW_CLASS}
                         >
                           <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />

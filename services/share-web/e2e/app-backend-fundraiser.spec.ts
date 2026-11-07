@@ -3,6 +3,7 @@ import https from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { actualFundraiserFixture, syntheticReceipt, viewerOrigin } from "./actualFundraiserFixture";
 
 // This Windows browser proof uses PowerShell 7 to create its temporary TLS certificate.
@@ -143,6 +144,20 @@ $cert.Dispose();$rsa.Dispose()`;
     const table=await f.ownerRead("tableRegistrations",{limit:50,search:"Venue"});
     expect(table.result.rows).toHaveLength(1);
     expect(table.result.rows[0]).toMatchObject({values:{[f.field("registrations","full_name")]:"Venue Friend",[f.field("registrations","status")]:"pay_at_venue",[f.field("registrations","total_php")]:300}});
+    // Deleting the Collection's files stops its public form two minutes after the server sees them gone.
+    f.deleteCollectionFile();const callsBefore=f.calls.length;
+    await refreshedApp.getByRole("button",{name:"My registration",exact:true}).click();
+    await refreshedApp.getByLabel("Private status token",{exact:true}).fill(token);
+    await refreshedApp.getByRole("button",{name:"Check status",exact:true}).click();
+    await expect.poll(()=>f.calls.slice(callsBefore).some(call=>call.status===200)).toBe(true);
+    await expect(refreshedApp.getByText("Players: First Player",{exact:true})).toBeVisible();
+    f.advance(120_000);
+    await refreshedApp.getByRole("button",{name:"Check status",exact:true}).click();
+    await expect(guest.getByRole("status")).toHaveText(LINK_REFUSALS.app_collection_missing.error);
+    await expect(guest.locator("iframe")).toHaveCount(0);
+    await guest.screenshot({path:info.outputPath("fundraiser-collection-deleted-light.png")});
+    await guest.emulateMedia({colorScheme:"dark"});await guest.screenshot({path:info.outputPath("fundraiser-collection-deleted-dark.png")});
+    expect((await f.ownerRead("listRegistrations")).result.records).toHaveLength(2);
     expect(f.compiler.recipe).toBe("dohc-closed-app-v3");expect(failures).toEqual([]);
     await info.attach("real-backend-operations",{body:JSON.stringify(f.calls,null,2),contentType:"application/json"});
   }finally{await browser.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await f.close();}

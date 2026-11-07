@@ -181,6 +181,7 @@ describe("desktop workspace windows", () => {
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
+      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
       refreshNativeWorkspaceSurfaces: () => undefined,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });
@@ -207,6 +208,39 @@ describe("desktop workspace windows", () => {
     await f.windows.sendWorkspaceActivated(windowA.native, rows[1]!);
     windowA.destroy();
     expect(registry(windowA.webContents.native)).toEqual({ workspaces: rows });
+  });
+
+  it("opens the workspace that was open when dohc quit, and the first one when that is gone", async () => {
+    const home = await createTestScratch("registry-last-opened-");
+    const registryFile = join(home, "state", "workspaces.json");
+    const before = createRegistryStore(registryFile);
+    for (const workspaceId of ["personal", "ordinary"]) {
+      const { workspace: created } = await createWorkspaceFolder({
+        rootPath: join(home, workspaceId), homeDir: home, kind: "personal",
+        computer: { installId: "install-here", label: "This Mac" }, workspaceId,
+      });
+      before.register(created);
+    }
+    before.markOpened("personal", 1_000);
+    before.markOpened("ordinary", 2_000);
+
+    // Each launch reads the file again, and its first window has no
+    // workspace of its own.
+    const launch = () => {
+      const summaries = workspaceSummariesFrom(createRegistryStore(registryFile).list());
+      return fixture("win32", () => summaries).windows
+        .prioritizePreferredWorkspace(summaries, new Contents().native)
+        .map((row) => row.workspaceId);
+    };
+    expect(launch()).toEqual(["ordinary", "personal"]);
+
+    createRegistryStore(registryFile).remove("ordinary");
+    expect(launch()).toEqual(["personal"]);
+  });
+
+  it("keeps registry order for a window with no workspace when nothing was opened", () => {
+    const f = fixture(); const rows = [workspace("a"), workspace("b")];
+    expect(f.windows.prioritizePreferredWorkspace(rows, new Contents().native)).toBe(rows);
   });
 
   it("tracks workspace windows separately from utility windows and forgets closed windows", () => {
@@ -572,6 +606,7 @@ describe("desktop native menus", () => {
       trustNewWorkspace: async () => undefined,
       forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
       openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
+      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });

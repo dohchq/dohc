@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
-import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { datasetChangeDigest, describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
-import { fixture, limits } from "./datasetTestFixture";
+import { fixture, limits, pushFile } from "./datasetTestFixture";
 import { createSyncRelayHandler, streamsRequestBody } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
@@ -77,6 +77,7 @@ const revision = describeDatasetRevision({definition, revision: 1, schemaSql, op
 
 async function httpFixture(maxParticipantsPerGrant?: number) {
   const f = fixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
+  pushFile(f.storage, "dataset-file", null, {path: "data/dataset.json", text: JSON.stringify({datasetId: id(1)})});
   let now = 10;
   const host = await f.storage.createDatasetHost({directory, limits, maxParticipantsPerGrant, nowMs: () => now, onShutdownError(error) {throw error;}});
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});});
@@ -433,6 +434,24 @@ it("migrates through the owner route and removes retained history with dataset a
   expect(f.storage.db.prepare("SELECT stage_id FROM dohc_dataset_checkpoint_chunks ORDER BY stage_id").all().map(row => row.stage_id)).toEqual(["pending-other-dataset", "pending-other-workspace"]);
 });
 
+it("refuses an Apply with a stale digest at the server route and leaves the Collection unchanged", async () => {
+  const f = await httpFixture(); await f.activate();
+  const artifacts = await (await f.http(`${f.path}/artifacts`)).json();
+  const nextSchema = `${schemaSql} CREATE INDEX requests_name ON requests(name);`, migrationSql = "CREATE INDEX requests_name ON requests(name);";
+  const next = describeDatasetRevision({definition, revision: 2, schemaSql: nextSchema, operationSource});
+  const candidate = await (await f.http(`${f.path}/prepare-migration`, {revision: next, schemaSql: nextSchema, operationSource, expected: artifacts.cursor, migrationSql})).json();
+  expect(candidate.changeSha256).toBe(datasetChangeDigest({revisionSha256: next.revisionSha256, migrationSql}));
+  // The person was asked to apply the same rules with a different migration.
+  const asked = datasetChangeDigest({revisionSha256: next.revisionSha256, migrationSql: "SELECT 1;"});
+  const approval = {candidateId: candidate.candidateId, checkpointSha256: candidate.checkpointSha256};
+  const refused = await f.http(`${f.path}/approve-migration`, {...approval, changeSha256: asked});
+  expect(refused.status).toBe(409);
+  expect((await (await f.http(`${f.path}/artifacts`)).json()).cursor).toEqual(artifacts.cursor);
+  expect((await f.http(`${f.path}/approve-migration`, {...approval, changeSha256: "not a digest"})).status).toBe(400);
+  expect((await f.http(`${f.path}/approve-migration`, {...approval, changeSha256: candidate.changeSha256})).status).toBe(200);
+  expect((await (await f.http(`${f.path}/artifacts`)).json()).revision.revisionSha256).toBe(next.revisionSha256);
+});
+
 const upload = {authorityRevision: 1, idempotencyKey: "receipt-upload", name: "receipt.png", contentType: "image/png",
   bytesBase64: Buffer.from([137,80,78,71,13,10,26,10,1,2,3]).toString("base64")};
 async function attachmentsFixture() {
@@ -442,6 +461,17 @@ async function attachmentsFixture() {
   const bind = (enabled: boolean) => f.http(`${f.path}/binding`, {publicationId, enabled});
   return {...f, app, named, bind, publicationId};
 }
+
+it("refuses a missing Collection's app calls with the same words for people and agents", async () => {
+  const f = await attachmentsFixture(); await f.bind(true);
+  const submit = (key: string) => ({authorityRevision: 1, operation: "submit", input: {name: key}, idempotencyKey: key});
+  pushFile(f.storage, "dataset-file", {path: "data/dataset.json", text: JSON.stringify({datasetId: id(1)})}, null);
+  expect((await f.app("invoke", submit("first"))).status).toBe(200);
+  f.advance(120_000);
+  const refused = await f.named("invoke", submit("second"));
+  expect(refused.status).toBe(410);
+  expect(await refused.json()).toEqual({ok: false, error: "This app can't find its data. Ask the person who shared it with you.", code: "app_collection_missing"});
+});
 
 it("uploads and atomically attaches a receipt, then discloses bytes only through the approved read operation", async () => {
   const f = await attachmentsFixture();
@@ -702,7 +732,14 @@ it("requires an owner and a current, acknowledged deletion review", async () => 
   for(const invalid of [{...request,acknowledge:false},{...request,acknowledge:undefined},{...request,reviewToken:undefined},
     {...request,expected:{...preview.cursor,datasetId:id(9)}},{...request,force:true}]) expect((await f.http(`${f.path}/delete`,invalid)).status).toBe(400);
   await f.http(`${f.path}/invoke`,{revision:1,revisionSha256:revision.revisionSha256,operationId:id(5),input:{name:"Latest"},idempotencyKey:"latest"});
-  expect((await f.http(`${f.path}/delete`,request)).status).toBe(409);
+  const stale=await f.http(`${f.path}/delete`,request);
+  expect(stale.status).toBe(409);
+  expect(await stale.json()).toEqual({ok:false,code:"conflict",error:"conflict"});
+  const live=await (await f.http(`${f.path}/delete-preview`)).json();
+  const refused=await f.http(`${f.path}/delete`,{expected:live.cursor,reviewToken:live.reviewToken,acknowledge:true});
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toMatchObject({code:"conflict",error:"This Collection isn't archived. Archive it before you delete it permanently."});
+  expect((await f.http(`${f.path}/archive`,{})).status).toBe(200);
   const current=await (await f.http(`${f.path}/delete-preview`)).json();
   expect(await (await f.http(`${f.path}/delete`,{expected:current.cursor,reviewToken:current.reviewToken,acknowledge:true})).json()).toEqual({deleted:true,datasetId:id(1)});
   expect(await (await f.http(`${f.path}/deletion-status`)).json()).toEqual({deleted:true});

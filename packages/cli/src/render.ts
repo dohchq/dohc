@@ -26,7 +26,10 @@ function counted(count: number, one: string, many: string): string {
 }
 
 function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
-  return [...page.conflicts.map(conflict => `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`),
+  return [...page.conflicts.flatMap(conflict => [
+    `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`,
+    ...(conflict.waiting ? ["  A newer version from another machine is waiting. It comes in after you resolve this conflict."] : []),
+  ]),
     ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
 }
 
@@ -393,6 +396,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":
       return renderThreads(result as CliResultByVerb["threads"]);
+    case "watch": {
+      const batch = result as CliResultByVerb["watch"];
+      return [...batch.messages.map(message => `${message.threadId}/${message.messageId} ${lineSafe(message.author.displayName)}: ${lineSafe(message.text)}`), `cursor: ${batch.cursor}`].join("\n");
+    }
     case "inbox":
       return renderInbox(result as CliResultByVerb["inbox"]);
     case "show":
@@ -430,7 +437,13 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "versionList": {
       const list = result as CliResultByVerb["versionList"];
       if (!list.ok) return list.reason;
-      return list.versions.map(version => `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}`).join("\n");
+      // A parent that isn't in the list shows by its id.
+      const names = new Map(list.versions.map(version => [version.id, version.name]));
+      return list.versions.map(version => {
+        const parent = version.madeFromVersionId;
+        const madeFrom = parent === undefined ? "" : ` · made from ${lineSafe(names.get(parent) ?? parent)}`;
+        return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}`;
+      }).join("\n");
     }
     case "versionCompare": {
       const compare = result as CliResultByVerb["versionCompare"];

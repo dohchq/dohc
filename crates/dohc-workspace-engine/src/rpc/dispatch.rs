@@ -34,6 +34,8 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "files.resolve"
+                | "workReferences.make"
+                | "workReferences.resolve"
                 | "documents.keepRetainedVersion"
                 | "capture.reconcile"
                 | "capture.retryHeld"
@@ -104,7 +106,8 @@ impl EngineService {
             "sync.claim"
                 | "sync.resetClaimRefusal"
                 | "sync.adoptJoinIdentity"
-                | "sync.pull"
+                | "sync.fetchPull"
+                | "sync.applyPull"
                 | "sync.refusalNotices"
                 | "sync.dismissRefusal"
                 | "liveApplication.captureOwnerActivation"
@@ -443,12 +446,23 @@ impl EngineService {
                 Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, true))
                     .await?
             }
+            "workReferences.make" => {
+                self.work_references_make(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "workReferences.resolve" => {
+                self.work_references_resolve(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "workspace.close" => self.workspace_close(request.workspace).await?,
             "sync.push" => {
                 Box::pin(self.sync_push(&ctx, request.workspace, request.params)).await?
             }
-            "sync.pull" => {
-                Box::pin(self.sync_pull(&ctx, request.workspace, request.params)).await?
+            "sync.fetchPull" => {
+                Box::pin(self.sync_fetch_pull(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.applyPull" => {
+                Box::pin(self.sync_apply_pull(&ctx, request.workspace, request.params)).await?
             }
             "sync.materializePendingCursor" => {
                 Box::pin(self.sync_materialize_pending_cursor(
@@ -1228,7 +1242,8 @@ impl EngineService {
                     | "replica.frontiers"
                     | "replica.applyJournalPage"
                     | "sync.adoptJoinIdentity"
-                    | "sync.pull"
+                    | "sync.fetchPull"
+                    | "sync.applyPull"
                     | "sync.commitCursor"
                     | "versionedText.read"
                     | "versionedText.readBlob"
@@ -1277,6 +1292,12 @@ impl EngineService {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,
                     "received shares do not keep retained versions",
+                ));
+            }
+            if method == "workReferences.make" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not make work references",
                 ));
             }
         }
@@ -1402,7 +1423,8 @@ mod tests {
             "sync.claim",
             "sync.resetClaimRefusal",
             "sync.adoptJoinIdentity",
-            "sync.pull",
+            "sync.fetchPull",
+            "sync.applyPull",
             "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.push",
@@ -1458,7 +1480,8 @@ mod tests {
         let other = ConnectionOwner::authenticated();
         ctx.connection = Some(other.handle());
         for method in [
-            "sync.pull",
+            "sync.fetchPull",
+            "sync.applyPull",
             "ydoc.ownerOutbox.readPending",
             "ydoc.ownerOutbox.retry",
         ] {
@@ -1472,7 +1495,7 @@ mod tests {
                 "{method}"
             );
         }
-        request.method = "sync.pull".into();
+        request.method = "sync.applyPull".into();
         ctx.connection = Some(owner.handle());
         owner.retire();
         assert_eq!(
@@ -1499,6 +1522,8 @@ mod tests {
             "links.in",
             "links.resolve",
             "files.resolve",
+            "workReferences.make",
+            "workReferences.resolve",
             "ydoc.ownerStop.request",
             "ydoc.ownerStop.release",
             "ydoc.ownerStop.clear",
@@ -1732,7 +1757,8 @@ mod tests {
             "sync.heldDocument",
             "sync.heldDocuments",
             "sync.probe",
-            "sync.pull",
+            "sync.fetchPull",
+            "sync.applyPull",
             "sync.pullHosted",
             "sync.remoteChanges",
             "sync.push",
@@ -1762,6 +1788,8 @@ mod tests {
             "versions.list",
             "versions.setActive",
             "watcher.status",
+            "workReferences.make",
+            "workReferences.resolve",
             "workspace.close",
             "workspace.open",
             "ydoc.adoptCollectionRecord",

@@ -1,5 +1,4 @@
-#[path = "../../tests/common/mod.rs"]
-mod common;
+use crate::rpc::test_common as common;
 
 use super::*;
 use dohc_engine_domain::{
@@ -64,12 +63,17 @@ async fn rpc(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_undo_keeps_unpublished_forward_and_later_edit_jobs_out_of_capture() {
-    pending_rewrite_proof(1, true).await;
+    pending_rewrite_proof(1, true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_undo_keeps_the_publisher_stopped_after_its_fence_releases_the_gates() {
+    pending_rewrite_proof(1, true, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_thousand_sources_forward_and_undo_through_rpc() {
-    pending_rewrite_proof(2000, false).await;
+    pending_rewrite_proof(2000, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -339,7 +343,7 @@ async fn markdown_hold_link_rename_reports_unchecked_and_undo_completes_safe_and
     service.workspace_close(Some(handle)).await.unwrap();
 }
 
-async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
+async fn pending_rewrite_proof(sources: usize, later_edit: bool, publisher_in_gap: bool) {
     let root = ScratchDir::new().unwrap();
     let binding = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     crate::root_binding::write_root_binding(&root, binding).unwrap();
@@ -474,9 +478,32 @@ async fn pending_rewrite_proof(sources: usize, later_edit: bool) {
         BODY
     );
     probe.pause_next_undo_placement();
+    if publisher_in_gap {
+        probe.pause_next_undo_after_fence();
+    }
     let started = Instant::now();
     drop(capture);
-    let undone = undo.await;
+    let gap = async {
+        if !publisher_in_gap {
+            return;
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            probe.wait_until_undo_after_fence_paused(),
+        )
+        .await
+        .unwrap();
+        // The publisher queued on the capture gate before Undo's fence took it, so
+        // this lock waits until the publisher's turn in the gap has ended.
+        drop(open.capture_apply_gate.lock().await);
+        assert_eq!(
+            std::fs::read_to_string(root.join("source-0000.md")).unwrap(),
+            BODY,
+            "the publisher must not write a job Undo sorted as unpublished"
+        );
+        probe.release_undo_after_fence();
+    };
+    let (undone, ()) = tokio::join!(undo, gap);
     let undo_ns = started.elapsed().as_nanos();
     tokio::time::timeout(
         std::time::Duration::from_secs(30),

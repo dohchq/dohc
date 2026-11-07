@@ -252,7 +252,9 @@ describe("the Explorer's menu", () => {
     fireEvent.pointerDown(row("plan.md"));
     fireEvent.contextMenu(row("plan.md"));
     await user.click(await screen.findByRole("menuitem", { name: "Show in File Explorer" }));
-    await waitFor(() => expect(props.onError).toHaveBeenCalledWith("no such file", expect.any(Error)));
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(
+      expect.stringMatching(/^dohc could not show plan\.md in /), expect.any(Error), expect.any(Function),
+    ));
 
     fireEvent.contextMenu(row("plan.md"));
     await user.click(await screen.findByRole("menuitem", { name: "Pin" }));

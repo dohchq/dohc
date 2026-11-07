@@ -122,6 +122,7 @@ import * as blobsStorage from "./storage/blobs";
 import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
+import * as pushStorage from "./storage/pushSubscriptions";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as collectionWriteStorage from "./storage/collectionWrites";
@@ -132,6 +133,7 @@ import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
 import * as linkChatStorage from "./storage/linkChat";
+import * as agentConnectionStorage from "./storage/agentConnections";
 import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
@@ -335,6 +337,7 @@ export function openSyncRelayStorage(
     const storage = new SqliteSyncRelayStorage(
       db,
       {
+        pushConfigured: options.pushConfigured ?? false,
         workspaceQuotaBytes,
         blobGraceMs,
         linkSessionsPerGrantLimit,
@@ -726,6 +729,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
     return noticeStorage.postAutomationWake(this, input);
+  }
+
+  readPushSubscription(installationId: string): pushStorage.PushSubscriptionRow | null {
+    return this.readTx(() => pushStorage.readPushSubscription(this, installationId));
+  }
+
+  bindPushSubscription(input: pushStorage.BindPushSubscriptionInput): pushStorage.PushSubscriptionRow {
+    return pushStorage.bindPushSubscription(this, input);
+  }
+
+  removePushSubscription(input: {installationId: string; userId: string}): void {
+    pushStorage.removePushSubscription(this, input);
   }
 
   postNotice(input: noticeStorage.PostNoticeInput): void {
@@ -1621,6 +1636,50 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   appendLinkChatPost(input: Parameters<typeof linkChatStorage.appendLinkChatPost>[1]): linkChatStorage.AppendLinkChatPostResult {
     return linkChatStorage.appendLinkChatPost(this, input);
+  }
+
+  registerAgentClient(input: Parameters<typeof agentConnectionStorage.registerAgentClient>[1]): boolean {
+    return agentConnectionStorage.registerAgentClient(this, input);
+  }
+
+  getAgentClient(clientId: string): agentConnectionStorage.AgentClientRow | null {
+    return agentConnectionStorage.getAgentClient(this, clientId);
+  }
+
+  beginAgentAuthorization(input: Parameters<typeof agentConnectionStorage.beginAgentAuthorization>[1]): boolean {
+    return agentConnectionStorage.beginAgentAuthorization(this, input);
+  }
+
+  readAgentAuthorization(requestHash: string, nowMs: number): agentConnectionStorage.AgentAuthorizationRow | null {
+    return agentConnectionStorage.readAgentAuthorization(this, requestHash, nowMs);
+  }
+
+  decideAgentAuthorization(input: Parameters<typeof agentConnectionStorage.decideAgentAuthorization>[1]): agentConnectionStorage.AgentAuthorizationDecision {
+    return agentConnectionStorage.decideAgentAuthorization(this, input);
+  }
+
+  redeemAgentAuthorizationCode(input: Parameters<typeof agentConnectionStorage.redeemAgentAuthorizationCode>[1]): agentConnectionStorage.AgentTokenGrantResult {
+    return agentConnectionStorage.redeemAgentAuthorizationCode(this, input);
+  }
+
+  refreshAgentTokens(input: Parameters<typeof agentConnectionStorage.refreshAgentTokens>[1]): agentConnectionStorage.AgentTokenGrantResult {
+    return agentConnectionStorage.refreshAgentTokens(this, input);
+  }
+
+  authenticateAgentAccessToken(accessTokenHash: string, nowMs: number): agentConnectionStorage.AgentConnectionRow | null {
+    return agentConnectionStorage.authenticateAgentAccessToken(this, accessTokenHash, nowMs);
+  }
+
+  recordAgentConnectionAction(connectionId: string, atMs: number): void {
+    agentConnectionStorage.recordAgentConnectionAction(this, connectionId, atMs);
+  }
+
+  listAgentConnections(input: Parameters<typeof agentConnectionStorage.listAgentConnections>[1]): agentConnectionStorage.AgentConnectionPage {
+    return agentConnectionStorage.listAgentConnections(this, input);
+  }
+
+  disconnectAgentConnection(input: Parameters<typeof agentConnectionStorage.disconnectAgentConnection>[1]): agentConnectionStorage.AgentConnectionRow | null {
+    return agentConnectionStorage.disconnectAgentConnection(this, input);
   }
 
   fetchLogCoordinate(input: {

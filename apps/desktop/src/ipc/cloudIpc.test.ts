@@ -250,7 +250,7 @@ describe("registered cloud handlers", () => {
       : h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
     const expected = action === "enable"
       ? "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again."
-      : `This drive can't store the workspace's secret key safely. Files remain in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
+      : `This drive can't store the workspace's secret key safely. Files stay in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
     const failure = await result.catch(error => error);
     expect(failure).toMatchObject({ message: expected });
     const channel = action === "enable" ? CHANNELS.cloudEnableSync : CHANNELS.cloudJoinWorkspace;
@@ -419,6 +419,15 @@ describe("registered cloud handlers", () => {
     });
     h.cache.set({ ...credentials, userId: "other" });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ workspaceSyncConnected: false });
+    // An unconfirmed account records nothing, so once it matches again sync
+    // reads on and connected, with no pause saved.
+    h.cache.set(credentials);
+    await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({
+      workspaceSynced: true, workspaceSyncConnected: true,
+    });
+    expect(h.workspace.remote).toEqual({ serverUrl: credentials.serverUrl, ownerUserId: credentials.userId });
+    expect(h.workspace.syncPause).toBeUndefined();
+    expect(h.workspace.pausedRemote).toBeUndefined();
   });
 
   it.each(["renderer", "authority"] as const)("stops enrollment after a claim when its %s retires", async (reason) => {
@@ -602,8 +611,8 @@ describe("registered cloud handlers", () => {
     h.enable.mockRejectedValue(new Error("download interrupted"));
     h.cleanup.mockRejectedValue(new Error("relay still in use"));
     const result = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
-    await expect(result).rejects.toThrow(`Files remain in ${h.joinPayload.rootPath}.`);
-    await expect(result).rejects.toThrow("choose Forget from its menu before joining again");
+    await expect(result).rejects.toThrow(`Files stay in ${h.joinPayload.rootPath}.`);
+    await expect(result).rejects.toThrow("choose Remove from list on its row in Manage workspaces before joining again");
     expect(h.registry.has("joined")).toBe(true);
     await expect(h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload)).rejects.toThrow("already on this machine");
     expect(h.bootstrap).toHaveBeenCalledTimes(1);
@@ -613,7 +622,7 @@ describe("registered cloud handlers", () => {
     const h = await harness();
     h.bootstrap.mockRejectedValue(new Error(message));
     const result = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
-    await expect(result).rejects.toThrow(`Files remain in ${h.joinPayload.rootPath}.`);
+    await expect(result).rejects.toThrow(`Files stay in ${h.joinPayload.rootPath}.`);
     await expect(result).rejects.toThrow(/choose another empty folder/i);
     if (message.startsWith("Passphrase")) await expect(result).rejects.toThrow("Passphrase required");
     expect(h.cleanup).toHaveBeenCalledWith("joined");

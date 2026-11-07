@@ -837,6 +837,27 @@ describe("ChatsView hybrid feed", () => {
     });
   });
 
+  it("shows what an agent reported on its post card's badge, read from the channel listing", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({
+        openingMessage: openingPreview({ presentation: { group: "fixture", hue: null, self: false },
+          authorKind: "agent",
+          authorDisplayName: "Nova",
+          authorReported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" },
+        }),
+      })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    fireEvent.focus(await screen.findByTestId("chats-post-agent-badge"));
+    expect(screen.getByTestId("chats-post-agent-reported").textContent).toBe(
+      "Claude Code 2.1 · Claude Opus 5.5 (as reported)",
+    );
+  });
+
   it("renders post cards with excerpts, reactions, decisions, comments, and agent treatment", async () => {
     const user = userEvent.setup();
     const reaction = {
@@ -908,8 +929,8 @@ describe("ChatsView hybrid feed", () => {
     expect(commentCount?.getAttribute("aria-label")).toBe("2 comments");
     const poll = screen.getByTestId("chats-post-decision-open");
     expect(poll.textContent).toBe("");
-    expect(poll.getAttribute("aria-label")).toBe("Poll open");
-    expect(poll.getAttribute("title")).toBe("Poll open");
+    expect(poll.getAttribute("aria-label")).toBe("Unanswered");
+    expect(poll.getAttribute("title")).toBe("Unanswered");
     expect(screen.getByTestId("chats-post-reaction-pill").textContent).toContain("1");
     expect(screen.getByTestId("chats-post-agent-badge").textContent).toBe("agent");
     expect(cards[1]?.getAttribute("data-author-kind")).toBe("agent");

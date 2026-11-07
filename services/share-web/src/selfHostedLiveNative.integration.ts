@@ -453,7 +453,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const unattributed = [{kind: "unattributed"}];
     await publication(baselineSettlement, unattributed);
     for (let page = 0; page < 8; page++) {
-      const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
+      const pulled = await rpc("sync.applyPull", {workspaceId: "workspace", pageToken: (await rpc("sync.fetchPull", {workspaceId: "workspace"})).pageToken}); expect(pulled.refusals ?? []).toEqual([]);
       if (pulled.pendingCursor) {
         const cursor = {workspaceId: "workspace", pendingCursor: pulled.pendingCursor};
         expect((await rpc("sync.materializePendingCursor", cursor)).materialized).toBe(true);
@@ -575,7 +575,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     };
     const pullAll = async (call: typeof rpc) => {
       for (let page = 0; page < 8; page++) {
-        const pulled = await call("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
+        const pulled = await call("sync.applyPull", {workspaceId: "workspace", pageToken: (await call("sync.fetchPull", {workspaceId: "workspace"})).pageToken}); expect(pulled.refusals ?? []).toEqual([]);
         if (pulled.pendingCursor) {
           const cursor = {workspaceId: "workspace", pendingCursor: pulled.pendingCursor};
           expect((await call("sync.materializePendingCursor", cursor)).materialized).toBe(true);

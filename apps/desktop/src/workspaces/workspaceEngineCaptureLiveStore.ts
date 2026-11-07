@@ -183,7 +183,8 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     activeVersion: VersionRecord; moments: VersionedTextMomentSummary[]; protectedMoments: SecretFileMoment[];
     versionMarkers: VersionRecord[]; startCursor: HistoryCursor; nextCursor: HistoryCursor | null; latestMomentOrder: number;
   }>;
-  flushCapture?(): Promise<void>;
+  // `signal` replaces the store's own cancel for this flush.
+  flushCapture?(options?: { signal?: AbortSignal }): Promise<void>;
   reconcileCapture?(): Promise<void>;
   // Restart capture that stopped, then flush until it settles.
   retryCapture?(): Promise<void>;
@@ -453,9 +454,11 @@ function momentSummaryFromWire(
 }
 
 function conflictFromWire(conflict: ConflictRecord): VersionedTextConflictRecord {
-  const { resolution, ...record } = conflict;
+  const { resolution, waitingVersion, ...record } = conflict;
   return {
     ...record,
+    // An older engine and a resolve answer send none.
+    waitingVersion: waitingVersion ?? null,
     base: conflictStateFromWire(conflict.base),
     current: conflictStateFromWire(conflict.current),
     incoming: conflictStateFromWire(conflict.incoming),
@@ -690,8 +693,7 @@ export function createCaptureLiveStores(
     );
   }
 
-  async function waitForCapture<T>(operation: () => Promise<T>): Promise<T> {
-    const signal = captureWaitSignal;
+  async function waitForCapture<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
     signal?.throwIfAborted();
     if (!signal) return await operation();
     let rejectAbort!: (reason: unknown) => void;
@@ -1457,13 +1459,14 @@ export function createCaptureLiveStores(
       return { kind: "resolved", conflict };
     },
 
-    async flushCapture() {
-      captureWaitSignal?.throwIfAborted();
+    async flushCapture(options: { signal?: AbortSignal } = {}) {
+      const signal = options.signal ?? captureWaitSignal;
+      signal?.throwIfAborted();
       const deadline = performance.now() + FLUSH_SETTLE_BUDGET_MS;
       let finished = false;
       const didNotSettle = () => new EngineCaptureNotSettledError(workspace.workspaceId);
       const assertActive = () => {
-        captureWaitSignal?.throwIfAborted();
+        signal?.throwIfAborted();
         if (finished) throw didNotSettle();
       };
       const request = <T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>) => {
@@ -1494,9 +1497,9 @@ export function createCaptureLiveStores(
           assertActive();
           // Do not leave a poll scheduled beyond the total deadline.
           await delay(Math.min(FLUSH_SETTLE_POLL_MS, Math.max(0, deadline - performance.now())), undefined, {
-            signal: captureWaitSignal,
+            signal,
           }).catch(error => {
-            captureWaitSignal?.throwIfAborted();
+            signal?.throwIfAborted();
             throw error;
           });
           outcome = await request(adapter => adapter.flushCapture());
@@ -1509,9 +1512,9 @@ export function createCaptureLiveStores(
         timer = setTimeout(() => reject(didNotSettle()), Math.max(0, deadline - performance.now()));
       });
       try {
-        await waitForCapture(() => Promise.race([settle(), expired]));
+        await waitForCapture(signal, () => Promise.race([settle(), expired]));
       } catch (error) {
-        captureWaitSignal?.throwIfAborted();
+        signal?.throwIfAborted();
         if (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED") {
           throw didNotSettle();
         }

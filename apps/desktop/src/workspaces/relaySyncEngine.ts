@@ -6,7 +6,7 @@ import {
   RelayUnreachableError,
   RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
-  type MaterializeRelayPullPage,
+  type RunRelayPullBatch,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
   type SharingDeclined,
@@ -23,7 +23,7 @@ export interface RelaySyncOperations {
   claim(): Promise<void>;
   push(): Promise<PushWorkspaceToRelayResult>;
   pull(
-    materializePage: MaterializeRelayPullPage,
+    runBatch: RunRelayPullBatch,
   ): Promise<PullWorkspaceFromRelayResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
 }
@@ -65,7 +65,7 @@ export interface CloudSyncEngineOptions {
   // failure is logged and contained so it cannot put relay sync into backoff.
   // `recovered` is true for the first successful pass after a failed one,
   // which is when the relay answers again.
-  afterSuccessfulPull?: (pass: { recovered: boolean }) => Promise<void>;
+  afterSuccessfulPull?: (pass: { recovered: boolean; applied: boolean }) => Promise<void>;
   // Runs as every pass ends, while the snapshot still says it is syncing, so
   // the owner can read what the pass left behind, such as a pull it did not
   // finish. Resolves whether that changed what the status shows. A failure
@@ -462,9 +462,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
-  // Resolves true when the workspace pull or the shared-channel pass applied
-  // ops. The shared-channel pass tells the renderer itself, and the renderer
-  // then reads `syncing`, so a quiet pass must announce that it ended.
+  // Resolves true when the workspace pull applied ops or held ones it fetched,
+  // or the shared-channel pass applied ops. A held op, such as a newer save
+  // behind an open conflict, changes what an open review shows though nothing
+  // applied. The echo of this computer's own upload is skipped, so it stays
+  // quiet. The shared-channel pass tells the renderer itself, and the
+  // renderer then reads `syncing`, so a quiet pass must announce that it ended.
   async function doPass(retryClaim: boolean, pushed?: { hasMore: boolean }, guard?: { signal: AbortSignal }): Promise<boolean> {
     const beforePending = pendingChangeCount;
     const recovered = syncFailure !== null;
@@ -487,18 +490,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
-    // Only the pull writes workspace files, so only the pull runs on the
-    // capture chain. The push and origin recovery wait on the relay without
-    // holding up capture, document opens or History.
-    const pull = () =>
-      options.capture.runRelaySync(async (materializePage) => {
-        const ended = options.pullStarting?.();
-        try {
-          return await operations.pull(materializePage);
-        } finally {
-          ended?.();
-        }
-      });
+    const pull = async () => {
+      const ended = options.pullStarting?.();
+      try {
+        return await operations.pull((apply) => options.capture.runRelaySync(apply));
+      } finally {
+        ended?.();
+      }
+    };
     // A join-bootstrap engine is pull-only until its first pull succeeds:
     // a fresh join must never append ops before it has the remote state.
     if (!bootstrapPass) {
@@ -541,7 +540,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     pulled = { cursor: pullResult.nextCursor, servedChange };
     if (options.afterSuccessfulPull) {
       try {
-        await options.afterSuccessfulPull({ recovered });
+        await options.afterSuccessfulPull({ recovered, applied: pullResult.applied > 0 });
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }
@@ -583,7 +582,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         void runPass(false);
       }, guard ? debounceMs : 0);
     }
-    return pullResult.applied > 0 || sharedChannelsApplied;
+    return pullResult.applied > 0 || pullResult.fetched > pullResult.skipped || sharedChannelsApplied;
   }
 
   // What the snapshot shows a person. `syncing` and `lastSyncedAtMs` move on
@@ -612,7 +611,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
 
   // A quiet pass serves queuePull. Each change event refreshes Chats, so a
   // quiet pass announces nothing at its start, and at its end only when it
-  // applied ops, changed what the snapshot shows, or something announced
+  // applied or held ops, changed what the snapshot shows, or something announced
   // `syncing` while it ran. An idle poll then costs one pass and wakes nothing.
   // `retry` marks a pass someone asked for with retryNow. `pushed` learns
   // whether the pass's push left more behind.
@@ -658,14 +657,14 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         if (!guard) retryQueued = false;
         const eventsBefore = changeEvents;
         const stateBefore = visibleState();
-        let applied = false;
+        let received = false;
         let failed = false;
         let statusChanged = false;
         syncing = true;
         retrying = retry !== undefined;
         if (!quiet) emitChange();
         try {
-          applied = await doPass(retryClaim, pushed, guard);
+          received = await doPass(retryClaim, pushed, guard);
         } catch (error) {
           failed = !(error instanceof EngineWorkspaceShuttingDownError);
           handleFailure(error, displacedDueAtMs, retry?.countsAsAttempt ?? true);
@@ -674,7 +673,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           statusChanged = await afterPass(failed);
           syncing = false;
           retrying = false;
-          if (!quiet || applied || statusChanged || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
+          if (!quiet || received || statusChanged || changeEvents !== eventsBefore || visibleState() !== stateBefore) {
             emitChange();
           }
         }

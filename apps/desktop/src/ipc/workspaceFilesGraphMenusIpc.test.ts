@@ -721,6 +721,25 @@ describe("registered native menu handlers", () => {
     })).resolves.toBeUndefined();
     expect(h.reveal).toHaveBeenCalledWith(expect.stringMatching(/notes\.md$/));
   });
+
+  it("refuses a reveal outside the workspace, through a link that leaves it, or with no path", async () => {
+    const h = await harness();
+    const outside = await createTestScratch("reveal-outside-");
+    await writeFile(join(outside, "secret.md"), "secret");
+    await symlink(outside, join(h.workspace.rootPath, "escape"), process.platform === "win32" ? "junction" : "dir");
+    const reveal = (path?: string) =>
+      h.invoke(explorerMenuOperations.revealExplorerPath.channel, { workspaceId: "workspace", ...(path !== undefined ? { path } : {}) });
+    for (const path of ["../outside.md", join(outside, "secret.md"), "escape/secret.md", "escape"]) {
+      await expect(reveal(path), path).rejects.toThrow();
+    }
+    await expect(reveal()).rejects.toThrow();
+    expect(h.reveal).not.toHaveBeenCalled();
+
+    await writeFile(join(h.workspace.rootPath, "notes.md"), "body");
+    await expect(reveal("notes.md")).resolves.toBeUndefined();
+    expect(h.reveal).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/notes\.md$/));
+    expect(h.buildMenu).not.toHaveBeenCalled();
+  });
 });
 
  it("delivers current visibility verdicts after only the policy file changes", async () => {

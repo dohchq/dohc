@@ -12,14 +12,14 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { DohcDesktopBridge, OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
-import type { SentNotices } from "./shell/useSentNotices";
+import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
 import { inputCount } from "./ui/inputCount";
 import { COPY_FAILURE } from "./ui/CopyButton";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, READY_UPDATE_STATE, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 // A data store the engine refuses gets a real recovery, not a dead
 // generic error. The notice explains what was found; the rebuild is explicit
@@ -1522,6 +1522,24 @@ describe("workspace shell errors", () => {
     ]);
   });
 
+  // #2887: a shared view goes by what it shares. Whoever reads the report
+  // still needs its share id, so Copy keeps it on the line after the name.
+  it("copies a shared view's name and its share id when it does not open", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, subjectName: "Trip plans" } });
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    const name = copied.indexOf("Workspace: Trip plans");
+    expect(name).toBeGreaterThan(-1);
+    expect(copied[name + 1]).toBe("Share id: share-1");
+  });
+
   it("names the engine folder another user owns, and keeps its path for Copy", async () => {
     const bridge = makeBridge(Promise.resolve(null), "darwin");
     bridge.openWorkspace.mockRejectedValueOnce(new Error(
@@ -1902,6 +1920,45 @@ describe("notices sent to you", () => {
     await waitFor(() => expect(screen.queryByTestId("workspace-shell-notice")).toBeNull());
     expect(screen.queryByTestId("notice-held")).toBeNull();
     expect(notices.dismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a row's unread mark when the pointer reaches it, and brings it back when main cannot mark it", async () => {
+    const user = userEvent.setup();
+    const marking = deferred<undefined>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      listNotices: vi.fn(async () => ({ account: null, notices: [MENTION] })),
+      onNoticesChanged: vi.fn(() => () => {}),
+      markNotices: vi.fn(() => marking.promise),
+    });
+    const bootstrap = shellBootstrapProps(bridge);
+    function WithSentNotices() {
+      const sent = useSentNotices(true);
+      return <DesktopWorkspaceShell workspace={WORKSPACE} workspaces={[WORKSPACE]} {...bootstrap}
+        onSwitchWorkspace={() => {}} sentNotices={sent} />;
+    }
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<><CollectionFieldWriteHost /><WithSentNotices /></>);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = await screen.findByTestId("sent-notice-mention:1");
+    expect(screen.getByTestId("sent-notice-mention:1-unread")).toBeTruthy();
+    fireEvent.pointerEnter(row);
+    expect(screen.queryByTestId("sent-notice-mention:1-unread")).toBeNull();
+    expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+    expect(bridge.markNotices).toHaveBeenCalledExactlyOnceWith({
+      account: null, mark: "read", notices: [{ store: "account", noticeId: "mention:1" }],
+    });
+
+    await act(async () => marking.reject(new Error("disk full")));
+    await waitFor(() => expect(screen.getByTestId("sent-notice-mention:1-unread")).toBeTruthy());
+    const failed = (await within(screen.getByTestId("notice-center")).findByText(/^dohc could not mark notices read\./)).closest("li")!;
+    expect(within(failed).getByRole("button", { name: "Try again" })).toBeTruthy();
+    // Open Notices hides toasts; the failure's toast shows once it closes.
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(/^dohc could not mark notices read\./)).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(bridge.markNotices).toHaveBeenCalledOnce();
   });
 
   const HELD: NoticeRow = { ...MENTION, store: "local", kind: "markdown-write-held", noticeId: "held", senderKind: null,
@@ -4303,7 +4360,8 @@ describe("sync answers after Settings closed", () => {
 
     await user.click(await screen.findByTestId("activity-settings"));
     await user.click(await screen.findByTestId("settings-nav-cloud"));
-    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+    // Signed out, nothing syncs, so Pause sync stands in for the switch.
+    await user.click(await screen.findByRole("button", { name: "Pause sync" }));
     await waitFor(() => expect(bridge.cloudStopSync).toHaveBeenCalled());
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
@@ -4827,10 +4885,15 @@ In Live documents, stop live editing for this page, then move it again.`);
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
     // Live editing stopped: Try again renames to the name the person typed.
-    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    // The pointer read the row on its way to Open Live documents, so its toast
+    // stays closed and Try again waits in Notices.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const again = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    await user.click(within(again).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
     expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, fromPath: "a.md", toPath: "renamed.md" });
-    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await waitFor(() => expect(screen.queryByText(TITLE)).toBeNull());
   });
 
   it("names the page it would replace when that page has live editing on", async () => {
@@ -4900,10 +4963,15 @@ describe("a refused delete of a page this computer owns live", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
     // Live editing stopped: Try again deletes the same page.
-    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    // The pointer read the row on its way to Open Live documents, so its toast
+    // stays closed and Try again waits in Notices.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const again = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    await user.click(within(again).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(2));
     expect(bridge.deleteWorkspacePath).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "a.md" }));
-    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    await waitFor(() => expect(screen.queryByText(TITLE)).toBeNull());
   });
 });
 
@@ -4941,9 +5009,15 @@ describe("a refused drag of a page this computer owns live", () => {
     await waitFor(() => expect(within(dialog).getByTestId("live-document-row-a.md").getAttribute("aria-current")).toBe("true"));
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
-    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    // The pointer read the row on its way to Open Live documents, so its toast
+    // stays closed and Try again waits in Notices.
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const again = (await within(await screen.findByTestId("notice-center")).findByText(TITLE)).closest("li")!;
+    await user.click(within(again).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(2));
     expect(bridge.moveWorkspacePath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, fromPath: "a.md", toPath: "docs/a.md" });
+    await waitFor(() => expect(screen.queryByText(TITLE)).toBeNull());
   });
 });
 

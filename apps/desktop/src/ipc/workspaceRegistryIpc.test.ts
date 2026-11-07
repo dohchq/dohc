@@ -49,6 +49,7 @@ async function registryHarness() {
     trustNewWorkspace: async (workspace, fresh) => { steps.push("trust"); trusted.push({ workspaceId: workspace.workspaceId, folder: fresh.folder }); },
     forgetWorkspace: forget, showItemInFolder: reveal,
     openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
+    forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
     refreshNativeWorkspaceSurfaces: refresh,
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });

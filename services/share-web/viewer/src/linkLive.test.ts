@@ -9,7 +9,9 @@ const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVecto
   maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
   maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
 afterEach(() => {vi.unstubAllGlobals(); vi.restoreAllMocks();});
-it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("shows the scoped refusal %s", async code => {
+// app_collection_missing comes only from an app's routes, never from a live link.
+const liveLinkRefusals = (Object.keys(LINK_REFUSALS) as LinkRefusalCode[]).filter(code => code !== "app_collection_missing");
+it.each(liveLinkRefusals)("shows the scoped refusal %s", async code => {
   vi.stubGlobal("fetch", vi.fn(async () => Response.json(linkRefusalBody(code), {status: LINK_REFUSALS[code].status})));
   await expect(openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal)).rejects.toThrow(LINK_REFUSALS[code].error);
 });

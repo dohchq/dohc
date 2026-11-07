@@ -485,9 +485,9 @@ describe("a server that runs a workspace's automations", () => {
     // The server starts after the laptop: 9:00 runs here, and nothing before it.
     await vi.waitFor(() => expect(fake.claims).toEqual([{ run: [], throughMs: at(8) }, { run: [at(9)], throughMs: at(9, 1) }]));
     expect(await fake.options.groupHost()).toBe(3);
-    expect(await fake.options.groupRelayRecord(3), "the laptop's decided messages, so each claims once")
+    expect(await fake.options.groupRelayRecord(3, new AbortController().signal), "the laptop's decided messages, so each claims once")
       .toEqual({ generation: 3, handover: groups(at(8), "message-on-laptop") });
-    expect(await fake.options.reachRelayRecord(3), "the step the laptop stopped stays stopped here")
+    expect(await fake.options.reachRelayRecord(3, new AbortController().signal), "the step the laptop stopped stays stopped here")
       .toEqual({ generation: 3, reach: reach("stopped", 4), everShared: false });
     expect(storage.readAutomationServerSchedules(WORKSPACE)).toEqual({ incarnation: 1, hostGeneration: 3, hostReleasedMs: at(8), throughMs: at(9, 1), takenGeneration: 3, fenceGeneration: null });
 
@@ -543,7 +543,7 @@ describe("a server that runs a workspace's automations", () => {
     const s = await server(storage, h, { incarnation: 2 });
     const fake = await s.openReplica();
     await vi.waitFor(() => expect(fake.claims).toEqual([{ run: [], throughMs: at(10) }]));
-    expect(await fake.options.groupRelayRecord(5), "the earlier copy took that release").toEqual({ generation: 3, handover: null });
+    expect(await fake.options.groupRelayRecord(5, new AbortController().signal), "the earlier copy took that release").toEqual({ generation: 3, handover: null });
   });
 
   it("resumes a rebuilt copy again after a restart that came before its marks landed", async () => {
@@ -591,12 +591,12 @@ describe("a server that runs a workspace's automations", () => {
     // The first copy, which ran no schedules, was given the laptop's release.
     const first = await server(storage, h, { incarnation: 1, schedules: [] });
     const taking = await first.openReplica();
-    expect(await taking.options.groupRelayRecord(3)).toEqual({ generation: 3, handover: groups(at(8), "message-on-laptop") });
+    expect(await taking.options.groupRelayRecord(3, new AbortController().signal)).toEqual({ generation: 3, handover: groups(at(8), "message-on-laptop") });
     await first.run.close();
     const s = await server(storage, h, { incarnation: 2 });
     const fake = await s.openReplica();
-    expect(await fake.options.groupRelayRecord(3), "Group triggers start from now").toEqual({ generation: 3, handover: null });
-    expect(await fake.options.reachRelayRecord(3), "what it cannot prove, it holds").toEqual({ generation: 3, reach: null, everShared: false });
+    expect(await fake.options.groupRelayRecord(3, new AbortController().signal), "Group triggers start from now").toEqual({ generation: 3, handover: null });
+    expect(await fake.options.reachRelayRecord(3, new AbortController().signal), "what it cannot prove, it holds").toEqual({ generation: 3, reach: null, everShared: false });
 
     // The owner moves the automations to the laptop and back: that release is new to this copy.
     clock = at(9);
@@ -604,8 +604,8 @@ describe("a server that runs a workspace's automations", () => {
     await vi.waitFor(async () => expect((await host("")).body.host).toMatchObject({ installId: "laptop", generation: 5 }));
     await host("/choose", { installId: "server", generation: 5 });
     await host("/release", { installId: "laptop", generation: 6, releasedThroughMs: at(9), groups: groups(at(9), "later"), groupsWatched: 5, reach: reach("held", 6) });
-    expect(await fake.options.groupRelayRecord(7)).toEqual({ generation: 7, handover: groups(at(9), "later") });
-    expect(await fake.options.reachRelayRecord(7)).toEqual({ generation: 7, reach: reach("held", 6), everShared: false });
+    expect(await fake.options.groupRelayRecord(7, new AbortController().signal)).toEqual({ generation: 7, handover: groups(at(9), "later") });
+    expect(await fake.options.reachRelayRecord(7, new AbortController().signal)).toEqual({ generation: 7, reach: reach("held", 6), everShared: false });
   });
 
   it.each([
@@ -1705,7 +1705,8 @@ describe("the owner's routes to the server's runs", () => {
           case "sync.push":
             if (failing) throw new Error("replica cannot push");
             return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
-          case "sync.pull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
+          case "sync.fetchPull": return { result: { pageToken: "fetched" } };
+            case "sync.applyPull": return { result: { status: "complete", nextCursor: 1, pendingCursor: { kind: "relay", token: "t" }, hasMore: false,
             fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: [] } };
           case "sync.materializePendingCursor": return { result: { materialized: true } };
           case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };

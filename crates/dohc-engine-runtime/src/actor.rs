@@ -39,6 +39,7 @@ mod link_documents;
 mod link_rewrites;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
 pub use link_documents::{DocumentIsOpen, DocumentResync};
+pub use link_rewrites::RewriteStop;
 mod journal;
 mod live_application;
 mod markdown_recovery;
@@ -54,6 +55,7 @@ mod search;
 mod secrets;
 mod versioned;
 mod versions;
+mod work_references;
 mod ydoc;
 
 pub use capture::{
@@ -88,7 +90,7 @@ pub use crate::links::LinkDrainMetrics;
 use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_collab::live_update_application::{HeldProofLimit, ReleasedTails};
-use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
+use dohc_engine_storage::{CheckpointWait, EngineStore, FaultInjector, StorageError};
 use dohc_engine_sync::HeldProofs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -232,6 +234,7 @@ pub struct WorkspaceActor {
     held_proofs: HeldProofs,
     pulls: relay::PullPermit,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
+    checkpoint_cycle: CheckpointCycle,
 }
 
 /// Where an actor's store is: the path it opened by and, once the supervisor
@@ -434,7 +437,8 @@ impl WorkspaceActor {
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
         // Startup handshake uses a std channel: `spawn` runs in a synchronous
         // context, so the open result must not depend on a tokio runtime.
-        let (startup_tx, startup_rx) = std_sync_channel::<Result<bool, StorageError>>(1);
+        let (startup_tx, startup_rx) =
+            std_sync_channel::<Result<(bool, CheckpointCycle), StorageError>>(1);
 
         let link_metrics = SharedMetrics::default();
         let worker_metrics = Arc::clone(&link_metrics);
@@ -468,7 +472,7 @@ impl WorkspaceActor {
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
-            Ok(Ok(store_freshly_created)) => {
+            Ok(Ok((store_freshly_created, checkpoint_cycle))) => {
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
                     markdown_recovery,
@@ -495,6 +499,7 @@ impl WorkspaceActor {
                     held_proofs: HeldProofs::new(held_limit),
                     pulls: relay::PullPermit::default(),
                     link_resolvers: Arc::default(),
+                    checkpoint_cycle,
                 };
                 #[cfg(unix)]
                 if matches!(mode, ActorOpenMode::ReadWrite) {
@@ -536,6 +541,7 @@ impl WorkspaceActor {
             held_proofs: self.held_proofs.clone(),
             pulls: self.pulls.clone(),
             link_resolvers: Arc::clone(&self.link_resolvers),
+            checkpoint_cycle: Arc::clone(&self.checkpoint_cycle),
         }
     }
 
@@ -647,6 +653,10 @@ impl Drop for WorkspaceActor {
     }
 }
 
+/// The store's bounded wait for its next checkpoint cycle. Asking needs no
+/// actor turn, so a caller can ask while the writer is busy.
+pub type CheckpointCycle = Arc<dyn Fn() -> CheckpointWait + Send + Sync>;
+
 /// A clonable handle to a [`WorkspaceActor`]. The worker also owns its shared
 /// current view projection cache.
 #[derive(Clone)]
@@ -668,6 +678,7 @@ pub struct ActorHandle {
     held_proofs: HeldProofs,
     pulls: relay::PullPermit,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,
+    checkpoint_cycle: CheckpointCycle,
 }
 
 /// Keeps derived link writes behind capture, including its queued commands.
@@ -1021,6 +1032,11 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// The store's bounded wait for its next checkpoint cycle.
+    pub fn checkpoint_cycle(&self) -> CheckpointCycle {
+        Arc::clone(&self.checkpoint_cycle)
+    }
+
     /// The canonical identity of the actor this handle addresses.
     pub fn identity(&self) -> &EngineDbIdentity {
         &self.identity
@@ -1165,7 +1181,7 @@ fn worker_main(
     state: Arc<AtomicU8>,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
-    startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
+    startup_tx: std::sync::mpsc::SyncSender<Result<(bool, CheckpointCycle), StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
     released_tails: ReleasedTails,
@@ -1232,7 +1248,11 @@ fn worker_main(
         metrics.actor_batches_at_publication = Some(metrics.actor_batches);
     }
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
-    if startup_tx.send(Ok(store_freshly_created)).is_err() {
+    let checkpoint_cycle: CheckpointCycle = Arc::new(store.checkpoint_cycle());
+    if startup_tx
+        .send(Ok((store_freshly_created, checkpoint_cycle)))
+        .is_err()
+    {
         // The spawner unwound before the actor was built; nothing to serve.
         return;
     }
@@ -1637,18 +1657,13 @@ mod held_reader_tests {
 }
 
 #[cfg(test)]
-mod saturation_tests {
+pub(crate) mod test_support {
     use super::*;
-    use dohc_engine_testkit::{ScratchDir, engine_db_path};
-    use std::future::{Future, poll_fn};
-    use std::sync::atomic::AtomicUsize;
-    use std::task::Poll;
-    use std::time::{Duration, Instant};
-    use tokio::sync::Semaphore;
+    use std::time::Duration;
 
     // Prepare the real command channel and holds before worker_main publishes.
     // This removes the race between spawn returning and its first idle slot.
-    fn spawn_prequeued_actor(
+    pub(crate) fn spawn_prequeued_actor(
         db: &std::path::Path,
         prepare: impl FnOnce(&ActorHandle),
     ) -> WorkspaceActor {
@@ -1683,6 +1698,7 @@ mod saturation_tests {
             pulls: relay::PullPermit::default(),
             link_resolvers: Arc::default(),
             link_rewrites: Arc::default(),
+            checkpoint_cycle: Arc::new(|| CheckpointWait::Finished),
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);
@@ -1708,13 +1724,25 @@ mod saturation_tests {
                 markdown_recovery,
             );
         }));
-        actor.store_freshly_created = startup_rx
+        (actor.store_freshly_created, actor.checkpoint_cycle) = startup_rx
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
             .unwrap();
         assert!(!actor.store_freshly_created, "exercise a reopened store");
         actor
     }
+}
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::test_support::spawn_prequeued_actor;
+    use super::*;
+    use dohc_engine_testkit::{ScratchDir, engine_db_path};
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Semaphore;
 
     #[tokio::test]
     async fn conversation_retry_wakes_without_a_parser_and_keeps_command_priority() {

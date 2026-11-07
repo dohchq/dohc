@@ -1,4 +1,4 @@
-import { Check, MoreHorizontal } from "lucide-react";
+import { Check, CircleAlert, MoreHorizontal } from "lucide-react";
 import {
   useId,
   useLayoutEffect,
@@ -54,6 +54,9 @@ export type MenuField = {
     busy?: boolean;
     /** A line under the field that describes it. */
     hint?: ReactNode;
+    /** Why the owner refused the value, in the hint's place. It marks the field invalid. */
+    error?: ReactNode;
+    errorTestId?: string;
     testId?: string;
   };
 };
@@ -471,7 +474,8 @@ export function Menu(props: {
             };
             if (isField(entry)) {
               const { field } = entry;
-              const hintId = field.hint ? `${descriptionId}-${index}` : undefined;
+              const invalid = field.error !== undefined && field.error !== null;
+              const hintId = invalid || field.hint ? `${descriptionId}-${index}` : undefined;
               return (
                 <div key={entry.id} className="relative py-0.5">
                   <input
@@ -479,6 +483,7 @@ export function Menu(props: {
                     autoFocus
                     aria-label={field.label}
                     aria-describedby={hintId}
+                    aria-invalid={invalid || undefined}
                     data-testid={field.testId}
                     value={field.value}
                     placeholder={field.placeholder}
@@ -505,7 +510,14 @@ export function Menu(props: {
                   />
                   {/* Enter submits every field; the key says so at its end. */}
                   <kbd aria-hidden className="pointer-events-none absolute right-1.5 top-2 rounded border border-line bg-bg px-1 font-sans text-[10px] leading-[14px] text-subtle">↵</kbd>
-                  {field.hint ? <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p> : null}
+                  {invalid ? (
+                    <p id={hintId} data-testid={field.errorTestId} role="alert" className="m-0 mt-1 flex gap-1 px-2 text-[11px] leading-4 text-danger">
+                      <CircleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
+                      <span>{field.error}</span>
+                    </p>
+                  ) : field.hint ? (
+                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p>
+                  ) : null}
                 </div>
               );
             }

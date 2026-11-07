@@ -31,7 +31,10 @@ import {
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
   collectionSetFieldsFieldsSchema,
+  MAX_REPORTED_AGENT_CHARS,
   parseCliResult,
+  reportedAgentPartSchema,
+  type CliReportedAgent,
   type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliStreamPosition,
@@ -111,6 +114,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_import_data: ["data.import"],
   dohc_query_database: ["data.query"],
   dohc_list_file_chats: ["file.chats.list"],
+  dohc_wait_for_messages: ["chat.inbox.read"],
   dohc_read_chat: ["chat.read"],
   dohc_list_groups: ["group.list"],
   dohc_start_group_chat: ["chat.post"],
@@ -143,7 +147,7 @@ export interface ToolContext {
   tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
-  request?: (request: CliRequestWithoutToken) => Promise<unknown>;
+  request?: (request: CliRequestWithoutToken, options?: { signal?: AbortSignal }) => Promise<unknown>;
 }
 
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
@@ -1915,6 +1919,7 @@ async function requestCli<Verb extends CliVerb>(
   ctx: ToolContext,
   verb: Verb,
   args: Omit<Extract<CliRequestWithoutToken, { verb: Verb }>["args"], "cwd" | "actor">,
+  signal?: AbortSignal,
 ): Promise<CliResultByVerb[Verb] | { ok: false; reason: string }> {
   const request = {
     protocolVersion: CLI_PROTOCOL_VERSION,
@@ -1927,8 +1932,8 @@ async function requestCli<Verb extends CliVerb>(
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
-    if (ctx.request) return parseCliResult(verb, await ctx.request(request));
-    return await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
+    if (ctx.request) return parseCliResult(verb, await (signal ? ctx.request(request, { signal }) : ctx.request(request)));
+    return await sendCliRequest(request, { stateDir: ctx.home, ...(signal ? { signal } : {}), ...(verb === "watch" ? { timeoutMs: 30_000 } : {}), ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
@@ -1998,6 +2003,15 @@ export async function dataset(ctx: ToolContext, input: unknown) {
   return requestCli(ctx, "dataset", {request:parsed.data});
 }
 
+export async function waitForMessages(
+  ctx: ToolContext,
+  args: Omit<Extract<CliRequestWithoutToken, { verb: "watch" }>["args"], "cwd" | "actor">,
+  signal?: AbortSignal,
+) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Chat waits require the owning workspace." };
+  return requestCli(ctx, "watch", args, signal);
+}
+
 export async function listFileChats(ctx: ToolContext, args: { path: string }) {
   return requestCli(ctx, "fileChats", args);
 }
@@ -2052,9 +2066,39 @@ interface ChatWriteInput {
   runId?: string;
 }
 
-function chatWriteArgs(input: ChatWriteInput) {
+// What an agent reports about itself. The product and version come from its
+// MCP client's handshake, preferring the client's display title to its name;
+// the model is what the agent states. A part with a control character, or
+// with no text, is unknown, and dohc never fills in a guess.
+export function reportedAgent(
+  client: { name?: unknown; title?: unknown; version?: unknown } | undefined,
+  model: string | undefined,
+): CliReportedAgent | undefined {
+  const part = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || /\p{Cc}/u.test(value)) return undefined;
+    let capped = "";
+    for (const char of value.trim()) {
+      if (capped.length + char.length > MAX_REPORTED_AGENT_CHARS) break;
+      capped += char;
+    }
+    capped = capped.trimEnd();
+    return reportedAgentPartSchema.safeParse(capped).success ? capped : undefined;
+  };
+  const product = part(client?.title) ?? part(client?.name);
+  const version = product === undefined ? undefined : part(client?.version);
+  const stated = part(model);
+  if (product === undefined && stated === undefined) return undefined;
+  return {
+    ...(product !== undefined ? { product } : {}),
+    ...(version !== undefined ? { version } : {}),
+    ...(stated !== undefined ? { model: stated } : {}),
+  };
+}
+
+function chatWriteArgs(input: ChatWriteInput, reported: CliReportedAgent | undefined) {
   return {
     ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    ...(reported !== undefined ? { reported } : {}),
     attachments: input.attachments ?? [],
     needsDecision: Boolean(input.needsDecision || input.options?.length),
     ...(input.options !== undefined ? { options: input.options } : {}),
@@ -2068,11 +2112,14 @@ function chatWriteArgs(input: ChatWriteInput) {
 export async function startGroupChat(
   ctx: ToolContext,
   args: ChatWriteInput & { group: string; title?: string },
+  agent?: string,
+  reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "post", {
     group: args.group,
     ...(args.title !== undefined ? { title: args.title } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {
@@ -2100,13 +2147,16 @@ export async function replyToChat(
     resolve?: string;
     choose?: string;
   },
+  agent?: string,
+  reported?: CliReportedAgent,
 ) {
   const result = await requestCli(ctx, "reply", {
     thread: args.threadId,
     ...(args.to !== undefined ? { to: args.to } : {}),
     ...(args.resolve !== undefined ? { resolve: args.resolve } : {}),
     ...(args.choose !== undefined ? { choose: args.choose } : {}),
-    ...chatWriteArgs(args),
+    ...chatWriteArgs(args, reported),
+    ...(agent === undefined ? {} : { agent }),
   });
   if ("ok" in result) return result;
   return {
@@ -2430,6 +2480,7 @@ export async function startFileChat(
   ctx: ToolContext,
   args: { path: string; title: string; body: string; requestId?: string; runId?: string },
   agent: string | undefined,
+  reported?: CliReportedAgent,
 ) {
   const resolved = await safeResolve(ctx, args.path, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
@@ -2437,6 +2488,7 @@ export async function startFileChat(
     ...args,
     path: resolved.normalized,
     ...(agent === undefined ? {} : { agent }),
+    ...(reported === undefined ? {} : { reported }),
   });
 }
 

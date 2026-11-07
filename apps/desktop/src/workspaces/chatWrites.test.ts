@@ -110,6 +110,7 @@ function fixture() {
     // The person's agents: Nova, the default, and Codex.
     agentIdsNamedIn: async (body: string) => Object.entries({ default: "@nova", codex: "@codex" })
       .flatMap(([id, handle]) => body.toLowerCase().includes(handle) ? [id] : []),
+    isOwnAgentId: async (name: string) => ["default", "codex"].includes(name),
     localInstallationId: () => "local-id",
     // Marks where an answer holds dispatch scans off.
     async betweenDispatchScans(_workspaceId, write) {
@@ -245,7 +246,7 @@ describe("chat writes", () => {
     expect(test.effects.syncSharedChannelsForChatTarget).toHaveBeenCalledWith("workspace", { threadId: "thread" });
   });
 
-  it("writes an agent's thread under its own name, its owner, and the CLI origin", async () => {
+  it("writes an unnamed agent's thread as Agent, with its owner and the CLI origin", async () => {
     const test = fixture();
     await test.writes.startThread(test.place, {
       writer: AGENT, channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
@@ -253,7 +254,7 @@ describe("chat writes", () => {
     });
     expect(test.store.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace", channelId: "channel", lane: "chat", title: "Plan", body: "Pick one",
-      author: { kind: "agent", displayName: "Nova" }, authorOwnerDisplayName: "Sam",
+      author: { kind: "agent", displayName: "Agent" }, authorOwnerDisplayName: "Sam",
       authorUserId: "user-1", origin: "cli", needsDecision: true, options: ["A", "B"],
     }));
     expect(test.effects.projectChatBookmarks).toHaveBeenCalledWith("workspace");
@@ -623,7 +624,7 @@ describe("chat writes", () => {
     });
     expect(test.store.setReaction).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
-      author: { authorId: "user-1", kind: "agent", displayName: "Nova" }, replicationAuthorId: "user-1",
+      author: { authorId: "user-1", kind: "agent", displayName: "Agent" }, replicationAuthorId: "user-1",
     });
   });
 
@@ -687,7 +688,8 @@ describe("ActorKey local admission", () => {
     expect(parseActorKey(switched.authorActorKey!)).toEqual({ kind: "account", issuer: "https://cloud.test", userId: "user-2" });
   });
 
-  it.each([undefined, " Opus "])("records the actual handshake claim (%s), matching History", async (agentName) => {
+  // Nova is one of the person's agents' names. A name alone is only a claim, so it stays.
+  it.each([undefined, " Opus ", "Nova"])("records the actual handshake claim (%s), matching History", async (agentName) => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {
       writer: { via: "cli", actor: "agent", agentName }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
@@ -697,7 +699,44 @@ describe("ActorKey local admission", () => {
       identity: { installationId: "local-id", account: { issuer: createActorIssuer("https://cloud.test"), userId: "user-1" } },
     }, "Agent");
     expect(parseActorKey(sent.authorActorKey!)).toEqual(history.key);
-    expect(sent.author.displayName).toBe(agentName ?? "Nova");
+    expect(sent.author.displayName).toBe(agentName ?? "Agent");
+  });
+
+  it("keeps what an agent reported beside its name, and never on a person's message", async () => {
+    const test = fixture();
+    const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+    const agent = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName: "Nova", reported }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(agent.author.displayName).toBe("Nova");
+    expect(agent.authorReported).toEqual(reported);
+    const unreported = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName: "Nova" }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(unreported).not.toHaveProperty("authorReported");
+    const person = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "human", reported }, threadId: "thread", body: "Hi",
+      resolveAttachments: async () => [],
+    });
+    expect(person).not.toHaveProperty("authorReported");
+  });
+
+  it.each(["default", "codex"])("drops a claim to the person's agent id %s, so the message is an unnamed agent's that keeps what it reported", async (agentName) => {
+    const test = fixture();
+    const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
+    const claimed = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent", agentName, reported }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+    });
+    const unnamed = await test.writes.sendMessage(test.place, {
+      writer: { via: "cli", actor: "agent" }, threadId: "thread", body: "Hi", resolveAttachments: async () => [],
+    });
+    expect(claimed.authorActorKey).toBeDefined();
+    expect(claimed.authorActorKey).toBe(unnamed.authorActorKey);
+    expect(claimed.author).toEqual({ kind: "agent", displayName: "Agent" });
+    expect(claimed.authorAgentId).toBeUndefined();
+    expect(claimed.authorReported).toEqual(reported);
   });
 
   it("stores CLI human origin and automation definition identity locally", async () => {

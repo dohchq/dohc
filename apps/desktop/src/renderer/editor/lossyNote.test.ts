@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { checkLossyNote, knownLossyNoteVerdict, useBoundNoteCheck } from "./lossyNote";
 
@@ -150,6 +151,22 @@ describe("useBoundNoteCheck", () => {
     }));
     imported.destroy();
     await waitFor(() => expect(result.current).toBe("clear"));
+  });
+
+  // The engine holds a larger source without checking it.
+  it("checks a witnessed source up to the engine's size limit, and holds a larger one", async () => {
+    const respelled = "Title\n=====\n\n";
+    const atLimit = respelled + "a".repeat(LIVE_MARKDOWN_MAX_BYTES - respelled.length);
+    // Fewer characters than the limit, and one byte over it in UTF-8.
+    const multibyte = respelled + "é".repeat((LIVE_MARKDOWN_MAX_BYTES + 1 - respelled.length) / 2);
+    for (const [open, source, verdict] of [["a", atLimit, "clear"], ["b", `${atLimit}a`, "lossy"], ["c", multibyte, "lossy"]]) {
+      const doc = markdownToYDoc(source);
+      doc.getMap("meta").set("dohcMarkdownSource", source);
+      doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+      doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+      const { result } = renderHook(() => useBoundNoteCheck({ open, doc, headSha256: sha(source) }));
+      await waitFor(() => expect(result.current).toBe(verdict));
+    }
   });
 
   describe("after a clear verdict", () => {

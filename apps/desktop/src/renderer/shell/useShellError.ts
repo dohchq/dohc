@@ -3,7 +3,6 @@ import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
-import type { ReportButtonError } from "../collections/useAutomationButtons";
 import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
@@ -92,6 +91,8 @@ export interface ShellError {
   // A line after the message that no clamp hides, such as how many more
   // files a list leaves out.
   lastLine?: string;
+  // Paths the message lists, one per line under it.
+  paths?: readonly string[];
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
@@ -104,7 +105,8 @@ export interface ShellError {
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs; one that `reads` it
   // closes its toast and keeps the row.
-  action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; additional?: {label: string; run: () => void}[] };
+  // afterRetry puts the action after Try again, so F6 lands on Try again.
+  action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; afterRetry?: true; additional?: {label: string; run: () => void}[] };
   onDismiss?: () => void;
   // The row has no Dismiss: it stays until its action runs or the workspace
   // closes.
@@ -335,6 +337,8 @@ export function useShellError(workspaceId: string) {
       retry: (() => void) | null = null,
       kind?: ShellErrorKind,
       identity?: string,
+      // Changes the row of its identity where it stands, with no new toast.
+      quiet = false,
     ) => {
       const { cause, title, words, canRetry, details: explanation } = readError(error);
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
@@ -358,14 +362,17 @@ export function useShellError(workspaceId: string) {
           : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
         ...(kind ? { kind } : {}),
-      }, waitedForCollectionMove(error) ? "quiet" : false);
+      }, quiet || waitedForCollectionMove(error) ? "quiet" : false);
     },
     [push, privacySettingsAction, keepCollectionsHere],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
-  // an identity when the part names what failed.
-  const reportButtonError = useCallback<ReportButtonError>(
-    (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity),
+  // an identity when the part names what failed. A part that keeps one row
+  // for several failures, such as the Versions page, passes `quiet` to change
+  // that row where it stands.
+  const reportButtonError = useCallback(
+    (fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean) =>
+      reportShellError(fallback, error, retry, undefined, identity, quiet),
     [reportShellError],
   );
   // A failure already worded for the person. Report facts, such as a raw
@@ -387,9 +394,11 @@ export function useShellError(workspaceId: string) {
       cause?: unknown;
       command?: string;
       details?: ReadonlyArray<ErrorDetailField>;
+      paths?: readonly string[];
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
+      noDismiss?: boolean;
       kind?: ShellErrorKind;
       identity?: string;
     }) => {
@@ -408,9 +417,11 @@ export function useShellError(workspaceId: string) {
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(failure.command ? { command: failure.command } : {}),
+        ...(failure.paths?.length ? { paths: failure.paths } : {}),
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(action ? { action } : {}),
+        ...(failure.noDismiss ? { noDismiss: true } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);

@@ -3,6 +3,9 @@
 // The site's demo passes its own root, because it renders in a shadow root.
 // A pointer press or any other key clears it, so a click, a shortcut such as
 // Ctrl+P, or Enter opening a dialog leaves the focus dohc moves unmarked.
+// A confirm dialog's buttons are the exception: they show the ring whenever
+// Chromium's :focus-visible matches, so a dialog opened from the keyboard
+// shows where Enter acts (ui/ConfirmDialog.tsx).
 // Escape, Delete and Backspace keep the mark as it was, with or without a
 // modifier: they close or remove what has focus, so closing a menu or a tab
 // from the keyboard shows where focus went. With an empty set, focus never

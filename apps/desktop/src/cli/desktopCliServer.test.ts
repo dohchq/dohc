@@ -86,7 +86,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     listOpenConflictsPage: vi.fn<Capture["listOpenConflictsPage"]>(async () => ({ conflicts: [], nextAfterConflictId: null })),
     createVersion: vi.fn<Capture["createVersion"]>(async name => ({ versions: [{ id: "created", workspaceId: "workspace", kind: "named", name, createdAtMs: 1, forkPoint: { versionId: "main" } }], activeVersionId: "created" })),
     switchVersion: vi.fn<Capture["switchVersion"]>(async versionId => ({ activeVersionId: versionId, changedFileCount: 2 })),
-    mergeVersionIntoMain: vi.fn<Capture["mergeVersionIntoMain"]>(async () => ({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 0 })),
+    mergeVersionIntoMain: vi.fn<Capture["mergeVersionIntoMain"]>(async () => ({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 0, replacedProtectedPaths: [".env"] })),
     resolveConflict: vi.fn<Capture["resolveConflict"]>(),
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
@@ -125,6 +125,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
     agentIdsNamedIn: async () => [],
+    isOwnAgentId: async () => false,
     localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -183,6 +184,16 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("passes the physical attachment signal to the CLI context", async () => {
+    const f = fixture();
+    const signal = await f.authorities.withOperation("workspace", operation => operation.signal);
+    const context = await f.create().openCliWorkspace(f.workspace);
+    expect(context.signal).toBe(signal);
+    expect(context.signal!.aborted).toBe(false);
+    await f.authorities.invalidate("workspace");
+    expect(context.signal!.aborted).toBe(true);
+  });
+
   it("routes Access refresh to the IPC owner for the socket workspace only", async () => {
     const scratch = await createTestScratch("cli-access-refresh-");
     const f = fixture(scratch);
@@ -445,7 +456,7 @@ describe("desktop CLI workspace context", () => {
       const conflict = (id: string, path: string, incomingPath = path) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
         base: side(path, "base"), current: side(path, "mine"), incoming: side(incomingPath, "theirs"),
-        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const }, waitingVersion: null });
       // c3's incoming side sits at a path History does not track.
       f.capture.listOpenConflictsPage.mockResolvedValue({ conflicts: [conflict("c1", "notes.md"),
         conflict("c2", "private/journal.md"), conflict("c3", "moved.md", "private/moved.md")], nextAfterConflictId: null });
@@ -462,9 +473,11 @@ describe("desktop CLI workspace context", () => {
       const mcp = (verb: "versionList" | "versionCompare" | "versionConflicts", args: Record<string, unknown> = {}) =>
         send({ protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: root, actor: "agent", ...args } } as CliRequestWithoutToken);
 
-      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
-      expect(await mcp("versionList")).toMatchObject({ ok: true, activeVersionId: "draft",
-        versions: [{ id: "main", kind: "main", canMergeIntoMain: false }, { id: "draft", name: "Draft", canMergeIntoMain: true }] });
+      // Each version but Main says what it was made from, as the versions menu does.
+      expect(await mcp("versionList")).toEqual({ ok: true, activeVersionId: "draft", versions: [
+        { id: "main", name: "Main", kind: "main", createdAtMs: 10, canMergeIntoMain: false },
+        { id: "draft", name: "Draft", kind: "named", createdAtMs: 10, canMergeIntoMain: true, madeFromVersionId: "main" }] });
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
       // Untracked and secret files are left out, and the next page starts
       // after the last file shown, never after a hidden one.
@@ -485,6 +498,23 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionConflicts")).toMatchObject({ ok: true, nextAfterConflictId: null,
         conflicts: [{ conflictId: "c1", path: "notes.md", currentText: "mine", incomingText: "theirs", baseText: "base" }] });
       expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("private/");
+      // A conflict nothing waits behind says nothing about waiting.
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waiting");
+      // A newer version held behind a conflict reads as one fact, worded with
+      // the conflict's own path. Its coordinates sit beside the message.
+      const waitingVersion = { code: "resolve-existing-conflict" as const, objectId: "notes-object", originId: "computer-d", originSeq: 4 };
+      const held = { conflicts: [{ ...conflict("c1", "notes.md", "moved/notes.md"), metadata: { origin: "sync" as const }, waitingVersion }],
+        nextAfterConflictId: null };
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect(await mcp("versionConflicts")).toMatchObject({ ok: true, conflicts: [{ conflictId: "c1", origin: "sync", waiting: {
+        code: "resolve-existing-conflict",
+        message: "A newer version of notes.md from another machine is waiting. It comes in after this conflict is resolved.",
+        objectId: "notes-object", originId: "computer-d", originSeq: 4 } }] });
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect(JSON.stringify(await mcp("versionConflicts"))).not.toContain("waitingVersion");
+      f.capture.listOpenConflictsPage.mockResolvedValueOnce(held);
+      expect((await cli("version", "conflicts")).stdout).toBe(
+        "c1 · sync · notes.md\n  A newer version from another machine is waiting. It comes in after you resolve this conflict.\n");
       f.capture.listOpenConflictsPage.mockResolvedValueOnce({ conflicts: [], nextAfterConflictId: null });
       expect(await mcp("versionConflicts")).toEqual({ ok: true, conflicts: [], nextAfterConflictId: null });
 
@@ -494,7 +524,7 @@ describe("desktop CLI workspace context", () => {
         reason: "Version files are hidden because dohc can't read .dohc/files.toml" });
       expect(await cli("version", "conflicts")).toEqual({ exitCode: 1, stdout: "",
         stderr: "dohc: Conflicts are hidden because dohc can't read .dohc/files.toml\n" });
-      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft\n");
+      expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
       // A shared view keeps no versions of its own.
       vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
@@ -531,7 +561,7 @@ describe("desktop CLI workspace context", () => {
       const conflict = (id: string, path: string, side: typeof text | typeof binary = text) => ({
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
         base: side(path, "base"), current: side(path, "mine"), incoming: side(path, "theirs"),
-        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const } });
+        status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const }, waitingVersion: null });
       const open = { conflicts: [conflict("c1", "notes.md"), conflict("c2", "logo.png", binary), conflict("c3", "private/journal.md")],
         nextAfterConflictId: null };
       f.capture.listOpenConflictsPage.mockResolvedValue(open);
@@ -571,7 +601,7 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("versionMerge", { version: "Nested" })).toEqual({ ok: false, reason: "Only versions made from Main can merge into Main." });
       expect(await mcp("versionMerge", { version: "Later" })).toEqual({ ok: false, reason: "No version is called Later. Run dohc version list to see them." });
       expect(f.capture.mergeVersionIntoMain).not.toHaveBeenCalled();
-      f.capture.mergeVersionIntoMain.mockResolvedValueOnce({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 3 });
+      f.capture.mergeVersionIntoMain.mockResolvedValueOnce({ mergedFileCount: 3, unchangedFileCount: 1, conflictCount: 3, replacedProtectedPaths: [] });
       // The merge prints the conflicts it left, except the one at a path History does not track.
       expect((await cli("version", "merge", "Draft")).stdout)
         .toBe("Merged Draft into Main · 3 files merged · 3 conflicts\nc1 · merge · notes.md\nc2 · merge · logo.png · binary\n");

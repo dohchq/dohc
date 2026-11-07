@@ -303,6 +303,12 @@ export const WorkspaceSummary = z.object({
   mode: MODE_ENUM,
   // Epoch ms of the last open in any window; absent when never stamped.
   lastOpenedAt: z.number().int().nonnegative().optional(),
+  // This device's sync link: on, or paused and kept for resuming. Absent
+  // when the workspace has none.
+  sync: z.enum(["on", "paused"]).optional(),
+  // Shared chats joined into this workspace that the person has not left.
+  // Absent when there are none.
+  joinedChatCount: z.number().int().positive().optional(),
   // Present only on a shared VIEW received through a relay share grant:
   // the workspace is read-only, refreshed from the share, and
   // carries who shared it for honest copy. `ended` marks a revoked share.
@@ -1884,11 +1890,28 @@ export const ListHistoryPage = z.object({
 }).strict();
 export const ListHistoryResult = z.union([ListHistoryPage, ListEngineMomentsUpdatingResult, HistoryPolicyUnreadableResult]);
 export type ListHistoryResult = z.infer<typeof ListHistoryResult>;
+// Each version's latest change of its own, for the Versions page. A version
+// with none since it was made has a null change. `personName` names one
+// person who made the change, never an agent, an automation or a link.
+export const ListVersionLastChangesPayload = z.object({ workspaceId: WORKSPACE_ID }).strict();
+export const ListVersionLastChangesResult = z.object({
+  versions: z.array(z.object({
+    versionId: OPAQUE_ID,
+    lastChange: z.object({ atMs: z.number(), personName: z.string().min(1).max(500).optional() }).nullable(),
+  })),
+});
+export type ListVersionLastChangesResult = z.infer<typeof ListVersionLastChangesResult>;
+
 export const historyOperations = {
   listHistory: {
     capabilityId: "history.list", channel: "desktop:list-history", guard: "active-workspace", scope: "workspace",
     inactiveMessage: "History stopped loading because this window changed workspaces.",
     payload: ListHistoryPayload, result: ListHistoryResult,
+  },
+  listVersionLastChanges: {
+    capabilityId: "history.list", channel: "desktop:list-version-last-changes", guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "History stopped loading because this window changed workspaces.",
+    payload: ListVersionLastChangesPayload, result: ListVersionLastChangesResult,
   },
 } as const satisfies OperationTable;
 
@@ -2016,6 +2039,16 @@ const CHAT_MESSAGE_AUTOMATION = z.object({
   collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
+// What an agent's client reported about itself: product, version, and the
+// model the agent stated. dohc shows it as reported and never fills it in.
+const REPORTED_AGENT_PART = z.string().min(1).max(64);
+export const ChatReportedAgentRecord = z.object({
+  product: REPORTED_AGENT_PART.optional(),
+  version: REPORTED_AGENT_PART.optional(),
+  model: REPORTED_AGENT_PART.optional(),
+});
+export type ChatReportedAgentRecord = z.infer<typeof ChatReportedAgentRecord>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
@@ -2024,6 +2057,9 @@ export const ChatMessageRecord = z.object({
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
+  authorReported: ChatReportedAgentRecord.optional(),
+  // The agent that wrote it in one of its runs, which only main records.
+  authorAgentId: AgentId.optional(),
   parentMessageId: OPAQUE_ID.optional(),
   origin: z.literal("cli").optional(),
   body: CHAT_BODY,
@@ -2373,6 +2409,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
       createdAtMs: z.number(),
       bodySnippet: z.string().min(1).max(500),
       automation: CHAT_MESSAGE_AUTOMATION.optional(),
+      authorReported: ChatReportedAgentRecord.optional(),
       reactions: z.array(ChatReactionRecord),
     })
     .nullable()
@@ -2907,6 +2944,8 @@ export const WorkspaceVersionRecord = z.object({
   // False for versions created from another named version — the alpha merge
   // surface only combines a version with the Main it was created from.
   canMergeIntoMain: z.boolean(),
+  // The version this one was made from. Main has none.
+  madeFromVersionId: OPAQUE_ID.optional(),
 });
 export type WorkspaceVersionRecord = z.infer<typeof WorkspaceVersionRecord>;
 
@@ -2979,6 +3018,16 @@ export type CompareWorkspaceVersionsResult = z.infer<
   typeof CompareWorkspaceVersionsResult
 >;
 
+// How many files differ between a version and Main, protected files
+// included: the number the compare page would list, without the rows.
+export const CountWorkspaceVersionChangesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  versionId: OPAQUE_ID,
+});
+export const CountWorkspaceVersionChangesResult = z.object({
+  count: z.number().int().nonnegative(),
+});
+
 export const WorkspaceVersionConflict = z.object({
   conflictId: OPAQUE_ID,
   path: PATH_STRING,
@@ -3006,6 +3055,19 @@ export const WorkspaceVersionConflict = z.object({
     .object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1).max(128) })
     .nullable()
     .optional(),
+  // A newer version another computer saved, held until this conflict is
+  // resolved. Identifiers are bounded as the engine bounds them. Absent
+  // reads as none.
+  waitingVersion: z
+    .object({
+      code: z.literal("resolve-existing-conflict"),
+      objectId: z.string().min(1).max(512),
+      originId: z.string().min(1).max(512),
+      originSeq: z.number().int().nonnegative(),
+    })
+    .strict()
+    .nullable()
+    .default(null),
 });
 export type WorkspaceVersionConflict = z.infer<typeof WorkspaceVersionConflict>;
 
@@ -3026,6 +3088,9 @@ export const MergeWorkspaceVersionResult = z.object({
   // a clean merge into a conflicted one. The count sentence over the cards
   // reads the loaded rows instead: it describes what the user is looking at.
   conflictCount: z.number().int().min(0),
+  // Protected files whose Main copy the merge replaced. Paths only, never
+  // contents: the result lists them because they never become conflicts.
+  replacedProtectedPaths: z.array(PATH_STRING),
   conflicts: z.array(WorkspaceVersionConflict),
   nextAfterConflictId: OPAQUE_ID.nullable(),
 });
@@ -3167,6 +3232,11 @@ export const workspaceVersionOperations = {
     capabilityId: "version.compare",
     channel: "desktop:compare-workspace-versions",
     payload: CompareWorkspaceVersionsPayload, result: CompareWorkspaceVersionsResult, ...versionGuard,
+  },
+  countWorkspaceVersionChanges: {
+    capabilityId: "version.compare",
+    channel: "desktop:count-workspace-version-changes",
+    payload: CountWorkspaceVersionChangesPayload, result: CountWorkspaceVersionChangesResult, ...versionGuard,
   },
   mergeWorkspaceVersion: {
     capabilityId: "version.merge",
@@ -3771,9 +3841,6 @@ export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload
 
 export const CloudJoinWorkspaceResult = z.object({
   workspace: WorkspaceSummary,
-  // Set when the workspace was added but its first sync did not finish —
-  // the workspace exists locally and sync keeps retrying.
-  warning: z.string().min(1).max(500).optional(),
 });
 export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 

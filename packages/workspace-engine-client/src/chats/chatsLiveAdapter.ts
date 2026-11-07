@@ -6,7 +6,13 @@ import {
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
-import type { ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type {
+  LinkedChatStore,
+  ChatChannelType,
+  ChatMessageAutomationInput,
+  ChatReportedAgent,
+  ChatThreadLane,
+} from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
   decodeChatsResult,
@@ -239,6 +245,7 @@ export class ChatsLiveAdapter {
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
+    authorReported?: ChatReportedAgent;
     namedAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
@@ -287,6 +294,7 @@ export class ChatsLiveAdapter {
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
         ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
           ? { namedAgentIds: input.namedAgentIds }
           : {}),
@@ -381,6 +389,7 @@ export class ChatsLiveAdapter {
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
+    authorReported?: ChatReportedAgent;
     namedAgentIds?: string[];
     author: ChatWriteActor;
     authorOwnerDisplayName?: string;
@@ -425,6 +434,7 @@ export class ChatsLiveAdapter {
           ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
+        ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
         ...(input.namedAgentIds !== undefined && input.namedAgentIds.length > 0
           ? { namedAgentIds: input.namedAgentIds }
           : {}),
@@ -566,9 +576,9 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string, runId?: string): Promise<ChatThread[]> {
+  async listAgentUnreadThreads(workspaceId: string, runId?: string): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
     this.assertWorkspace(workspaceId);
-    const rows: ChatThread[] = [];
+    const rows: Awaited<ReturnType<LinkedChatStore["listAgentUnreadThreads"]>> = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(
@@ -585,14 +595,14 @@ export class ChatsLiveAdapter {
     return rows;
   }
 
-  // The messages that asked a running run's agent and that it has not read.
-  async listAgentUnreadRequests(workspaceId: string, runId: string): Promise<ChatAgentRequest[]> {
+  // Unread requests for a run's agent, or the shared outside-run reader.
+  async listAgentUnreadRequests(workspaceId: string, runId?: string): Promise<ChatAgentRequest[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatAgentRequest[] = [];
     let cursor: string | undefined;
     do {
       const page = await this.request(CHATS_METHOD.agentReadListUnreadRequests, {
-        runId,
+        ...(runId !== undefined ? { runId } : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
@@ -605,7 +615,6 @@ export class ChatsLiveAdapter {
   async listMentionsForHandle(
     workspaceId: string,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMention[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatMention[] = [];
@@ -613,9 +622,6 @@ export class ChatsLiveAdapter {
     do {
       const page = await this.request(CHATS_METHOD.mentionsListForHandle, {
         handle,
-        ...(options?.unreadByAgentOnly !== undefined
-          ? { unreadByAgentOnly: options.unreadByAgentOnly }
-          : {}),
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });

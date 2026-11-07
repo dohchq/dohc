@@ -281,6 +281,17 @@ type VersionedTextConflictResolution =
   | "kept-current";
 type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
+/**
+ * A newer version of a conflict's file that another computer saved. dohc
+ * holds it until the conflict is resolved.
+ */
+interface VersionedTextConflictWaitingVersion {
+  code: "resolve-existing-conflict";
+  objectId: string;
+  originId: string;
+  originSeq: number;
+}
+
 export interface VersionedTextConflictRecord {
   id: VersionedTextConflictId;
   workspaceId: WorkspaceId;
@@ -296,6 +307,8 @@ export interface VersionedTextConflictRecord {
   chosenFrom: VersionedTextConflictChoice;
   metadata: ActorNeutralWriteMetadata;
   resolution?: VersionedTextConflictResolution;
+  /** Read from conflict listings; `null` elsewhere. */
+  waitingVersion: VersionedTextConflictWaitingVersion | null;
 }
 
 type VersionedTextMergeResult =
@@ -420,9 +433,21 @@ export interface ChatMessageAppendPayload {
   linkPrincipalId?: string;
   // The agent that wrote an agent message in one of its runs.
   authorAgentId?: string;
+  // What an agent reported about itself.
+  authorReported?: ChatReportedAgent;
   body: string;
   createdAtMs: number;
 }
+
+// What an agent says about itself: the product and version its MCP client
+// names in the handshake, and the model the agent states. dohc can't check
+// any of it, so it is only ever shown as reported. Absent means unknown, and
+// a version always comes with its product.
+export type ChatReportedAgent = {
+  product?: string;
+  version?: string;
+  model?: string;
+};
 
 type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
 type ChatFollowState = "following" | "unfollowed";
@@ -819,6 +844,7 @@ export interface ChannelThreadSummary {
     createdAtMs: number;
     bodySnippet: string;
     automation?: ChatMessageAutomation;
+    authorReported?: ChatReportedAgent;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };
@@ -921,6 +947,8 @@ export interface ChatMessage {
   automation?: ChatMessageAutomation;
   // The agent that wrote the message in one of its runs. Provenance only.
   authorAgentId?: string;
+  // What the agent reported about itself. Only an agent message has one.
+  authorReported?: ChatReportedAgent;
   attachments: ChatAttachment[];
   // Thread and stream reads name each open agent request: one per agent that
   // was asked to answer this message and has not finished. Absent when none.
@@ -1145,6 +1173,8 @@ export interface LinkedChatStore {
     automation?: ChatMessageAutomationInput;
     // The agent writing in one of its runs. Only an agent author has one.
     authorAgentId?: string;
+    // What the agent reported about itself. Only an agent author has one.
+    authorReported?: ChatReportedAgent;
     // The author's own agents the message names, resolved on this computer.
     // Each one wakes, as does the agent whose chat this is. Never journaled.
     namedAgentIds?: string[];
@@ -1221,6 +1251,8 @@ export interface LinkedChatStore {
     automation?: ChatMessageAutomationInput;
     // The agent writing in one of its runs. Only an agent author has one.
     authorAgentId?: string;
+    // What the agent reported about itself. Only an agent author has one.
+    authorReported?: ChatReportedAgent;
     // The author's own agents the message names, resolved on this computer.
     // Each one wakes, as does the agent whose chat this is. Never journaled.
     namedAgentIds?: string[];
@@ -1290,13 +1322,11 @@ export interface LinkedChatStore {
     upTo: { createdAtMs: number; messageId: ChatMessageId };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
-  listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<ChatThread[]>;
-  listAgentUnreadRequests(workspaceId: WorkspaceId, runId: string): Promise<ChatAgentRequestRecord[]>;
-  // unreadByAgentOnly reads the place agents outside a run share.
+  listAgentUnreadThreads(workspaceId: WorkspaceId, runId?: string): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
+  listAgentUnreadRequests(workspaceId: WorkspaceId, runId?: string): Promise<ChatAgentRequestRecord[]>;
   listMentionsForHandle(
     workspaceId: WorkspaceId,
     handle: string,
-    options?: { unreadByAgentOnly?: boolean },
   ): Promise<ChatMentionRecord[]>;
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A

@@ -243,9 +243,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await capture.runRelaySync((materializePage) =>
-            sourceRelay.pull(materializePage),
-          );
+          await sourceRelay.pull(apply => capture.runRelaySync(apply));
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },
@@ -264,9 +262,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await capture.runRelaySync((materializePage) =>
-            sourceRelay.pull(materializePage),
-          );
+          await sourceRelay.pull(apply => capture.runRelaySync(apply));
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },
@@ -605,10 +601,9 @@ test("protected join preserves a failed folder, then restores exact secret and b
 
     // The missing passphrase is discovered at the public IPC boundary. The
     // attempt preserves its manifest but releases its registry entry.
-    await expect(page.getByTestId("join-sync-passphrase")).toBeVisible();
-    await expect(page.getByTestId("join-error")).toHaveText(
-      `This workspace has protected files. Enter the protected-file passphrase. Files remain in ${temp.rootPath}. Choose another empty folder to try again.`,
-    );
+    await expect(page.getByTestId("join-sync-passphrase")).toBeFocused();
+    await expect(page.getByTestId("join-used-folder")).toHaveText(`Files stay in ${temp.rootPath}.`);
+    await expect(page.getByTestId("join-error")).toHaveCount(0);
     await expect
       .poll(async () => (await readdir(temp.rootPath)).sort())
       .toContain(".dohc");
@@ -618,7 +613,6 @@ test("protected join preserves a failed folder, then restores exact secret and b
     // Retry through the same public button. Successful materialization proves
     // the envelope key was installed before the pull tried to decrypt .env.
     await page.getByTestId("join-sync-passphrase").fill(passphrase);
-    await expect(page.getByTestId("join-workspace-start")).toBeDisabled();
     await mkdir(retryRoot);
     await desktop.app.evaluate((_electron, path) => { process.env.DOHC_TEST_PICK_PATH = path; }, retryRoot);
     await page.getByTestId("join-choose-folder").click();

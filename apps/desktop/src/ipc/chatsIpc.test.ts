@@ -163,6 +163,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     warmCredentials: async () => undefined, currentCredentials: () => chatCredentials,
     currentCredentialGeneration: () => 0,
     localUserDisplayName: () => "Sam", agentDisplayName: async () => "Nova", agentIdsNamedIn: async () => [],
+    isOwnAgentId: async () => false,
     localInstallationId: () => "local-owner", projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch,
     betweenDispatchScans: (_workspaceId, write) => write(),
@@ -348,6 +349,10 @@ describe("chat message IPC identity", () => {
     expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" }, () => null, neutralPresentation)))
       .toMatchObject({ authorUserId: "person-1" });
     expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation))).not.toHaveProperty("authorUserId");
+    // The badge knows your agent's run by this id alone.
+    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorAgentId: "codex" }, () => null, neutralPresentation)))
+      .toMatchObject({ authorAgentId: "codex" });
+    expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation))).not.toHaveProperty("authorAgentId");
   });
 
   it("carries an automation author, the automation that wrote the message, and where its Collection is now", () => {
@@ -886,7 +891,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   expect(cli.exitCode).toBe(0);
   const {schemaVersion:_,...groupPage}=JSON.parse(cli.stdout);
   expect(groupPage).toEqual(ipc);
-  const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request},{channelWireId:"wire",cursor:"sealed"});
+  const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request:value=>request(value)},{channelWireId:"wire",cursor:"sealed"});
   expect(cliPage).toEqual(ipc);expect(mcp).toEqual(ipc);
   const calls=h.storeMethods.linksPage.mock.calls.map(([input])=>input);
   expect(calls).toHaveLength(4);
@@ -894,7 +899,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   expect(JSON.stringify(ipc)).not.toMatch(/secret|authorUserId|authorActorKey/);
   h.resolveEngineFiles.mockResolvedValue([{status:"absent"}]);
   const denied=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});
-  expect(await mcpChatLinks({root,home:root,request},{channelWireId:"wire"})).toEqual(denied);
+  expect(await mcpChatLinks({root,home:root,request:value=>request(value)},{channelWireId:"wire"})).toEqual(denied);
   h.storeMethods.listChannels.mockResolvedValue([]);
   expect(await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"})).toBeNull();
   expect(await request({protocolVersion:CLI_PROTOCOL_VERSION,verb:"chatLinks",args:{cwd:root,actor:"agent",channelWireId:"wire"}})).toBeNull();

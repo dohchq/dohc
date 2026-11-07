@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
 import { afterAll, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
 import { startEngineProjection } from "./engineProjection";
@@ -70,7 +71,7 @@ describe.skipIf(engine.missing)("native store-free projection wire", () => {
   }, 300_000);
   it("returns the named per-document error for content between 2 MiB and 16 MiB", async () => {
     const doc = new Y.Doc();
-    doc.getText("plainText").insert(0, "x".repeat(2 * 1024 * 1024 + 1));
+    doc.getText("plainText").insert(0, "x".repeat(LIVE_MARKDOWN_MAX_BYTES + 1));
     try {
       expect(
         await projection!.project({

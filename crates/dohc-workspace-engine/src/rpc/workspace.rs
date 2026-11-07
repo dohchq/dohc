@@ -93,6 +93,12 @@ pub(crate) struct OpenWorkspace {
     /// Version fences retain this gate through their destructive continuation,
     /// without stalling editor traffic in unrelated open workspaces.
     pub(super) session_ops: Arc<tokio::sync::Mutex<()>>,
+    /// One fetched batch, bound to this open handle and replaced by the next fetch.
+    pub(super) pending_pull: tokio::sync::Mutex<Option<super::relay::PendingPull>>,
+    /// Pages taken by apply requests that close must release if they have not begun.
+    pub(super) applying_pulls: Mutex<Vec<Arc<dohc_engine_sync::PreparedOrdinaryPull>>>,
+    pub(super) pull_fetch_cancel: dohc_engine_protocol::cancel::CancelSignal,
+    pub(super) pull_repair_retries: std::sync::atomic::AtomicUsize,
     /// How many pending cursors of each kind this handle has issued, counted
     /// under the pending-cursor lock. A commit that did not land restores its
     /// token only if no newer cursor of its kind was issued since.
@@ -161,6 +167,10 @@ impl OpenWorkspace {
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
+            pending_pull: Default::default(),
+            applying_pulls: Default::default(),
+            pull_fetch_cancel: Default::default(),
+            pull_repair_retries: Default::default(),
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
             pulls_in_flight: Default::default(),
@@ -1370,6 +1380,10 @@ impl EngineService {
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
                 session_ops,
+                pending_pull: Default::default(),
+                applying_pulls: Default::default(),
+                pull_fetch_cancel: Default::default(),
+                pull_repair_retries: Default::default(),
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pulls_in_flight: Default::default(),
@@ -1480,6 +1494,7 @@ impl EngineService {
             (closing, removed, attached_handles)
         };
         let removed = removed.ok_or_else(workspace_unavailable)?;
+        removed.pull_fetch_cancel.cancel();
         let closed = closing.is_some();
         // A hold whose caller went away must not keep teardown waiting.
         lock(&removed.capture_holds).clear();
@@ -1502,6 +1517,8 @@ impl EngineService {
         #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
         let close_task = tokio::spawn(async move {
+            let pending = removed.pending_pull.lock().await.take();
+            let applying = std::mem::take(&mut *lock(&removed.applying_pulls));
             #[cfg(feature = "harness")]
             let gate_wait = probe
                 .as_ref()
@@ -1520,6 +1537,13 @@ impl EngineService {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
+            if let Some(pending) = pending {
+                let _ = Self::release_fetched_pull(&removed, &pending.page).await;
+            }
+            // Restore newer pages' previous tokens before releasing older pages.
+            for page in applying.into_iter().rev() {
+                let _ = Self::release_fetched_pull(&removed, &page).await;
+            }
             let finished = tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
                 None => Ok(()),
@@ -2007,7 +2031,8 @@ mod tests {
         }
         for method in [
             "sync.adoptJoinIdentity",
-            "sync.pull",
+            "sync.fetchPull",
+            "sync.applyPull",
             "sync.commitCursor",
             "versionedText.read",
             "workspace.close",

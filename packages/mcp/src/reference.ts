@@ -72,6 +72,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   approve: ["approved"],
   discard: ["discarded"],
   prepareMigration: ["migration-prepared"],
+  askToApply: ["change-asked"],
   migrationPreviewPage: ["migration-preview-page"],
   prepareSchemaChange: ["migration-prepared"],
   approveMigration: ["migrated"],
@@ -161,12 +162,13 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
   threads: [["chat", "threads", "general"]],
+  watch: [["chat", "watch", "--once", "--cursor", "cursor", "--group", "general", "--thread", "th_1", "--timeout", "25"]],
   inbox: [["chat", "inbox"]],
   show: [["chat", "show", "th_1", "--peek"], ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"]],
-  post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "Ship", "it?"]],
+  post: [["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "--as-agent", "--agent", "Scout", "Ship", "it?"]],
   reply: [
     ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
-    ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "Done"],
+    ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "--as-agent", "--agent", "Scout", "Done"],
   ],
   react: [["chat", "react", "msg_1", "👍"]],
   grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],
@@ -226,6 +228,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_import_data: "`{ ok: true, path, tableName, rowCount }`",
   dohc_query_database: "`{ ok: true, rows }`, with at most 1,000 rows.",
   dohc_list_file_chats: { cli: "fileChats" },
+  dohc_wait_for_messages: { cli: "watch" },
   dohc_read_chat: { cli: "chat" },
   dohc_list_groups: { cli: "groupsFull" },
   dohc_start_group_chat: "`{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`",
@@ -404,6 +407,7 @@ export async function mcpToolNames(shareAccess?: ShareAccess): Promise<string[]>
 // Why a shared view does not offer a tool that reads. Every other tool it
 // does not offer changes the workspace.
 const NOT_SHARED_READS: Record<string, string> = {
+  dohc_wait_for_messages: "The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.",
   dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",

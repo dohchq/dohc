@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -33,6 +34,12 @@ function run(command, args, env = process.env) {
 if (!process.env.UI_AUDIT_SHOT_DIR?.trim()) {
   throw new Error("set UI_AUDIT_SHOT_DIR to an empty output directory");
 }
+// Every audit spec writes into this folder, so check it once, before any runs.
+const shotDir = resolve(repoRoot, process.env.UI_AUDIT_SHOT_DIR);
+mkdirSync(shotDir, { recursive: true });
+if (readdirSync(shotDir).length !== 0) {
+  throw new Error("UI_AUDIT_SHOT_DIR must be empty before capture");
+}
 const commit = git(["rev-parse", "HEAD"]);
 if (git(["status", "--porcelain"]) !== "") {
   throw new Error("commit the worktree before building UI audit evidence");
@@ -55,5 +62,5 @@ run(
     "--grep",
     "@ui-audit",
   ],
-  { ...process.env, DOHC_TEST_ENGINE_BINARY: enginePath },
+  { ...process.env, DOHC_TEST_ENGINE_BINARY: enginePath, UI_AUDIT_SHOT_DIR: shotDir },
 );

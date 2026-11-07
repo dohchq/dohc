@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto'
+import {LIVE_MARKDOWN_MAX_BYTES} from '@dohc/live-session-contract/limits'
 import {WORKER_LIVE_VALIDATION_POLICY} from './liveValidationPolicy.js'
 import {createEngineMarkdownReader, type EngineMarkdownProof} from './engine-markdown-reader.js'
 import type {LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
@@ -106,7 +107,7 @@ export async function runEngineMarkdownHost() {
         keys(r, ['id', 'method', 'source', 'sourceSha256', 'projectionSha256'])
         requireWire(typeof r.sourceSha256 === 'string' && /^[a-f0-9]{64}$/.test(r.sourceSha256)
           && typeof r.projectionSha256 === 'string' && /^[a-f0-9]{64}$/.test(r.projectionSha256))
-        const declared = declaration(r.source, 2 * 1024 * 1024)
+        const declared = declaration(r.source, LIVE_MARKDOWN_MAX_BYTES)
         requireWire(declared.sha256 === r.sourceSha256)
         const source = await readBlob(1, declared)
         const finish = await readControl(); keys(finish, ['id', 'end'])
@@ -122,7 +123,7 @@ export async function runEngineMarkdownHost() {
       keys(r.document, ['workspaceId', 'mainVersionId', 'objectId', 'lineageClaimId'])
       requireWire(Object.values(r.document).every(v => typeof v === 'string' && v.length > 0)
         && typeof r.currentPath === 'string')
-      const sourceDeclaration = declaration(r.source, 2 * 1024 * 1024), checkpointDeclaration = declaration(r.checkpoint, UPDATE)
+      const sourceDeclaration = declaration(r.source, LIVE_MARKDOWN_MAX_BYTES), checkpointDeclaration = declaration(r.checkpoint, UPDATE)
       const source = await readBlob(1, sourceDeclaration), checkpoint = await readBlob(2, checkpointDeclaration)
       // An explicit end control catches surplus chunks before running the parser.
       const finish = await readControl(); keys(finish, ['id', 'end'])

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
 use dohc_engine_storage::text;
@@ -656,6 +657,9 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
+    fn request_pending(&self) -> bool {
+        false
+    }
     /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
@@ -792,7 +796,16 @@ pub struct RelaySyncClient<T> {
 /// gathered: a fresh pass would skip the rows already applied and report
 /// none of it. A new request starts empty.
 #[derive(Clone, Default)]
-pub struct PullContinuation(std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>);
+pub struct PullContinuation(
+    std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>,
+    std::sync::Arc<std::sync::Mutex<Option<FetchPullToken>>>,
+);
+
+struct FetchPullToken {
+    identity: crate::SyncIdentity,
+    token: String,
+    previous: Option<String>,
+}
 
 struct SuspendedPull {
     workspace_id: String,
@@ -803,6 +816,215 @@ struct SuspendedPull {
 enum Fetched {
     Ordinary(Box<OrdinaryFetch>),
     Hosted(Box<HostedFetch>),
+}
+
+/// One bounded network read under the token that keeps Collections work owed.
+#[derive(Debug)]
+pub struct PreparedOrdinaryPull {
+    identity: crate::SyncIdentity,
+    current: Option<RelayCursor>,
+    ops: std::sync::Mutex<Vec<ReplicationEnvelope>>,
+    cursor: i64,
+    has_more: bool,
+    repairs: BaseRepairAnswers,
+    pull_token: String,
+    previous_pull_token: Option<String>,
+    apply_began: AtomicBool,
+}
+
+impl PreparedOrdinaryPull {
+    pub fn pull_token(&self) -> &str {
+        &self.pull_token
+    }
+
+    pub fn previous_pull_token(&self) -> Option<&str> {
+        self.previous_pull_token.as_deref()
+    }
+
+    pub fn apply_began(&self) -> bool {
+        self.apply_began.load(Ordering::SeqCst)
+    }
+}
+
+fn ordinary_pull_token(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Option<String>, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .map_err(|error| local(SyncError::corrupt(error)))
+}
+
+fn replace_ordinary_pull_token(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    token: &str,
+    replacement: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<bool, RelayError> {
+    match store
+        .write_with(faults, |tx| {
+            tx.execute(
+                "UPDATE sync_identity SET ordinary_pull_token=?3 \
+                 WHERE workspace_id=?1 AND ordinary_pull_token=?2",
+                params![workspace_id, token, replacement],
+            )
+            .map(|changed| changed > 0)
+            .map_err(SyncError::persist)
+        })
+        .map_err(local)?
+    {
+        TxnOutcome::Committed(changed) => Ok(changed),
+        TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+    }
+}
+
+fn pull_objects(page: &[ReplicationEnvelope]) -> BTreeSet<String> {
+    fn collect(value: &serde_json::Value, objects: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(object) = fields.get("objectId").and_then(|value| value.as_str()) {
+                    objects.insert(object.to_owned());
+                }
+                for value in fields.values() {
+                    collect(value, objects);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect(value, objects);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut objects = BTreeSet::new();
+    for op in page {
+        collect(&op.payload, &mut objects);
+    }
+    objects
+}
+
+#[cfg(test)]
+#[path = "tests/prepared_base_repairs.rs"]
+mod prepared_base_repair_tests;
+
+#[derive(Debug, Default)]
+struct BaseRepairAnswers {
+    decisions: Vec<(String, BaseRepairDecision)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BaseRepairDecision {
+    Unchanged,
+    Base {
+        version_id: String,
+        object_id: String,
+        lineage_claim_id: String,
+        origin_id: String,
+        origin_seq: i64,
+        relay_seq: Option<i64>,
+        recorded_at_ms: i64,
+    },
+    Deferred {
+        origin_id: String,
+        origin_seq: i64,
+        relay_seq: i64,
+    },
+}
+
+impl BaseRepairAnswers {
+    fn keep(&mut self, signature: String, decision: BaseRepairDecision) -> bool {
+        if self.decisions.len() == MAX_BASE_REPAIR_LOOKUPS {
+            return false;
+        }
+        self.decisions.push((signature, decision));
+        true
+    }
+
+    fn by_signature(&self) -> BTreeMap<&str, &BaseRepairDecision> {
+        self.decisions
+            .iter()
+            .map(|(signature, decision)| (signature.as_str(), decision))
+            .collect()
+    }
+}
+
+fn base_repair_signature<'a>(
+    pushed_seq: i64,
+    repairs: impl Iterator<Item = &'a PendingBaseRelayRepair>,
+) -> String {
+    let rows: Vec<_> = repairs.map(|repair| serde_json::json!({
+        "version": repair.key.version_id, "object": repair.key.object_id,
+        "claim": repair.lineage_claim_id, "origin": repair.origin_id, "seq": repair.origin_seq,
+        "kind": repair.op_kind, "payload": repair.payload, "time": repair.recorded_at_ms,
+    })).collect();
+    dohc_engine_storage::hex_sha256(serde_json::json!([pushed_seq, rows]).to_string().as_bytes())
+}
+
+fn deferred_repair_signature(pushed_seq: i64, repair: &PendingDeferredRelayRepair) -> String {
+    dohc_engine_storage::hex_sha256(
+        serde_json::json!([
+            pushed_seq,
+            repair.origin_id,
+            repair.origin_seq,
+            repair.op_kind,
+            repair.payload,
+            repair.recorded_at_ms
+        ])
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+impl BaseRepairDecision {
+    fn apply(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), RelayError> {
+        match store.write_with(faults, |tx| {
+            match self {
+                Self::Unchanged => {}
+                Self::Base { version_id, object_id, lineage_claim_id, origin_id, origin_seq, relay_seq, recorded_at_ms } => {
+                    let key = dohc_engine_collab::DocKey::new(workspace_id, version_id, object_id)
+                        .map_err(base_repair_collab_error)?;
+                    dohc_engine_collab::record_base_coordinate_in_tx(tx, dohc_engine_collab::BaseCoordinateRecord {
+                        key: &key, lineage_claim_id, origin_id, origin_seq: *origin_seq,
+                        relay_seq: *relay_seq, now_ms: *recorded_at_ms,
+                    }).map_err(base_repair_collab_error)?;
+                    if relay_seq.is_none() {
+                        dohc_engine_collab::mark_base_coordinate_absent_in_tx(tx, &key, lineage_claim_id,
+                            origin_id, *origin_seq, *recorded_at_ms).map_err(base_repair_collab_error)?;
+                    }
+                    tx.execute("DELETE FROM ydoc_base_relay_candidates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                        params![workspace_id, version_id, object_id]).map_err(SyncError::persist)?;
+                }
+                Self::Deferred { origin_id, origin_seq, relay_seq } => {
+                    let changed = tx.execute("UPDATE ydoc_deferred_updates SET relay_seq=?4 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND relay_seq IS NULL",
+                        params![workspace_id, origin_id, origin_seq, relay_seq]).map_err(SyncError::persist)?;
+                    if changed != 1 { return Err(SyncError::CoordinateDiverged); }
+                }
+            }
+            Ok(())
+        }).map_err(local)? {
+            TxnOutcome::Committed(()) => Ok(()),
+            TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
+        }
+    }
+}
+
+enum BaseRepairPhase<'a> {
+    Immediate,
+    Fetch(&'a mut BaseRepairAnswers),
+    Apply(&'a BaseRepairAnswers),
 }
 
 /// What an ordinary pass fetched and read before it applied.
@@ -997,6 +1219,7 @@ impl BaseRelayRepairChunk {
 }
 
 struct PendingDeferredRelayRepair {
+    object_id: String,
     origin_id: String,
     origin_seq: i64,
     op_kind: String,
@@ -1091,6 +1314,26 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::journal::SyncIdentity,
         faults: &dyn FaultInjector,
         page: &[ReplicationEnvelope],
+    ) -> Result<(), RelayError> {
+        self.repair_base_orders(
+            store,
+            workspace_id,
+            identity,
+            faults,
+            page,
+            BaseRepairPhase::Immediate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn repair_base_orders(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        identity: &crate::journal::SyncIdentity,
+        faults: &dyn FaultInjector,
+        page: &[ReplicationEnvelope],
+        mut phase: BaseRepairPhase<'_>,
     ) -> Result<(), RelayError> {
         let passive = store.is_passive();
         let local_pushed_seq =
@@ -1206,7 +1449,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 let mut statement = conn
                     .prepare(
                         "SELECT deferred.origin_id,deferred.origin_seq,log.op_kind,
-                                log.payload_json,log.recorded_at_ms
+                                log.payload_json,log.recorded_at_ms,deferred.object_id
                            FROM ydoc_deferred_updates AS deferred
                            JOIN replication_log AS log
                              ON log.workspace_id=deferred.workspace_id
@@ -1226,6 +1469,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
                         ))
                     })
                     .map_err(SyncError::corrupt)?;
@@ -1241,7 +1485,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }) || deferred.iter().any(|(origin_id, origin_seq, ..)| {
             origin_id == &identity.origin_id && *origin_seq > local_pushed_seq
         });
-        let relay_origin_max = if needs_confirmation && !passive {
+        let relay_origin_max = if matches!(&phase, BaseRepairPhase::Apply(_)) {
+            local_pushed_seq
+        } else if needs_confirmation && !passive {
             let hosted = store
                 .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
                 .map_err(local)?;
@@ -1268,8 +1514,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let deferred = deferred
             .into_iter()
             .map(
-                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)| {
+                |(origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, object_id)| {
                     Ok(PendingDeferredRelayRepair {
+                        object_id,
                         origin_id,
                         origin_seq,
                         op_kind,
@@ -1291,9 +1538,53 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .or_default()
                 .push(repair);
         }
+        if let BaseRepairPhase::Apply(answers) = &phase {
+            let decisions = answers.by_signature();
+            let touched = pull_objects(page);
+            let mut missing = false;
+            for group in groups.values() {
+                let signature = base_repair_signature(local_pushed_seq, group.iter());
+                if let Some(decision) = decisions.get(signature.as_str()) {
+                    decision.apply(store, workspace_id, faults)?;
+                } else if touched.contains(&group[0].key.object_id) {
+                    missing = true;
+                }
+            }
+            for repair in &deferred {
+                let signature = deferred_repair_signature(local_pushed_seq, repair);
+                if let Some(decision) = decisions.get(signature.as_str()) {
+                    decision.apply(store, workspace_id, faults)?;
+                } else if touched.contains(&repair.object_id) {
+                    missing = true;
+                }
+            }
+            return if missing {
+                Err(RelayError::RepairPending)
+            } else {
+                Ok(())
+            };
+        }
+        let touched = pull_objects(page);
+        let mut groups: Vec<_> = groups.into_values().collect();
+        groups.sort_by_key(|group| !touched.contains(&group[0].key.object_id));
+        let mut deferred = deferred;
+        deferred.sort_by_key(|repair| !touched.contains(&repair.object_id));
         let mut chunks = Vec::new();
         let mut chunk = BaseRelayRepairChunk::default();
-        for group in groups.into_values() {
+        let mut append_deferred =
+            |chunk: &mut BaseRelayRepairChunk, chunks: &mut Vec<BaseRelayRepairChunk>| {
+                for repair in deferred.drain(..) {
+                    if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
+                        chunks.push(std::mem::take(chunk));
+                    }
+                    chunk.deferred.push(repair);
+                }
+            };
+        // Finish page dependencies before unrelated repair work.
+        for group in groups {
+            if !touched.contains(&group[0].key.object_id) {
+                append_deferred(&mut chunk, &mut chunks);
+            }
             if chunk.len() > 0 && chunk.len() + group.len() > MAX_BASE_REPAIR_LOOKUPS {
                 chunks.push(std::mem::take(&mut chunk));
             }
@@ -1302,17 +1593,40 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 chunks.push(std::mem::take(&mut chunk));
             }
         }
-        for repair in deferred {
-            if chunk.len() >= MAX_BASE_REPAIR_LOOKUPS {
-                chunks.push(std::mem::take(&mut chunk));
-            }
-            chunk.deferred.push(repair);
-        }
+        append_deferred(&mut chunk, &mut chunks);
         if chunk.len() > 0 {
             chunks.push(chunk);
         }
 
-        for BaseRelayRepairChunk { repairs, deferred } in chunks {
+        for BaseRelayRepairChunk {
+            mut repairs,
+            mut deferred,
+        } in chunks
+        {
+            if let BaseRepairPhase::Fetch(answers) = &phase {
+                let mut available = MAX_BASE_REPAIR_LOOKUPS - answers.decisions.len();
+                if available == 0 {
+                    break;
+                }
+                let mut selected = BTreeSet::new();
+                repairs.retain(|repair| {
+                    let key = (
+                        repair.key.version_id.clone(),
+                        repair.key.object_id.clone(),
+                        repair.lineage_claim_id.clone(),
+                    );
+                    if selected.contains(&key) {
+                        return true;
+                    }
+                    if available == 0 {
+                        return false;
+                    }
+                    selected.insert(key);
+                    available -= 1;
+                    true
+                });
+                deferred.truncate(available);
+            }
             let mut coordinates = BTreeSet::new();
             coordinates.extend(
                 repairs
@@ -1339,7 +1653,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 })
                 .collect::<Vec<_>>();
             let mut responses = BTreeMap::new();
-            // A group wider than one batch retains its answers across replay and commits whole.
+            // Validate a complete base group before retaining its one decision.
             for requests in requests.chunks(MAX_BASE_REPAIR_LOOKUPS) {
                 let answers = self.transport.lookup_log_coordinates(requests.to_vec())?;
                 if answers.len() != requests.len() {
@@ -1365,6 +1679,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
             };
             let mut deferred_repairs = Vec::new();
+            let mut prepared_deferred = Vec::new();
             for repair in deferred {
                 let response = lookup(&repair.origin_id, repair.origin_seq)?;
                 let relay_seq = match response {
@@ -1392,7 +1707,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     LogCoordinateResponse::Absent => None,
                 };
                 if let Some(relay_seq) = relay_seq {
+                    if matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                        prepared_deferred.push((
+                            deferred_repair_signature(local_pushed_seq, &repair),
+                            BaseRepairDecision::Deferred {
+                                origin_id: repair.origin_id.clone(),
+                                origin_seq: repair.origin_seq,
+                                relay_seq,
+                            },
+                        ));
+                    }
                     deferred_repairs.push((repair.origin_id, repair.origin_seq, relay_seq));
+                } else if matches!(&phase, BaseRepairPhase::Fetch(_))
+                    && touched.contains(&repair.object_id)
+                {
+                    prepared_deferred.push((
+                        deferred_repair_signature(local_pushed_seq, &repair),
+                        BaseRepairDecision::Unchanged,
+                    ));
                 }
             }
             let mut grouped: BTreeMap<BaseRelayRepairKey, Vec<BaseRelayRepairCandidate>> =
@@ -1441,13 +1773,61 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .push((repair, relay_seq, unresolved_local_coordinate));
             }
 
-            grouped.retain(|_, candidates| {
-                candidates
-                    .iter()
-                    .any(|(_, relay_seq, _)| relay_seq.is_some())
-                    || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
-            });
-            if grouped.is_empty() && deferred_repairs.is_empty() {
+            if !matches!(&phase, BaseRepairPhase::Fetch(_)) {
+                grouped.retain(|_, candidates| {
+                    candidates
+                        .iter()
+                        .any(|(_, relay_seq, _)| relay_seq.is_some())
+                        || !candidates.iter().any(|(_, _, unresolved)| *unresolved)
+                });
+            }
+            if grouped.is_empty() && deferred_repairs.is_empty() && prepared_deferred.is_empty() {
+                continue;
+            }
+            if let BaseRepairPhase::Fetch(answers) = &mut phase {
+                for candidates in grouped.values() {
+                    let signature = base_repair_signature(
+                        local_pushed_seq,
+                        candidates.iter().map(|(repair, ..)| repair),
+                    );
+                    let resolved = candidates
+                        .iter()
+                        .filter_map(|(repair, seq, _)| seq.map(|seq| (repair, seq)))
+                        .min_by_key(|(_, seq)| *seq);
+                    let (chosen, relay_seq) = match resolved {
+                        Some((repair, seq)) => (repair, Some(seq)),
+                        None => (&candidates[0].0, None),
+                    };
+                    if relay_seq.is_none()
+                        && candidates.iter().any(|(_, _, unresolved)| *unresolved)
+                    {
+                        if touched.contains(&chosen.key.object_id)
+                            && !answers.keep(signature, BaseRepairDecision::Unchanged)
+                        {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    if !answers.keep(
+                        signature,
+                        BaseRepairDecision::Base {
+                            version_id: chosen.key.version_id.clone(),
+                            object_id: chosen.key.object_id.clone(),
+                            lineage_claim_id: chosen.lineage_claim_id.clone(),
+                            origin_id: chosen.origin_id.clone(),
+                            origin_seq: chosen.origin_seq,
+                            relay_seq,
+                            recorded_at_ms: chosen.recorded_at_ms,
+                        },
+                    ) {
+                        return Ok(());
+                    }
+                }
+                for (signature, decision) in prepared_deferred {
+                    if !answers.keep(signature, decision) {
+                        return Ok(());
+                    }
+                }
                 continue;
             }
             match store
@@ -1973,9 +2353,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Pull and apply replicated operations. The returned cursor remains
-    /// pending until the caller completes disk materialization and commits it.
-    pub fn pull_chat_workspace(
+    fn resume_ordinary_pull(
         &self,
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
@@ -1984,9 +2362,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
-        let (fetch, progress) = match self.continuation.take(workspace_id) {
+        let (fetch, mut progress) = match self.continuation.take(workspace_id) {
             Some((Fetched::Ordinary(fetch), progress)) => (fetch, progress),
-            _ => self.fetch_ordinary(store, workspace_id, faults)?,
+            _ => return Err(RelayError::InvalidResponse),
         };
         let pass = match self.apply_pulled(
             store,
@@ -1995,16 +2373,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &fetch.identity,
             &fetch.queued,
             &fetch.ordered,
-            progress,
+            &mut progress,
             None,
             faults,
             leases,
-        )? {
-            Applying::Done(pass) => *pass,
-            Applying::Suspended(pending, progress) => {
+        ) {
+            Ok(Applying::Done(pass)) => *pass,
+            Ok(Applying::Suspended(pending)) => {
                 self.continuation
-                    .keep(workspace_id, Fetched::Ordinary(fetch), *progress);
+                    .keep(workspace_id, Fetched::Ordinary(fetch), progress);
                 return Err(RelayError::ValidationPending(pending));
+            }
+            Err(error) => {
+                if self
+                    .pending_preparation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+                {
+                    self.continuation
+                        .keep(workspace_id, Fetched::Ordinary(fetch), progress);
+                }
+                return Err(error);
             }
         };
         let OrdinaryFetch {
@@ -2109,14 +2499,145 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// What an ordinary pass fetches and reads before it applies, and where
-    /// its apply starts.
-    fn fetch_ordinary(
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn pull_chat_workspace(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+    ) -> Result<SyncPassOutcome, RelayError> {
+        if self
+            .continuation
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return self.resume_ordinary_pull(store, cache, workspace_id, faults, leases, now_ms);
+        }
+        loop {
+            let prepared = self.fetch_pull(store, workspace_id, faults)?;
+            match self.apply_pull(
+                store,
+                cache,
+                workspace_id,
+                &prepared,
+                faults,
+                leases,
+                now_ms,
+            ) {
+                Err(RelayError::RepairPending) => continue,
+                result => return result,
+            }
+        }
+    }
+
+    /// Fetch a bounded page while Collections work waits for the terminal commit.
+    pub fn fetch_pull(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         faults: &dyn FaultInjector,
-    ) -> Result<(Box<OrdinaryFetch>, ApplyProgress), RelayError> {
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        self.fetch_pull_with_repairs(store, workspace_id, faults, false)
+    }
+
+    pub fn fetch_pull_settling_repairs(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        self.fetch_pull_with_repairs(store, workspace_id, faults, true)
+    }
+
+    fn fetch_pull_with_repairs(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        settle_repairs: bool,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
+        let result = self
+            .fetch_pull_inner(store, workspace_id, faults)
+            .and_then(|prepared| {
+                if settle_repairs {
+                    let ops = prepared
+                        .ops
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match self.repair_base_orders(
+                        store,
+                        workspace_id,
+                        &prepared.identity,
+                        faults,
+                        &ops,
+                        BaseRepairPhase::Apply(&prepared.repairs),
+                    ) {
+                        Ok(()) | Err(RelayError::RepairPending) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(prepared)
+            });
+        if result.is_ok() {
+            self.continuation
+                .1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        } else if !self.transport.request_pending()
+            && !matches!(&result, Err(RelayError::ValidationPending(_)))
+            && self
+                .pending_preparation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        {
+            self.abandon_fetch_pull(store, workspace_id, faults)?;
+        }
+        result
+    }
+
+    /// Release this request's failed fetch without clearing an earlier pass.
+    pub fn abandon_fetch_pull(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, RelayError> {
+        let mut fetching = self
+            .continuation
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(fetch) = fetching.as_ref() else {
+            return Ok(false);
+        };
+        if fetch.identity.workspace_id != workspace_id {
+            return Err(RelayError::InvalidResponse);
+        }
+        let released = replace_ordinary_pull_token(
+            store,
+            workspace_id,
+            &fetch.token,
+            fetch.previous.as_deref(),
+            faults,
+        )?;
+        fetching.take();
+        Ok(released)
+    }
+
+    fn fetch_pull_inner(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<PreparedOrdinaryPull, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -2128,7 +2649,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 "a hosted replica pulls with pull_hosted_workspace",
             ));
         }
-        let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
+        let (queued, _) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
         if let Some(cursor) = &current {
             if cursor.replication_epoch != identity.replication_epoch
@@ -2137,12 +2658,38 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
         }
-        let bootstrap_complete = store
-            .read_with(|conn| {
-                crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
-            })
-            .map_err(local)?;
-        let mut cursor = current.map_or(0, |value| value.cursor);
+        let (pull_token, previous_pull_token) = {
+            let mut fetching = self
+                .continuation
+                .1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = ordinary_pull_token(store, workspace_id)?;
+            match fetching.as_ref() {
+                Some(fetch)
+                    if fetch.identity == identity
+                        && previous.as_deref() == Some(fetch.token.as_str()) =>
+                {
+                    (fetch.token.clone(), fetch.previous.clone())
+                }
+                Some(_) => return Err(RelayError::InvalidResponse),
+                None => {
+                    let token = match crate::cursor::begin_ordinary_pull(store, &identity, faults)
+                        .map_err(local)?
+                    {
+                        TxnOutcome::Committed(token) => token,
+                        TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                    };
+                    *fetching = Some(FetchPullToken {
+                        identity: identity.clone(),
+                        token: token.clone(),
+                        previous: previous.clone(),
+                    });
+                    (token, previous)
+                }
+            }
+        };
+        let mut cursor = current.as_ref().map_or(0, |value| value.cursor);
         let mut fetched = 0_usize;
         let mut pages = 0_usize;
         let mut ops = Vec::new();
@@ -2177,9 +2724,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
-        if !queued.is_empty() {
-            crate::deferred::check_redelivery(store, &ops)?;
-        }
         let fetched_coordinates: BTreeSet<_> = ops
             .iter()
             .map(|op| (op.origin_id.clone(), op.origin_seq))
@@ -2191,22 +2735,92 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
                 .cloned(),
         );
-        preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
-        let pull_token =
-            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
-                TxnOutcome::Committed(token) => token,
-                TxnOutcome::Crashed { .. } => {
-                    return Err(RelayError::Local("injected-crash".to_owned()));
-                }
-            };
-        self.repair_pending_ydoc_base_orders(
+        let mut repairs = BaseRepairAnswers::default();
+        self.repair_base_orders(
             store,
             workspace_id,
             &identity,
             faults,
-            &ops[..fetched_op_count],
+            &ops,
+            BaseRepairPhase::Fetch(&mut repairs),
         )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
+        ops.truncate(fetched_op_count);
+        Ok(PreparedOrdinaryPull {
+            identity,
+            current,
+            ops: std::sync::Mutex::new(ops),
+            cursor,
+            has_more,
+            repairs,
+            pull_token,
+            previous_pull_token,
+            apply_began: AtomicBool::new(false),
+        })
+    }
+
+    fn begin_prepared_pull(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        prepared: &PreparedOrdinaryPull,
+        faults: &dyn FaultInjector,
+    ) -> Result<(Box<OrdinaryFetch>, ApplyProgress), RelayError> {
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        if identity != prepared.identity
+            || crate::read_relay_cursor(store, workspace_id).map_err(local)? != prepared.current
+            || store
+                .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+                .map_err(local)?
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
+        let mut held_ops = prepared
+            .ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::deferred::check_redelivery(store, &held_ops)?;
+        let fetched = held_ops.len();
+        let fetched_coordinates: BTreeSet<_> = held_ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        held_ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
+        let prepared_state = (|| {
+            preflight_collisions(store, workspace_id, &identity.origin_id, &held_ops)?;
+            self.repair_base_orders(
+                store,
+                workspace_id,
+                &identity,
+                faults,
+                &held_ops,
+                BaseRepairPhase::Apply(&prepared.repairs),
+            )?;
+            store
+                .read_with(|conn| {
+                    crate::ydoc_origination::can_originate_local_bases_in_tx(conn, workspace_id)
+                })
+                .map_err(local)
+        })();
+        let bootstrap_complete = match prepared_state {
+            Ok(complete) => complete,
+            Err(error) => {
+                held_ops.truncate(fetched);
+                return Err(error);
+            }
+        };
+        prepared.apply_began.store(true, Ordering::SeqCst);
+        let ops = std::mem::take(&mut *held_ops);
+        drop(held_ops);
+        let pull_token = prepared.pull_token().to_owned();
         let ordered = merge_by_origin(ops);
         let progress = Self::begin_apply(ordered.len(), durable_origins, Holding::ByOrigin);
         Ok((
@@ -2214,14 +2828,62 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 identity,
                 queued,
                 ordered,
-                cursor,
+                cursor: prepared.cursor,
                 fetched,
-                has_more,
+                has_more: prepared.has_more,
                 bootstrap_complete,
                 pull_token,
             }),
             progress,
         ))
+    }
+
+    /// Apply one fetched page. Mutable local state is read only after entering the writer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_pull(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        prepared: &PreparedOrdinaryPull,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+    ) -> Result<SyncPassOutcome, RelayError> {
+        if read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .as_ref()
+            != Some(&prepared.identity)
+            || crate::read_relay_cursor(store, workspace_id).map_err(local)? != prepared.current
+            || ordinary_pull_token(store, workspace_id)?.as_deref() != Some(prepared.pull_token())
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        if self
+            .continuation
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            let (fetch, progress) =
+                match self.begin_prepared_pull(store, workspace_id, prepared, faults) {
+                    Err(error) => {
+                        replace_ordinary_pull_token(
+                            store,
+                            workspace_id,
+                            prepared.pull_token(),
+                            prepared.previous_pull_token(),
+                            faults,
+                        )?;
+                        return Err(error);
+                    }
+                    Ok(answer) => answer,
+                };
+            self.continuation
+                .keep(workspace_id, Fetched::Ordinary(fetch), progress);
+        }
+        self.resume_ordinary_pull(store, cache, workspace_id, faults, leases, now_ms)
     }
 
     /// Confirm the relay holds nothing of this hosted replica's own origin
@@ -2276,7 +2938,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<HostedPassOutcome, RelayError> {
-        let (fetch, progress) = match self.continuation.take(workspace_id) {
+        let (fetch, mut progress) = match self.continuation.take(workspace_id) {
             Some((Fetched::Hosted(fetch), progress)) => (fetch, progress),
             _ => match self.fetch_hosted(store, workspace_id, faults)? {
                 Some(fetched) => fetched,
@@ -2296,15 +2958,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &fetch.identity,
             &fetch.queued,
             &fetch.ordered,
-            progress,
+            &mut progress,
             Some(relay_namespace),
             faults,
             leases,
         )? {
             Applying::Done(pass) => *pass,
-            Applying::Suspended(pending, progress) => {
+            Applying::Suspended(pending) => {
                 self.continuation
-                    .keep(workspace_id, Fetched::Hosted(fetch), *progress);
+                    .keep(workspace_id, Fetched::Hosted(fetch), progress);
                 return Err(RelayError::ValidationPending(pending));
             }
         };
@@ -2827,12 +3489,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::SyncIdentity,
         queued: &[ReplicationEnvelope],
         ordered: &[ReplicationEnvelope],
-        mut progress: ApplyProgress,
+        progress: &mut ApplyProgress,
         relay_namespace: Option<&str>,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<Applying, RelayError> {
-        let p = &mut progress;
+        let p = progress;
         // Recovery that waits for validation leaves every drain's rows
         // queued and runs again after it, reporting them then. The rows one
         // that completes removes leave drain reports, so a later wait loses
@@ -2860,7 +3522,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             p.pass.conflicts_opened += recovered.conflicts_opened;
             p.pass.replace_drain_holds(recovered.holds);
             match recovered.waiting {
-                Some(pending) => return Ok(Applying::Suspended(pending, Box::new(progress))),
+                Some(pending) => return Ok(Applying::Suspended(pending)),
                 None => p.recovering = false,
             }
         }
@@ -2878,7 +3540,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     leases,
                 ) {
                     Err(RelayError::ValidationPending(pending)) => {
-                        return Ok(Applying::Suspended(pending, Box::new(progress)));
+                        return Ok(Applying::Suspended(pending));
                     }
                     applied => applied?,
                 }
@@ -2990,7 +3652,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 drained.holds
             }
             Err(SyncError::ValidationPending(pending)) => {
-                return Ok(Applying::Suspended(pending, Box::new(progress)));
+                return Ok(Applying::Suspended(pending));
             }
             Err(error) => return Err(self.local(error)),
         };
@@ -3023,7 +3685,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 push_refusal_once(&mut p.pass.refusals, refusal);
             }
             if let Some(pending) = released.waiting {
-                return Ok(Applying::Suspended(pending, Box::new(progress)));
+                return Ok(Applying::Suspended(pending));
             }
         }
         let drained = crate::moment_apply::pending::drain_and_claim(
@@ -3043,7 +3705,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // The settlements before the one that waits committed into the
             // report the pass goes on with.
             Err(SyncError::ValidationPending(pending)) => {
-                return Ok(Applying::Suspended(pending, Box::new(progress)));
+                return Ok(Applying::Suspended(pending));
             }
             Err(error) => return Err(local(error)),
         }
@@ -5369,10 +6031,7 @@ enum Applying {
     Done(Box<AppliedPass>),
     /// An op or owner settlement waits for released-tail validation; nothing
     /// of it applied.
-    Suspended(
-        Box<dohc_engine_collab::live_update_application::PendingValidation>,
-        Box<ApplyProgress>,
-    ),
+    Suspended(Box<dohc_engine_collab::live_update_application::PendingValidation>),
 }
 
 /// The documents a scope names, each once, with its path.

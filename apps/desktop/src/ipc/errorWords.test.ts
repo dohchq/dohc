@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, MergeStoppedPartwayError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
@@ -28,10 +28,13 @@ import {
   HistoryStillPausedError,
   ipcWireError,
   isChatMentionPageChanged,
+  isDatasetServerNotFound,
+  markDatasetServerNotFound,
   isPrivacyDenied,
   isShareReadOnlyRefusal,
   isLiveFolderRefusal,
   isLivePageOwnedRefusal,
+  isMergeStoppedPartway,
   livePageBody,
   livePageTitle,
   isSharedLiveFileRefusal,
@@ -66,6 +69,15 @@ it("explains the held-file live-open refusal after Electron serializes it", () =
 function acrossIpc(error: unknown, channel = "desktop:list-workspace-versions"): Error {
   return new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(error))}`);
 }
+
+it("keeps a server Collection's not found code across Electron, with the words other callers show", () => {
+  const error = acrossIpc(markDatasetServerNotFound(new Error("That share isn't available anymore."), 404, { code: "not_found" }), "desktop:dataset");
+  expect(isDatasetServerNotFound(error)).toBe(true);
+  expect(readError(error).words).toBe("That share isn't available anymore.");
+  expect(isDatasetServerNotFound(acrossIpc(new Error("That share isn't available anymore."), "desktop:dataset"))).toBe(false);
+  expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 404, { code: "share_access_removed" }))).toBe(false);
+  expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 403, { code: "not_found" }))).toBe(false);
+});
 
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
   return new DaemonRefusalError({ code, message, retry: "no" }, null);
@@ -390,6 +402,13 @@ describe("error words", () => {
     expect(readError(received).words).toBe(refused.message);
     expect(isSharedLiveFileRefusal(acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"))).toBe(false);
     expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
+  });
+
+  it("knows a merge that stopped partway across IPC, and keeps the failure for Copy details", () => {
+    const received = acrossIpc(new MergeStoppedPartwayError(new Error("disk full")), "desktop:merge-workspace-version");
+    expect(isMergeStoppedPartway(received)).toBe(true);
+    expect(readError(received)).toEqual({ words: null, mapped: false, cause: "Error: disk full" });
+    expect(isMergeStoppedPartway(acrossIpc(new Error("disk full"), "desktop:merge-workspace-version"))).toBe(false);
   });
 
   it("reads a refused folder move across IPC as its title and body", () => {

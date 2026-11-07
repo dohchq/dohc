@@ -293,6 +293,7 @@ export function createDesktopCliServer<State>(
         return work(operation);
       });
     return {
+      signal: publicationAttachment,
       workspaceId: workspace.workspaceId,
       historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory, {agent: true})),
       historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
@@ -503,7 +504,7 @@ export function createDesktopCliServer<State>(
             versions: {
               list: async () => {
                 const snapshot = await capture.listVersions();
-                return { versions: snapshot.versions.map(workspaceVersionForIpc), activeVersionId: snapshot.activeVersionId };
+                return { versions: snapshot.versions.map(version => workspaceVersionForIpc(version)), activeVersionId: snapshot.activeVersionId };
               },
               compare: async (versionId, afterPath) => {
                 // Unreadable rules hide every file, as the desktop's History does.
@@ -532,8 +533,16 @@ export function createDesktopCliServer<State>(
                 // After a rename, a side can sit at another path than its conflict.
                 const shown = (conflict: (typeof page.conflicts)[number]) =>
                   [conflict.path, conflict.base.path, conflict.current.path, conflict.incoming.path].every(path => admitted(path));
+                const forAgents = (conflict: (typeof page.conflicts)[number]) => {
+                  const { waitingVersion, ...listed } = versionConflictForIpc(conflict);
+                  if (waitingVersion === null) return listed;
+                  // The conflict's own path, which a waiting move does not change.
+                  const message = `A newer version of ${conflict.path} from another machine is waiting. It comes in after this conflict is resolved.`;
+                  const { code, objectId, originId, originSeq } = waitingVersion;
+                  return { ...listed, waiting: { code, message, objectId, originId, originSeq } };
+                };
                 return {
-                  conflicts: page.conflicts.filter(shown).map(versionConflictForIpc),
+                  conflicts: page.conflicts.filter(shown).map(forAgents),
                   nextAfterConflictId: page.nextAfterConflictId,
                 };
               },
@@ -555,7 +564,8 @@ export function createDesktopCliServer<State>(
               merge: versionId => dependencies.versionRound(workspace.workspaceId, async () => {
                 const merged = await capture.mergeVersionIntoMain(versionId);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
-                return merged;
+                // The CLI reply carries the counts only.
+                return { mergedFileCount: merged.mergedFileCount, unchangedFileCount: merged.unchangedFileCount, conflictCount: merged.conflictCount };
               }, { done: () => ({}), failed: {} }),
               resolve: (conflictId, resolution) => dependencies.versionRound(workspace.workspaceId, async () => {
                 await capture.resolveConflict(conflictId, resolution.keep === "combined" ? { kind: "apply-merged", text: resolution.text }

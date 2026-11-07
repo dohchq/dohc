@@ -11,11 +11,13 @@ import { stageEngineReader, requireEngineReader } from "./stage-engine-reader.mj
 import { installedReaderConfig } from "../src/workspaces/installedReaderConfig.ts";
 import { NODE_VERSION, PINNED_NODE } from "./pinned-node.mjs";
 import signReader from "./sign-engine-reader-macos.mjs";
+import { useCachedNodeDownloads } from "./pinned-node-downloads.testSupport.mjs";
 
 const require = createRequire(import.meta.url);
 const builder = createRequire(require.resolve("electron-builder/package.json"));
 builder("app-builder-lib");
 const desktop = fileURLToPath(new URL("..", import.meta.url));
+useCachedNodeDownloads();
 const { resolveFunction } = builder("app-builder-lib/out/util/resolve.js");
 const config = load(await readFile(new URL("../electron-builder.yml", import.meta.url), "utf8"));
 
@@ -34,7 +36,9 @@ async function assertOwnerWritable(base) {
   }
 }
 
-test("packaged macOS runtime signing", { timeout: 180000 }, async t => {
+// Each case copies the packaged layout with its two Node binaries. On a slow
+// disk the cases take about 180 s in all, where a normal one takes 80 s.
+test("packaged macOS runtime signing", { timeout: 600000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-signing-")), source = join(root, "source");
   t.after(async () => { await removeLayout(source); await rm(root, { recursive: true, force: true }); });
   const staged = await stageEngineReader({ resources: source, platform: "darwin", arch: "arm64" });

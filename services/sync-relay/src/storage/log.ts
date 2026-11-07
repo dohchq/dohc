@@ -24,11 +24,13 @@ import {
 } from "./currentFiles";
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
+import { forgetCollectionFilePresence } from "./collectionFilePresence";
 import {confirmLiveApplication} from "./liveApplicationAuthorship";
 import {REFUSED_OP_KIND} from "./relayAdmission";
 import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
+import { recordPushDeliveries } from "./pushDeliveries";
 
 function withAdmittedChatName(op: SyncRelayLogInput, snapshot: LiveAuthorSnapshot): SyncRelayLogInput {
   const human = snapshot.find(author => author.kind === "human");
@@ -248,6 +250,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
       const versionSnapshotBlobStmt = storage.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
       const currentFileStmt = currentFileStatements(storage.db);
+      const pushMessages: number[] = [];
       for (const op of newOps) {
         const result = insertStmt.run(
           input.workspaceId,
@@ -265,6 +268,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         // alone would bring the document back where it no longer is. A
         // redundant copy keeps the accepted creation's object, path and file.
         if(op.settlementAdmission?.status === "refused" || op.relayAdmission !== undefined || redundant.has(op.originSeq))continue;
+        if (op.opKind === "chat.message.append") pushMessages.push(Number(result.lastInsertRowid));
         // Keep "where is this object now?" answerable by primary
         // key. The relay_seq this row just took IS the order the guard in the
         // upsert compares, so a later moment always wins and an out-of-order
@@ -286,6 +290,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           const moment = objectMomentFromMomentPayload(op.payloadJson);
           if (moment) {
             if (moment.versionId === "main" && moment.path !== null) notifyDesktopReadiness(storage, {workspaceId: input.workspaceId, path: moment.path});
+            if (moment.versionId === "main") forgetCollectionFilePresence(storage, input.workspaceId);
             objectMomentStmt.run(
               input.workspaceId,
               moment.objectId,
@@ -325,6 +330,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           Number(result.lastInsertRowid),
         );
       }
+      for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
       const settlementRefusals=input.ops.filter(op=>op.settlementAdmission?.status === "refused").map(op=>({originId:input.originId,originSeq:op.originSeq,
         momentId:settlementResponseIdentifier((JSON.parse(op.payloadJson) as Record<string,unknown>).momentId),settlementId:op.settlementAdmission!.settlementId,reason:"authorship-mismatch"}));
       return { inserted, skipped, currentMaxOriginSeq: currentMax,...(settlementRefusals.length?{settlementRefusals}:{}),

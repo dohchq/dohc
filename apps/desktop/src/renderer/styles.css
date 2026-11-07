@@ -72,7 +72,7 @@
   --dohc-ink: #f6f4ee;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
   --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
-  --dohc-scrim: rgba(0, 0, 0, 0.40);
+  --dohc-scrim: rgba(0, 0, 0, 0.65);
   --dohc-muted: #a9a599;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;

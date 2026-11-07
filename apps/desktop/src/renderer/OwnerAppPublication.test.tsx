@@ -690,10 +690,43 @@ describe("owner app publication", () => {
       expect(reach("Changes")).toBe("submit, cancelNew");
       expect(within(screen.getByTestId("app-access")).getAllByText("New")).toHaveLength(1);
       expect(screen.getByRole("button", { name: "Remove approval" })).toBeTruthy();
-      expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
       await userEvent.setup().click(approveButton());
       await waitFor(() => expect(dialog()).toBeNull());
       expect(actions("approve")).toHaveLength(1);
+    });
+
+    it.each(["Cancel", "Escape", "Close"] as const)("offers Cancel once an approved app's source changes, and %s leaves the approval as it is", async way => {
+      api.publishOwnerApp.mockImplementation(local([localRow], { revision: "e".repeat(64) }));
+      renderLocal();
+      await openLocal();
+      await ready();
+      const footer = screen.getByTestId("app-publication-dialog").querySelector("footer")!;
+      expect([...footer.querySelectorAll("button")].map(button => button.textContent)).toEqual(["Remove approval", "Cancel", "Approve changes"]);
+      // Remove approval stands alone at the left, apart from Cancel and Approve changes.
+      expect(screen.getByRole("button", { name: "Remove approval" }).nextElementSibling?.className).toBe("flex-1");
+      if (way === "Escape") fireEvent.keyDown(document, { key: "Escape" });
+      else await userEvent.setup().click(screen.getByRole("button", { name: way }));
+      expect(dialog()).toBeNull();
+      expect(actions("approve")).toEqual([]);
+      expect(actions("withdraw")).toEqual([]);
+      // Closing releases only the candidate the person did not approve.
+      expect(actions("cancel")).toEqual([{ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId }]);
+    });
+
+    it("holds Cancel, the X and Escape while Approve changes runs", async () => {
+      const approval = deferred<OwnerAppPublicationResult>();
+      const answers = local([localRow], { revision: "e".repeat(64) });
+      api.publishOwnerApp.mockImplementation(request => request.action === "approve" ? approval.promise : answers(request));
+      renderLocal();
+      await openLocal();
+      await ready();
+      await userEvent.setup().click(approveButton());
+      await waitFor(() => expect(actions("approve")).toHaveLength(1));
+      for (const name of ["Remove approval", "Cancel", "Close"]) expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(dialog()).toBeTruthy();
+      await act(async () => approval.resolve({ ...published, publicationId: localRow.publicationId, local: true }));
+      await waitFor(() => expect(dialog()).toBeNull());
     });
 
     it("marks new fields when a Collection app's changed source asks for more", async () => {

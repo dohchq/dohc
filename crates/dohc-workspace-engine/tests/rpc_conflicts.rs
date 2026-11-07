@@ -2715,3 +2715,148 @@ async fn a_kept_copy_is_listed_until_it_is_saved_beside_its_file() {
         json!({ "status": "gone" })
     );
 }
+
+/// Retain a newer save of conflict `index`'s file from `origin` on another
+/// branch, as a pull does when the save waits behind the conflict.
+fn hold_newer_save(scratch: &ScratchDir, workspace_id: &str, index: usize, origin: &str) {
+    let db = rusqlite::Connection::open(
+        dohc_engine_testkit::engine_db_path(scratch.path()).expect("engine db path"),
+    )
+    .expect("open the engine db");
+    db.busy_timeout(std::time::Duration::from_secs(5))
+        .expect("busy timeout");
+    db.execute(
+        "INSERT OR IGNORE INTO sync_identity\
+         (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES(?1,'local','epoch-1','stream-1',1)",
+        [workspace_id],
+    )
+    .expect("sync identity");
+    let envelope = json!({
+        "workspaceId": workspace_id,
+        "originId": origin,
+        "originSeq": 0,
+        "opKind": "moment.append",
+        "payload": {
+            "objectId": format!("object-{index:03}"),
+            "versionId": "main",
+            "path": format!("conflict-{index:03}.md"),
+            "momentId": format!("{origin}-moment"),
+            "beforeLatestMomentId": "moment-on-another-branch",
+        },
+        "recordedAtMs": 1,
+    })
+    .to_string();
+    db.execute(
+        "INSERT INTO relay_deferred_ops\
+         (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,\
+          retained_bytes) VALUES(?1,?2,0,'epoch-1','stream-1',?3,?4)",
+        rusqlite::params![workspace_id, origin, envelope, envelope.len() as i64],
+    )
+    .expect("retain the newer save");
+}
+
+fn waiting_version(origin: &str, index: usize) -> Value {
+    json!({
+        "code": "resolve-existing-conflict",
+        "objectId": format!("object-{index:03}"),
+        "originId": origin,
+        "originSeq": 0,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listed_conflict_names_the_newer_version_waiting_behind_it() {
+    let scratch_a = ScratchDir::new().expect("workspace A scratch");
+    let scratch_b = ScratchDir::new().expect("workspace B scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_a_id = "ws-conflicts-waiting-a";
+    let workspace_b_id = "ws-conflicts-waiting-b";
+    let handle_a = open_workspace(&transport, &scratch_a, workspace_a_id, 1).await;
+    let handle_b = open_workspace(&transport, &scratch_b, workspace_b_id, 10).await;
+    // One row per page, as `conflict_page_cursor_round_trips_without_duplicates_or_gaps`.
+    let text = "\0".repeat(20_000);
+    seed_conflicts(&transport, &handle_a, workspace_a_id, 3, &text).await;
+    seed_conflicts(&transport, &handle_b, workspace_b_id, 2, &text).await;
+    hold_newer_save(&scratch_a, workspace_a_id, 1, "computer-d");
+
+    let mut rows = Vec::new();
+    let mut after = Value::Null;
+    for id in 20..30 {
+        let mut params = json!({ "status": "open" });
+        if !after.is_null() {
+            params["afterConflictId"] = after.clone();
+        }
+        let listed = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "conflicts.list", Some(handle_a.clone()), params),
+            )
+            .await
+            .expect("list workspace A");
+        let page = listed.result.clone();
+        encode_control(&Envelope::Response(listed), &WireLimits::default())
+            .expect("the page fits the control frame");
+        rows.extend(page["conflicts"].as_array().expect("rows").iter().cloned());
+        after = page["nextAfterConflictId"].clone();
+        if after.is_null() {
+            break;
+        }
+    }
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let waiting = rows
+        .iter()
+        .map(|row| (row["id"].clone(), row["waitingVersion"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        waiting,
+        vec![
+            (json!("conflict-000"), Value::Null),
+            (json!("conflict-001"), waiting_version("computer-d", 1)),
+            (json!("conflict-002"), Value::Null),
+        ],
+        "only the conflict the save waits behind names it, on its own page"
+    );
+
+    let listed_b = call(
+        &transport,
+        &handle_b,
+        40,
+        "conflicts.list",
+        json!({ "status": "open" }),
+    )
+    .await;
+    for row in listed_b["conflicts"].as_array().expect("rows") {
+        assert_eq!(
+            row["waitingVersion"],
+            Value::Null,
+            "workspace A's held save stays in workspace A"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_frame_conflict_row_keeps_its_waiting_version() {
+    let (scratch, transport, handle, workspace_id) = fixture("waiting-over-frame").await;
+    let oversized = "x".repeat(3_000_000);
+    seed_conflicts(&transport, &handle, &workspace_id, 1, &oversized).await;
+    hold_newer_save(&scratch, &workspace_id, 0, "computer-d");
+
+    let response = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "conflicts.list",
+                Some(handle),
+                json!({ "status": "open" }),
+            ),
+        )
+        .await
+        .expect("the over-frame row degrades");
+    let row = response.result["conflicts"][0].clone();
+    assert_eq!(row["current"]["snapshot"]["text"], Value::Null);
+    assert_eq!(row["waitingVersion"], waiting_version("computer-d", 0));
+    encode_control(&Envelope::Response(response), &WireLimits::default())
+        .expect("the degraded page fits the control frame");
+}

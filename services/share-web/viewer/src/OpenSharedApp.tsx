@@ -22,6 +22,15 @@ export async function launchSharedApp(launch: AppLaunch, signal: AbortSignal): P
   document.body.append(form);form.submit();form.remove();
 }
 
+/** A refused or failed Open app. The alert icon and the error tone mark it before a person reads the words. */
+export function LaunchFailure({message, role}: {message: string; role: "alert" | "status"}) {
+  return <p className="launch-failure" role={role}>
+    <svg className="launch-failure-mark" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+    <span>{message}</span>
+  </p>;
+}
+
 export function OpenSharedApp({session, publicationId, showNotice = true}: {session: string; publicationId: string; showNotice?: boolean}) {
   const [state, setState] = useState<"idle" | "opening" | "failed">("idle");
   const active = useRef<AbortController | null>(null);
@@ -34,6 +43,6 @@ export function OpenSharedApp({session, publicationId, showNotice = true}: {sess
   return <section aria-label="Shared app">
     {showNotice && <p>This app can use external services. Its author decides where it sends data.</p>}
     <button className="handoff-button primary" onClick={() => void open()} disabled={state === "opening"}>{state === "opening" ? "Opening app" : "Open app"}</button>
-    {state === "failed" && <p role="status">Could not open the app. Try again or ask the owner for a new link.</p>}
+    {state === "failed" && <LaunchFailure role="status" message="Could not open the app. Try again or ask the owner for a new link."/>}
   </section>;
 }

@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor, type CliStreamPosition } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -44,6 +44,7 @@ type CliCommandBody =
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
   | { verb: "groups" }
   | { verb: "threads"; group: string }
+  | { verb: "watch"; cursor?: string; group?: string; thread?: string; timeoutMs: number; once: boolean }
   | { verb: "inbox" }
   | { verb: "show"; target: string; peek: boolean; before?: CliStreamPosition; limit?: number }
   | {
@@ -54,6 +55,7 @@ type CliCommandBody =
       needsDecision: boolean;
       options?: string[];
       body: string;
+      agent?: string;
     }
   | {
       verb: "reply";
@@ -65,6 +67,7 @@ type CliCommandBody =
       resolve?: string;
       choose?: string;
       body: string;
+      agent?: string;
     }
   | { verb: "react"; message: string; emoji: string }
   | {
@@ -230,6 +233,12 @@ const attachFlag: CliFlag = {
   value: "path",
   text: "Attach a workspace file. Repeat for more files.",
 };
+const chatAgentFlag: CliFlag = { name: "--agent", value: "name", text: "Record this agent name when --as-agent is set." };
+function chatAgent(input: VerbInput): { agent?: string } {
+  const agent = lastValue(input, "--agent");
+  if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name");
+  return agent === undefined ? {} : { agent };
+}
 const decisionFlags: readonly CliFlag[] = [
   { name: "--needs-decision", text: "Ask readers for a decision." },
   {
@@ -444,9 +453,29 @@ const CHAT_VERBS = {
       return { verb: "threads", group };
     },
   },
+  watch: {
+    capabilityId: "chat.inbox.read",
+    summary: "Wait for the agent's unread messages. Repeat until interrupted; never mark messages read.",
+    operands: "",
+    flags: [
+      { name: "--cursor", value: "cursor", text: "Continue from the cursor returned by watch." },
+      { name: "--group", value: "group", text: "Wait only for messages in this Group." },
+      { name: "--thread", value: "thread", text: "Wait only for messages in this thread." },
+      { name: "--timeout", value: "seconds", text: "Wait up to this many seconds per batch. The default and maximum are 25." },
+      { name: "--once", text: "Return after one batch, including an empty batch at the timeout." },
+    ],
+    parse: input => {
+      noExtraArgs(input.operands, "watch");
+      const timeout = lastValue(input, "--timeout");
+      const timeoutMs = timeout === undefined ? CHAT_WATCH_TIMEOUT_MS : integerFlag(timeout, "--timeout", { allowZero: true }) * 1_000;
+      if (timeoutMs > CHAT_WATCH_MAX_TIMEOUT_MS) fail("--timeout must be at most 25 seconds");
+      if (timeoutMs === 0 && !input.flags.has("--once")) fail("--timeout 0 requires --once");
+      return { verb: "watch", cursor: lastValue(input, "--cursor"), group: lastValue(input, "--group"), thread: lastValue(input, "--thread"), timeoutMs, once: input.flags.has("--once") };
+    },
+  },
   inbox: {
     capabilityId: "chat.inbox.read",
-    summary: "List unread threads. For an agent, also list its unread mentions.",
+    summary: "List unread threads. For an agent, also list its unread requests: @agent mentions, its DMs, and replies in threads it posted in.",
     operands: "",
     parse: ({ operands }) => {
       noExtraArgs(operands, "inbox");
@@ -481,7 +510,7 @@ const CHAT_VERBS = {
     capabilityId: "chat.post",
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
-    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags],
+    flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags, chatAgentFlag],
     freeText: true,
     notes: [stdinNote, "In a direct message, use reply instead."],
     parse: (input) => {
@@ -497,6 +526,7 @@ const CHAT_VERBS = {
         attachments: allValues(input, "--attach"),
         ...decisionFields(input),
         body,
+        ...chatAgent(input),
       };
     },
   },
@@ -510,6 +540,7 @@ const CHAT_VERBS = {
       ...decisionFlags,
       { name: "--resolve", value: "message", text: "Resolve this open decision with the reply." },
       { name: "--choose", value: "choice", text: "Pick this choice of the decision. Needs --resolve." },
+      chatAgentFlag,
     ],
     freeText: true,
     notes: [stdinNote],
@@ -531,6 +562,7 @@ const CHAT_VERBS = {
         ...(resolve ? { resolve } : {}),
         ...(choose ? { choose } : {}),
         body,
+        ...chatAgent(input),
       };
     },
   },
@@ -936,6 +968,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
       { field: "reviewToken", from: "deletePreview", path: "reviewToken" },
     ],
     notes: [
+      "Archive the Collection first with dohc dataset archive. Then run deletePreview, since archiving makes an earlier preview stale.",
       "This removes the Collection's private data and history.",
       "Set acknowledge to true.",
       "Export before deleting if you need a recovery copy. Deleted Collections cannot be restored in place.",
@@ -999,6 +1032,14 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   prepareMigration: {
     summary: "Prepare new source and migration SQL for review.",
     notes: ["Read more changed records with migrationPreviewPage.", migrationApproval],
+  },
+  askToApply: {
+    summary: "Write a prepared change to a file a person can apply from a chat.",
+    notes: [
+      "Edit the Collection's source files and write the migration SQL first. askToApply prepares that change, records what it does in a new file beside dataset.json, and discards the preparation.",
+      "Post the returned path in a chat reply with --attach and --needs-decision. The Collection's owner applies the change from that message.",
+      "note is one sentence the person reads beside the change to the code.",
+    ],
   },
   migrationPreviewPage: { summary: "Read more records a prepared migration changes." },
   prepareSchemaChange: {
@@ -1292,6 +1333,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: {
       list: {
         capabilityId: "version.list", summary: "List the versions and which one is active.", operands: "",
+        notes: ["A version's madeFromVersionId is the id of the version it was made from."],
         parse: input => { noExtraArgs(input.operands, "version list"); return { verb: "versionList" }; },
       },
       compare: {
@@ -1438,7 +1480,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

@@ -385,6 +385,18 @@ interface ChatsComposerReplyTarget {
 
 type ComposerReplyTarget = ChatsComposerReplyTarget;
 
+// The answering bar names whose question it is. Main marks this computer's
+// person with presentation.self, so a display name never makes it "your".
+// Before the question loads, the bar says "the question".
+function answeringWords(question: ChatMessageRecord | undefined, option: string | null): string {
+  const whose = question === undefined
+    ? "the"
+    : question.authorKind === "human" && question.presentation.self
+      ? "your"
+      : `${chatAuthorLabel(question)}'s`;
+  return option ? `Answering ${whose} question · ${option}` : `Answering ${whose} question`;
+}
+
 // Whether a new outgoing grant would deepen the over-limit state. Only the
 // granted lane can: an outgoing share adds a row there and nowhere else. A
 // full received lane is an inbound backlog the user did not create and cannot
@@ -508,6 +520,8 @@ export function ChatsView(props: {
   // A retry, when given, is the failure's Try again. An archive refused for
   // live editing also names the bookmark's page.
   onError: (message: string, cause?: unknown, retry?: () => void, refusedPage?: string) => void;
+  // What a change card's Apply or Undo did, when it finishes after the chat closed.
+  onNotice?: (message: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
   onBookmarkArchived?: (path: string) => void;
   // Removing a member is undoable for a while. The shell shows that notice
@@ -1624,6 +1638,7 @@ export function ChatsView(props: {
                       createdAtMs: preview.createdAtMs,
                       bodySnippet: preview.bodySnippet,
                       ...(preview.automation ? { automation: preview.automation } : {}),
+                      ...(preview.authorReported ? { authorReported: preview.authorReported } : {}),
                     }
                   : null,
                 reactions: preview?.reactions ?? [],
@@ -2301,10 +2316,7 @@ export function ChatsView(props: {
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
       if (result.resolveFailure) {
-        props.onError(
-          ipcErrorMessage(result.resolveFailure, "Your reply was sent, but the decision is still open."),
-          result.resolveFailure,
-        );
+        props.onError("Sent your reply. dohc could not mark the question answered.", result.resolveFailure);
       }
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
@@ -3703,6 +3715,12 @@ export function ChatsView(props: {
       authorLabel: chatAuthorLabel(message),
     });
   }, []);
+  const answeringMessage = useMemo(
+    () => resolveTargetMessageId === null
+      ? undefined
+      : messages.find((message) => message.id === resolveTargetMessageId),
+    [messages, resolveTargetMessageId],
+  );
 
   const liveRunId = dispatchState?.liveRunId ?? null;
   const stopThreadRun = useCallback(async () => {
@@ -4447,6 +4465,7 @@ export function ChatsView(props: {
             className="mx-auto w-full max-w-[640px] px-3 pb-3 pt-3 sm:px-4"
           >
             <ThreadMessages
+              workspaceId={workspaceId}
               nav={nav}
               channelLabel={nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, settingsAgents).label : `#${nav.channel.name}`}
               messages={messages}
@@ -4492,7 +4511,7 @@ export function ChatsView(props: {
                     <ComposerModeBar
                       testId="chats-resolving-mode"
                       cancelTestId="chats-resolving-cancel"
-                      cancelLabel="Cancel resolving decision"
+                      cancelLabel="Cancel answer"
                       onCancel={() => {
                         if (replyTarget?.messageId === resolveTargetMessageId) {
                           setReplyTarget(null);
@@ -4501,22 +4520,16 @@ export function ChatsView(props: {
                         setResolveChosenOption(null);
                       }}
                     >
-                      {resolveChosenOption
-                        ? `Answering the poll · ${resolveChosenOption}`
-                        : "Answering the poll"}
+                      {answeringWords(answeringMessage, resolveChosenOption)}
                     </ComposerModeBar>
                   ) : null}
-                  {replyTarget ? (
+                  {/* An answer is also a reply to its question, so that reply needs no bar of its own. */}
+                  {replyTarget && replyTarget.messageId !== resolveTargetMessageId ? (
                     <ComposerModeBar
                       testId="chats-replying-mode"
                       cancelTestId="chats-replying-cancel"
                       cancelLabel="Cancel reply"
-                      onCancel={() => {
-                        if (resolveTargetMessageId === replyTarget.messageId) {
-                          setResolveTargetMessageId(null);
-                        }
-                        setReplyTarget(null);
-                      }}
+                      onCancel={() => setReplyTarget(null)}
                     >
                       Replying to {replyTarget.authorLabel}
                     </ComposerModeBar>
@@ -4829,6 +4842,7 @@ export function ChatsView(props: {
             loadFileHeadings={loadFileHeadings}
             onOpenPath={props.onOpenPath}
             onError={props.onError}
+            onNotice={props.onNotice}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}

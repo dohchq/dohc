@@ -171,6 +171,7 @@ fn collection_apply_context<'a>(
         events: EngineEvents::default(),
         apply_probe: None,
         import_priority: None,
+        layer_rules: None,
     }
 }
 
@@ -829,6 +830,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
                 events: EngineEvents::default(),
                 apply_probe: None,
                 import_priority: None,
+                layer_rules: None,
             },
             &handle,
             RootBoundRun {
@@ -1034,6 +1036,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 events: EngineEvents::default(),
                 apply_probe: None,
                 import_priority: None,
+                layer_rules: None,
             },
             &handle,
             RootBoundRun {
@@ -1087,6 +1090,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 events: EngineEvents::default(),
                 apply_probe: None,
                 import_priority: None,
+                layer_rules: None,
             },
             &handle,
             RootBoundRun {
@@ -1229,6 +1233,7 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
             events: EngineEvents::default(),
             apply_probe: None,
             import_priority: None,
+            layer_rules: None,
         },
         &files.handle(),
         RootBoundRun {
@@ -1325,6 +1330,7 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
             events,
             apply_probe: None,
             import_priority: None,
+            layer_rules: None,
         },
         &files.handle(),
         RootBoundRun {

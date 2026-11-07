@@ -28,6 +28,7 @@ import {
   createWorkspaceEngineCapture,
   isVolumeSharesNewFilesCause,
   isYDocPathNotInVersionError,
+  MergeStoppedPartwayError,
   probeEngineStoreRefusal,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
@@ -326,6 +327,46 @@ describe("merge materialization order", () => {
 
       await engine.mergeVersionIntoMain(draftId);
       expect(merged).toEqual(order);
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it.each([
+    ["names a failure after a file reached Main as stopped partway", 2, true],
+    ["passes on a failure before any file reached Main", 1, false],
+  ])("%s", async (_name, failAt, partway) => {
+    const root = await createTestScratch("dohc-merge-partway-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    let merges = 0;
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge && ++merges === failAt) throw new Error("disk full");
+      return await send(request);
+    });
+    for (const path of ["a.md", "b.md"]) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text: "old\n" });
+      await write(root, path, "old\n");
+    }
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      for (const path of ["a.md", "b.md"]) {
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text: "new\n" });
+      }
+      await engine.switchVersion("main");
+
+      const failure = await engine.mergeVersionIntoMain(draftId).then(() => null, (error: unknown) => error);
+      expect(failure).toMatchObject({ message: expect.stringContaining("disk full") });
+      expect(failure instanceof MergeStoppedPartwayError).toBe(partway);
     } finally {
       await engine.stop();
     }
@@ -1820,6 +1861,39 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
     expect(requests.filter(request => request.method === "capture.flush")).toHaveLength(1);
     expect(closeWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps saves accepted before shutdown and refuses other waiting work and later saves", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const person = { kind: "human", humanId: "local-person" } as const;
+    const admitted = deferred<void>();
+    const release = deferred<void>();
+    try {
+      const kept = engine.writeAuthoredFile(join(root, "kept.md"), "kept\n", person, {
+        beforeWrite: async () => {
+          admitted.resolve();
+          await release.promise;
+        },
+      }).catch((error: unknown) => error);
+      await admitted.promise;
+      // Both wait behind the running save when quit starts.
+      const count = engine.compareVersionsChangedCount("main").catch((error: unknown) => error);
+      const queued = engine.writeAuthoredFile(join(root, "queued.md"), "queued\n", person).catch((error: unknown) => error);
+      engine.beginShutdown();
+      const late = engine.writeAuthoredFile(join(root, "late.md"), "late\n", person).catch((error: unknown) => error);
+      release.resolve();
+      expect(await kept).toMatchObject({ materializeOutcome: "applied" });
+      expect(await count, "Work that isn't a save still stops at quit").toMatchObject({ name: "AbortError" });
+      expect(await queued, "A save queued before quit still lands").toMatchObject({ materializeOutcome: "applied" });
+      expect(await late).toMatchObject({ name: "AbortError" });
+      expect(await readFile(join(root, "kept.md"), "utf8")).toBe("kept\n");
+      expect(await readFile(join(root, "queued.md"), "utf8")).toBe("queued\n");
+      expect(existsSync(join(root, "late.md"))).toBe(false);
+    } finally {
+      release.resolve();
+      await engine.stop();
+    }
   });
 
   it("closes both daemon stores without restarting convergence after shutdown begins", async () => {
@@ -3434,7 +3508,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `object-${index}`, path: `${index}.md`, text: "recorded before pull" });
       await write(root, `${index}.md`, "recorded before pull");
     }
-    // Like sync.pull, record the entire page before its disk projection.
+    // Like sync.applyPull, record the entire page before its disk projection.
     for (let index = 0; index < 500; index++) {
       const path = `${index}.md`;
       if (index < writeCount) loopback.seedTextFile({ workspace: WORKSPACE_ID, objectId: `object-${index}`, path, text: "incoming", origin: "sync" });

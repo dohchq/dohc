@@ -19,6 +19,7 @@ import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client
 import { YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
 import * as Y from "yjs";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { windowShowsWorkspace } from "../window/workspaceWindowReuse";
 
 import {
   AcknowledgeEngineYDocLineageReplacementPayload,
@@ -115,6 +116,7 @@ interface EngineYDocWorkspace {
 
 export interface EngineYDocRendererSession {
   readonly workspaceId: string;
+  readonly attachmentId: symbol;
   readonly generation: number;
   isCurrent(): boolean;
 }
@@ -123,6 +125,7 @@ interface EngineYDocSessionIpcOptions {
   sessionFor: (
     sender: EngineYDocIpcSender,
   ) => EngineYDocRendererSession | undefined;
+  authorities: Parameters<typeof windowShowsWorkspace>[2];
   acquireWorkspace: (workspaceId: string) => {
     workspace: EngineYDocWorkspace;
     assertCurrent(): void;
@@ -466,6 +469,7 @@ class DocumentMutationReservations {
 
 class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #sessionFor: EngineYDocSessionIpcOptions["sessionFor"];
+  readonly #authorities: EngineYDocSessionIpcOptions["authorities"];
   readonly #acquireWorkspace: EngineYDocSessionIpcOptions["acquireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
@@ -489,6 +493,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   constructor(options: EngineYDocSessionIpcOptions) {
     this.#sessionFor = options.sessionFor;
+    this.#authorities = options.authorities;
     this.#acquireWorkspace = options.acquireWorkspace;
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
@@ -539,6 +544,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       !rendererSession.isCurrent()
     ) {
       return unavailableOpen();
+    }
+    // Only a window that shows the workspace as it is open now opens its
+    // documents. A window left from before Forget shows them as unavailable,
+    // not in the plain editor, because it can't save them.
+    if (!windowShowsWorkspace(rendererSession, input.workspaceId, this.#authorities)) {
+      return unavailableOpen({ documentUnavailable: true });
     }
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
@@ -1324,7 +1335,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   async waitForAdmission(sender: EngineYDocIpcSender, payload: OpenPayload): Promise<boolean> {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const renderer = this.#sessionFor(sender);
-    if (!renderer?.isCurrent() || renderer.workspaceId !== input.workspaceId || sender.isDestroyed()) return false;
+    if (!renderer?.isCurrent() || !windowShowsWorkspace(renderer, input.workspaceId, this.#authorities) || sender.isDestroyed()) return false;
     const authority = this.#acquireWorkspace(input.workspaceId);
     const waits = this.#admissionWaits.get(sender) ?? new Map<string, SharedAdmissionWait>();
     // Bound IPC waits too, including requests that have not reached relay authentication.

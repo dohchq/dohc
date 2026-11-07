@@ -677,6 +677,9 @@ export interface SyncRelayStorage {
   retirementJournalEvidence(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, deliveryIds: readonly string[]):
     {receipts: import("@dohc/live-session-contract/live-update-admission").LiveUpdateReceipt[]; absent: string[]};
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  readPushSubscription(installationId: string): import("./pushSubscriptions").PushSubscriptionRow | null;
+  bindPushSubscription(input: import("./pushSubscriptions").BindPushSubscriptionInput): import("./pushSubscriptions").PushSubscriptionRow;
+  removePushSubscription(input: {installationId: string; userId: string}): void;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
@@ -931,6 +934,17 @@ export interface SyncRelayStorage {
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
   appendLinkChatPost(input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1]): import("./linkChat").AppendLinkChatPostResult;
+  registerAgentClient(input: Parameters<typeof import("./agentConnections").registerAgentClient>[1]): boolean;
+  getAgentClient(clientId: string): import("./agentConnections").AgentClientRow | null;
+  beginAgentAuthorization(input: Parameters<typeof import("./agentConnections").beginAgentAuthorization>[1]): boolean;
+  readAgentAuthorization(requestHash: string, nowMs: number): import("./agentConnections").AgentAuthorizationRow | null;
+  decideAgentAuthorization(input: Parameters<typeof import("./agentConnections").decideAgentAuthorization>[1]): import("./agentConnections").AgentAuthorizationDecision;
+  redeemAgentAuthorizationCode(input: Parameters<typeof import("./agentConnections").redeemAgentAuthorizationCode>[1]): import("./agentConnections").AgentTokenGrantResult;
+  refreshAgentTokens(input: Parameters<typeof import("./agentConnections").refreshAgentTokens>[1]): import("./agentConnections").AgentTokenGrantResult;
+  authenticateAgentAccessToken(accessTokenHash: string, nowMs: number): import("./agentConnections").AgentConnectionRow | null;
+  recordAgentConnectionAction(connectionId: string, atMs: number): void;
+  listAgentConnections(input: Parameters<typeof import("./agentConnections").listAgentConnections>[1]): import("./agentConnections").AgentConnectionPage;
+  disconnectAgentConnection(input: Parameters<typeof import("./agentConnections").disconnectAgentConnection>[1]): import("./agentConnections").AgentConnectionRow | null;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
@@ -1317,6 +1331,7 @@ export interface SqliteDb {
 }
 
 export interface OpenSyncRelayStorageOptions {
+  pushConfigured?: boolean;
   liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;

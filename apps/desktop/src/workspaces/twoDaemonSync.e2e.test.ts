@@ -33,10 +33,11 @@ import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/auto
 import { runCollectionAutomation } from "@dohc/automation-executor/collection-automation-run";
 import { undoCollectionAutomationRuns } from "../../../../packages/automation-executor/src/collectionAutomationUndo";
 import { createAutomationTargets } from "../../../../packages/automation-executor/src/automationTargets";
-import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
+import { openLiveDaemonWorkspace, type CloseStep } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
+import { WILL_QUIT_BUDGET_MS } from "../shutdownBudgets";
 import type { EngineRelayWorkspaceClient } from "./engineRelayClient";
 import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
@@ -121,7 +122,11 @@ interface LiveDaemonCapture {
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
   // What the desktop does first at quit.
   beginShutdown(): void;
-  close(): Promise<void>;
+  close(step?: CloseStep): Promise<void>;
+}
+
+function pullCaptured(relay: EngineRelayWorkspaceClient, capture: WorkspaceEngineCapture) {
+  return relay.pull(apply => capture.runRelaySync(apply));
 }
 
 async function pushUntilDrained(relay: EngineRelayWorkspaceClient) {
@@ -168,11 +173,11 @@ async function openLiveDaemonCapture(input: {
       capture.beginShutdown();
       workspace.sessions.beginShutdown();
     },
-    close: async () => {
+    close: async (step: CloseStep = (_name, work) => work) => {
       try {
-        await capture.stop();
+        await step("capture.stop", capture.stop());
       } finally {
-        await workspace.close();
+        await workspace.close(step);
       }
     },
   };
@@ -237,11 +242,11 @@ async function openJoinedDaemonCapture(input: {
       capture.beginShutdown();
       workspace.sessions.beginShutdown();
     },
-    close: async () => {
+    close: async (step: CloseStep = (_name, work) => work) => {
       try {
-        await capture.stop();
+        await step("capture.stop", capture.stop());
       } finally {
-        await workspace.close();
+        await workspace.close(step);
       }
     },
   };
@@ -293,9 +298,7 @@ async function pullAndExpect(
   contents: string | Buffer,
   contentKind?: "text" | "binary",
 ): Promise<void> {
-  const pull = await daemon.capture.runRelaySync((materializePage) =>
-    daemon.relay.pull(materializePage),
-  );
+  const pull = await daemon.relay.pull(apply => daemon.capture.runRelaySync(apply));
   expect(pull.applied).toBeGreaterThan(0);
   if (contentKind !== undefined) {
     expect(pull.fastForwardedPaths).toContainEqual({
@@ -591,7 +594,7 @@ it.skipIf(engine.missing)(
       });
       expect(JSON.stringify(relayServer.diagnostics())).not.toContain("invalid-schema");
       capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
-      await capture.runRelaySync(page => relay.pull(page));
+      await pullCaptured(relay, capture);
       await relay.push();
       const assertRecipientState = async () => {
         const markdown = await readFile(join(rootB, path), "utf8");
@@ -615,7 +618,7 @@ it.skipIf(engine.missing)(
         const headers = { authorization: "Bearer test:relation-recipient" };
         const digest = createHash("sha256").update(cleared).digest("hex");
         await expect.poll(async () => {
-          await capture!.runRelaySync(page => relay.pull(page));
+          await relay.pull(apply => capture!.runRelaySync(apply));
           await relay.push();
           const log = await fetch(`${proxy.origin}/sync/shares/${shareId}/log?since=0&limit=500`, { headers });
           expect(log.status).toBe(200);
@@ -627,7 +630,7 @@ it.skipIf(engine.missing)(
         expect(blob.status).toBe(200);
         expect(await blob.text()).toBe(cleared);
         await expect.poll(async () => {
-          await recipient!.capture.runRelaySync(page => recipient!.relay.pull(page));
+          await recipient!.relay.pull(apply => recipient!.capture.runRelaySync(apply));
           const markdown = await readFile(join(rootB, path), "utf8");
           const query = await recipient!.queryCollectionRecords({ collectionPath: "tasks", resolveRelations: true });
           const record = query.records.find(record => record.id === sourceId);
@@ -669,7 +672,7 @@ it.skipIf(engine.missing)(
     const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
-    const pull = (daemon: LiveDaemonCapture) => daemon.capture.runRelaySync(page => daemon.relay.pull(page));
+    const pull = (daemon: LiveDaemonCapture) => daemon.relay.pull(apply => daemon.capture.runRelaySync(apply));
     const inspect = async (daemon: LiveDaemonCapture, root: string) => {
       const rows = (await daemon.capture.listOpenConflictsPage()).conflicts;
       const moments = (await daemon.capture.listMoments({ limit: 100 })).moments.filter(moment => moment.path === path);
@@ -887,7 +890,7 @@ it.skipIf(engine.missing).each([
     delivery = startServerOwnerDelivery({workspaceIds: () => [workspaceId], attemptTimeoutMs: 60_000, retryDelayMs: 250,
       async runPass(_workspaceId, _index, signal) {
         const result = await pass(signal);
-        await capture!.runRelaySync(materializePage => relay.pull(materializePage));
+        await relay.pull(apply => capture!.runRelaySync(apply));
         return {documentCount: 1, acknowledged: result === "acknowledged"};
       },
       onError: error => recordError("owner delivery", error)});
@@ -1024,7 +1027,7 @@ it.skipIf(engine.missing).each([
         }, {timeout: REAL_DAEMON_DEADLINE_MS}).toEqual(["settled"]);
         await expect.poll(async () => {
           await pass(signal);
-          await capture!.runRelaySync(materializePage => relay.pull(materializePage));
+          await relay.pull(apply => capture!.runRelaySync(apply));
           await capture!.flush();
           return readFile(join(rootA, path), "utf8");
         }, {timeout: 120_000}).toBe(markdown).catch(error => {
@@ -1042,7 +1045,7 @@ it.skipIf(engine.missing).each([
     await expect.poll(async () => {
       await capture!.flush();
       await pushUntilDrained(relay);
-      await peer!.capture.runRelaySync(materializePage => peer!.relay.pull(materializePage));
+      await peer!.relay.pull(apply => peer!.capture.runRelaySync(apply));
       return readFile(join(rootB, path), "utf8");
     }, {timeout: 120_000}).toBe(markdown);
     expect(await source.sessions.run(source.workspace, async ({client, workspace}) =>
@@ -1203,7 +1206,7 @@ it.skipIf(engine.missing).each([
           finally {db.close();}
         },{timeout:120_000}).toBe(0);
         await expect.poll(async () => {
-          await capture!.flush();await pushUntilDrained(relay);await peer!.capture.runRelaySync(page=>peer!.relay.pull(page));
+          await capture!.flush();await pushUntilDrained(relay);await peer!.relay.pull(apply => peer!.capture.runRelaySync(apply));
           return readFile(join(rootB,path),"utf8");
         },{timeout:120_000}).toContain("Name: Deferred edit 31");
         return;
@@ -1226,7 +1229,7 @@ it.skipIf(engine.missing).each([
         expect(await readFile(join(rootA, path), "utf8")).toContain(`Name: ${value}`);
         await expect.poll(async () => {
           await pushUntilDrained(relay);
-          await peer!.capture.runRelaySync(page => peer!.relay.pull(page));
+          await peer!.relay.pull(apply => peer!.capture.runRelaySync(apply));
           return readFile(join(rootB, path), "utf8");
         }, {timeout: 120_000}).toContain(`Name: ${value}`);
       };
@@ -1259,7 +1262,7 @@ it.skipIf(engine.missing).each([
       await expect.poll(async () => readFile(join((await hostStore())!, path), "utf8"), {timeout: 10_000}).toContain("Name: Local after stop");
       // The peer keeps the stopped edit.
       await expect.poll(async () => {
-        await peer!.capture.runRelaySync(page => peer!.relay.pull(page));
+        await peer!.relay.pull(apply => peer!.capture.runRelaySync(apply));
         return readFile(join(rootB, path), "utf8");
       }, {timeout: 120_000}).toContain("Name: Local after stop");
       // A relay restart starts the session host from its store, and the document is ready again.
@@ -1516,7 +1519,7 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
         await pullAndExpect(peer, rootB, record.path, await readFile(join(rootA, record.path)), "text");
         expect((await peer.capture.listMoments({ limit: 100 })).moments.some(moment => moment.path === record.path)).toBe(true);
-        const echo = await capture.runRelaySync(materializePage => relay.pull(materializePage));
+        const echo = await pullCaptured(relay, capture);
         expect(echo.sharingDeclined).toEqual([]);
         expect(await owner.sessions.run(owner.workspace, ({ client, workspace }) =>
           new WorkspaceDaemonRequester(client).request("sync.refusalNotices", { workspaceId }, { workspace }),
@@ -1606,12 +1609,12 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
 
       daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
       const receiver = daemonB;
-      const pull = await receiver.capture.runRelaySync(materializePage => receiver.relay.pull(materializePage));
+      const pull = await receiver.relay.pull(apply => receiver.capture.runRelaySync(apply));
       expect(pull.fastForwardedPaths.filter(({ path }) => path.startsWith("notes/"))
         .map(({ operation, path }) => [operation, path])).toEqual([["delete", "notes/before.md"], ["write", "notes/after.md"]]);
       expect(await readdir(join(rootB, "notes"))).toEqual(["after.md"]);
       expect(await readFile(join(rootB, "notes", "after.md"), "utf8")).toBe("body\n");
-      const again = await receiver.capture.runRelaySync(materializePage => receiver.relay.pull(materializePage));
+      const again = await receiver.relay.pull(apply => receiver.capture.runRelaySync(apply));
       expect(again).toMatchObject({ fetched: 0, applied: 0, fastForwardedPaths: [] });
     } finally {
       await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
@@ -1711,6 +1714,200 @@ it.skipIf(engine.missing)(
   120_000,
 );
 
+// The close follows the desktop quit (appLifecycle.ts and main.ts's shutdown):
+// beginEngineShutdown, then the workspace's capture close, then closeRelay and
+// stopEngine.
+describe.skipIf(engine.missing)("Quit while a save is in progress", () => {
+  // `running` names the close steps still awaited.
+  function quitLikeTheDesktop(device: LiveDaemonCapture) {
+    const running = new Set<string>();
+    const step: CloseStep = (name, work) => {
+      running.add(name);
+      const done = () => { running.delete(name); };
+      work.then(done, done);
+      return work;
+    };
+    device.beginShutdown();
+    const done = (async () => {
+      await step("capture.settleAndCloseAllLiveSessions", device.capture.settleAndCloseAllLiveSessions()).catch(() => undefined);
+      await device.close(step).catch(() => undefined);
+    })();
+    return { running, done };
+  }
+
+  // Resolves "closed", or names the steps still awaited at `limitMs`.
+  async function closedWithin(quit: ReturnType<typeof quitLikeTheDesktop>, limitMs: number): Promise<string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([quit.done.then(() => "closed"), new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve(`still waiting on ${[...quit.running].join(", ") || "an unlabelled step"}`), limitMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  // The app exits when its quit budget ends, so accepted work has to land inside it.
+  async function insideQuitBudget<T>(work: Promise<T>, quitStarted: number): Promise<T | string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([work, new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve("past the quit budget"), Math.max(0, WILL_QUIT_BUDGET_MS - (performance.now() - quitStarted)));
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  // Quitting faster must never drop accepted work: a write the capture admitted
+  // before quit holds the close until it lands.
+  it("holds quit for a local write admitted before it, and keeps the write", async () => {
+    const workspaceId = "two-daemon-quit-held-write";
+    const root = await createTestScratch("dohc-quit-held-write-");
+    const relayRoot = await createTestScratch("dohc-quit-held-write-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
+    const person = { kind: "human", humanId: "local-person" } as const;
+    const admitted = deferred();
+    const release = deferred();
+    let daemon: LiveDaemonCapture | null = null;
+    let quit: ReturnType<typeof quitLikeTheDesktop> | undefined;
+    try {
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+      await daemon.relay.claim();
+      await daemon.chats.ensureGeneralChannel({ workspaceId });
+      const written = daemon.capture.writeAuthoredFile(join(root, "kept.md"), "kept\n", person, {
+        beforeWrite: async () => {
+          admitted.resolve();
+          await release.promise;
+        },
+      }).then(() => "written", (error: unknown) => error);
+      await admitted.promise;
+      const quitStarted = performance.now();
+      quit = quitLikeTheDesktop(daemon);
+      daemon = null;
+      expect(await closedWithin(quit, 1_000), "Quit waits for the admitted write").toMatch(/^still waiting on /);
+      release.resolve();
+      expect(await insideQuitBudget(written, quitStarted), "The admitted write lands inside the quit budget").toBe("written");
+      expect(await closedWithin(quit, REAL_DAEMON_DEADLINE_MS)).toBe("closed");
+
+      daemon = await openLiveDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+      await waitForPathMoments(daemon.capture, "kept.md", 1);
+      expect(await readFile(join(root, "kept.md"), "utf8")).toBe("kept\n");
+    } finally {
+      release.resolve();
+      await quit?.done;
+      await daemon?.close();
+      await relay.stop();
+    }
+  }, 120_000);
+});
+
+// Local work remains available while either kind of pull waits for the server.
+describe.skipIf(engine.missing)("History while a pull waits on a server that does not answer (#2709)", () => {
+  it.each(["bootstrap pull", "pull after a push"] as const)(
+    "writes, opens a document, and lists History while the %s waits",
+    async (pass) => {
+      const workspaceId = `two-daemon-held-pull-${pass.replaceAll(" ", "-")}`;
+      const token = `test:${workspaceId}`;
+      const rootA = await createTestScratch("dohc-held-pull-a-");
+      const relayRoot = await createTestScratch("dohc-held-pull-relay-");
+      const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+      const connection = { baseUrl: relay.baseUrl, token };
+      const held = new Set<Socket>();
+      const silent = createServer((socket) => {
+        held.add(socket);
+        socket.on("error", () => undefined);
+      });
+      const reached = once(silent, "connection") as Promise<[Socket]>;
+      // The silent server takes the relay's port, so the next request waits.
+      let holding: Promise<void> | undefined;
+      const holdRelay = () => holding ??= (async () => {
+        await relay.stop();
+        silent.listen(relay.port, "127.0.0.1");
+        await once(silent, "listening");
+      })();
+      let daemonA: LiveDaemonCapture | null = null;
+      let daemonB: LiveDaemonCapture | null = null;
+      let sync: CloudSyncEngine | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let pulling = false;
+      const pushed: number[] = [];
+      try {
+        daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+        await daemonA.relay.claim();
+        await daemonA.chats.ensureGeneralChannel({ workspaceId });
+        await pushUntilDrained(daemonA.relay);
+        await writeAndCapture(daemonA, rootA, "notes.md", "body\n");
+        let device = daemonA, root = rootA;
+        if (pass === "bootstrap pull") {
+          expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+          root = await createTestScratch("dohc-held-pull-b-");
+          device = daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: root, relay: connection });
+          await holdRelay();
+        }
+        const operations = device.relay;
+        sync = createRelaySyncEngine({
+          rootDir: root, relay: connection, capture: device.capture, onChange: () => undefined,
+          joinBootstrap: pass === "bootstrap pull",
+          // The push reaches the working relay; only the pull meets the silent server.
+          operations: { ...operations, push: async () => {
+            const result = await operations.push();
+            pushed.push(result.pushed);
+            await holdRelay();
+            return result;
+          } },
+          pullStarting: () => {
+            pulling = true;
+            return () => { pulling = false; };
+          },
+        });
+        void sync.start().catch(() => undefined);
+        const [socket] = await reached;
+        await once(socket, "data");
+        await vi.waitFor(() => expect(pulling).toBe(true), { timeout: REAL_DAEMON_DEADLINE_MS });
+        if (pass === "bootstrap pull") expect(pushed).toEqual([]);
+        else expect(pushed[0]).toBeGreaterThan(0);
+
+        // The measured wait: how long History takes to list, up to 15 s.
+        const started = performance.now();
+        const history = device.capture.listMoments({ limit: 1 }).then(() => "listed", (error: unknown) => error);
+        const outcome = await Promise.race([history, new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve("still waiting"), 15_000);
+        })]);
+        const waited = Math.round(performance.now() - started);
+        console.log(`#2709 ${pass}: History ${String(outcome)} after ${waited} ms, pull ${pulling ? "still waiting" : "ended"}`);
+        expect(pulling, "The pull ended before History was checked").toBe(true);
+        expect(outcome, "History waited on the pending pull").toBe("listed");
+        expect(waited, "History waited on the pending pull").toBeLessThan(2_000);
+        clearTimeout(timer);
+        const localWork = (async () => {
+          await device.capture.writeAuthoredFile(join(root, "local.txt"), "local work\n",
+            { kind: "human", humanId: "local-person" });
+          const session = await device.capture.openYDocSession({
+            path: "local.txt", contentKind: "plaintext", onRemoteUpdate: () => undefined,
+          });
+          await session.close();
+          expect(await readFile(join(root, "local.txt"), "utf8")).toBe("local work\n");
+          expect((await device.capture.listMoments({ limit: 20 })).moments.some(moment => moment.path === "local.txt")).toBe(true);
+        })().then(() => "completed", (error: unknown) => error);
+        const localOutcome = await Promise.race([localWork, new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve("still waiting"), 2_000);
+        })]);
+        expect(localOutcome, "Local work waited on the pending fetch").toBe("completed");
+        expect(pulling).toBe(true);
+      } finally {
+        clearTimeout(timer);
+        // Shutdown rejects the held pull, so the pass and the chain end.
+        daemonB?.beginShutdown();
+        daemonA?.beginShutdown();
+        for (const socket of held) socket.destroy();
+        if (silent.listening) silent.close();
+        await sync?.stop();
+        await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+        await relay.stop();
+      }
+    },
+    120_000,
+  );
+});
+
 // A rename that changes only case reaches a peer as a delete of the old
 // spelling and a write of the new one. On a disk that ignores case, as macOS
 // and Windows do by default, writing `Notes.md` rewrites the existing
@@ -1745,9 +1942,7 @@ it.skipIf(engine.missing)(
       await finish(true);
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       const receiver = daemonB;
-      const pull = await receiver.capture.runRelaySync((materializePage) =>
-        receiver.relay.pull(materializePage),
-      );
+      const pull = await receiver.relay.pull(apply => receiver.capture.runRelaySync(apply));
 
       expect((await readdir(rootB)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
       expect(await readFile(join(rootB, "Notes.md"), "utf8")).toBe("body\n");
@@ -1810,12 +2005,8 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
 
       // Both editors remain live. Each pull may persist the foreign base, but
       // it must not arbitrate behind the editor or change either projection.
-      await daemonA.capture.runRelaySync((materializePage) =>
-        daemonA!.relay.pull(materializePage),
-      );
-      await daemonB.capture.runRelaySync((materializePage) =>
-        daemonB!.relay.pull(materializePage),
-      );
+      await pullCaptured(daemonA.relay, daemonA.capture);
+      await pullCaptured(daemonB.relay, daemonB.capture);
       expect(await readFile(join(rootA, path), "utf8")).toBe(textA);
       expect(await readFile(join(rootB, path), "utf8")).toBe(textB);
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
@@ -1848,9 +2039,7 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
       expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       await pullAndExpect(daemonA, rootA, path, chosen);
       // Advance B's cursor past its own resolution before reopening editors.
-      await daemonB.capture.runRelaySync((materializePage) =>
-        daemonB!.relay.pull(materializePage),
-      );
+      await pullCaptured(daemonB.relay, daemonB.capture);
 
       // Reopen both editors to inspect the daemon's chosen CRDT lineage,
       // then prove it accepts edits from either machine without another conflict.
@@ -1868,15 +2057,11 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
         );
         await typeAtEnd(editorA, "continued on A\n");
         expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
-        await daemonB.capture.runRelaySync((materializePage) =>
-          daemonB!.relay.pull(materializePage),
-        );
+        await pullCaptured(daemonB.relay, daemonB.capture);
         await vi.waitFor(() => expect(shown(editorB)).toBe(afterA), arrival);
         await typeAtEnd(editorB, "continued on B\n");
         expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
-        await daemonA.capture.runRelaySync((materializePage) =>
-          daemonA!.relay.pull(materializePage),
-        );
+        await pullCaptured(daemonA.relay, daemonA.capture);
         await vi.waitFor(() => expect(shown(editorA)).toBe(finalText), arrival);
         expect(shown(editorB)).toBe(finalText);
       } finally {
@@ -1897,9 +2082,7 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
         rootPath: rootC,
         relay: { baseUrl: relay.baseUrl, token },
       });
-      await daemonC.capture.runRelaySync((materializePage) =>
-        daemonC!.relay.pull(materializePage),
-      );
+      await pullCaptured(daemonC.relay, daemonC.capture);
       expect(await readFile(join(rootC, path), "utf8")).toBe(finalText);
       expect(await daemonC.capture.countOpenConflicts()).toBe(0);
       expect(await readdir(join(rootC, "notes"))).toEqual(["shared.txt"]);
@@ -1932,7 +2115,7 @@ it.skipIf(engine.missing).each([
     const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
-    const pull = (daemon: LiveDaemonCapture) => daemon.capture.runRelaySync(page => daemon.relay.pull(page));
+    const pull = (daemon: LiveDaemonCapture) => daemon.relay.pull(apply => daemon.capture.runRelaySync(apply));
     try {
       daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
       await daemonA.relay.claim();
@@ -2022,9 +2205,7 @@ it.skipIf(engine.missing)(
     let daemonB: LiveDaemonCapture | null = null;
     const editors: OpenEditor[] = [];
     const pull = (daemon: LiveDaemonCapture) =>
-      daemon.capture.runRelaySync((materializePage) =>
-        daemon.relay.pull(materializePage),
-      );
+      daemon.relay.pull(apply => daemon.capture.runRelaySync(apply));
     try {
       daemonA = await openLiveDaemonCapture({
         workspaceId,
@@ -2209,9 +2390,7 @@ it.skipIf(engine.missing)(
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
 
-      await daemonA.capture.runRelaySync((materializePage) =>
-        daemonA!.relay.pull(materializePage),
-      );
+      await pullCaptured(daemonA.relay, daemonA.capture);
       const conflictPage = await daemonA.capture.listOpenConflictsPage();
       const conflict = conflictPage.conflicts.find((entry) => entry.path === path);
       expect(conflict).toBeDefined();
@@ -2226,9 +2405,7 @@ it.skipIf(engine.missing)(
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
       expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
 
-      await daemonB.capture.runRelaySync((materializePage) =>
-        daemonB!.relay.pull(materializePage),
-      );
+      await pullCaptured(daemonB.relay, daemonB.capture);
       expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
 
@@ -2597,12 +2774,12 @@ it.skipIf(engine.missing).each([false, true])(
       try {
         if (peerTypedFirst) await typeAtEnd(peerEditor, "peer before artifact\n");
         await sourceSession.close({ settle: false });
-        await daemonA.capture.runRelaySync((page) => daemonA!.relay.pull(page));
+        await pullCaptured(daemonA.relay, daemonA.capture);
         const sourceEditor = await openEditor(daemonA, path);
         try {
           await typeAtEnd(sourceEditor, "origin after artifact\n");
           expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
-          await daemonB.capture.runRelaySync((page) => daemonB!.relay.pull(page));
+          await pullCaptured(daemonB.relay, daemonB.capture);
           await vi.waitFor(() => expect(shown(peerEditor)).toContain("origin after artifact\n"), {
             timeout: REAL_DAEMON_DEADLINE_MS,
           });
@@ -2616,7 +2793,7 @@ it.skipIf(engine.missing).each([false, true])(
       } finally {
         await peerEditor.session.close();
       }
-      await daemonB.capture.runRelaySync((page) => daemonB!.relay.pull(page));
+      await pullCaptured(daemonB.relay, daemonB.capture);
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
       expect(await readFile(join(rootB, path), "utf8")).toContain("peer after artifact\n");
     } finally {
@@ -2650,7 +2827,7 @@ it.skipIf(engine.missing).each(["H2b", "H2c"] as const)(
     const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
     let a: LiveDaemonCapture | null = null;
     let b: LiveDaemonCapture | null = null;
-    const pull = (device: LiveDaemonCapture) => device.capture.runRelaySync(page => device.relay.pull(page));
+    const pull = (device: LiveDaemonCapture) => device.relay.pull(apply => device.capture.runRelaySync(apply));
     const rounds = async () => {
       for (let i = 0; i < 3; i++) {
         await pushUntilDrained(a!.relay);
@@ -2744,7 +2921,7 @@ it.skipIf(engine.missing)(
       const connection = {baseUrl: relay.baseUrl, token: `test:${workspaceId}`};
       let a: LiveDaemonCapture | null = null;
       let b: LiveDaemonCapture | null = null;
-      const pull = (device: LiveDaemonCapture) => device.capture.runRelaySync(page => device.relay.pull(page));
+      const pull = (device: LiveDaemonCapture) => device.relay.pull(apply => device.capture.runRelaySync(apply));
       type ExpectedRow = {path: string; current: {exists: boolean}; incoming: {exists: boolean}};
       const rounds = async (expectedA: ExpectedRow[] = [], expectedB: ExpectedRow[] = []) => {
         for (let i = 0; i < 3; i++) {
@@ -2939,9 +3116,7 @@ it.skipIf(engine.missing)(
         rootPath: rootB,
         relay: relayConnection,
       });
-      await daemonB.capture.runRelaySync((materializePage) =>
-        daemonB!.relay.pull(materializePage),
-      );
+      await pullCaptured(daemonB.relay, daemonB.capture);
       const editorB = await openEditor(daemonB, path);
       editors.push(editorB);
       expect(shown(editorB)).toBe("Starting together.\n");
@@ -3042,7 +3217,7 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
     await hosted.settleNow();
     await pushUntilDrained(relay);
     peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection, holdEditorResync: true });
-    await peer.capture.runRelaySync(materialize => peer!.relay.pull(materialize));
+    await pullCaptured(peer.relay, peer.capture);
     const lease = await peer.capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
     expect(lease.objectId).toBe(binding.objectId);
     expect(lease.lineageClaimId).toBe(binding.lineageClaimId);
@@ -3061,9 +3236,9 @@ it.skipIf(engine.missing)("keeps mixed accepted text for Stop and restore on a s
         });
         expect(applied.result).toMatchObject({ status: "applied" });
       }
-      await capture.runRelaySync(materialize => relay.pull(materialize));
+      await pullCaptured(relay, capture);
       await pushUntilDrained(relay);
-      await peer.relay.pull(async () => undefined);
+      await peer.relay.pull(async (apply) => apply(async () => undefined));
       const parked = new DatabaseSync(join(rootB, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
       try {
         expect((parked.prepare("SELECT count(*) AS n FROM ydoc_deferred_updates").get() as { n: number }).n,
@@ -3157,7 +3332,8 @@ describe("the move guard over a real relay and live host", () => {
   }
 
   // The link holder's edit is accepted, saved and published; nothing on the
-  // device has pulled it. Times only the move. This computer owns no page it
+  // device has pulled it. Times only the move, and checks the guard's own wait
+  // apart from the move's other work. This computer owns no page it
   // moves here: a bound move is refused (editThenRefusedMove).
   // `unbound` decides what a guarded move must show:
   // - backlog: its pull either carries the edit, or answers retry later and
@@ -3195,10 +3371,11 @@ describe("the move guard over a real relay and live host", () => {
       return false;
     }
     expect(device.targetedPasses()).toBe(requested + 1);
-    const carriedInTime = elapsedMs <= MOVE_ACCEPTED_EDITS_WAIT_MS && moved !== undefined && moved.includes(text);
+    // The guard's wait, not the whole move: the rename and its capture come after it.
+    const carriedInTime = guardPulls.endedInWait && moved !== undefined && moved.includes(text);
     if (!input.unbound) throw new Error("A guarded move here says what its pull must show.");
-    if (input.unbound === "drained" && elapsedMs > MOVE_ACCEPTED_EDITS_WAIT_MS) {
-      throw new Error(`The move ran over the wait: ${Math.round(elapsedMs)} ms. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
+    if (input.unbound === "drained" && !guardPulls.endedInWait) {
+      throw new Error(`The guard's wait ran out before its catch-up ended, ${Math.round(elapsedMs)} ms into the move. The guard's pulls: ${guardPulls.pulls.map(describePull).join(", ") || "none"}.`);
     }
     expect(guardPulls.shared, "another pass was running when the guard's catch-up began").toBe(false);
     if (pull === undefined) throw new Error(`The guard's catch-up ran no pull, ${Math.round(elapsedMs)} ms into the move.`);
@@ -3317,13 +3494,18 @@ describe("the move guard over a real relay and live host", () => {
   // left before each edit, and pulls nothing between the edit and the move.
   it.skipIf(engine.missing)("carries the accepted edit on an unbound device whose pull has nothing else to do", async () => {
     const fixture = await openLiveMoveFixture({ workspaceId: "guard-carries-unbound", compiledRelayMain, engineExecutable: engine.require(),
-      pages: ["peer-alone", "peer-slow"], peer: true });
+      pages: ["peer-alone", "peer-slow", "warm-up"], peer: true });
     try {
       const { peer } = fixture;
+      // Starts the peer's Markdown reader before the first move: its cold start is a separate, known slowness (#3356), not the guard's wait.
+      const warmUp = async () => {
+        await drain(peer);
+        await fixture.waitPublished("warm-up", await fixture.edit("warm-up", marker("warm-up")));
+        await drain(peer);
+      };
       const recorded = timings.length;
       const carriedInTime = [
-        await editThenMove(fixture, peer, { name: "peer-alone", guarded: true, proxyDelayMs: 0, unbound: "drained",
-          beforeEdit: () => drain(peer) }),
+        await editThenMove(fixture, peer, { name: "peer-alone", guarded: true, proxyDelayMs: 0, unbound: "drained", beforeEdit: warmUp }),
         await editThenMove(fixture, peer, { name: "peer-slow", guarded: true, proxyDelayMs: PROXY_DELAY_MS, unbound: "drained",
           beforeEdit: () => drain(peer) }),
       ];
@@ -3537,7 +3719,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
         if (!result.hasMore) break;
       } catch (error) { pushes.push({ error: reproErrorText(error) }); pending = undefined; break; }
     }
-    const pull = await o.pages.runRelaySync(page => o.relay.pull(page))
+    const pull = await o.relay.pull(apply => o.pages.runRelaySync(apply))
       .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
     // The desktop sync engine keeps the last push's list as its ownerAdmissionPending, which Notices shows.
     return { stops, delivery, pushes, noticesPending: pending, firstPending: pending?.[0] ?? null, pull };
@@ -3546,7 +3728,7 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
   const relayHas = async () => {
     const device = peer;
     if (!device) throw new Error("The second device is not open.");
-    const pulled = await device.capture.runRelaySync(page => device.relay.pull(page))
+    const pulled = await device.relay.pull(apply => device.capture.runRelaySync(apply))
       .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
     const text = (path: string) => readFile(join(rootB, path), "utf8").catch(() => null);
     const [aOld, aNew, b, c] = await Promise.all([text(oldPath), text(newPath), text(newPage), text(existing)]);
@@ -3866,14 +4048,14 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
       await editPage(oldPath, "a-live", false);
       await expect.poll(async () => {
         await deliveryPass(document, [document]);
-        await owner().pages.runRelaySync(page => owner().relay.pull(page));
+        await owner().relay.pull(apply => owner().pages.runRelaySync(apply));
         const store = await hostStore();
         return store === undefined ? "" : readFile(join(store, oldPath), "utf8").catch(() => "");
       }, { timeout: 120_000 }).toContain("note: a-live");
       // The owner's file holds the accepted edit before the rename.
       const fileMatches = await expect.poll(async () => {
         await owner().pages.flush();
-        await owner().pages.runRelaySync(page => owner().relay.pull(page));
+        await owner().relay.pull(apply => owner().pages.runRelaySync(apply));
         return readFile(join(rootA, oldPath), "utf8");
       }, { timeout: 60_000 }).toContain("note: a-live").then(() => true, () => false);
       observe({ ownerFileHasAcceptedEdit: fileMatches, ownerFile: await readFile(join(rootA, oldPath), "utf8") });
@@ -4111,7 +4293,7 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
         if (!result.hasMore) break;
       } catch (error) { pushes.push({ error: reproErrorText(error) }); pending = undefined; break; }
     }
-    const pull = await pages.runRelaySync(page => relay.pull(page))
+    const pull = await relay.pull(apply => pages.runRelaySync(apply))
       .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
     // The desktop keeps the last push's list, and Notices shows one row per entry (NoticeCenter.tsx).
     const notices = (pending ?? []).map(entry => ({ id: `owner-admission-pending-${entry.originId}-${entry.originSeq}`,
@@ -4122,7 +4304,7 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
   const relayHas = async () => {
     const device = peer;
     if (!device) throw new Error("The second device is not open.");
-    const pulled = await device.capture.runRelaySync(page => device.relay.pull(page))
+    const pulled = await device.relay.pull(apply => device.capture.runRelaySync(apply))
       .then(result => ({ fetched: result.fetched, applied: result.applied }), (error: unknown) => ({ error: reproErrorText(error) }));
     const text = (path: string) => readFile(join(rootB, path), "utf8").catch(() => null);
     const [a, b, c] = await Promise.all([text(oldPath), text(newPage), text(existing)]);
@@ -4299,13 +4481,13 @@ async function runDeleteRepro(kind: DeleteReproCase, ca: Awaited<ReturnType<type
         await editPage(oldPath, "a-live", false);
         await expect.poll(async () => {
           await deliveryPass(document, [document]);
-          await pages.runRelaySync(page => relay.pull(page));
+          await relay.pull(apply => pages.runRelaySync(apply));
           const store = await hostStore();
           return store === undefined ? "" : readFile(join(store, oldPath), "utf8").catch(() => "");
         }, { timeout: 120_000 }).toContain("note: a-live");
         const fileMatches = await expect.poll(async () => {
           await pages.flush();
-          await pages.runRelaySync(page => relay.pull(page));
+          await relay.pull(apply => pages.runRelaySync(apply));
           return readFile(join(rootA, oldPath), "utf8");
         }, { timeout: 60_000 }).toContain("note: a-live").then(() => true, () => false);
         observe({ ownerFileHasAcceptedEdit: fileMatches });

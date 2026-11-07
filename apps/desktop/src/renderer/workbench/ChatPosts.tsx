@@ -10,12 +10,16 @@ import type {
   ChatDispatchFailedRun,
   ChatMessageRecord,
   ChatReactionRecord,
+  ChatReportedAgentRecord,
   ChatRunRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { bridge } from "../bridge";
+import { COLLECTION_CHANGE_FILE, readCollectionChangeProposal } from "../collections/collectionChangeFlow";
 import { basenameOf } from "../path";
 import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { SecondaryButton } from "../ui/controls";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
@@ -33,6 +37,7 @@ import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
 import { FailedRunLine, failedRunEnd } from "./ChatThreadPanel";
+import { AS_REPORTED, reportedProduct } from "./reportedAgent";
 
 const NO_ATTACHMENTS: ChatAttachmentRecord[] = [];
 
@@ -57,7 +62,7 @@ function automationAsking(
 
 // What the agent ran, under its reply: the program and how it ended, then
 // the chip that opens the details.
-function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
+function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; reported?: ChatReportedAgentRecord }) {
   const { endedAtMs, exitCode } = props.run;
   const failed = endedAtMs !== undefined && exitCode !== 0;
   const program = runnerProgram(props.run.command);
@@ -81,7 +86,7 @@ function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
       />
       <span>{label}</span>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      <RunChip run={props.run} />
+      <RunChip run={props.run} reported={props.reported} />
     </div>
   );
 }
@@ -146,7 +151,7 @@ export function DecisionStatus(props: {
       <span className="flex min-w-0 flex-1 flex-col">
         <span
           data-testid={`${props.testIdPrefix}-decision-resolved`}
-          className="inline-flex w-fit items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success"
+          className="inline-flex items-center gap-1 text-[11px] text-success"
         >
           <CircleCheck size={11} strokeWidth={2} aria-hidden />
           Answered
@@ -160,20 +165,19 @@ export function DecisionStatus(props: {
       <span className="inline-flex flex-wrap items-center gap-1.5">
         <span
           data-testid={`${props.testIdPrefix}-decision-open`}
-          className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning"
+          className="inline-flex items-center gap-1 text-[11px] text-warning"
         >
           <CircleHelp size={11} strokeWidth={2} aria-hidden />
-          Poll open
+          Unanswered
         </span>
         {props.onResolve && !hasOptions ? (
-          <button
-            type="button"
+          <SecondaryButton
+            size="compact"
             data-testid={`${props.testIdPrefix}-decision-resolve`}
             onClick={() => props.onResolve?.()}
-            className="rounded px-1 py-0.5 text-[11px] font-medium text-muted hover:text-ink"
           >
             Answer
-          </button>
+          </SecondaryButton>
         ) : null}
       </span>
       <PollOptions
@@ -185,23 +189,56 @@ export function DecisionStatus(props: {
   );
 }
 
+// How a chip names a Collection change file: "Collection change" while it
+// loads, then "Change to <the Collection's current name>". Null for any other
+// file, and for a change file dohc can't read.
+function useCollectionChangeLabel(workspaceId: string, path: string | undefined): string | null {
+  const key = path !== undefined && COLLECTION_CHANGE_FILE.test(path) ? `${workspaceId}\n${path}` : null;
+  const [named, setNamed] = useState<{ key: string; name: string | null } | null>(null);
+  useEffect(() => {
+    if (key === null || path === undefined) return;
+    let current = true;
+    const api = bridge();
+    void (async () => {
+      const proposal = await readCollectionChangeProposal(api, workspaceId, path);
+      if (!proposal) {
+        if (current) setNamed({ key, name: null });
+        return;
+      }
+      const described = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "describe" })
+        .catch(() => null);
+      if (current) setNamed({ key, name: described?.kind === "description" ? described.dataset.name : proposal.name });
+    })();
+    return () => { current = false; };
+  }, [key, workspaceId, path]);
+  if (key === null) return null;
+  if (named?.key !== key) return "Collection change";
+  return named.name === null ? null : `Change to ${named.name}`;
+}
+
 function AttachmentChip(props: {
+  workspaceId: string;
   attachment: ChatAttachmentRecord;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
   const { pathHint, headingAnchor, headingText } = props.attachment;
   const onOpenPath = props.onOpenPath;
+  const changeLabel = useCollectionChangeLabel(props.workspaceId, pathHint);
   // A shared view can hold an attachment whose path it may not read: the
   // chip names it only as an attachment and opens nothing.
   if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
+  // An attachment is named by what it shows: the file and its heading, or
+  // the Collection a change file changes, with the Collection's glyph. The
+  // tooltip keeps the path.
+  const label = changeLabel
+    ?? `${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${headingText ? `#${headingText}` : ""}`;
   return (
     <Ref
       path={pathHint}
+      title={changeLabel !== null ? label : undefined}
+      objectKind={changeLabel !== null ? "collection" : undefined}
       heading={headingText}
-      // An attachment is named by what it shows, the file and its heading.
-      label={`${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${
-        headingText ? `#${headingText}` : ""
-      }`}
+      label={label}
       testId="chats-attachment-chip"
       onOpen={onOpenPath
         ? () => (headingAnchor ? onOpenPath(pathHint, headingAnchor) : onOpenPath(pathHint))
@@ -228,16 +265,16 @@ function RunAskedBy(props: { message: ChatMessageRecord }) {
 }
 
 // A post an agent opened during a run: who asked for the run, then its chip.
-function RunOpening(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord }) {
+function RunOpening(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; reported?: ChatReportedAgentRecord }) {
   return (
     <>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
-      <RunChip run={props.run} />
+      <RunChip run={props.run} reported={props.reported} />
     </>
   );
 }
 
-function RunChip(props: { run: ChatRunRecord }) {
+function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -285,27 +322,45 @@ function RunChip(props: { run: ChatRunRecord }) {
           data-testid="chats-run-popover"
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
-          <RunDetails run={props.run} />
+          <RunDetails run={props.run} reported={props.reported} />
         </span>
       ) : null}
     </span>
   );
 }
 
-// What ran for an agent's reply: its command, when it started, how it
-// ended, and its log.
-export function RunDetails(props: { run: ChatRunRecord }) {
+// What ran for an agent's reply: its command, the product and model the
+// agent reported, when it started, how it ended, and its log.
+export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord }) {
   const started = formatChatTime(props.run.startedAtMs);
+  const product = reportedProduct(props.reported);
+  const model = props.reported?.model;
   return (
     <>
-      <span className="grid gap-0.5">
+      <span className="grid gap-1">
         <span className="text-[11px] text-muted">Command</span>
         <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
           {props.run.command}
         </code>
       </span>
+      {product ? (
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Product</span>
+          <span data-testid="chats-run-product" className="wrap-anywhere text-[11px] text-ink">
+            {product} <span className="text-muted">{AS_REPORTED}</span>
+          </span>
+        </span>
+      ) : null}
+      {model ? (
+        <span className="grid gap-1">
+          <span className="text-[11px] text-muted">Model</span>
+          <span data-testid="chats-run-model" className="wrap-anywhere text-[11px] text-ink">
+            {model} <span className="text-muted">{AS_REPORTED}</span>
+          </span>
+        </span>
+      ) : null}
       <span className="grid grid-cols-2 gap-2">
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Started</span>
           <time
             data-testid="chats-run-started"
@@ -315,14 +370,14 @@ export function RunDetails(props: { run: ChatRunRecord }) {
             {started.label}
           </time>
         </span>
-        <span className="grid gap-0.5">
+        <span className="grid gap-1">
           <span className="text-[11px] text-muted">Exit code</span>
           <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
             {props.run.exitCode ?? "—"}
           </span>
         </span>
       </span>
-      <span className="grid gap-0.5">
+      <span className="grid gap-1">
         <span className="text-[11px] text-muted">Log</span>
         <span className="flex min-w-0 items-center gap-1.5">
           <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
@@ -407,6 +462,7 @@ export function BookmarkAction(props: {
 // keeps each prop referentially stable across draft and typing renders; the
 // transcript re-renders only when the conversation data itself changes.
 export const ThreadMessages = memo(function ThreadMessages(props: {
+  workspaceId: string;
   nav: Extract<ChatsNav, { level: "thread" }>;
   // The thread's chat as its header names it: an agent's name, or #group.
   channelLabel: string;
@@ -504,7 +560,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         className={className}
       >
         {askedBy ? <RunAskedBy message={askedBy} /> : null}
-        {run ? <RunChip run={run} /> : null}
+        {run ? <RunChip run={run} reported={messagesById.get(messageId)?.authorReported} /> : null}
       </FailedRunLine>
     );
   };
@@ -642,6 +698,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {commentAttachments.map((attachment) => (
                 <AttachmentChip
                   key={attachment.attachmentId}
+                  workspaceId={props.workspaceId}
                   attachment={attachment}
                   onOpenPath={props.onOpenPath}
                 />
@@ -719,6 +776,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <RunLine
             run={runRecords[comment.id]}
             askedBy={automationAsking(runRecords[comment.id], messagesById)}
+            reported={comment.authorReported}
           />
         ) : null}
         {failedLine(comment.id, "mt-1 px-2", true)}
@@ -822,6 +880,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               {openingAttachments.map((attachment) => (
                 <AttachmentChip
                   key={attachment.attachmentId}
+                  workspaceId={props.workspaceId}
                   attachment={attachment}
                   onOpenPath={props.onOpenPath}
                 />
@@ -845,6 +904,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <RunOpening
                   run={runRecords[openingMessage.id]}
                   askedBy={automationAsking(runRecords[openingMessage.id], messagesById)}
+                  reported={openingMessage.authorReported}
                 />
               ) : null}
             </div>

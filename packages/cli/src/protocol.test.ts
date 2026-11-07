@@ -5,9 +5,18 @@ import {
   CLI_CAPABILITIES,
   CLI_PROTOCOL_VERSION,
   MAX_FILE_WRITE_FILES,
+  chatReportedAgentSchema,
   cliRequestSchema,
   parseCliResult,
 } from "./protocol";
+
+it("counts a reported part in UTF-16 units and refuses what JavaScript trims or can't print", () => {
+  const accepts = (model: string) => chatReportedAgentSchema.safeParse({ model }).success;
+  expect(accepts("\u{1F600}".repeat(32))).toBe(true);
+  expect(accepts("\u{1F600}".repeat(40))).toBe(false);
+  expect(accepts("﻿Claude Opus 5.5")).toBe(false);
+  expect(accepts("Claude\u0007Opus")).toBe(false);
+});
 
 it("keeps outside-write copies separate from native retained copies for agents", () => {
   const result = { ok: true, keptCopies: [], more: false, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] };

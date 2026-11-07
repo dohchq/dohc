@@ -37,6 +37,7 @@ pub mod records;
 pub mod secrets;
 pub mod store;
 mod synced_deletion;
+pub mod work_references;
 pub use store::{
     DuplicateFile, FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
     duplicate_file_in_tx, ensure_operation_published_in, is_duplicate_in, operation_moments_in,
@@ -80,9 +81,9 @@ pub use chats::{
     ChatChannelKind, ChatChannelSummary, ChatChannelType, ChatDecision, ChatDecisionState,
     ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage,
     ChatMessageAutomation, ChatMessageLinkAuthor, ChatMessagePage, ChatProjectionFileAccess,
-    ChatReaction, ChatReactionState, ChatThread, ChatThreadLane, ChatThreadProjection,
-    ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord, DispatchRecovery,
-    FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
+    ChatReaction, ChatReactionState, ChatReportedAgent, ChatThread, ChatThreadLane,
+    ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord,
+    DispatchRecovery, FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
     FollowTargetResolution, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
     LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, LocalAttachmentInput, MAX_MESSAGE_BODY_BYTES,
     MAX_MESSAGE_PAGE, MentionCursor, PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingBookmarkRow,
@@ -137,13 +138,13 @@ pub use conflicts::{
     BINARY_COMBINED_TEXT_REFUSAL, BinaryResolveWrite, CONFLICT_METADATA_BUDGET_BYTES,
     CONFLICT_ROW_CONSTRAINT, CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES, ConflictChoice,
     ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictRowUpdate, ConflictStatus, ResolveConflictKind, ResolveTextConflict,
-    ResolveTextConflictResult, TEXT_CONFLICT_QUERY_LIMIT, TextConflict, WriteBinaryFile,
-    binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
-    binary_write_job_id, conflict_state_preimage, enqueue_binary_delete, enqueue_binary_rename,
-    enqueue_delete, enqueue_write, insert_text_conflict_if_absent,
-    live_state_matches_conflict_current, load_text_conflict_in_tx, select_snapshot_by_path_in_tx,
-    update_text_conflict_row, write_binary_file_in_tx,
+    ConflictRowUpdate, ConflictStatus, ListedTextConflict, ResolveConflictKind,
+    ResolveTextConflict, ResolveTextConflictResult, TEXT_CONFLICT_QUERY_LIMIT, TextConflict,
+    WaitingVersion, WriteBinaryFile, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, binary_write_job_id, conflict_state_preimage,
+    enqueue_binary_delete, enqueue_binary_rename, enqueue_delete, enqueue_write,
+    insert_text_conflict_if_absent, live_state_matches_conflict_current, load_text_conflict_in_tx,
+    select_snapshot_by_path_in_tx, update_text_conflict_row, write_binary_file_in_tx,
 };
 pub use error::{DomainError, HOSTED_REPLICA_WRITE_REFUSED};
 pub use merge::{

@@ -14,10 +14,13 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
+// The words of a composer bar, without its cancel button.
+const barWords = (testId: string) => screen.getByTestId(testId).firstElementChild?.textContent;
+
 describe("ChatsView decisions", () => {
   it("resolves from composer mode and uses the literal fallback for an empty reply", async () => {
     const user = userEvent.setup();
-    const opening = message();
+    const opening = message({ presentation: { group: "fixture", hue: null, self: true } });
     const openDecision = {
       threadId: "thread-1",
       messageId: opening.id,
@@ -48,12 +51,9 @@ describe("ChatsView decisions", () => {
     await user.click(await screen.findByTestId("chats-thread"));
     expect(await screen.findByTestId("chats-message-decision-open")).toBeTruthy();
     await user.click(screen.getByTestId("chats-message-decision-resolve"));
-    expect(screen.getByTestId("chats-resolving-mode").textContent).toContain(
-      "Answering the poll",
-    );
-    expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
-      "Replying to You",
-    );
+    // The answer is also the reply, so one bar says both, and the reply link still goes.
+    expect(barWords("chats-resolving-mode")).toBe("Answering your question");
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
     await user.click(screen.getByTestId("chats-send"));
 
     await waitFor(() =>
@@ -67,6 +67,109 @@ describe("ChatsView decisions", () => {
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
     expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
+  });
+
+  // "your" comes from main's self mark on a person, never from the name, so a
+  // person named anything, and your own agent, are named.
+  const whoseQuestion: [words: string, name: string, kind: "human" | "agent", self: boolean, pick: string | null][] = [
+    ["Answering Nova's question", "Nova", "human", false, null],
+    ["Answering Nova's question · Region A", "Nova", "human", false, "Region A"],
+    ["Answering your question", "Sam", "human", true, null],
+    ["Answering James's question", "James", "human", false, null],
+    ["Answering Trip agent's question", "Trip agent", "agent", true, null],
+  ];
+  it.each(whoseQuestion)("says %s", async (words, name, kind, self, pick) => {
+    const user = userEvent.setup();
+    const opening = message({ authorKind: kind, authorDisplayName: name, presentation: { group: "fixture", hue: null, self } });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{
+      threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW,
+      ...(pick ? { options: ["Region A", "Region B"] } : {}),
+    }] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    if (pick) {
+      const options = await screen.findAllByTestId("chats-message-poll-option");
+      await user.click(options.find((option) => option.textContent === pick)!);
+    } else {
+      await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    }
+    expect(barWords("chats-resolving-mode")).toBe(words);
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+  });
+
+  it("cancels the answer and its reply together, so the next comment is neither", async () => {
+    const user = userEvent.setup();
+    const opening = message({ authorDisplayName: "Nova" });
+    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "comment-2", body: "Plain comment" }) });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click(screen.getByRole("button", { name: "Cancel answer" }));
+    expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    await user.type(screen.getByTestId("chats-composer"), "Plain comment");
+    await user.click(screen.getByTestId("chats-send"));
+
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        body: "Plain comment",
+      }),
+    );
+  });
+
+  it("keeps a reply bar of its own when the reply goes to another message", async () => {
+    const user = userEvent.setup();
+    const opening = message({ authorDisplayName: "Nova" });
+    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [opening, message({ id: "comment-1", authorDisplayName: "Sam", body: "Friday works." })],
+    });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click((await screen.findAllByTestId("chats-comment-reply"))[0]!);
+    expect(barWords("chats-resolving-mode")).toBe("Answering Nova's question");
+    expect(barWords("chats-replying-mode")).toBe("Replying to Sam");
+  });
+
+  it("says a reply that posted left its question open, with no Try again", async () => {
+    const user = userEvent.setup();
+    const opening = message();
+    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "resolution-message", parentMessageId: opening.id, body: "Resolved ✓" }),
+      resolveFailure: "Error: Your server session changed. Try again.",
+    });
+    const { onError } = renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click(screen.getByTestId("chats-send"));
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "Sent your reply. dohc could not mark the question answered.", "Error: Your server session changed. Try again."));
+    expect(onError.mock.lastCall?.[2]).toBeUndefined();
+    expect(screen.getByTestId("chats-message-decision-open")).toBeTruthy();
   });
 
   it("answers a poll by picking a choice, and the choice travels with the answer", async () => {
@@ -303,6 +406,75 @@ describe("ChatsView work and run links", () => {
     expect(screen.getByRole("button", { name: "brief.md#Scope" })).toBe(chip);
     await user.click(chip);
     expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md", "scope");
+  });
+
+  const changeFile = "volunteers/changes/3f2a91c0-5b7d-4e2a-9c1f-2d8e6a4b7c90.json";
+
+  // Opens a thread whose message attaches changeFile, which reads as `text`.
+  async function openThreadWithChangeFile(text: Promise<string>) {
+    const user = userEvent.setup();
+    const readWorkspaceText = vi.fn(async (input: { relativePath: string }) => {
+      if (input.relativePath !== changeFile) throw new Error("not found");
+      return { text: await text, truncated: false };
+    });
+    const dataset = vi.fn(async () => ({ kind: "description", dataset: { name: "Volunteers" } }));
+    vi.stubGlobal("dohcDesktop", { ...window.dohcDesktop, readWorkspaceText, dataset });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.listChatThreadAttachments.mockResolvedValue({
+      attachments: [
+        {
+          attachmentId: "attachment-change",
+          threadId: "thread-1",
+          messageId: "message-1",
+          targetKind: "file",
+          objectId: "object-1",
+          pathHint: changeFile,
+          createdAtMs: NOW,
+        },
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { onOpenPath: vi.fn() });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    return { dataset };
+  }
+
+  it("names a Collection change file by the Collection's current name, and calls it a Collection change while that loads", async () => {
+    const proposal = {
+      kind: "dohc-collection-change", version: 1, datasetId: "dataset-1", name: "Helpers",
+      datasetPath: "volunteers/dataset.json", migrationPath: "volunteers/migrations/0002.sql",
+      base: { revision: 1, revisionSha256: "a".repeat(64) }, revisionSha256: "b".repeat(64), changeSha256: "c".repeat(64),
+      files: ["volunteers/dataset.json"], rows: [{ kind: "code-changed", key: "code" }], note: null,
+    };
+    let release!: () => void;
+    const { dataset } = await openThreadWithChangeFile(new Promise(resolve => { release = () => resolve(JSON.stringify(proposal)); }));
+
+    const loading = await screen.findByRole("button", { name: "Collection change" });
+    expect(screen.getByTestId("chats-attachment-chip")).toBe(loading);
+    expect(loading.textContent).toBe("Collection change");
+    expect(loading.getAttribute("title")).toBe(changeFile);
+    expect(loading.querySelector("svg")?.classList.contains("lucide-table-2")).toBe(true);
+    expect(screen.queryByText(/3f2a91c0/)).toBeNull();
+
+    release();
+    const chip = await screen.findByRole("button", { name: "Change to Volunteers" });
+    expect(screen.getByTestId("chats-attachment-chip")).toBe(chip);
+    expect(chip.textContent).toBe("Change to Volunteers");
+    expect(chip.getAttribute("title")).toBe(changeFile);
+    expect(chip.querySelector("svg")?.classList.contains("lucide-table-2")).toBe(true);
+    expect(dataset).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", datasetPath: "volunteers/dataset.json", expectedDatasetId: "dataset-1", action: "describe",
+    });
+  });
+
+  it("names a change file that doesn't read as a change by its file name", async () => {
+    await openThreadWithChangeFile(Promise.resolve("not a change"));
+
+    const chip = await screen.findByRole("button", { name: "3f2a91c0-5b7d-4e2a-9c1f-2d8e6a4b7c90.json" });
+    expect(screen.getByTestId("chats-attachment-chip")).toBe(chip);
+    expect(chip.querySelector("svg")?.classList.contains("lucide-file-code")).toBe(true);
   });
 
   it("opens attachment paths and shows linked agent-run details", async () => {

@@ -129,8 +129,16 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         .filter((row) => shareMountsShape.safeParse([row]).success)
     : undefined;
 
+  const sync = entry.remote ? "on" : entry.pausedRemote ? "paused" : undefined;
+  const rawChannels: unknown = entry.sharedChannels;
+  const joinedChatCount = Array.isArray(rawChannels)
+    ? rawChannels.filter((row: unknown) => isRecord(row) && row.left !== true).length
+    : 0;
+
   return WorkspaceSummary.parse({
     ...entry,
+    ...(sync ? { sync } : {}),
+    ...(joinedChatCount > 0 ? { joinedChatCount } : {}),
     shareView,
     ...(shareMounts ? { shareMounts } : {}),
   });

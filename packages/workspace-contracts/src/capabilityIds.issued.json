@@ -266,6 +266,7 @@
   "app.view",
   "app.local.check",
   "capture.history.retry",
+  "dataset.change.ask",
   "file.reveal",
   "explorer.menu.read"
 ]

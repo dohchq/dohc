@@ -941,9 +941,11 @@ describe("Rust engine daemon lifecycle", () => {
     //
     // So this test changes NO production constant. It drives a clock instead.
     const realSetTimeout = globalThis.setTimeout;
+    const realTurn = () => new Promise((resolve) => realSetTimeout(resolve, 0));
     vi.useFakeTimers();
     let now = 0;
     const clients: SelfExitingClient[] = [];
+    let published = 0;
     const terminalFailures: Error[] = [];
     // Driven arrival time of every probe, per generation, for the cadence
     // assertion below.
@@ -963,11 +965,19 @@ describe("Rust engine daemon lifecycle", () => {
           return silentPing(request);
         });
         client.exit = options.onExit;
+        // Recorded at the call, so a launch the terminal verdict should have
+        // prevented counts even while it is still starting.
         clients.push(client);
+        // A loaded machine: each relaunch takes many real event-loop turns,
+        // as its smoke's real file work does under load.
+        if (clients.length > 1) for (let turn = 0; turn < 300; turn += 1) await realTurn();
         return client;
       },
       onFailure: (error, terminal) => {
         if (terminal) terminalFailures.push(error);
+      },
+      onLaunch: () => {
+        published += 1;
       },
     });
 
@@ -979,14 +989,18 @@ describe("Rust engine daemon lifecycle", () => {
       for (
         let elapsed = 0;
         elapsed < 20 * 60_000 && terminalFailures.length === 0;
-        elapsed += step
       ) {
-        now += step;
-        await vi.advanceTimersByTimeAsync(step);
-        // Each launch runs the smoke against a real temporary directory. A
-        // driven clock does not move real I/O, so give the event loop a real
-        // turn between steps or the relaunch never completes.
-        await new Promise((resolve) => realSetTimeout(resolve, 0));
+        // A relaunch runs its smoke against a real temporary directory, which
+        // a driven clock does not move. Hold the clock from the kill until the
+        // next generation is published or the restart is refused, so driven
+        // time is fake-timer arithmetic however loaded the machine is.
+        const relaunching = clients.length > published || clients.at(-1)?.closed === true;
+        if (!relaunching) {
+          now += step;
+          elapsed += step;
+        }
+        await vi.advanceTimersByTimeAsync(relaunching ? 0 : step);
+        await realTurn();
       }
 
       expect(terminalFailures.map((error) => error.message)).toEqual([
@@ -1002,14 +1016,9 @@ describe("Rust engine daemon lifecycle", () => {
       expect(clients.every((client) => client.closed)).toBe(true);
       // The cadence check pins the wedge budget's SPEED, which the terminal
       // message alone cannot: a slower probe cadence would produce the same
-      // message, minutes later. It must not be an elapsed-driven-time
-      // ceiling: the driven clock advances one step per real event-loop
-      // turn, and the relaunch smoke's real I/O consumes turns, so driven
-      // milliseconds measure machine load — honest runs measured 650s to
-      // 965s of driven time under a 24-process load, overlapping any bound
-      // a tripled interval (830s measured) could fail. Probe
-      // ARRIVAL SPACING inside one wedged generation is load-invariant:
-      // it is pure fake-timer arithmetic, one expiry plus one interval
+      // message, minutes later. Probe ARRIVAL SPACING inside one wedged
+      // generation pins it directly: it is pure fake-timer arithmetic, one
+      // expiry plus one interval
       // after the previous probe, 45s + 30s = 75s at the production
       // constants (the expiry half is already pinned by the message
       // above). A tripled interval spaces probes 135s apart and fails

@@ -9,7 +9,8 @@ import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type AppDatasetBinding, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
-import { fixture as appFixture, limits, owner } from "./datasetTestFixture";
+import { fixture as appFixture, limits, owner, pushFile } from "./datasetTestFixture";
+import { collectionFilePresent } from "./storage/collectionFilePresence";
 import type { AppBackendAuth } from "./appBackendAuthority";
 import {createDatasetAppRoutes} from "./datasetRoutes";
 import { createRelayDatasetHost, type RelayDatasetHost } from "./datasetHost";
@@ -46,7 +47,8 @@ async function fixture(startupExclusive = false, prepared = { revision, schemaSq
   const base = appFixture(), directory = await mkdtemp(join(tmpdir(), "relay-dataset-test-"));
   let host: RelayDatasetHost;
   const shutdownErrors: unknown[] = [];
-  const create = () => createRelayDatasetHost({storage: base.storage, directory, limits, startupExclusive, nowMs: () => 10, onShutdownError(error) {shutdownErrors.push(error);}});
+  let now = 10;
+  const create = () => createRelayDatasetHost({storage: base.storage, directory, limits, startupExclusive, nowMs: () => now, onShutdownError(error) {shutdownErrors.push(error);}});
   host = await create();
   cleanups.push(async () => {await host.close(); await rm(directory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25}); expect(shutdownErrors).toEqual([]);});
   const activate = () => host.activate(owner, {...scope, revision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
@@ -70,8 +72,9 @@ async function fixture(startupExclusive = false, prepared = { revision, schemaSq
     host.bindPublication(owner, {...scope, publicationId: result.publicationId});
     return result.publicationId;
   }
-  return {...base, get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
-    async reopen() {await host.close(); host = await create();}};
+  // These tests move the clock by minutes, so their link sessions outlast it.
+  return {...base, link: (id: string) => base.link(id, Number.MAX_SAFE_INTEGER), get storage() {return base.storage;}, directory, get host() {return host;}, activate, invoke, publish, addHelper,
+    async reopen() {await host.close(); host = await create();}, advance(ms: number) {now += ms;}};
 }
 
 it("keeps its workers and recovery staging in the folder it was given", async () => {
@@ -87,6 +90,7 @@ it("keeps its workers and recovery staging in the folder it was given", async ()
 it("permanently deletes at the owner authority and releases private storage without deleting source publications", async () => {
   const f = await fixture(); await f.activate(); const publicationId = f.publish(), link = f.link("friend");
   await f.invoke(link,id(5),{name:"Deleted"},publicationId);
+  f.host.archiveDataset(owner,scope);
   const preview = f.host.deletePreview(owner,scope);
   const request = {...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true as const};
   await expect(f.host.deleteDataset(link,request)).rejects.toThrow();
@@ -472,8 +476,8 @@ async function movingCollection() {
   try { for await (const bytes of archive.stream()) chunks.push(bytes); } finally { await archive.dispose(); }
   const body = Buffer.concat(chunks);
   return {fileId: file.fileId, sourceCursor,
-    importInto: (host: RelayDatasetHost, activate: boolean) => host.importRecovery(owner, {...scope, transferId: "move", manifestSha256, sourceCursor, activate,
-      stream: (async function* () { yield body; })()})};
+    importInto: (host: RelayDatasetHost, activate: boolean, signal?: AbortSignal) => host.importRecovery(owner, {...scope, transferId: "move", manifestSha256, sourceCursor, activate,
+      signal, stream: (async function* () { yield body; })()})};
 }
 
 it("finishes a move whose import stopped when the relay stopped, once the relay starts again (#2903)", async () => {
@@ -514,6 +518,29 @@ it("finishes a move whose import stopped when the relay stopped, once the relay 
     .toMatchObject({bytesBase64: receiptBytes});
 });
 
+it("finishes a move whose import request was cut off, on the next try (#3067)", async () => {
+  const moved = await movingCollection(), target = await fixture(true, receipts);
+  const usageBefore = workspaceUsageBytes(target.storage, "w");
+  // The request's deadline passes inside the final install transaction, which rolls back.
+  const deadline = new AbortController(), prepare = target.storage.db.prepare.bind(target.storage.db);
+  const cut = vi.spyOn(target.storage.db, "prepare").mockImplementation(sql => {
+    if (sql.startsWith("SELECT 1 FROM dohc_dataset_import_checkpoints m JOIN")) deadline.abort(new DOMException("Recovery import timed out", "TimeoutError"));
+    return prepare(sql);
+  });
+  await expect(moved.importInto(target.host, true, deadline.signal)).rejects.toThrow("Recovery import timed out");
+  cut.mockRestore();
+  // The cut-off import cleared its copy and released its quota, with the relay still running.
+  expect({
+    imports: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_imports").get()!.n),
+    attachments: Number(target.storage.db.prepare("SELECT count(*) n FROM sync_relay_dataset_import_files").get()!.n),
+    stages: Number(target.storage.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints").get()!.n),
+    usage: workspaceUsageBytes(target.storage, "w"),
+  }).toEqual({imports: 0, attachments: 0, stages: 0, usage: usageBefore});
+  await expect(moved.importInto(target.host, true)).resolves.toMatchObject({transferId: "move", sourceCursor: moved.sourceCursor,
+    targetCursor: {revision: moved.sourceCursor.revision + 1}});
+  expect((await target.invoke(owner, id(6))).result).toMatchObject([{name: "Kept", receipt: moved.fileId}]);
+});
+
 it.each([false, true])("keeps an installed or claimed import, its quota, and its attachments across startup (claimed: %s)", async claimed => {
   const moved = await movingCollection(), target = await fixture(true, receipts);
   await moved.importInto(target.host, claimed);
@@ -530,4 +557,103 @@ it.each([false, true])("keeps an installed or claimed import, its quota, and its
   await target.reopen();
   expect(kept()).toEqual(before);
   await expect(moved.importInto(target.host, true)).resolves.toMatchObject({targetCursor: {revision: moved.sourceCursor.revision + 1}});
+});
+
+const collectionFile = (path = "registrations/dataset.json") => ({path, text: JSON.stringify({datasetId: id(1)})});
+const collectionMissing = {code: "app_collection_missing", statusCode: 410};
+
+it("stops a deleted Collection's apps, reads included, two minutes after the server sees it gone, and keeps its records", async () => {
+  const f = await fixture(); await f.activate(); f.addHelper(); pushFile(f.storage, "dataset", null, collectionFile());
+  const publicationId = f.publish([id(5), id(6), id(7)]), link = f.link("friend");
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
+  await f.invoke(link, id(5), {name: "Before"}, publicationId, "before");
+  pushFile(f.storage, "dataset", collectionFile(), null);
+  await f.invoke(link, id(5), {name: "During"}, publicationId, "during");
+  f.advance(119_999);
+  expect((await f.invoke(helper, id(6), {}, publicationId, "read-1")).result).toHaveLength(2);
+  f.advance(1);
+  await expect(f.invoke(link, id(5), {name: "After"}, publicationId, "after")).rejects.toMatchObject(collectionMissing);
+  await expect(f.invoke(helper, id(6), {}, publicationId, "read-2")).rejects.toMatchObject(collectionMissing);
+  // An account without access keeps its own refusal, the one that person can fix.
+  await expect(f.invoke({...helper, userId: "stranger"}, id(6), {}, publicationId, "stranger")).rejects.toMatchObject({statusCode: 404});
+  expect(() => f.host.bindPublication(owner, {...scope, publicationId})).toThrow(expect.objectContaining(collectionMissing));
+  expect((await f.invoke(owner, id(6))).result).toHaveLength(2);
+  pushFile(f.storage, "restored", null, collectionFile());
+  expect((await f.invoke(helper, id(6), {}, publicationId, "read-3")).result).toHaveLength(2);
+});
+
+it("keeps an app working when its Collection moves, or when its dataset.json comes back within two minutes", async () => {
+  const f = await fixture(); await f.activate(); pushFile(f.storage, "dataset", null, collectionFile());
+  const publicationId = f.publish(), link = f.link("friend");
+  pushFile(f.storage, "dataset", collectionFile(), collectionFile("archive/registrations/dataset.json"));
+  await f.invoke(link, id(5), {name: "Moved"}, publicationId, "moved");
+  f.advance(120_000);
+  await f.invoke(link, id(5), {name: "Still moved"}, publicationId, "still-moved");
+  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), null);
+  await f.invoke(link, id(5), {name: "Deleted"}, publicationId, "deleted");
+  f.advance(60_000); pushFile(f.storage, "restored", null, collectionFile());
+  await f.invoke(link, id(5), {name: "Restored"}, publicationId, "restored");
+  pushFile(f.storage, "restored", collectionFile(), null); f.advance(60_000);
+  // The grace period starts again when the file goes again.
+  await f.invoke(link, id(5), {name: "Deleted again"}, publicationId, "deleted-again");
+  f.advance(119_999);
+  await f.invoke(link, id(5), {name: "Late"}, publicationId, "late");
+});
+
+it("keeps an app working, on its own records only, when another Collection takes its moved Collection's old folder (#3186)", async () => {
+  const f = await fixture(); await f.activate(); f.addHelper(); pushFile(f.storage, "dataset", null, collectionFile());
+  const other = {workspaceId: "w", datasetId: id(9)};
+  const otherRevision = describeDatasetRevision({definition: {...definition, datasetId: id(9), name: "Other"}, revision: 1, schemaSql, operationSource});
+  const invokeOther = (auth: AppBackendAuth, operationId: string, input: Record<string, string>, key: string, appId?: string) => f.host.invoke(auth, {...other,
+    revision: 1, revisionSha256: otherRevision.revisionSha256, operationId, input, idempotencyKey: key, ...(appId ? {access: {kind: "app" as const, appId}} : {})});
+  await f.host.activate(owner, {...other, revision: otherRevision, schemaSql, operationSource, capacityBytes: 1024 * 1024});
+  await invokeOther(owner, id(5), {name: "Other record"}, "other");
+  const publicationId = f.publish([id(5), id(6)]), link = f.link("friend");
+  f.host.setDataGrant(owner, {...scope, grantId: "helper-grant", grant: {operationIds: [id(6)], discover: true, revision: 1, revisionSha256: revision.revisionSha256}});
+  pushFile(f.storage, "dataset", collectionFile(), collectionFile("archive/registrations/dataset.json"));
+  pushFile(f.storage, "other", null, {path: "registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
+  await f.invoke(link, id(5), {name: "Moved"}, publicationId, "moved");
+  f.advance(120_000);
+  await f.invoke(link, id(5), {name: "Still moved"}, publicationId, "still-moved");
+  const names = (result: unknown) => (result as {name: string}[]).map(row => row.name).sort();
+  expect(names((await f.invoke(helper, id(6), {}, publicationId, "read")).result)).toEqual(["Moved", "Still moved"]);
+  // The app can't reach the Collection that took its old folder.
+  await expect(invokeOther(link, id(5), {name: "Leaked"}, "leaked", publicationId)).rejects.toMatchObject({statusCode: 404});
+  await expect(invokeOther(helper, id(6), {}, "leaked-read", publicationId)).rejects.toMatchObject({statusCode: 404});
+  expect(names((await invokeOther(owner, id(6), {}, "other-read")).result)).toEqual(["Other record"]);
+  // A file that names the other Collection never stands in for this one, at the old folder or where the moved file went.
+  pushFile(f.storage, "dataset", collectionFile("archive/registrations/dataset.json"), {path: "archive/registrations/dataset.json", text: JSON.stringify({datasetId: id(9)})});
+  await f.invoke(link, id(5), {name: "Renamed"}, publicationId, "renamed");
+  f.advance(120_000);
+  await expect(f.invoke(link, id(5), {name: "Refused"}, publicationId, "refused")).rejects.toMatchObject(collectionMissing);
+  await expect(f.invoke(helper, id(6), {}, publicationId, "read-refused")).rejects.toMatchObject(collectionMissing);
+  expect(names((await f.invoke(owner, id(6))).result)).toEqual(["Moved", "Renamed", "Still moved"]);
+});
+
+it("looks for a root Collection's dataset.json at the workspace root", async () => {
+  const root = {...definition, schemaPath: "schema.sql", operationsPath: "operations.js"};
+  const f = await fixture(false, {revision: describeDatasetRevision({definition: root, revision: 1, schemaSql, operationSource}), schemaSql, operationSource});
+  await f.activate(); pushFile(f.storage, "dataset", null, collectionFile("dataset.json"));
+  const publicationId = f.publish(), link = f.link("friend");
+  await f.invoke(link, id(5), {name: "Root"}, publicationId, "root");
+  f.advance(120_000);
+  await f.invoke(link, id(5), {name: "Still root"}, publicationId, "still-root");
+  pushFile(f.storage, "dataset", collectionFile("dataset.json"), null);
+  await f.invoke(link, id(5), {name: "Deleted"}, publicationId, "deleted");
+  f.advance(120_000);
+  await expect(f.invoke(link, id(5), {name: "Gone"}, publicationId, "gone")).rejects.toMatchObject(collectionMissing);
+});
+
+it("checks a remembered dataset.json again after two seconds, and at once after a push or a reset", async () => {
+  const f = await fixture(); await f.activate(); pushFile(f.storage, "dataset", null, collectionFile());
+  const present = (nowMs: number) => collectionFilePresent(f.storage, "w", id(1), nowMs);
+  expect(present(10)).toBe(true);
+  // Another relay process's push leaves this process's answer in place.
+  f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_current_files WHERE workspace_id='w' AND path='registrations/dataset.json'").run());
+  expect(present(2_009)).toBe(true);
+  expect(present(2_010)).toBe(false);
+  pushFile(f.storage, "restored", null, collectionFile());
+  expect(present(2_011)).toBe(true);
+  f.storage.rotateWorkspaceIdentity({workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 1});
+  expect(present(2_012)).toBe(false);
 });

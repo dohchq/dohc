@@ -365,6 +365,9 @@ export function readError(error: unknown): ReadError {
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
+  // The merge dialog words a merge that stopped partway, since only it knows
+  // the version. The message is the failure's own text, for Copy details.
+  if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
   if (name === "DaemonRefusalError" && code === "INVALID_PARAMS" && [
     "Each choice is one line of at most 200 characters.",
     "Each choice appears once.",
@@ -545,6 +548,15 @@ export function liveEditingStoppedPaths(error: unknown): readonly string[] {
 export function isHistoryCatchingUp(error: unknown): boolean {
   return isWorkspaceUpdatingError(error) || parse(error).name === "EngineCaptureNotSettledError";
 }
+/** Main's code for a 404 from a Collection route on the server. The server sends it for a Collection the caller can't change, too. */
+export const DATASET_SERVER_NOT_FOUND = "dataset_not_found";
+export function isDatasetServerNotFound(error: unknown): boolean {
+  return parse(error).code === DATASET_SERVER_NOT_FOUND;
+}
+/** Gives a Collection route's 404 "not found" its code, so a change card can name the server. Its words stay. */
+export function markDatasetServerNotFound(failure: Error, status: number, body: { code?: unknown } | null | undefined): Error {
+  return status === 404 && body?.code === "not_found" ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND }) : failure;
+}
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
 export function isPrivacyDenied(error: unknown): boolean {
@@ -559,6 +571,11 @@ export function isVolumeSharesNewFiles(error: unknown): boolean {
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */
 export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
+}
+
+/** The code an error carries, read back from the string main's IPC boundary sends. */
+export function refusalCode(error: unknown): string | undefined {
+  return parse(error).code;
 }
 
 /** The engine refuses reads this way while it reads a new workspace's files. */
@@ -576,6 +593,11 @@ export function isWorkspaceRestricted(error: unknown): boolean {
 /** An exclusive create found the path taken. */
 export function isPathTaken(error: unknown): boolean {
   return parse(error).code === "EEXIST";
+}
+
+/** A merge failed after some of the version's files were already in Main. */
+export function isMergeStoppedPartway(error: unknown): boolean {
+  return parse(error).name === "MergeStoppedPartwayError";
 }
 
 /** The engine's refusal of a new version's name: another version has it, or it cannot name a version. */

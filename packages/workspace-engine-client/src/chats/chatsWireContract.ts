@@ -5,7 +5,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
-import type { ChatChannelType, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type { ChatChannelType, ChatReportedAgent, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 
 export const CHATS_METHOD = {
   channelCreate: "chats.channels.create",
@@ -165,6 +165,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
+  authorReported?: ChatReportedAgent;
   namedAgentIds?: string[];
   nowMs?: number;
 };
@@ -215,6 +216,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   automation?: ChatMessageAutomationParams;
   authorAgentId?: string;
+  authorReported?: ChatReportedAgent;
   namedAgentIds?: string[];
   nowMs?: number;
 };
@@ -253,12 +255,11 @@ type ChatThreadPageParams = ChatPageParams & { threadId: string };
 type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | { objectId: string }; cursor?: string; scope: string; sharedChannelRowsUncovered: number };
 type ChatMentionsParams = ChatPageParams & {
   handle: string;
-  unreadByAgentOnly?: boolean;
 };
 // A run dohc dispatched names itself, and the engine reads its agent from the
 // run's record. Without a run, the reads are those of agents outside a run.
 type ChatAgentUnreadThreadsParams = ChatPageParams & { runId?: string };
-type ChatAgentRequestsParams = ChatPageParams & { runId: string };
+type ChatAgentRequestsParams = ChatPageParams & { runId?: string };
 type ChatAgentReadMarkParams = ChatsJsonObject & {
   runId?: string;
   threadId: string;
@@ -526,6 +527,11 @@ const noAccountOnLinkMessage = Schema.makeFilter(
 const ChatMessageAutomationSchema = mutableStruct({
   automationId: Schema.String,
 });
+const ChatReportedAgentSchema = mutableStruct({
+  product: Schema.optionalKey(Schema.String),
+  version: Schema.optionalKey(Schema.String),
+  model: Schema.optionalKey(Schema.String),
+});
 const ThreadLaneSchema = Schema.Literals(["posts", "chat"]);
 const ChatLinkedFileSchema = mutableStruct({
   objectId: Schema.String,
@@ -578,6 +584,7 @@ const ChatMessageSchema = mutableStruct({
   createdAtMs: AnyInt,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   authorAgentId: Schema.optionalKey(Schema.String),
+  authorReported: Schema.optionalKey(ChatReportedAgentSchema),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
   // Thread and stream reads name each open agent request. Absent when none.
   agentRequests: Schema.optionalKey(Schema.mutable(Schema.Array(ChatStreamAgentRequestSchema))),
@@ -760,6 +767,7 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   createdAtMs: AnyInt,
   bodySnippet: Schema.String,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
+  authorReported: Schema.optionalKey(ChatReportedAgentSchema),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
 }).check(noAccountOnLinkMessage);
 const ChatChannelThreadSummarySchema = mutableStruct({
@@ -925,7 +933,12 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.agentReadListUnreadRequests]: pageSchema({
     requests: Schema.mutable(Schema.Array(ChatAgentRequestSchema)),
   }),
-  [CHATS_METHOD.agentReadListUnreadThreads]: ThreadsPageSchema,
+  [CHATS_METHOD.agentReadListUnreadThreads]: pageSchema({
+    threads: Schema.mutable(Schema.Array(mutableStruct({
+      ...ChatThreadSchema.fields,
+      lastRead: mutableStruct({ createdAtMs: NonnegativeInt, messageId: Schema.String }),
+    }))),
+  }),
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadStateSchema,
   [CHATS_METHOD.followsSet]: ChatFollowSchema,
   [CHATS_METHOD.followsList]: pageSchema({

@@ -159,7 +159,7 @@ export function DocumentControls(props: {
 export function EngineMayHoldDocumentNotice(props: {
   onRetry: () => void;
   // Is the document's content on screen? When the read failed too, it is
-  // not — and "It is read-only for now" would promise read access to
+  // not — and "You can still read it" would promise read access to
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
@@ -182,7 +182,7 @@ export function EngineMayHoldDocumentNotice(props: {
           the retry is the same either way. */}
       <span>
         {props.message ?? "dohc could not open this document for editing."}
-        {!props.message && props.contentShown ? " It is read-only for now." : ""}
+        {!props.message && props.contentShown ? " You can still read it." : ""}
       </span>
       <span className="flex shrink-0 items-center gap-3">
         {props.children}

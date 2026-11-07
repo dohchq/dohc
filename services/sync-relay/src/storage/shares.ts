@@ -35,6 +35,7 @@ import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilte
 import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare } from "./serviceHostEnrollment";
+import { retireAgentConnectionsInTransaction } from "./agentConnections";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -232,6 +233,7 @@ export function rotateLinkGrant(storage: StorageContext, input: {
         .prepare("UPDATE sync_relay_share_grants SET generation = ? WHERE grant_id = ?")
         .run(generation, grant.grantId);
       retireCurrentLinkCredential(storage, grant.grantId, input.rotatedAtMs);
+      retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.rotatedAtMs);
       insertLinkCredential(storage, {
         credentialId: credential.credentialId,
         grantId: grant.grantId,
@@ -313,6 +315,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
 
       if (wideningCredential) {
         retireCurrentLinkCredential(storage, grant.grantId, input.changedAtMs);
+        retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.changedAtMs);
         insertLinkCredential(storage, {
           credentialId: wideningCredential.credentialId,
           grantId: grant.grantId,
@@ -393,6 +396,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         .run(revokedAtMs, grant.grantId);
       if (grant.principalKind === "link") {
         retireCurrentLinkCredential(storage, grant.grantId, revokedAtMs);
+        retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, revokedAtMs);
         storage.db
           .prepare(
             `UPDATE sync_relay_share_grants
@@ -1090,6 +1094,7 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
              )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
+      retireAgentConnectionsInTransaction(storage, { shareId }, revokedAtMs);
       retireUncoveredServiceActivations(storage, covered, Math.trunc(revokedAtMs));
       forgetReplicaCurrentViewCaches(storage,String(existing.workspace_id));
       storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1

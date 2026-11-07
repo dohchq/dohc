@@ -22,7 +22,7 @@ const snapshot: Awaited<ReturnType<Operations["listVersions"]>> = {
 };
 const conflict: VersionedTextConflictRecord = {
   id: "conflict", workspaceId, path: "notes.md", targetVersionId: "main", sourceVersionId: versionId,
-  createdAtMs: 1, updatedAtMs: 2, status: "open", chosenFrom: "current", metadata: { origin: "sync" },
+  createdAtMs: 1, updatedAtMs: 2, status: "open", chosenFrom: "current", metadata: { origin: "sync" }, waitingVersion: null,
   base: { exists: false, path: "notes.md" },
   current: { exists: true, path: "notes.md", text: "current" },
   incoming: { exists: true, path: "notes.md", contentKind: "binary", sha256: "b".repeat(64), byteLength: 4 },
@@ -35,6 +35,7 @@ const requests = [
   [ops.createWorkspaceVersion.channel, { workspaceId, name: "Draft" }],
   [ops.switchWorkspaceVersion.channel, { workspaceId, versionId }],
   [ops.compareWorkspaceVersions.channel, { workspaceId, versionId }],
+  [ops.countWorkspaceVersionChanges.channel, { workspaceId, versionId }],
   [ops.mergeWorkspaceVersion.channel, { workspaceId, versionId }],
   [ops.listWorkspaceVersionConflicts.channel, { workspaceId }],
   [ops.resolveWorkspaceVersionConflict.channel, { workspaceId, conflictId: "conflict", resolution: { kind: "keep-current" } }],
@@ -51,7 +52,8 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     createVersion: vi.fn<Operations["createVersion"]>(async () => { steps.push("create"); return snapshot; }),
     switchVersion: vi.fn<Operations["switchVersion"]>(async () => { steps.push("switch"); return { activeVersionId: versionId, changedFileCount: 2 }; }),
     compareVersions: vi.fn<Operations["compareVersions"]>().mockResolvedValue({ files: [], nextAfterPath: null }),
-    mergeVersionIntoMain: vi.fn<Operations["mergeVersionIntoMain"]>(async () => { steps.push("merge"); return { mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1 }; }),
+    compareVersionsChangedCount: vi.fn<Operations["compareVersionsChangedCount"]>().mockResolvedValue(3),
+    mergeVersionIntoMain: vi.fn<Operations["mergeVersionIntoMain"]>(async () => { steps.push("merge"); return { mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1, replacedProtectedPaths: [".env"] }; }),
     listOpenConflictsPage: vi.fn<Operations["listOpenConflictsPage"]>(async () => { steps.push("conflicts"); return conflictPage; }),
     resolveConflict: vi.fn<Operations["resolveConflict"]>(async () => { steps.push("resolve"); return { conflict, remaining: conflictPage }; }),
     listKeptCopies: vi.fn<Operations["listKeptCopies"]>(async () => { steps.push("kept"); return { keptCopies: [keptCopy], more: false }; }),
@@ -108,15 +110,22 @@ describe("registered workspace version handlers", () => {
     for (const operation of Object.values(h.operations)) expect(operation).not.toHaveBeenCalled();
   });
 
-  it("maps merge eligibility from the named version's Main fork", async () => {
+  it("maps merge eligibility and the version each was made from", async () => {
     const h = harness();
     await expect(h.invoke(ops.listWorkspaceVersions.channel, { workspaceId })).resolves.toEqual({
       activeVersionId: versionId,
-      versions: snapshot.versions.map(({ id, name, kind, createdAtMs }) => ({
+      versions: snapshot.versions.map(({ id, name, kind, createdAtMs, forkPoint }) => ({
         id, name, kind, createdAtMs, canMergeIntoMain: id === versionId,
+        ...(forkPoint ? { madeFromVersionId: forkPoint.versionId } : {}),
       })),
     });
     expect(h.notifyRenderer).not.toHaveBeenCalled();
+  });
+
+  it("counts the files a version changes from Main", async () => {
+    const h = harness();
+    await expect(h.invoke(ops.countWorkspaceVersionChanges.channel, { workspaceId, versionId })).resolves.toEqual({ count: 3 });
+    expect(h.operations.compareVersionsChangedCount).toHaveBeenCalledExactlyOnceWith(versionId);
   });
 
   it("waits for the capture gate and version creation before notifying", async () => {
@@ -198,7 +207,7 @@ describe("registered workspace version handlers", () => {
   it("reads one conflict page after a conflicted merge and preserves mixed sides", async () => {
     const h = harness();
     await expect(h.invoke(ops.mergeWorkspaceVersion.channel, { workspaceId, versionId })).resolves.toMatchObject({
-      mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1, nextAfterConflictId: "next-conflict",
+      mergedFileCount: 2, unchangedFileCount: 1, conflictCount: 1, replacedProtectedPaths: [".env"], nextAfterConflictId: "next-conflict",
       conflicts: [{ conflictId: "conflict", origin: "sync", contentKind: "binary", currentText: "current", incomingText: null, baseText: null, incomingBinary: { byteLength: 4, sha256: "b".repeat(64) } }],
     });
     expect(h.operations.mergeVersionIntoMain).toHaveBeenCalledExactlyOnceWith(versionId);
@@ -208,8 +217,8 @@ describe("registered workspace version handlers", () => {
 
   it("does not load unrelated conflicts after a clean merge", async () => {
     const h = harness();
-    h.operations.mergeVersionIntoMain.mockResolvedValue({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0 });
-    await expect(h.invoke(ops.mergeWorkspaceVersion.channel, { workspaceId, versionId })).resolves.toEqual({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0, conflicts: [], nextAfterConflictId: null });
+    h.operations.mergeVersionIntoMain.mockResolvedValue({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0, replacedProtectedPaths: [] });
+    await expect(h.invoke(ops.mergeWorkspaceVersion.channel, { workspaceId, versionId })).resolves.toEqual({ mergedFileCount: 1, unchangedFileCount: 2, conflictCount: 0, replacedProtectedPaths: [], conflicts: [], nextAfterConflictId: null });
     expect(h.operations.listOpenConflictsPage).not.toHaveBeenCalled();
   });
 

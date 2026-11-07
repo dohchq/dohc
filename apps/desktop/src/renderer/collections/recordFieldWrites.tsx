@@ -5,6 +5,7 @@ import { PROPERTIES_READ_ONLY_REASON } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
+import { useReopenKey } from "../documentVersionKey";
 import { useBoundNoteCheck } from "../editor/lossyNote";
 import { useRecordSourceCheck } from "./recordSourceCheck";
 import { SecondaryButton } from "../ui/controls";
@@ -96,10 +97,13 @@ export function CollectionRecordFieldWrite({
   // The record's file is checked before its session opens, and the session's
   // own document again once it binds. A lossy note (CONTEXT.md) refuses.
   const source = useRecordSourceCheck(workspaceId, change.recordPath);
+  // The key the record's open editor uses, so the edit lands in its session.
+  const reopenKey = useReopenKey(workspaceId);
   const docState = useEngineDoc({
     workspaceId,
     path: change.recordPath,
     enabled: source.state === "clear",
+    reopenKey,
   });
   const session = useBoundNoteCheck({
     open: change.recordPath,
@@ -113,6 +117,8 @@ export function CollectionRecordFieldWrite({
   }, [source.state, session, onFailed]);
   const applied = useRef(false);
   const sawSaving = useRef(false);
+  // The session the edit went into. A session opened later never carried it.
+  const appliedDoc = useRef<typeof docState.doc>(null);
   const prepStarted = useRef(false);
   const alive = useRef(true);
   const [preparationAbort] = useState(() => new AbortController());
@@ -248,6 +254,7 @@ export function CollectionRecordFieldWrite({
       return;
     }
     applied.current = true;
+    appliedDoc.current = doc;
     onApplied?.();
   }, [
     checkedClear,
@@ -264,6 +271,13 @@ export function CollectionRecordFieldWrite({
 
   useEffect(() => {
     if (!applied.current) return;
+    // A version key change can move this writer to a new session, whose save
+    // state says nothing about the edit. Unless the engine already holds the
+    // edit, fail it so Retry applies it again.
+    if (docState.doc !== appliedDoc.current) {
+      if (lockedReport.current === null) onFailed(null);
+      return;
+    }
     if (docState.deletedWhileEditing || docState.readOnlyWhileEditing) {
       onFailed(docState.saveError ? `${WRITE_NOT_SAVED_MESSAGE} ${docState.saveError}` : null);
       return;
@@ -309,6 +323,7 @@ export function CollectionRecordFieldWrite({
         return;
     }
   }, [
+    docState.doc,
     docState.saveState,
     docState.deletedWhileEditing,
     docState.readOnlyWhileEditing,

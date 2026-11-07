@@ -179,6 +179,7 @@ fn apply_context<'a>(
         events: EngineEvents::default(),
         apply_probe: None,
         import_priority: None,
+        layer_rules: None,
     }
 }
 
@@ -3230,4 +3231,249 @@ async fn a_respelled_folder_sends_no_delete_after_its_write() {
 
     files.close().await;
     supervisor.close(&db).expect("close actor");
+}
+
+/// A driver over `root` with a started layer, its first run applied.
+async fn started_env(
+    root: &Path,
+    actor: &ActorHandle,
+    leases: &LeaseRegistry,
+    carried: Option<Arc<CarriedPass>>,
+) -> (RealEnv, FilesLayer) {
+    use std::sync::atomic::AtomicU64;
+    let events = EngineEvents::default();
+    let (open_ready_tx, _) = tokio::sync::watch::channel(true);
+    let status = Arc::new(DriverStatus::default());
+    status.mark_initial_ready();
+    let mut env = RealEnv {
+        observation: crate::file_observation::FileObservation::new(
+            events.clone(),
+            WORKSPACE_ID.into(),
+        ),
+        root: root.to_path_buf(),
+        initial_links_hold: None,
+        actor: actor.clone(),
+        lease_releases_seen: leases.release_generation(WORKSPACE_ID),
+        workspace_id: WORKSPACE_ID.into(),
+        leases: leases.clone(),
+        status,
+        author_json: Arc::new(Mutex::new(None)),
+        self_writes: SelfWriteSuppression::default(),
+        apply_gate: Arc::new(tokio::sync::Mutex::new(())),
+        store_freshly_created: false,
+        open_ready_tx,
+        refresh_epoch: Arc::new(AtomicU64::new(0)),
+        events,
+        apply_probe: None,
+        scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
+        no_atomic_placement_announced: false,
+        first_import: None,
+        carried,
+        rules: None,
+    };
+    let cancel = CancellationToken::new();
+    env.observation
+        .start(env.root.clone())
+        .expect("observation");
+    let (layer, initial) = FilesLayer::start_with_fingerprint(
+        &env.root,
+        &cancel,
+        None,
+        policy_fingerprint(&env.root),
+        0,
+        &env.scan,
+        &env.observation,
+    )
+    .await
+    .expect("layer");
+    let applied = apply_run(env.apply_context(), &layer.files.handle(), initial, &cancel).await;
+    after_pass(&mut env.carried, &mut env.rules, &applied);
+    (env, layer)
+}
+
+/// Tick until the layer converges. A watcher event from the first scan may
+/// cost one more clean pass first.
+async fn tick_until_converged(env: &mut RealEnv, layer: &FilesLayer) {
+    let cancel = CancellationToken::new();
+    for _ in 0..10 {
+        match env.tick(layer, &cancel).await {
+            TickIo::Converged => return,
+            TickIo::Applied { clean: true } => {}
+            other => panic!("expected a clean tick, got {other:?}"),
+        }
+    }
+    panic!("the layer never converged");
+}
+
+fn moment_label(db: &Path, path: &str) -> (Option<String>, Option<String>) {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT metadata_summary, metadata_correlation_id FROM moments \
+             WHERE workspace_id = ?1 AND path = ?2 ORDER BY moment_order DESC LIMIT 1",
+            [WORKSPACE_ID, path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the file's moment")
+}
+
+async fn close_env(env: RealEnv, layer: FilesLayer, supervisor: WorkspaceSupervisor, db: PathBuf) {
+    layer.stop().await;
+    drop(env);
+    tokio::task::spawn_blocking(move || supervisor.close(&db))
+        .await
+        .expect("join")
+        .expect("close actor");
+}
+
+// A rescan found a new file while the person's editor held it. The session
+// keeps the file out of capture and nothing else is dirty, so the layer
+// converges. The file stays carried until the session lets it go, then
+// records with the rescan's label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rescan_keeps_carrying_a_file_a_live_session_holds() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    std::fs::write(root.join(NEW_FILE), b"").expect("write file");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE),
+    )
+    .expect("new file key");
+    let lease = leases
+        .acquire(&key)
+        .expect("the editor's session holds the new file");
+    let carried = Arc::new(CarriedPass {
+        summary: Some(RESCAN_SUMMARY.to_owned()),
+        correlation_id: Some("reconcile-held".to_owned()),
+        paths: BTreeSet::from([NEW_FILE.to_owned()]),
+    });
+    let (mut env, layer) = started_env(&root, &actor, &leases, Some(carried)).await;
+    assert_eq!(
+        layer.files.handle().stats().await.expect("stats").deferred,
+        1
+    );
+
+    tick_until_converged(&mut env, &layer).await;
+    assert_eq!(
+        env.carried.as_ref().map(|pass| pass.paths.clone()),
+        Some(BTreeSet::from([NEW_FILE.to_owned()])),
+        "a converged tick must not drop a file the session still holds"
+    );
+
+    drop(lease);
+    assert_eq!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { clean: true }
+    );
+    assert!(env.carried.is_none(), "the release recorded the file");
+    assert_eq!(
+        moment_label(&db, NEW_FILE),
+        (
+            Some(RESCAN_SUMMARY.to_owned()),
+            Some("reconcile-held".to_owned())
+        )
+    );
+    close_env(env, layer, supervisor, db).await;
+}
+
+// The rules a layer started with can come from a read that hit a lock. The
+// first pass under the readable rules records as a rescan, and the passes
+// after it compare against those rules, so they record as ordinary edits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_first_pass_under_changed_rules_records_as_a_rescan() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let (mut env, layer) = started_env(&root, &actor, &leases, None).await;
+    env.rules = Some(Arc::new(PolicyState::Unavailable));
+
+    for (path, rescan) in [("notes/first.md", true), ("notes/second.md", false)] {
+        std::fs::write(root.join(path), b"text").expect("write file");
+        layer.files.handle().request_rescan();
+        assert_eq!(
+            env.tick(&layer, &CancellationToken::new()).await,
+            TickIo::Applied { clean: true }
+        );
+        let (summary, _) = moment_label(&db, path);
+        assert_eq!(
+            summary.as_deref() == Some(RESCAN_SUMMARY),
+            rescan,
+            "{path} recorded with {summary:?}"
+        );
+    }
+    close_env(env, layer, supervisor, db).await;
+}
+
+// The first pass under changed rules found two files while the person's
+// editor held one. It records the other as a rescan. The held file keeps
+// that pass's label and group until the session lets it go, though the
+// passes after it compare against the new rules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_the_first_pass_under_changed_rules_left_keeps_its_label() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir_all(root.join("notes")).expect("notes directory");
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE),
+    )
+    .expect("new file key");
+    let lease = leases
+        .acquire(&key)
+        .expect("the editor's session holds the new file");
+    let (mut env, layer) = started_env(&root, &actor, &leases, None).await;
+    env.rules = Some(Arc::new(PolicyState::Unavailable));
+
+    std::fs::write(root.join("notes/first.md"), b"text").expect("write file");
+    std::fs::write(root.join(NEW_FILE), b"text").expect("write file");
+    layer.files.handle().request_rescan();
+    assert!(matches!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { .. }
+    ));
+    let (summary, group) = moment_label(&db, "notes/first.md");
+    assert_eq!(summary.as_deref(), Some(RESCAN_SUMMARY));
+    assert!(
+        group
+            .as_deref()
+            .is_some_and(|group| group.starts_with("reconcile"))
+    );
+    assert_eq!(
+        layer.files.handle().stats().await.expect("stats").deferred,
+        1
+    );
+
+    tick_until_converged(&mut env, &layer).await;
+    drop(lease);
+    assert_eq!(
+        env.tick(&layer, &CancellationToken::new()).await,
+        TickIo::Applied { clean: true }
+    );
+    assert_eq!(
+        moment_label(&db, NEW_FILE),
+        (Some(RESCAN_SUMMARY.to_owned()), group),
+        "the held file records with the rescan that found it"
+    );
+    assert!(env.carried.is_none(), "the release recorded the file");
+    close_env(env, layer, supervisor, db).await;
 }

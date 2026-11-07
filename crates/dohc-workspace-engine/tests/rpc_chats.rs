@@ -1110,7 +1110,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         &handle,
         &mut id,
         "chats.mentions.listForHandle",
-        json!({ "handle": "AGENT", "unreadByAgentOnly": false, "pageLimit": 10 }),
+        json!({ "handle": "AGENT", "pageLimit": 10 }),
     )
     .await;
     assert_eq!(
@@ -1136,7 +1136,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
             &handle,
             &mut id,
             "chats.mentions.listForHandle",
-            json!({ "handle": query, "unreadByAgentOnly": false, "pageLimit": 10 }),
+            json!({ "handle": query, "pageLimit": 10 }),
         )
         .await;
         assert_eq!(
@@ -1164,7 +1164,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         &reopened,
         &mut id,
         "chats.mentions.listForHandle",
-        json!({ "handle": "raw", "unreadByAgentOnly": false, "pageLimit": 10 }),
+        json!({ "handle": "raw", "pageLimit": 10 }),
     )
     .await;
     assert!(
@@ -3971,6 +3971,10 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     )
     .await;
     assert_eq!(unread["threads"][0]["id"], json!("thread"));
+    assert_eq!(
+        unread["threads"][0]["lastRead"],
+        json!({ "createdAtMs": 0, "messageId": "" })
+    );
     let read = call(
         &transport,
         &handle,
@@ -5680,6 +5684,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         attachments: vec![],
         automation: None,
         author_agent_id: None,
+        author_reported: None,
         named_agent_ids: Vec::new(),
         now_ms: 40,
         request_id: Some("passive-start".into()),
@@ -5700,6 +5705,7 @@ async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
         attachments: vec![],
         automation: None,
         author_agent_id: None,
+        author_reported: None,
         named_agent_ids: Vec::new(),
         now_ms: 41,
         request_id: Some("passive-send".into()),

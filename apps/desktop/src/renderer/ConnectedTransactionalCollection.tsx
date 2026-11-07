@@ -9,6 +9,7 @@ import type { DatasetCopyStatus, DatasetMigrationPreparation } from "@dohc/cli/d
 import { CollectionTableViewsControl } from "./CollectionTableViewsControl";
 import type { CollectionTableView } from "./collectionTableViews";
 import { bridge } from "./bridge";
+import { dirnameOf } from "./path";
 import { TransactionalCollectionPage, type TransactionalButtons, type TransactionalInvoke } from "./TransactionalCollectionPage";
 import { transactionalDescription } from "./transactionalCollectionModel";
 import { CollectionActionDialog } from "./CollectionActionDialog";
@@ -234,7 +235,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     {owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}
     <SecondaryButton disabled={loading || restoring} onClick={() => void refresh()}>Refresh</SecondaryButton>
     {owner && !copy?.offline && <SecondaryButton className="text-danger" disabled={loading || restoring} onClick={() => setDeletingCollection(true)}>Delete permanently…</SecondaryButton>}
-  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name}
+  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} folder={dirnameOf(datasetPath)}
     onClose={() => setDeletingCollection(false)} onError={onError} onExport={exportRecovery} onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
     onDeleted={() => { request.current++; setDeletingCollection(false); setDeleted(true); onLifecycleChanged?.(); onNotice?.("Collection deleted"); }}
     onLoad={async (input, signal) => {
@@ -251,7 +252,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       return result;
     }} />}</>;
   // The ⚡ panel docks at the right of the table.
-  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><button type="button" className="truncate px-3 py-1 text-left font-mono text-[12px] text-muted hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled} onNotice={onNotice}
+  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><div className="flex min-w-0 px-1"><button type="button" className="min-w-0 truncate rounded-md px-3 py-1 text-left font-mono text-[12px] text-muted hover:bg-hover hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button></div><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled} onNotice={onNotice}
     buttons={buttonColumns}
     automationsButton={automations.button}
     fieldMarks={automations.fieldMarks}

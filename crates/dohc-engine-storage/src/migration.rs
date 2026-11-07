@@ -3607,6 +3607,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("capture_first_imports.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 84,
+        id: "v2-work-references",
+        sql: include_str!("work_references.sql"),
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 85,
+        id: "v2-chat-reported-agent",
+        sql: include_str!("chat_reported_agent.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5595,6 +5607,14 @@ mod tests {
                 "v2-capture-first-imports",
                 "c6b0c309e5dd16fe6ba196efaa0b4afb91719d1f099ef53aabc513c906c60657",
             ),
+            (
+                "v2-work-references",
+                "7c56b7cc4fce9796ec7245bed34308a45f76b352bdb333067401a61edf964c4f",
+            ),
+            (
+                "v2-chat-reported-agent",
+                "7e66943ecdb7659231ac8aab7a3629304243c0fb7264b14f381a2c98a58c551a",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -5858,6 +5878,173 @@ mod tests {
             plan.iter()
                 .any(|detail| detail.contains("COVERING INDEX materialization_retained_blocked")),
             "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn chat_reported_agent_upgrade_preserves_existing_messages() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-reported-agent");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 84);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 85);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread', 'Existing conversation', 10, 30); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, parent_message_id, origin, body, created_at_ms, \
+                  author_owner_display_name, author_actor_key) \
+                 VALUES ('ws', 'thread', 0, 'person', 'human', 'Ada', 'user-ada', NULL, \
+                         'desktop', 'Please check the plan.', 20, NULL, '{\"kind\":\"unknown\"}'), \
+                        ('ws', 'thread', 1, 'agent', 'agent', 'Nova', 'agent-nova', 'person', \
+                         'cli', 'The plan is ready.', 30, 'Ada', '{\"kind\":\"unknown\"}');",
+        )
+        .unwrap();
+        let messages = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT json_array(workspace_id, thread_id, message_order, message_id, author_kind, \
+                 author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, \
+                 author_owner_display_name, automation_id, chain_depth, author_actor_key, \
+                 link_grant_id, link_principal_id) FROM chat_messages ORDER BY message_order",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let old_messages = messages(&conn);
+        assert_eq!(old_messages.len(), 2);
+        assert!(
+            conn.prepare("SELECT author_reported FROM chat_messages")
+                .is_err()
+        );
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(messages(&conn), old_messages);
+        let reports: Vec<Option<String>> = conn
+            .prepare("SELECT author_reported FROM chat_messages ORDER BY message_order")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(reports, vec![None, None]);
+
+        let report = r#"{"product":"Codex","version":"1.0","model":"example-model"}"#;
+        for (message_id, value) in [("person", report), ("agent", "not json")] {
+            let error = conn
+                .execute(
+                    "UPDATE chat_messages SET author_reported=?1 WHERE message_id=?2",
+                    [value, message_id],
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        assert_eq!(
+            conn.execute(
+                "UPDATE chat_messages SET author_reported=?1 WHERE message_id='agent'",
+                [report],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT author_reported FROM chat_messages WHERE message_id='agent'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            report
+        );
+        assert_eq!(messages(&conn), old_messages);
+    }
+
+    /// The work reference tables arrive empty on an existing store, and refuse
+    /// a row that does not fit its kind, a second reference to one target, and
+    /// any change to a reference.
+    #[test]
+    fn work_references_upgrade_adds_empty_strict_tables() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-work-references");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 84);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        for table in ["work_references", "work_reference_outbox"] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
+        let insert = |reference: &str, kind: &str, version: Option<&str>, thread: Option<&str>| {
+            conn.execute(
+                "INSERT INTO work_references(reference, workspace_id, target_kind, target_id, \
+                 version_id, thread_id, created_at_ms) \
+                 VALUES (?1, 'ws', ?2, 'target', ?3, ?4, 1)",
+                rusqlite::params![reference, kind, version, thread],
+            )
+        };
+        let a = "A".repeat(43);
+        assert!(insert(&a, "file", Some("main"), None).is_ok());
+        for (reference, kind, version, thread) in [
+            ("B".repeat(42), "file", Some("main"), None),
+            (format!("{}=", "B".repeat(42)), "file", Some("main"), None),
+            ("B".repeat(43), "file", None, None),
+            ("B".repeat(43), "message", None, None),
+            ("B".repeat(43), "message", Some("main"), Some("thread")),
+            ("B".repeat(43), "folder", Some("main"), None),
+            ("B".repeat(43), "file", Some("main"), None),
+        ] {
+            assert!(
+                insert(&reference, kind, version, thread).is_err(),
+                "{reference} {kind} {version:?} {thread:?}"
+            );
+        }
+        assert!(insert(&"B".repeat(43), "app", Some("main"), None).is_ok());
+        for change in [
+            "UPDATE work_references SET target_id = 'other' WHERE reference = ?1",
+            "UPDATE work_references SET created_at_ms = 2 WHERE reference = ?1",
+        ] {
+            assert!(conn.execute(change, [&a]).is_err(), "{change}");
+        }
+        conn.execute(
+            "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, 1)",
+            [&a],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.execute(
+                "DELETE FROM work_reference_outbox WHERE reference = ?1",
+                [&a]
+            )
+            .unwrap(),
+            1,
+            "registration removes the outbox row"
+        );
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, 1)",
+                ["D".repeat(43)],
+            )
+            .is_err(),
+            "an outbox row needs its reference"
         );
     }
 

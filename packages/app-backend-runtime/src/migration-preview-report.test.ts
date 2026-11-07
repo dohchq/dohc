@@ -20,7 +20,7 @@ const integer=(value:string)=>({type:"integer" as const,value});
 it("reports inserted, updated, deleted, and unchanged rows without exposing other tables",()=>{
   const input=fixture("CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'same'),(2,'old'),(3,'gone'); CREATE TABLE secret(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO secret VALUES(1,'hidden');","CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'same'),(2,'new'),(4,'added');");
   const report=createMigrationPreviewReport({...input,beforeTables:["items"],afterTables:["items"]});
-  expect(report.tables).toEqual([{table:"items",beforeRows:3,afterRows:3,changedRows:3}]);
+  expect(report.tables).toEqual([{table:"items",beforeRows:3,afterRows:3,changedRows:3,deletedRows:1,beforeValues:{id:3,value:3},afterValues:{id:3,value:3},clearedValues:{id:0,value:0}}]);
   expect(report.bytes).toBe(readFileSync(input.path).length);
   expect(readMigrationPreviewReportPage({path:input.path})).toEqual({changes:[
     {table:"items",kind:"update",key:{id:integer("2")},before:{id:integer("2"),value:"old"},after:{id:integer("2"),value:"new"}},
@@ -29,13 +29,21 @@ it("reports inserted, updated, deleted, and unchanged rows without exposing othe
   ],nextCursor:null});
 });
 
+it("counts each column's values and the values kept records lose, leaving out empty text and missing values",()=>{
+  const input=fixture("CREATE TABLE items(id INTEGER PRIMARY KEY,due TEXT,note TEXT,zero INTEGER); INSERT INTO items VALUES(1,'2026-01-01','a',0),(2,NULL,'',0),(3,'2026-02-01','b',NULL);","CREATE TABLE items(id INTEGER PRIMARY KEY,note TEXT,zero INTEGER); INSERT INTO items VALUES(1,NULL,0),(2,'',0),(3,'b',NULL);");
+  const report=createMigrationPreviewReport({...input,beforeTables:["items"],afterTables:["items"]});
+  expect(report.tables).toMatchObject([{beforeValues:{id:3,due:2,note:2,zero:2},afterValues:{id:3,note:1,zero:2},clearedValues:{id:0,due:2,note:1,zero:0}}]);
+});
+
 it("includes added and dropped tables and every value of added and dropped columns",()=>{
   const input=fixture("CREATE TABLE items(id INTEGER PRIMARY KEY,removed TEXT); INSERT INTO items VALUES(1,'old'); CREATE TABLE removed(id INTEGER PRIMARY KEY); INSERT INTO removed VALUES(9); CREATE TABLE empty_removed(id INTEGER PRIMARY KEY);","CREATE TABLE items(id INTEGER PRIMARY KEY,added TEXT); INSERT INTO items VALUES(1,'new'); CREATE TABLE added(id INTEGER PRIMARY KEY); INSERT INTO added VALUES(8); CREATE TABLE empty_added(id INTEGER PRIMARY KEY);");
   const report=createMigrationPreviewReport({...input,beforeTables:["items","removed","empty_removed"],afterTables:["items","added","empty_added"]});
   expect(report.tables).toEqual([
-    {table:"items",beforeRows:1,afterRows:1,changedRows:1},{table:"removed",beforeRows:1,afterRows:0,changedRows:1},
-    {table:"empty_removed",beforeRows:0,afterRows:0,changedRows:0},{table:"added",beforeRows:0,afterRows:1,changedRows:1},
-    {table:"empty_added",beforeRows:0,afterRows:0,changedRows:0},
+    {table:"items",beforeRows:1,afterRows:1,changedRows:1,deletedRows:0,beforeValues:{id:1,removed:1},afterValues:{id:1,added:1},clearedValues:{id:0,removed:1}},
+    {table:"removed",beforeRows:1,afterRows:0,changedRows:1,deletedRows:1,beforeValues:{id:1},afterValues:{},clearedValues:{}},
+    {table:"empty_removed",beforeRows:0,afterRows:0,changedRows:0,deletedRows:0,beforeValues:{id:0},afterValues:{},clearedValues:{}},
+    {table:"added",beforeRows:0,afterRows:1,changedRows:1,deletedRows:0,beforeValues:{},afterValues:{id:1},clearedValues:{}},
+    {table:"empty_added",beforeRows:0,afterRows:0,changedRows:0,deletedRows:0,beforeValues:{},afterValues:{id:0},clearedValues:{}},
   ]);
   expect(readMigrationPreviewReportPage({path:input.path}).changes).toMatchObject([
     {table:"items",kind:"update",before:{id:integer("1"),removed:"old"},after:{id:integer("1"),added:"new"}},

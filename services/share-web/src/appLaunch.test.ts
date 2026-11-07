@@ -191,6 +191,21 @@ it('keeps revoked bootstrap cookies opaque when their local request budget is ex
   expect(unknown.status).toBe(404);expect(await unknown.json()).toEqual({ok:false,error:'not found'});
 });
 
+it('shows a reload of an ended session the stopped page, the same for every refusal',async()=>{
+  const reload=(f:ReturnType<typeof fixture>,origin:string,cookie='')=>f.handler.handle(new Request(origin+'/bootstrap',{headers:{host:new URL(origin).host,cookie,'sec-fetch-mode':'navigate'}}));
+  const revoked=fixture(),narrowed=fixture(),expired=fixture(),live=fixture(),a=await launch(revoked),d=await launch(narrowed),b=await launch(expired),c=await launch(live);
+  revoked.revoke();narrowed.narrow();expired.advance(600000);
+  const responses=[await reload(revoked,a.origin,a.cookie),await reload(narrowed,d.origin,d.cookie),await reload(expired,b.origin,b.cookie),await reload(live,c.origin,'__Host-dohc-app='+'Z'.repeat(43)),
+    await reload(live,c.origin),await reload(live,'https://'+'b'.repeat(48)+'.example.net',c.cookie),
+    await live.handler.handle(live.request(c.origin+'/bootstrap','handoff='+'Z'.repeat(43),{origin:config.viewerOrigin,'content-type':'application/x-www-form-urlencoded','sec-fetch-mode':'navigate'}))];
+  const page=await responses[0]!.text();
+  for(const response of responses.slice(1)){expect(Object.fromEntries(response.headers)).toEqual(Object.fromEntries(responses[0]!.headers));expect(await response.text()).toBe(page);}
+  expect(responses.map(response=>response.status)).toEqual([404,404,404,404,404,404,404]);
+  expect(responses[0]!.headers.get('content-type')).toBe('text/html; charset=utf-8');expect(responses[0]!.headers.get('content-security-policy')).not.toContain('script');
+  expect(page).toContain('<body data-state="stopped">');expect(page).toContain('<p id="status" role="status">This app session ended. Reopen the share link.</p>');
+  for(const named of ['<script',publicationId,...[a,b,c,d].map(app=>new URL(app.origin).hostname.split('.')[0]!)])expect(page).not.toContain(named);
+});
+
 it("drops a publication's launch and staged document when its owner is deleted", async () => {
   const f = fixture(), app = await launch(f);
   f.handler.deleteAccount("deleted-owner", [], [publicationId]);
@@ -205,4 +220,35 @@ it("refuses an in-flight launch after its publication is deleted", async () => {
   const pending = f.issue(); await waiting;
   f.handler.deleteAccount("deleted-owner", [], [publicationId]); release();
   expect((await pending).status).toBe(404);
+});
+
+it('shows opening and a stopped session as a centered dohc message in both themes', async () => {
+  const {html} = await launch(fixture()), style = /<style>([^<]+)<\/style>/.exec(html)?.[1] ?? '';
+  expect(html).toContain('<meta name="color-scheme" content="light dark">');
+  expect(style).toContain(':root{color-scheme:light dark;--bg:#faf9f5;--ink:#1c1b18;--muted:#55524a;--danger:#a43e2a}');
+  expect(style).toContain('@media (prefers-color-scheme:dark){:root{--bg:#131211;--ink:#f6f4ee;--muted:#a9a599;--danger:#e08065}}');
+  expect(style).toContain('font:14px/1.5 system-ui,"Segoe UI",sans-serif');
+  expect(style).toContain('align-items:center;justify-content:center;gap:16px;padding:24px 16px;text-align:center');
+  expect(html).toMatch(/<body data-state="opening"><main id="message"><svg id="mark"[^>]* aria-hidden="true">.*<\/svg><p id="status" role="status">Opening app<\/p><\/main><script>/);
+  expect(style).toContain('#status{max-width:320px;margin:0;color:var(--muted);text-wrap:balance}');
+  expect(style).toContain('#mark{display:none;color:var(--danger)}[data-state=stopped] #mark{display:block}');
+  expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent=\"This app session ended. Reopen the share link.\";");
+  expect(html).toContain("document.body.dataset.state='running';document.getElementById('status').textContent='';");
+  // A hidden live region drops out of the accessibility tree and misses the session-ended announcement.
+  expect(style).toContain('[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}');
+  expect(style).toContain('[data-state=running]{background:Canvas}');
+  expect(style).not.toMatch(/#(message|status)\{display:none/);
+  expect(html).not.toMatch(/style="|<link|@import|@font-face|url\(/);
+});
+it('keeps the launch page policy strict and its words free of link and workspace details', async () => {
+  const app = await launch(fixture()), csp = app.response.headers.get('content-security-policy') ?? '';
+  expect(csp.replace(/script-src [^;]+;/, 'script-src HASHES;')).toBe("default-src 'none'; script-src HASHES; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+  expect(app.html.match(/<script/g)).toHaveLength(1);
+  const script = /<script>([\s\S]*)<\/script>/.exec(app.html)?.[1] ?? '';
+  expect(csp).toContain(`script-src 'sha256-${createHash('sha256').update(script).digest('base64')}' `);
+  const words = [/<title>([^<]*)</, /role="status"[^>]*>([^<]*)</, /frame\.title='([^']*)'/].map(pattern => pattern.exec(app.html)?.[1]);
+  words.push(...[...app.html.matchAll(/textContent=(?:'([^']*)'|"([^"]*)")/g)].map(match => match[1] ?? match[2]));
+  expect(words).toEqual(['Shared app', 'Opening app', 'Shared app', 'This app session ended. Reopen the share link.', "This app can't find its data. Ask the person who shared it with you.", '']);
+  for (const detail of [publicationId, 'abcdefghijkl', 'server-capability', 'server-profile', 'viewer=session', 'relay.example.org', 'viewer.example.com'])
+    expect(app.html).not.toContain(detail);
 });

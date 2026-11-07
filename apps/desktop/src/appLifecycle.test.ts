@@ -1,11 +1,14 @@
 import { registerTypingCheckpoint } from "./workspaces/outageTypingRecovery";
 import { EventEmitter } from "node:events";
+import { writeFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
 import { createAutomationWakeConsumer, createAutomationWakeIntents, type AutomationWakeIntent } from "./automations/automationWakeIntents";
 import { createTestScratch } from "./workspaces/testTemp";
+import { createRegistryStore } from "./workspaces/registryStore";
+import { startupFailureBox } from "./launch/startupFailureBox";
 import { createWorkspaceAuthorityOwner } from "./workspaces/workspaceAuthorityOwner";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
 import { DISPATCH_STOP_LIMIT_MS, QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
@@ -87,7 +90,6 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
         return settings.promise;
       }),
       applySettings: vi.fn((value) => { log.push("settings-apply"); zoom = value.zoom; }),
-      prepareCli: vi.fn(() => undefined),
       registerHandlers: vi.fn(() => { log.push("handlers"); }),
       markFirstWindow: vi.fn(() => { log.push("first-window"); }),
       reportFailure: vi.fn(() => { log.push("report-failure"); }),
@@ -171,21 +173,6 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.services.updateAfterStartupFailure).not.toHaveBeenCalled();
     expect(f.app.quit).not.toHaveBeenCalled();
     expect(f.dependencies.windows.activate).not.toHaveBeenCalled();
-  });
-
-  it("waits for platform CLI preparation before handlers without delaying the engine and settings reads", async () => {
-    const preparation = deferred();
-    const f = fixture((d) => { d.bootstrap.prepareCli = () => preparation.promise; });
-    const ready = f.lifecycle.start();
-    f.appReady.resolve();
-    await f.settingsRequested.promise;
-    expect(f.dependencies.bootstrap.startEngine).toHaveBeenCalledOnce();
-    expect(f.dependencies.bootstrap.registerHandlers).not.toHaveBeenCalled();
-    f.settings.resolve({ zoom: 2 });
-    f.engine.resolve(true);
-    preparation.resolve();
-    await ready;
-    expect(f.log.indexOf("handlers")).toBeLessThan(f.log.indexOf("window"));
   });
 
   it("opens launch paths before later intents and activates only after the renderer subscribes", async () => {
@@ -326,6 +313,27 @@ describe("desktop bootstrap", () => {
     expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(
       restarting ? ["report-failure", "updates", "update-check"] : ["report-failure", "updates", "update-check", "quit"],
     );
+  });
+
+  it("shows the registry guidance when the workspace list is corrupt, then checks for an update", async () => {
+    const registryFile = join(await createTestScratch("dohc-lifecycle-registry-"), "dohc-workspaces.json");
+    await writeFile(registryFile, "{ this is not json");
+    const boxes: Array<{ title: string; content: string }> = [];
+    const f = fixture((d) => {
+      d.bootstrap.registerHandlers = () => { createRegistryStore(registryFile).list(); };
+      d.bootstrap.reportFailure = vi.fn((error: unknown) => {
+        boxes.push(startupFailureBox(error));
+        f.log.push("report-failure");
+      });
+    });
+    const ready = f.lifecycle.start();
+    f.appReady.resolve();
+    await ready;
+    expect(boxes).toEqual([{
+      title: "dohc couldn't read its workspace registry",
+      content: expect.stringContaining(`File: ${registryFile}\n`),
+    }]);
+    expect(f.log.slice(f.log.indexOf("report-failure"))).toEqual(["report-failure", "updates", "update-check", "quit"]);
   });
 
   it("keeps activation and incoming paths deferred when the daemon cannot start", async () => {

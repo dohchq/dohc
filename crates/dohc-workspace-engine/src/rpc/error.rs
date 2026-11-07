@@ -571,7 +571,8 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
         | RelayError::ValidationPending(_)
-        | RelayError::Local(_) => ErrorCode::Internal,
+        | RelayError::Local(_)
+        | RelayError::RepairPending => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }
@@ -595,6 +596,7 @@ fn map_domain(error: &DomainError) -> WireError {
         }
         DomainError::FileNotFound => (InvalidParams, "file-not-found"),
         DomainError::ObjectIdentityMismatch => (InvalidParams, "object-identity-mismatch"),
+        DomainError::WorkTargetNotFound => (InvalidParams, "work-target-not-found"),
         DomainError::TargetPathExists => (InvalidParams, "target-path-exists"),
         DomainError::LiveDocumentBindingActive => (InvalidParams, "live-document-binding-active"),
         DomainError::LivePageOwned => (InvalidParams, "live-page-owned"),

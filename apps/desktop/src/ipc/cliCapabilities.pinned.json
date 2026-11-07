@@ -15,6 +15,9 @@
     "threads": [
       "chat.threads.list"
     ],
+    "watch": [
+      "chat.inbox.read"
+    ],
     "inbox": [
       "chat.inbox.read"
     ],
@@ -162,6 +165,7 @@
       "dataset.approve",
       "dataset.discard",
       "dataset.migration.prepare",
+      "dataset.change.ask",
       "dataset.migration.preview",
       "dataset.schema.change.prepare",
       "dataset.migration.approve",
@@ -259,6 +263,7 @@
     "document stop-again": "share.live.document.stop",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",
+    "chat watch": "chat.inbox.read",
     "chat inbox": "chat.inbox.read",
     "chat show": "chat.show",
     "chat post": "chat.post",
@@ -295,6 +300,7 @@
     "dataset approve": "dataset.approve",
     "dataset discard": "dataset.discard",
     "dataset prepareMigration": "dataset.migration.prepare",
+    "dataset askToApply": "dataset.change.ask",
     "dataset migrationPreviewPage": "dataset.migration.preview",
     "dataset prepareSchemaChange": "dataset.schema.change.prepare",
     "dataset approveMigration": "dataset.migration.approve",

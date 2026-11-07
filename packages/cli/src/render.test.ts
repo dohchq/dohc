@@ -123,6 +123,23 @@ describe("markdown renderers", () => {
     );
   });
 
+  it("shows what an agent reported beside its name, and nothing when it reported nothing", () => {
+    const reply = showResult.messages[1]!;
+    const reported: ShowResult = {
+      ...showResult,
+      messages: [
+        { ...reply, authorReported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
+        { ...reply, id: "msg_product", authorReported: { product: "Claude Code" } },
+        { ...reply, id: "msg_silent" },
+      ],
+    };
+    const markdown = renderThreadMarkdown(reported);
+    const at = new Date(reply.createdAtMs).toISOString();
+    expect(markdown).toContain(`**Sam** · Claude Code 2.1, Claude Opus 5.5 (as reported) · ${at} · msg_reply`);
+    expect(markdown).toContain(`**Sam** · Claude Code (as reported) · ${at} · msg_product`);
+    expect(markdown).toContain(`**Sam** · ${at} · msg_silent`);
+  });
+
   it("renders a redacted attachment with an opaque label", () => {
     const redacted: ShowResult = {
       ...showResult,

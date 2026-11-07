@@ -65,6 +65,7 @@ pub use cursor::{
     abandon_ordinary_pull, commit_relay_cursor, commit_share_cursor, ordinary_pull_unfinished_in,
     read_pushed_seq, read_relay_cursor, read_share_cursor, read_shared_peer_position,
 };
+pub use deferred::{WAITING_VERSION_CODE, waiting_versions};
 pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
@@ -117,14 +118,15 @@ pub use relay::{
     HostedPullResponse, HostedPushRefusal, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS,
-    MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, ProbeRequest, ProbeResponse, PullContinuation,
-    PullRequest, PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
-    RelaySyncClient, RelayTransport, SettlementPublicationRefusal, ShareBlobRequest,
-    ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
-    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
-    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
-    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, PreparedOrdinaryPull, ProbeRequest,
+    ProbeResponse, PullContinuation, PullRequest, PullResponse, PushRequest, PushResponse,
+    PushWorkspaceProgress, RecoverResponse, RelaySyncClient, RelayTransport,
+    SettlementPublicationRefusal, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
+    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
+    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
+    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, collision_key, hosted_feed_only,
     no_hosted_feed, read_direct_write_status, read_record_creation_statuses,
 };

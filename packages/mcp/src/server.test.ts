@@ -433,6 +433,48 @@ describe("MCP tool results", () => {
     });
   });
 
+  it("sends what the client reports and the model the agent states with every chat write", async () => {
+    const root = await workspaceRoot();
+    const sent: unknown[] = [];
+    const server = createDohcMcpServer({ root, home: "/home",
+      request: async request => {
+        sent.push(request.args);
+        return request.verb === "fileChatStart"
+          ? { ok: true, path: "tracked.md", threadId: "thread-1", messageId: "message-1" }
+          : request.verb === "post"
+            ? { group: { id: "ch_1", name: "general", slug: "general", kind: "group" }, threadId: "th_1", messageId: "msg_1", title: "" }
+            : { threadId: "th_1", messageId: "msg_2" };
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "claude-code", title: "Claude Code", version: "2.1" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    connections.push({ client, server });
+    for (const [name, args] of [
+      ["dohc_start_file_chat", { path: "tracked.md", title: "Food", model: "Claude Opus 5.5" }],
+      ["dohc_start_group_chat", { group: "general", model: "Claude Opus 5.5" }],
+      ["dohc_reply_to_chat", { threadId: "thread-1" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: { ...args, body: "On it." } });
+      expect(result, JSON.stringify(result)).not.toHaveProperty("isError", true);
+    }
+    expect(sent).toMatchObject([
+      { agent: "claude-code", reported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
+      { reported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
+      { reported: { product: "Claude Code", version: "2.1" } },
+    ]);
+    expect(sent.every(args => !Object.hasOwn(args as object, "model"))).toBe(true);
+    expect((sent[2] as { reported: object }).reported).not.toHaveProperty("model");
+
+    for (const model of [" Opus\n", "﻿Opus", "\u{1F600}".repeat(40)]) {
+      const refused = await client.callTool({
+        name: "dohc_reply_to_chat", arguments: { threadId: "thread-1", body: "On it.", model },
+      });
+      expect(refused.isError).toBe(true);
+    }
+    expect(sent).toHaveLength(3);
+  });
+
   it("passes bodies at the normalized UTF-8 limit to the server for every chat write", async () => {
     // CRLF becomes LF and trailing JS whitespace is removed before the cap.
     const body = "x".repeat(65_534) + "\r\ny\uFEFF ";
