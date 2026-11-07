@@ -3433,7 +3433,7 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
       agentId: "default",
     });
-    const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+    const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "claude -p" });
     if (!claim) throw new Error("Expected a run.");
     await fixture.dispatch.failRun({ runId: claim.run.runId, reason });
     await activate(fixture);
