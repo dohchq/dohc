@@ -35,7 +35,7 @@ describe("ConfirmDialog intent", () => {
   it("confirms on the danger fill when the action removes or revokes", () => {
     render(card("danger"));
     const confirm = screen.getByTestId("confirm-action");
-    expect(confirm.className).toContain("bg-danger");
+    expect(confirm.className).toContain("bg-danger-fill");
     expect(confirm.className).not.toContain("bg-accent");
     // The intent changes the fill only: the dialog's name, the testids and
     // the labels are pinned by e2e.
