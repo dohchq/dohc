@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
@@ -641,6 +641,37 @@ describe("selecting several rows in Home", () => {
     const setData = vi.fn();
     fireEvent.dragStart(homeRow("pages:notes.md"), { dataTransfer: { effectAllowed: "none", setData } });
     expect(setData).toHaveBeenCalledWith("text/plain", "notes.md\nPlans");
+  });
+
+  it("leaves a selected folder's contents out of the delete, since the folder carries them", async () => {
+    const deleteWorkspacePath = vi.fn(async (_input: { relativePath: string }) => undefined);
+    vi.stubGlobal("dohcDesktop", { showExplorerMenu, deleteWorkspacePath });
+    const onPathsChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps({ expandedFolders: ["Plans"], onPathsChanged })} />);
+    homeRow("pages:notes.md").focus();
+    await user.keyboard("{Control>}a{/Control}");
+    expect(picked()).toEqual(expect.arrayContaining(["pages:Plans/", "pages:Plans/Old/", "pages:Plans/Spring.md"]));
+    await user.keyboard("{Delete}");
+
+    const dialog = screen.getByTestId("delete-confirm");
+    const listed = [...dialog.querySelectorAll("li")].map((item) => item.textContent ?? "");
+    expect(listed).toContain("Plans");
+    expect(listed.filter((path) => path.startsWith("Plans/"))).toEqual([]);
+    expect(within(dialog).getByRole("heading").textContent).toBe(`Delete ${listed.length} items?`);
+    await user.click(screen.getByTestId("confirm-delete"));
+    await waitFor(() => expect(onPathsChanged).toHaveBeenCalled());
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath).sort()).toEqual([...listed].sort());
+  });
+
+  it("drags a selected folder without its selected contents", () => {
+    render(<Explorer {...explorerProps({ expandedFolders: ["Plans"] })} />);
+    fireEvent.click(homeRow("pages:Plans/"), { ctrlKey: true });
+    fireEvent.click(homeRow("pages:Plans/Spring.md"), { ctrlKey: true });
+    fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
+    const setData = vi.fn();
+    fireEvent.dragStart(homeRow("pages:Plans/Spring.md"), { dataTransfer: { effectAllowed: "none", setData } });
+    expect(setData).toHaveBeenCalledWith("text/plain", "Plans\nnotes.md");
   });
 
   it("sends a selected row's menu the selection's count, and a row outside it its own menu", () => {

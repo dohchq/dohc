@@ -233,6 +233,19 @@ function glyphTone(marked: boolean): string {
   return marked ? "text-ink" : "text-subtle";
 }
 
+// The paths with no ancestor folder among them, in order. Deleting or moving
+// a folder carries its contents, so a selected child of a selected folder is
+// left out.
+function topLevelPaths(paths: Iterable<string>): string[] {
+  const all = new Set(paths);
+  return [...all].filter((path) => {
+    for (let at = path.lastIndexOf("/"); at > 0; at = path.lastIndexOf("/", at - 1)) {
+      if (all.has(path.slice(0, at))) return false;
+    }
+    return true;
+  });
+}
+
 // Disclosure chevrons and the section toolbars take the secondary voice in
 // dark, where the hint voice reads too dim on the panel. Light keeps it.
 const CHEVRON_TONE = "text-subtle dark:text-muted";
@@ -559,6 +572,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   collectionFoldersRef.current = props.collectionFolders;
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
+  // What the delete dialog lists and deletes.
+  const deleting = useMemo(() => (confirmDelete ? topLevelPaths(confirmDelete) : null), [confirmDelete]);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingFocusPath = useRef<string | null>(null);
   const fileTreeRef = useRef<HTMLElement>(null);
@@ -1094,11 +1109,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const performDeletes = useCallback(
     (paths: string[]) => {
-      // A selected child inside a selected folder is covered by the folder.
-      const tops = paths.filter(
-        (path) => !paths.some((other) => other !== path && path.startsWith(`${other}/`)),
-      );
-      const changes: PendingTreeChange[] = tops.map((path) => ({
+      const changes: PendingTreeChange[] = paths.map((path) => ({
         id: nextChangeId(),
         kind: isFolderPath(path) ? "delete-folder" : "delete-file",
         path,
@@ -1390,7 +1401,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const onRowDragStart = useCallback(
     (path: string, event: DragEvent) => {
       const selected = selectionRef.current;
-      const paths = selected.has(path) ? [...selected] : [path];
+      const paths = selected.has(path) ? topLevelPaths(selected) : [path];
       dragSources.current = paths.map((p) => ({
         path: p,
         kind: isFolderPath(p) ? "folder" : "file",
@@ -2203,15 +2214,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         </div>
       ) : null}
 
-      {confirmDelete ? (
+      {deleting ? (
         <ConfirmDialog
-          {...deleteConfirmText(confirmDelete, props.shareView)}
+          {...deleteConfirmText(deleting, props.shareView)}
           testId="delete-confirm"
           cancelTestId="cancel-delete"
           confirmTestId="confirm-delete"
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() => {
-            performDeletes(confirmDelete);
+            performDeletes(deleting);
             setConfirmDelete(null);
           }}
         />
