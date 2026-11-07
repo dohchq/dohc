@@ -246,6 +246,9 @@
     ],
     "versionResolve": [
       "version.conflict.resolve"
+    ],
+    "notices": [
+      "notice.list"
     ]
   },
   "public": {
@@ -347,6 +350,7 @@
     "links edges": "links.edges",
     "chat file-mentions": "chat.read",
     "file duplicate": "file.duplicate",
-    "chat links": "chat.read"
+    "chat links": "chat.read",
+    "notices list": "notice.list"
   }
 }

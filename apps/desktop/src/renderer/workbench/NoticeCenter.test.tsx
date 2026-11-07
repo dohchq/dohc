@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { NOTICE_BODY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NoticeRow, SyncStatusResult } from "../../ipc/bridgeContract";
-import type { NoticeTarget } from "../shell/noticeTarget";
+import type { NoticeTarget } from "../../notices/noticeTarget";
 import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";

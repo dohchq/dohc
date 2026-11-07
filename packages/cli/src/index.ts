@@ -190,6 +190,7 @@ function buildCliRequest(
         group: command.group, thread: command.thread, timeoutMs: command.timeoutMs,
       } };
     case "inbox":
+    case "notices":
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,

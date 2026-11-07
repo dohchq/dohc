@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type { NoticeRow, WorkspaceSummary } from "../ipc/bridgeContract";
 import { sentNoticeFolder, sentNoticePlace } from "./sentNoticePlace";
 
 function workspace(workspaceId: string, extra: Partial<WorkspaceSummary> = {}): WorkspaceSummary {

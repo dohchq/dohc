@@ -6,6 +6,8 @@ import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-con
 import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
+import type { AgentNotice } from "../notices/agentNotices";
+import type { SentNoticeTarget } from "../notices/noticeTarget";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
@@ -22,6 +24,7 @@ import {
   cliTransportResponseSchema,
   parseCliResult,
   type CliActor,
+  type CliNoticeOpens,
   type CliAuthor,
   type CliGroup,
   type CliCollectionQueryCursor,
@@ -400,6 +403,8 @@ export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
+  // The signed-in person's Notices rows that open in this workspace.
+  notices?(workspaceId: string): Promise<AgentNotice[]>;
   chatLinks?(workspace:CliRegistryWorkspace,input:ChatLinksInput):Promise<ChatLinksPage>;
   chatFileMentions?(workspace: CliRegistryWorkspace, input: ChatFileMentionsInput): Promise<ChatFileMentionsPage>;
   links?: {
@@ -538,6 +543,13 @@ export function cliThreadId(id: string): string {
 
 export function cliMessageId(id: string): string {
   return formatMessageHandle(id);
+}
+
+// A conversation a notice opens, under the ids `show` takes.
+function cliNoticeOpens(opens: SentNoticeTarget): CliNoticeOpens {
+  if (opens.to !== "chat") return opens;
+  const { message, ...chat } = opens;
+  return { ...chat, thread: cliThreadId(opens.thread), ...(message === undefined ? {} : { message: cliMessageId(message) }) };
 }
 
 // The engine's `channel` kind is a Group everywhere a reader sees it.
@@ -2556,6 +2568,11 @@ async function dispatchWorkspace(
     throw new CliCommandError("--choose needs --resolve <message>");
   }
   switch (request.verb) {
+    case "notices": {
+      if (!options.notices) throw new CliCommandError("Notices are unavailable.");
+      const notices = await options.notices(context.workspaceId);
+      return { notices: notices.map(({ opens, ...notice }) => ({ ...notice, opens: opens && cliNoticeOpens(opens) })) };
+    }
     case "stopSync":
       if (context.readOnly || !context.stopSync) throw new CliCommandError("Open the owning workspace to stop its sync.");
       return context.stopSync(writeActor(request.args.actor, context, options) === "agent"

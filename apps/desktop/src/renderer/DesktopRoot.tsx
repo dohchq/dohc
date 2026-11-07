@@ -25,7 +25,7 @@ import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from 
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
-import type { NoticeTarget } from "./shell/noticeTarget";
+import type { NoticeTarget } from "../notices/noticeTarget";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { useAccountDeletion } from "./shell/useAccountDeletion";

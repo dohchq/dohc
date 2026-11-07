@@ -46,6 +46,7 @@ type CliCommandBody =
   | { verb: "threads"; group: string }
   | { verb: "watch"; cursor?: string; group?: string; thread?: string; timeoutMs: number; once: boolean }
   | { verb: "inbox" }
+  | { verb: "notices" }
   | { verb: "show"; target: string; peek: boolean; before?: CliStreamPosition; limit?: number }
   | {
       verb: "post";
@@ -1204,6 +1205,21 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       try { return { verb: "linksResolve", ...LinksResolveInput.parse({ source, literals: JSON.parse(literals ?? "null") }) }; } catch { return fail('Use a source path and a JSON array of kind and literal objects.'); }
     } },
   } },
+  notices: {
+    summary: "Read this workspace's Notices.",
+    notes: ["Listing does not change whether rows are read."],
+    verbs: {
+      list: {
+        capabilityId: "notice.list",
+        summary: "List this workspace's Notices, newest first: each row's title, text, sender, time, whether you have read it, and where it opens.",
+        operands: "",
+        parse: ({ operands }) => {
+          noExtraArgs(operands, "notices list");
+          return { verb: "notices" };
+        },
+      },
+    },
+  },
   sync: {
     summary: "Stop syncing this workspace on this computer.",
     notes: ["Local files, documents, records, and history stay here. Shares and protected-file keys are retained.",
