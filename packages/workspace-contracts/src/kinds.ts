@@ -17,6 +17,8 @@ type KindGlyphId =
   | "file-text"
   | "file-spreadsheet"
   | "file-code"
+  | "file-braces"
+  | "file-type"
   | "pen-tool"
   | "image"
   | "database";
@@ -83,22 +85,23 @@ export const FILE_KIND_RECORDS = {
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   json: {
-    displayKind: "json", name: "Code or text", glyphId: "file-code", displayNameRule: "basename",
-    extensions: ["json"],
+    displayKind: "json", name: "Data", glyphId: "file-braces", displayNameRule: "basename",
+    extensions: ["json", "xml", "yaml", "yml", "toml", "ini", "env"],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   text: {
-    displayKind: "text", name: "Code or text", glyphId: "file-code", displayNameRule: "basename",
-    extensions: ["txt", "html", "htm", "xml", "yaml", "yml", "toml", "ini", "env", "log"],
+    displayKind: "text", name: "Text", glyphId: "file-type", displayNameRule: "basename",
+    extensions: ["txt", "log"],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   code: {
-    displayKind: "code", name: "Code or text", glyphId: "file-code", displayNameRule: "basename",
+    displayKind: "code", name: "Code", glyphId: "file-code", displayNameRule: "basename",
     extensions: [
       "css", "scss", "sass", "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "sql",
       "sh", "bash", "zsh", "ps1", "py", "rb", "go", "rs", "java", "c", "cpp", "h", "hpp",
+      "html", "htm",
     ],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,

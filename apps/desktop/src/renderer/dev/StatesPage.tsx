@@ -35,7 +35,16 @@ import { DocumentMenu } from "../DocumentMenu";
 import { PageIdentity } from "../PageIdentity";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { TextViewActions } from "../TextEditorView";
-import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
+import {
+  DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
+  DocumentControls,
+  MarkdownSourceStrip,
+  OPENING_TITLE,
+  OpeningState,
+  SetAsideEditRow,
+  ViewActions,
+} from "../fileInspectorUi";
+import { CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "../readOnlyReasons";
 import { BlockMenu } from "../editor/blockControls";
 import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -211,9 +220,9 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         onCreateGroupRight={noop}
         onCloseGroup={noop}
       />
-      {/* Tall enough to hold the tab list, which the capture opens, and its
-          shadow. */}
-      <div className="h-28 bg-bg" />
+      {/* Tall enough to hold the tab list, which the capture opens, with
+          Close group and its shadow. */}
+      <div className="h-38 bg-bg" />
     </>
   );
 }
@@ -239,7 +248,7 @@ function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
 
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; dirty?: boolean; children: ReactNode }) {
   const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
@@ -251,7 +260,7 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
             groupNumber={1}
             tabs={[{ path }]}
             activeTab={path}
-            activeTabDirty={false}
+            activeTabDirty={props.dirty ?? false}
             recoveryPaths={NO_RECOVERY}
             onActivate={noop}
             onClose={noop}
@@ -554,6 +563,38 @@ function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean 
   return (
     <div className="w-full overflow-hidden rounded-lg border border-line">
       <GlyphStrip groupId="states" groupNumber={1} {...props} />
+    </div>
+  );
+}
+
+// Two tabs over a strip of paper, the first active. An unsaved tab draws its
+// dot in its close's slot. `tab` and `close` force a state on the active tab
+// and on its close. states-page.spec.ts measures the tabs by `testId`.
+const UNSAVED_TABS = [{ path: "trip/plan.md" }, { path: "notes.md" }];
+const UNSAVED_RECOVERY: ReadonlySet<string> = new Set(["notes.md"]);
+const UNSAVED_ACTIVE_TAB = '[role="tab"][data-active]';
+function UnsavedTabStrip(props: { testId: string; dirty: boolean; recovered: boolean; tab?: string; close?: string }) {
+  return (
+    <div data-testid={props.testId} className="w-[360px] overflow-hidden rounded-lg border border-line">
+      <div data-force-state={props.tab} data-force-target={props.tab ? UNSAVED_ACTIVE_TAB : undefined}>
+        <div data-force-state={props.close} data-force-target={props.close ? `${UNSAVED_ACTIVE_TAB} button` : undefined}>
+          <EditorTabs
+            groupId="states"
+            groupNumber={1}
+            tabs={UNSAVED_TABS}
+            activeTab="trip/plan.md"
+            activeTabDirty={props.dirty}
+            recoveryPaths={props.recovered ? UNSAVED_RECOVERY : NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        </div>
+      </div>
+      <div className="h-4 bg-bg" />
     </div>
   );
 }
@@ -1832,6 +1873,8 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="active" active />
           <Row name="focused, hover" force="hover focus-visible" />
           <Row name="drop target" folder drop />
+          <Row name="2026-07-08-meeting-notes-with-the-venue-team.md" />
+          <Row name="quarterly-planning-and-budget-review-2026" folder />
         </ul>
       </Section>
 
@@ -2195,7 +2238,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="saving" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-saving-${theme}`} truncate quietWhenCalm state="saving" shown="saving" />}
@@ -2209,7 +2252,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="pending share" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-pending-${theme}`} truncate quietWhenCalm state="pending-share" shown="pending-share" />}
@@ -2223,7 +2266,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="held: file in use" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" dirty>
             <ViewActions
               onShare={noop}
               status={<StateMark testId={`states-tab-row-actions-held-${theme}`} truncate quietWhenCalm state="file-locked" shown="file-locked" />}
@@ -2250,7 +2293,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="narrow, changed on disk">
-          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`}>
+          <TabRowActionsSpecimen width="w-[360px]" testId={`states-tab-row-actions-narrow-${theme}`} dirty>
             <ViewActions
               onShare={noop}
               status={
@@ -3493,6 +3536,54 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="open, plum chosen, keyboard focus on olive">
           <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Olive"]'>
             <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Each strip holds a tab list, so the part holds them at rest. */}
+      <Section part="tab-unsaved" title="Unsaved tabs" menusAtRest>
+        <Specimen label="saved, for the width">
+          <UnsavedTabStrip testId={`states-tab-unsaved-clean-${theme}`} dirty={false} recovered={false} />
+        </Specimen>
+        <Specimen label="the active tab, unsaved">
+          <UnsavedTabStrip testId={`states-tab-unsaved-dirty-${theme}`} dirty recovered={false} />
+        </Specimen>
+        <Specimen label="an inactive tab holding recovered changes">
+          <UnsavedTabStrip testId={`states-tab-unsaved-recovered-${theme}`} dirty={false} recovered />
+        </Specimen>
+        <Specimen label="hover on the unsaved active tab">
+          <UnsavedTabStrip testId={`states-tab-unsaved-hover-${theme}`} dirty recovered tab="hover" />
+        </Specimen>
+        <Specimen label="the pointer on its close">
+          <UnsavedTabStrip testId={`states-tab-unsaved-close-${theme}`} dirty recovered tab="hover" close="hover" />
+        </Specimen>
+        <Specimen label="keyboard focus on the unsaved active tab">
+          <UnsavedTabStrip testId={`states-tab-unsaved-focus-${theme}`} dirty recovered tab="focus-visible" />
+        </Specimen>
+      </Section>
+
+      <Section part="read-only-reasons" title="Read-only reasons">
+        <Specimen label="the replacement did not finish: the chip with Try again, over the source strip">
+          <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
+            <div className="flex justify-end px-3 py-1.5">
+              <StateMark testId={`states-read-only-replacement-${theme}`} state="read-only" shown="read-only-unavailable"
+                title={REPLACEMENT_FAILED_REASON} onRetry={noop} />
+            </div>
+            <MarkdownSourceStrip words={REPLACEMENT_FAILED_REASON} getText={() => null} />
+          </div>
+        </Specimen>
+        <Specimen label="the connection was lost: the chip, over the source strip">
+          <div className="flex w-[440px] flex-col rounded-lg border border-line bg-panel">
+            <div className="flex justify-end px-3 py-1.5">
+              <StateMark testId={`states-read-only-connection-${theme}`} state="read-only" shown="read-only-unavailable"
+                title={CONNECTION_LOST_REASON} />
+            </div>
+            <MarkdownSourceStrip words={CONNECTION_LOST_REASON} getText={() => null} />
+          </div>
+        </Specimen>
+        <Specimen label="an edit refused for good: its set-aside row">
+          <div className="w-[440px] overflow-hidden rounded-lg border border-line">
+            <SetAsideEditRow message={DOCUMENT_NOT_SAVED_DRAFT_NOTICE} getText={() => null} onDismiss={noop} />
           </div>
         </Specimen>
       </Section>

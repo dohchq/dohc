@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { editorTabTestId } from "../../testPins";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
 import { useFocusSurface } from "../ui/focusReturn";
@@ -53,6 +53,13 @@ function renderTabs(activeTab: string) {
 }
 
 describe("EditorTabs strip scrolling", () => {
+  it("gives every tab's close the tooltip Close", () => {
+    renderTabs("b.md");
+    for (const path of ["a.md", "b.md", "c.md"]) {
+      expect(screen.getByRole("button", { name: `Close ${path}` }).getAttribute("title")).toBe("Close");
+    }
+  });
+
   it.each([
     [siteTabPath("apps/trip"), "Discovered name", "apps/trip"],
     [collectionTabPath("notes/旅"), "旅", "notes/旅"],
@@ -257,8 +264,8 @@ describe("EditorTabs strip scrolling", () => {
     }
 
     // Only the strip scrolls: scrollIntoView would scroll every scrolling
-    // ancestor too, the window included. A revealed tab stops 33px from a
-    // faded edge: the 24px fade and its 9px join.
+    // ancestor too, the window included. A revealed tab stops 49px from a
+    // faded edge: the 40px fade and its 9px join.
     it("reveals the active tab clear of the fades when activation changes by any means, scrolling only the strip", () => {
       const scrollIntoView = vi.fn();
       Element.prototype.scrollIntoView = scrollIntoView;
@@ -272,15 +279,15 @@ describe("EditorTabs strip scrolling", () => {
       rerender(renderStrip("b.md"));
       expect(scrollTo).not.toHaveBeenCalled();
 
-      // d.md ends at 400px: its end 33px inside the view.
+      // d.md ends at 400px: its end 49px inside the view.
       rerender(renderStrip("d.md"));
       expect(scrollTo).toHaveBeenCalledTimes(1);
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 183, behavior: "smooth" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 199, behavior: "smooth" });
       expect(scrollTo.mock.contexts[0]).toBe(strip);
 
-      // b.md starts at 100px, left of the view: its start 33px inside.
+      // b.md starts at 100px, left of the view: its start 49px inside.
       rerender(renderStrip("b.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 67, behavior: "smooth" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 51, behavior: "smooth" });
 
       // e.md is last: the strip scrolls to its end, which has no fade.
       rerender(renderStrip("e.md"));
@@ -304,7 +311,7 @@ describe("EditorTabs strip scrolling", () => {
       // view, and comes back without an animation.
       resize(250);
       expect(scrollTo).toHaveBeenCalledTimes(1);
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 183, behavior: "auto" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 199, behavior: "auto" });
 
       // Widened, the tab is still in view: nothing scrolls.
       resize(300);
@@ -321,7 +328,7 @@ describe("EditorTabs strip scrolling", () => {
       // The next width change reveals it again.
       resize(260);
       expect(scrollTo).toHaveBeenCalledTimes(2);
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 173, behavior: "auto" });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 189, behavior: "auto" });
     });
 
     // Places the tabs a test names at [left, width] over `content` px of tabs
@@ -343,7 +350,7 @@ describe("EditorTabs strip scrolling", () => {
     }
 
     // The strip's end does not fade, so a last tab needs no margin there; the
-    // 33px margin at its start does not fit beside a 224px tab in 250px.
+    // 49px margin at its start does not fit beside a 224px tab in 250px.
     it("reveals a last tab with no room for its margin whole, at the strip's end", () => {
       const span = layOut(640, { "a.md": [0, 100], "e.md": [400, 224] });
       const { rerender } = render(renderStrip("a.md"));
@@ -368,13 +375,38 @@ describe("EditorTabs strip scrolling", () => {
       expect(span("a.md")).toEqual({ start: 0, end: 224 });
     });
 
+    // A 49px margin would scroll a tab's start out of a 40px strip.
+    it("shows the start of a tab wider than a strip too narrow for its margin", () => {
+      width.current = 40;
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [100, 100] });
+      const { rerender } = render(renderStrip("a.md"));
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 100, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 0, end: 100 });
+    });
+
+    // The margin gives way only to keep 49px of the tab in view: a 150px
+    // strip keeps all of it, and an 80px one keeps 31px.
+    it("shows the start of a tab wider than the strip as clear of the fade as the room allows", () => {
+      width.current = 150;
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [100, 200] });
+      const { rerender } = render(renderStrip("a.md"));
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 51, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 49, end: 249 });
+
+      resize(80);
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 69, behavior: "auto" });
+      expect(span("c.md")).toEqual({ start: 31, end: 231 });
+    });
+
     it("reveals a middle tab with room for both margins clear of both fades, and leaves it where it is clear", () => {
       const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 150] });
       const { rerender } = render(renderStrip("a.md"));
       const strip = screen.getByRole("tablist");
       rerender(renderStrip("c.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 233, behavior: "smooth" });
-      expect(span("c.md")).toEqual({ start: 67, end: 217 });
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 249, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 51, end: 201 });
 
       strip.scrollLeft = 250;
       scrollTo.mockClear();
@@ -383,7 +415,7 @@ describe("EditorTabs strip scrolling", () => {
     });
 
     it("reveals a middle tab with no room for both margins whole, as clear of both fades as the room allows", () => {
-      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 190] });
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 160] });
       const { rerender } = render(renderStrip("a.md"));
       const strip = screen.getByRole("tablist");
       // 30px of room: 15px on each side.
@@ -391,12 +423,12 @@ describe("EditorTabs strip scrolling", () => {
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 285, behavior: "smooth" });
       expect(span("c.md")).toEqual({ start: 15, end: 235 });
 
-      // 60px of room clears both 24px fades, if not the joins beside them:
+      // 90px of room clears both 40px fades, if not the joins beside them:
       // the nearest such scroll, and none while the tab is already clear.
       rerender(renderStrip("d.md"));
-      expect(scrollTo).toHaveBeenLastCalledWith({ left: 276, behavior: "smooth" });
-      expect(span("d.md")).toEqual({ start: 24, end: 214 });
-      strip.scrollLeft = 270;
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 260, behavior: "smooth" });
+      expect(span("d.md")).toEqual({ start: 40, end: 200 });
+      strip.scrollLeft = 255;
       scrollTo.mockClear();
       resize(251);
       expect(scrollTo).not.toHaveBeenCalled();
@@ -418,6 +450,59 @@ describe("EditorTabs strip scrolling", () => {
       expect(drawn.className.split(" ")).toEqual(expect.arrayContaining(["pointer-events-none", "z-[6]"]));
     }
     expect(screen.getByRole("tab", { selected: true }).className).toContain("z-10");
+  });
+
+  // A cut name's first two or three letters sit in the fade's solid outer
+  // 16px, so no short fragment shows, and the fade runs to the strip's own
+  // fill. The left fade runs rightward from the left edge, the right one
+  // leftward from the right edge.
+  it("fades each edge over 40px from the strip's own fill, solid over the outer 16px", () => {
+    renderTabs("a.md");
+    const frame = screen.getByTestId("editor-tabs");
+    expect(frame.className.split(" ")).toContain("bg-panel");
+    const drawn = (side: string) => {
+      const fade = frame.querySelector<HTMLElement>(`[data-strip-fade="${side}"]`);
+      return ((fade?.className.includes("absolute") ? fade : fade?.firstElementChild) as HTMLElement).className.split(" ");
+    };
+    for (const [side, direction] of [["left", "bg-linear-to-r"], ["right", "bg-linear-to-l"]] as const) {
+      expect(drawn(side)).toEqual(
+        expect.arrayContaining(["w-10", "from-panel", "from-40%", "to-transparent", direction, `${side}-0`]),
+      );
+    }
+  });
+
+  // The strip's buttons rest at the muted tone of the other tab-row controls.
+  it("tones the strip's buttons muted at rest", () => {
+    // An empty group's strip holds the group close.
+    const group = (groupId: string, groupNumber: number, groupTabs: typeof tabs) => (
+      <EditorTabs
+        groupId={groupId}
+        groupNumber={groupNumber}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={noop}
+      />
+    );
+    render(<>{group("left", 1, tabs)}{group("right", 2, [])}</>);
+    const buttons = [
+      screen.getByTestId("tabs-overflow"),
+      ...screen.getAllByTestId("create-editor-group-right"),
+      screen.getByRole("button", { name: "Close editor group" }),
+    ];
+    expect(buttons).toHaveLength(4);
+    for (const button of buttons) {
+      const classes = button.className.split(" ");
+      expect(classes).toContain("text-muted");
+      expect(classes.filter((name) => name.includes("text-subtle"))).toEqual([]);
+    }
   });
 
   // The fades in styles.css read these: an edge the strip can still scroll
@@ -1073,33 +1158,6 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(thumb.style.transform).toBe("translateX(0px)");
   });
 
-  it("re-measures when the active tab becomes dirty", () => {
-    const { rerender } = renderTabs("a.md");
-    const strip = screen.getByRole("tablist");
-    const thumb = screen.getByTestId("tab-strip-scrollbar");
-    Object.defineProperty(strip, "scrollWidth", { value: 600 });
-    Object.defineProperty(strip, "clientWidth", { value: 200 });
-    expect(thumb.style.display).toBe("none");
-
-    rerender(
-      <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={tabs}
-        activeTab="a.md"
-        activeTabDirty
-        recoveryPaths={new Set<string>()}
-        onActivate={noop}
-        onClose={noop}
-        onContextMenu={noop}
-        onMove={noop}
-        onMoveToGroup={noop}
-        onCreateGroupRight={noop}
-      />,
-    );
-    expect(thumb.style.display).toBe("");
-  });
-
   it("scrolls the strip when the thumb is dragged", () => {
     const strip = overflowStrip();
     const thumb = screen.getByTestId("tab-strip-scrollbar");
@@ -1117,7 +1175,6 @@ describe("EditorTabs overlay scrollbar", () => {
 
   it("labels and invokes group-scoped controls", () => {
     const onCreateGroupRight = vi.fn();
-    const onCloseGroup = vi.fn();
     render(
       <EditorTabs
         groupId="left"
@@ -1132,7 +1189,6 @@ describe("EditorTabs overlay scrollbar", () => {
         onMove={noop}
         onMoveToGroup={noop}
         onCreateGroupRight={onCreateGroupRight}
-        onCloseGroup={onCloseGroup}
       />,
     );
 
@@ -1145,9 +1201,104 @@ describe("EditorTabs overlay scrollbar", () => {
     );
     expect(onCreateGroupRight).toHaveBeenCalledOnce();
     expect(onCreateGroupRight).toHaveBeenCalledWith("left");
-    fireEvent.click(screen.getByRole("button", { name: "Close editor group" }));
+  });
+
+  // The strip's group close sat beside the active tab's close, with the same
+  // X, so a group with tabs closes from its tab list.
+  it("closes a group with tabs from the end of its tab list, not the strip", () => {
+    const onActivate = vi.fn();
+    const onCloseGroup = vi.fn();
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={2}
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={onActivate}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={onCloseGroup}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "All tabs in editor group 2" }));
+    const menu = screen.getByRole("menu", { name: "Tabs in editor group 2" });
+    expect(
+      Array.from(menu.children, (row) => row.getAttribute("role") === "separator" ? "---" : row.textContent),
+    ).toEqual(["a.md", "b.md", "c.md", "---", "Close group"]);
+    const close = screen.getByRole("menuitem", { name: "Close group" });
+    expect(close.getAttribute("aria-current")).toBeNull();
+    fireEvent.click(close);
     expect(onCloseGroup).toHaveBeenCalledOnce();
     expect(onCloseGroup).toHaveBeenCalledWith("left");
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("keeps the strip's close button for an empty group, which has no tab list", () => {
+    const onCloseGroup = vi.fn();
+    const group = (groupId: string, groupNumber: number, groupTabs: typeof tabs) => (
+      <EditorTabs
+        groupId={groupId}
+        groupNumber={groupNumber}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={onCloseGroup}
+      />
+    );
+    // A split, as the shell lays it out: a group with tabs, then an empty one.
+    render(<>{group("left", 1, tabs)}{group("right", 2, [])}</>);
+
+    const [tabbed, empty] = screen.getAllByTestId("editor-tabs");
+    expect(within(tabbed!).queryByRole("button", { name: "Close editor group" })).toBeNull();
+    expect(within(empty!).queryByTestId("tabs-overflow")).toBeNull();
+    fireEvent.click(within(empty!).getByRole("button", { name: "Close editor group" }));
+    expect(onCloseGroup).toHaveBeenCalledOnce();
+    expect(onCloseGroup).toHaveBeenCalledWith("right");
+  });
+
+  it.each([
+    ["with tabs", tabs],
+    ["with no tabs", []],
+  ])("offers no group close when the shell cannot close the group, %s", (_label, groupTabs) => {
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+    if (groupTabs.length === 0) return;
+    fireEvent.click(screen.getByTestId("tabs-overflow"));
+    const menu = screen.getByTestId("tabs-overflow-menu");
+    expect(screen.queryByRole("menuitem", { name: "Close group" })).toBeNull();
+    expect(menu.querySelector('[role="separator"]')).toBeNull();
+    expect(screen.getAllByRole("menuitem").map((row) => row.textContent)).toEqual(["a.md", "b.md", "c.md"]);
   });
 
   // Forced colors remove fills, so the mark is a border, which they keep, in
@@ -1239,19 +1390,26 @@ it("uses one tab stop and arrow, Home and End activation", () => {
 // The strip's scroller cuts off a tab's outset ring, and the pane edge the
 // last strip button's.
 it("draws the focus ring inside every tab and strip button", () => {
+  // An empty group's strip holds the group close.
   render(
-    <EditorTabs groupId="left" groupNumber={1} tabs={tabs} activeTab="b.md"
-      activeTabDirty={false} recoveryPaths={new Set<string>()}
-      onActivate={noop} onClose={noop} onContextMenu={noop} onMove={noop}
-      onMoveToGroup={noop} onCreateGroupRight={noop} onCloseGroup={noop} />,
+    <>
+      <EditorTabs groupId="left" groupNumber={1} tabs={tabs} activeTab="b.md"
+        activeTabDirty={false} recoveryPaths={new Set<string>()}
+        onActivate={noop} onClose={noop} onContextMenu={noop} onMove={noop}
+        onMoveToGroup={noop} onCreateGroupRight={noop} onCloseGroup={noop} />
+      <EditorTabs groupId="right" groupNumber={2} tabs={[]} activeTab={null}
+        activeTabDirty={false} recoveryPaths={new Set<string>()}
+        onActivate={noop} onClose={noop} onContextMenu={noop} onMove={noop}
+        onMoveToGroup={noop} onCreateGroupRight={noop} onCloseGroup={noop} />
+    </>,
   );
   const controls = [
     ...screen.getAllByRole("tab"),
     screen.getByRole("button", { name: "Close editor group" }),
-    screen.getByTestId("create-editor-group-right"),
+    ...screen.getAllByTestId("create-editor-group-right"),
     screen.getByTestId("tabs-overflow"),
   ];
-  expect(controls).toHaveLength(6);
+  expect(controls).toHaveLength(7);
   for (const control of controls) {
     expect(control.className.split(" ")).toContain("focus-visible:-outline-offset-2");
   }

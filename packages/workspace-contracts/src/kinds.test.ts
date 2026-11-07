@@ -36,12 +36,15 @@ describe("file kind records", () => {
   });
 
   // The drawing's kind list (ui-review parts/unify.mjs), file kinds only,
-  // with its icons as Lucide IDs. One name, one glyph: a kind the list names
-  // takes that glyph, and a kind it does not name takes the blank page.
+  // with its icons as Lucide IDs, and its "Code or text" split so code, data
+  // and text files each have a glyph. One name, one glyph: a kind the list
+  // names takes that glyph, and a kind it does not name takes the blank page.
   const DRAWING_KINDS: Record<string, string> = {
     Document: "file-text",
     "CSV table": "file-spreadsheet",
-    "Code or text": "file-code",
+    Code: "file-code",
+    Data: "file-braces",
+    Text: "file-type",
     Drawing: "pen-tool",
     Image: "image",
     Database: "database",
@@ -62,9 +65,12 @@ describe("file kind records", () => {
   it.each([
     ["plan.md", "Document", "file-text"],
     ["rows.csv", "CSV table", "file-spreadsheet"],
-    ["main.ts", "Code or text", "file-code"],
-    ["notes.txt", "Code or text", "file-code"],
-    ["config.json", "Code or text", "file-code"],
+    ["main.ts", "Code", "file-code"],
+    ["notes.txt", "Text", "file-type"],
+    ["server.log", "Text", "file-type"],
+    ["config.json", "Data", "file-braces"],
+    ["compose.yaml", "Data", "file-braces"],
+    ["index.html", "Code", "file-code"],
     ["plan.excalidraw", "Drawing", "pen-tool"],
     ["photo.png", "Image", "image"],
     ["data.sqlite", "Database", "database"],
@@ -75,15 +81,23 @@ describe("file kind records", () => {
     expect(fileKindForPath(path)).toMatchObject({ name, glyphId });
   });
 
-  it.each(["txt", "log", "env", "ini", "html", "htm", "xml", "yaml", "yml", "toml"])(
-    "uses the code glyph for %s while retaining text loading", (extension) => {
+  it.each(["txt", "log"])(
+    "uses the text glyph for %s while retaining text loading", (extension) => {
       expect(fileKindForPath(`file.${extension}`)).toMatchObject({
-        displayKind: "text", glyphId: "file-code", opens: { content: "text" },
+        displayKind: "text", glyphId: "file-type", opens: { content: "text" },
       });
     },
   );
 
-  it.each(["js", "tsx", "css", "py", "rs", "sh", "sql"])(
+  it.each(["json", "xml", "yaml", "yml", "toml", "ini", "env"])(
+    "uses the data glyph for %s while retaining text loading", (extension) => {
+      expect(fileKindForPath(`file.${extension}`)).toMatchObject({
+        displayKind: "json", glyphId: "file-braces", opens: { content: "text" },
+      });
+    },
+  );
+
+  it.each(["js", "tsx", "css", "py", "rs", "sh", "sql", "html", "htm"])(
     "uses a code glyph for %s while retaining text loading", (extension) => {
       expect(fileKindForPath(`file.${extension}`)).toMatchObject({
         displayKind: "code", glyphId: "file-code", opens: { content: "text" },

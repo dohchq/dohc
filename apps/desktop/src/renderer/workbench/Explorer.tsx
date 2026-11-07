@@ -6,6 +6,7 @@ import { SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import { MiddleCutName } from "../ui/MiddleCutName";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -224,6 +225,10 @@ function glyphTone(selected: boolean): string {
   return selected ? "text-ink" : "text-subtle";
 }
 
+// Disclosure chevrons and the section toolbars take the secondary voice in
+// dark, where the hint voice reads too dim on the panel. Light keeps it.
+const CHEVRON_TONE = "text-subtle dark:text-muted";
+
 type DropPreview = {
   targetPath: string | null;
   targetDir: string;
@@ -275,7 +280,7 @@ function SectionActionButton(props: {
       title={props.label}
       disabled={props.disabled}
       onClick={props.onClick}
-      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-30"
+      className="grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink dark:text-muted dark:hover:text-ink disabled:pointer-events-none disabled:opacity-30"
     >
       {props.children}
     </button>
@@ -347,18 +352,23 @@ export const TreeRow = memo(function TreeRow(props: {
   onRowDragEnd: () => void;
 }) {
   const { row } = props;
-  // A drop preview colors the whole row, glyph included.
-  const glyphClass = props.dropPreview ? "" : glyphTone(props.selected || props.active);
-  const dropClass =
-    props.dropPreview?.kind === "blocked"
-      ? props.dropPreview.role === "target"
-        ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
-        : "bg-danger/5 text-danger"
-      : props.dropPreview
-        ? props.dropPreview.role === "target"
-          ? "bg-line/80 text-ink ring-1 ring-inset ring-ink/25"
-          : "bg-line/35 text-ink"
-        : "";
+  const name = basenameOf(row.fullPath);
+  const blocked = props.dropPreview?.kind === "blocked";
+  const target = props.dropPreview?.role === "target";
+  // A drop preview colors the whole row, glyph included. An allowed target's
+  // glyph takes the success color.
+  const glyphClass = props.dropPreview
+    ? target && !blocked
+      ? "text-success"
+      : ""
+    : glyphTone(props.selected || props.active);
+  const dropClass = blocked
+    ? target
+      ? "bg-danger/10 text-danger ring-1 ring-inset ring-danger/30"
+      : "bg-danger/5 text-danger"
+    : target
+      ? "bg-success/16 text-ink"
+      : "bg-line/35 text-ink";
   return (
     <li role="none" className="px-1">
       <button
@@ -374,6 +384,10 @@ export const TreeRow = memo(function TreeRow(props: {
         aria-posinset={row.positionInSet}
         aria-setsize={row.setSize}
         aria-selected={props.selected}
+        // The whole name, read once, though MiddleCutName draws it in two
+        // parts. The tooltip shows what a cut row hides.
+        aria-label={name}
+        title={name}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
@@ -394,8 +408,9 @@ export const TreeRow = memo(function TreeRow(props: {
         // selected-not-active rows sat between hover and selected, too close
         // to either to read. The keyboard-focused row draws the row's 1px
         // accent line inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
-        // Background style).
+        // cannot clip it on a row scrolled to an edge. An allowed drop target is
+        // a success tint with no ring or bar, so it never reads as focus. A
+        // blocked target adds a danger ring and a danger bar.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
@@ -407,17 +422,8 @@ export const TreeRow = memo(function TreeRow(props: {
                 : "text-muted hover:bg-hover hover:text-ink"
         }`}
       >
-        {props.dropPreview ? (
-          <span
-            aria-hidden
-            className={`absolute bottom-1 left-0 top-1 w-0.5 rounded-full ${
-              props.dropPreview.role === "target"
-                ? props.dropPreview.kind === "blocked"
-                  ? "bg-danger"
-                  : "bg-ink"
-                : "bg-transparent"
-            }`}
-          />
+        {blocked && target ? (
+          <span aria-hidden className="absolute bottom-1 left-0 top-1 w-0.5 rounded-full bg-danger" />
         ) : null}
         <IndentGuides depth={row.depth} />
         {row.isFolder ? (
@@ -433,7 +439,7 @@ export const TreeRow = memo(function TreeRow(props: {
               <ChevronRight
                 size={12}
                 aria-hidden
-                className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 ${CHEVRON_TONE} transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
               />
             </span>
             {props.app ? (
@@ -455,7 +461,7 @@ export const TreeRow = memo(function TreeRow(props: {
             />
           </>
         )}
-        <span className="min-w-0 flex-1 truncate">{basenameOf(row.fullPath)}</span>
+        <MiddleCutName name={name} />
       </button>
     </li>
   );
@@ -1573,7 +1579,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           <ChevronRight
             size={12}
             aria-hidden
-            className={`shrink-0 text-subtle transition-transform ${folderEditExpanded ? "rotate-90" : ""}`}
+            className={`shrink-0 ${CHEVRON_TONE} transition-transform ${folderEditExpanded ? "rotate-90" : ""}`}
           />
         ) : (
           <span aria-hidden className="w-3 shrink-0" />
@@ -1837,7 +1843,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <ChevronRight
                 size={11}
                 aria-hidden
-                className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 dark:text-muted transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
@@ -1922,6 +1928,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             <button
                               type="button"
                               title={tab.path}
+                              // The whole title, read once, though
+                              // MiddleCutName draws it in two parts.
+                              aria-label={dirty ? `${title}, unsaved changes` : title}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
                               className={`dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md py-0 pl-2 pr-9 text-left text-[13px] ${active ? "bg-transparent" : ""}`}
                             >
@@ -1930,7 +1939,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                                 size={GLYPH_SIZE}
                                 className={glyphTone(active)}
                               />
-                              <span className="min-w-0 flex-1 truncate">{title}</span>
+                              <MiddleCutName name={title} />
                               {dirty ? (
                                 <span
                                   data-testid="open-editor-dirty"
@@ -2028,7 +2037,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               <ChevronRight
                 size={11}
                 aria-hidden
-                className={`shrink-0 transition-transform ${filesExpanded ? "rotate-90" : ""}`}
+                className={`shrink-0 dark:text-muted transition-transform ${filesExpanded ? "rotate-90" : ""}`}
               />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">

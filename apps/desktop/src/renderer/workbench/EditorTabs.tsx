@@ -5,7 +5,7 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { isMacContextClick } from "../ui/keys";
-import { Menu } from "../ui/Menu";
+import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import {
   memo,
@@ -97,18 +97,31 @@ const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-activ
 // An edge the strip can still scroll past fades over this width. A revealed
 // tab stops clear of the fade, its joins included, where the strip has room
 // for both.
-const EDGE_FADE = 24;
+const EDGE_FADE = 40;
 const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
-// The fade is the chrome's own fill drawn over the tab names, w-6 being
-// EDGE_FADE. It starts under the strip's top band, where the split's accent
-// line runs, and stops above the hairline; it sits above the other tabs and
-// under the active one (z-10), and takes no clicks.
-const STRIP_FADE = "pointer-events-none absolute top-1 bottom-px z-[6] w-6 from-panel to-transparent";
+// The fade is the strip's own fill drawn over the tab names, w-10 being
+// EDGE_FADE. Its outer 16px are solid, so a cut name shows no fragment of
+// two or three letters, and the rest fades in. It starts under the strip's
+// top band, where the split's accent line runs, and stops above the
+// hairline; it sits above the other tabs and under the active one (z-10),
+// and takes no clicks.
+const STRIP_FADE =
+  "pointer-events-none absolute top-1 bottom-px z-[6] w-10 from-panel from-40% to-transparent";
 // The last of the strip's buttons meets the pane edge, where the window edge
 // or the split's separator cuts off an outset focus ring. All of them draw
 // it inset, so the ring keeps one shape as focus moves along them.
 const STRIP_BUTTON =
-  "grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink focus-visible:-outline-offset-2";
+  "grid w-7 shrink-0 place-items-center border-b border-line text-muted hover:text-ink focus-visible:-outline-offset-2";
+
+// An unsaved tab's dot and its close share the close's 16px slot, and each
+// hides exactly while the other shows: on hover, while the keyboard focuses
+// the tab (the moment its ring draws), and while the close has focus. Opacity,
+// not visibility, so the dot's label stays in the tab's name. The tab's named
+// group keeps focus in an enclosing group, such as the editor's, from hiding
+// the dot.
+const CLOSE_SLOT = "[grid-area:1/1]";
+const DIRTY_DOT_SWAP = "group-hover/tab:opacity-0 keyboard:group-focus-visible/tab:opacity-0 group-has-[:focus]/tab:opacity-0";
+const DIRTY_CLOSE_SWAP = "opacity-0 group-hover/tab:opacity-100 keyboard:group-focus-visible/tab:opacity-100 focus:opacity-100";
 
 // Scrolls only the strip, and only when the tab is not already clear of the
 // fades: scrollIntoView would also scroll every scrolling ancestor, the
@@ -130,8 +143,11 @@ function revealTab(strip: HTMLElement, tab: HTMLElement, behavior: ScrollBehavio
   if (earliest <= latest) {
     target = nearest(earliest, latest);
   } else if (end - start > view) {
-    // A tab wider than the strip shows its start.
-    target = latest;
+    // A tab wider than the strip shows its start, clear of the fade where
+    // the strip has room. A strip narrower than two margins gives the margin
+    // up, so the tab's start always shows.
+    const margin = Math.min(REVEAL_MARGIN, Math.max(0, view - REVEAL_MARGIN));
+    target = Math.min(max, Math.max(0, start - margin));
   } else {
     // The tab and its margins do not fit, so the whole tab shows: at an edge
     // the strip reaches, where it shows there, or else as clear of both
@@ -210,7 +226,7 @@ const Tab = memo(function Tab(props: {
       // In a split, an inactive group's active tab recedes to muted text.
       // The strip scrolls, so the focus ring is drawn inset, where the
       // scroller cannot clip it.
-      className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] focus-visible:-outline-offset-2 [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
+      className={`group group/tab relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] focus-visible:-outline-offset-2 [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
         props.active
           ? `z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink ${INACTIVE_GROUP_TAB}`
           : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-hover hover:text-ink"
@@ -226,35 +242,44 @@ const Tab = memo(function Tab(props: {
           </span>
         </>
       ) : null}
-      {props.dirty ? (
-        <span
-          data-testid="tab-dirty"
-          aria-label="Unsaved changes"
-          className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink"
-        />
-      ) : null}
       {/* The drawing's 8px from glyph to name; the glyph is muted on the
           active tab and subtle on the rest. */}
       <span className="flex items-center gap-2">
         <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? "text-muted" : "text-subtle"} />
         <span className="max-w-44 truncate">{name}</span>
       </span>
-      <button
-        type="button"
-        aria-label={`Close ${name}`}
-        tabIndex={-1}
-        // Don't let a press on the close button arm the drag above.
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          props.onClose(props.groupId, props.path);
-        }}
-        className={`grid size-4 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${
-          props.active ? "" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
-        }`}
-      >
-        <X size={12} aria-hidden />
-      </button>
+      {/* The close's slot. An unsaved tab shows its dot here, so it is as
+          wide as a saved one. Hover, keyboard focus on the tab, or focus on
+          the close swap the dot for the close, at once. The dot is an image,
+          so every browser reads its label into the tab's name; ARIA does not
+          name a span with no role. */}
+      <span className="grid size-4 shrink-0 place-items-center">
+        {props.dirty ? (
+          <span
+            data-testid="tab-dirty"
+            role="img"
+            aria-label="Unsaved changes"
+            className={`pointer-events-none size-1.5 rounded-full bg-ink ${CLOSE_SLOT} ${DIRTY_DOT_SWAP}`}
+          />
+        ) : null}
+        <button
+          type="button"
+          aria-label={`Close ${name}`}
+          title="Close"
+          tabIndex={-1}
+          // Don't let a press on the close button arm the drag above.
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onClose(props.groupId, props.path);
+          }}
+          className={`grid size-4 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${CLOSE_SLOT} ${
+            props.dirty ? DIRTY_CLOSE_SWAP : props.active ? "" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
+          }`}
+        >
+          <X size={12} aria-hidden />
+        </button>
+      </span>
     </div>
   );
 });
@@ -900,9 +925,9 @@ export const EditorTabs = memo(function EditorTabs(props: {
     reveal();
     measure();
     strip.addEventListener("scroll", measure, { passive: true });
-    // Tab opens/closes re-run this effect (deps), as does a dirty dot changing
-    // tab width — the observer covers the container resizing under the same
-    // tabs (panel toggle, window resize).
+    // Tab opens/closes re-run this effect (deps). The observer covers the
+    // container resizing under the same tabs (panel toggle, window resize).
+    // An unsaved dot sits in the close's slot and never changes a tab's width.
     const resize =
       typeof ResizeObserver === "undefined"
         ? null
@@ -916,7 +941,13 @@ export const EditorTabs = memo(function EditorTabs(props: {
       strip.removeEventListener("scroll", measure);
       resize?.disconnect();
     };
-  }, [drag, props.tabs, props.activeTab, props.activeTabDirty]);
+  }, [drag, props.tabs, props.activeTab]);
+  // The tab list ends with the group's own action. Its id starts with "/",
+  // which no tab's path does.
+  const closeGroup = props.onCloseGroup;
+  const groupActions: MenuEntry[] = closeGroup
+    ? [MENU_SEPARATOR, { id: "/close-group", label: "Close group", icon: <X size={14} aria-hidden />, onSelect: () => closeGroup(props.groupId) }]
+    : [];
   return (
     <div
       ref={frameRef}
@@ -990,7 +1021,9 @@ export const EditorTabs = memo(function EditorTabs(props: {
         data-testid="editor-tab-actions"
         className="flex shrink-[1000] items-center justify-end gap-1 border-b border-line pl-2 pr-1 empty:hidden"
       />
-      {props.onCloseGroup ? (
+      {/* A group with tabs closes from its tab list, so this X never sits
+          beside the active tab's own. */}
+      {empty && props.onCloseGroup ? (
         <button
           type="button"
           aria-label="Close editor group"
@@ -1008,7 +1041,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         title="New editor group right"
         disabled={empty || TAB_KINDS[parseTab(props.activeTab)?.kind ?? "removed"].singleton}
         onClick={() => props.onCreateGroupRight(props.groupId)}
-        className={`${STRIP_BUTTON} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle`}
+        className={`${STRIP_BUTTON} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
       >
         <Columns2 size={14} aria-hidden />
       </button>
@@ -1100,8 +1133,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
         />
       </div>
       {/* Overflow affordance: every open tab, reachable even when the strip
-          scrolls. The list is placed against the window, so the strip's
-          scroller cannot clip it. */}
+          scrolls, then Close group. The list is placed against the window,
+          so the strip's scroller cannot clip it. */}
       {!empty ? (
         <Menu
           label={`Tabs in editor group ${props.groupNumber}`}
@@ -1121,22 +1154,25 @@ export const EditorTabs = memo(function EditorTabs(props: {
               <ChevronDown size={14} aria-hidden />
             </button>
           )}
-          items={props.tabs.map((tab) => ({
-            id: tab.path,
-            label: fileName(tab.path, props.tabLabels?.get(tab.path)),
-            title: tab.path,
-            // Ink on the current row's selected fill and subtle elsewhere,
-            // as Explorer's open editors tone the same glyph.
-            icon: (
-              <TabGlyph
-                {...tabMark(tab.path, props.files, props.tabGlyphs?.get(tab.path))}
-                size={TAB_GLYPH_SIZE}
-                className={tab.path === props.activeTab ? "text-ink" : "text-subtle"}
-              />
-            ),
-            current: tab.path === props.activeTab,
-            onSelect: () => props.onActivate(props.groupId, tab.path),
-          }))}
+          items={[
+            ...props.tabs.map((tab) => ({
+              id: tab.path,
+              label: fileName(tab.path, props.tabLabels?.get(tab.path)),
+              title: tab.path,
+              // Ink on the current row's selected fill and subtle elsewhere,
+              // as Explorer's open editors tone the same glyph.
+              icon: (
+                <TabGlyph
+                  {...tabMark(tab.path, props.files, props.tabGlyphs?.get(tab.path))}
+                  size={TAB_GLYPH_SIZE}
+                  className={tab.path === props.activeTab ? "text-ink" : "text-subtle"}
+                />
+              ),
+              current: tab.path === props.activeTab,
+              onSelect: () => props.onActivate(props.groupId, tab.path),
+            })),
+            ...groupActions,
+          ]}
         />
       ) : null}
     </div>

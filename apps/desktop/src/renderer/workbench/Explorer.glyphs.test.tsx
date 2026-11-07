@@ -3,7 +3,7 @@ import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
-import { Explorer, TreeRow, type ExplorerProps } from "./Explorer";
+import { Explorer, TreeRow, type ExplorerProps, type RowDropPreview } from "./Explorer";
 import {
   GRAPH_TAB_PATH,
   chatTabPath,
@@ -234,18 +234,18 @@ describe("Explorer kind glyphs", () => {
     });
   });
 
-  it("lets a drop preview color the glyph with its row", () => {
+  function renderDropRow(dropPreview: RowDropPreview, path = "plan.md", isFolder = false) {
     const noop = () => undefined;
     render(
       <ul role="tree">
         <TreeRow
-          row={{ fullPath: "plan.md", isFolder: false, isExpanded: false, depth: 0, parentPath: null, kind: "file", positionInSet: 1, setSize: 1 }}
+          row={{ fullPath: path, isFolder, isExpanded: false, depth: 0, parentPath: null, kind: isFolder ? null : "file", positionInSet: 1, setSize: 1 }}
           collection={false}
           app={false}
           selected
           active={false}
           tabbable={false}
-          dropPreview={{ kind: "blocked", role: "target" }}
+          dropPreview={dropPreview}
           registerRef={noop}
           onRowFocus={noop}
           onRowClick={noop}
@@ -259,11 +259,37 @@ describe("Explorer kind glyphs", () => {
         />
       </ul>,
     );
-    const row = treeRow("plan.md");
+    return treeRow(path);
+  }
+
+  // The left bar is the row's only absolutely placed child.
+  function dropBar(row: HTMLElement): Element | undefined {
+    return [...row.children].find((child) => child.classList.contains("absolute"));
+  }
+
+  it("lets a drop preview color the glyph with its row", () => {
+    const row = renderDropRow({ kind: "blocked", role: "target" });
     expect(row.classList.contains("text-danger")).toBe(true);
     const glyph = glyphOf(row);
     expect(glyph.classList.contains("text-ink")).toBe(false);
     expect(glyph.classList.contains("text-subtle")).toBe(false);
+  });
+
+  it("tints an allowed drop target with the success color and draws no focus marks", () => {
+    const row = renderDropRow({ kind: "move", role: "target" }, "Trip", true);
+    expect(row.classList.contains("bg-success/16")).toBe(true);
+    expect(row.classList.contains("text-ink")).toBe(true);
+    expect([...row.classList].some((name) => name.startsWith("ring-"))).toBe(false);
+    expect(dropBar(row)).toBeUndefined();
+    expect(row.querySelector("svg.lucide-folder")?.classList.contains("text-success")).toBe(true);
+  });
+
+  it("keeps a blocked drop target's danger tint, ring and bar", () => {
+    const row = renderDropRow({ kind: "blocked", role: "target" }, "Trip", true);
+    expect(row.classList.contains("bg-danger/10")).toBe(true);
+    expect(row.classList.contains("ring-danger/30")).toBe(true);
+    expect(dropBar(row)?.classList.contains("bg-danger")).toBe(true);
+    expect(row.querySelector("svg.lucide-folder")?.classList.contains("text-success")).toBe(false);
   });
 
   it("opens a new page in the selected folder, with no row until its file exists", () => {
