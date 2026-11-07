@@ -33,6 +33,16 @@ const expectForcedTarget = (mark: HTMLElement) =>
   expect(mark.querySelector(mark.dataset.forceTarget ?? ""), mark.dataset.forceTarget).not.toBeNull();
 
 describe("states page", () => {
+  it("keeps the narrow file-row specimens in both themes", () => {
+    render(<StatesPage parts={new Set(["tab-row-actions", "file-view-actions"])} />);
+    for (const theme of ["light", "dark"]) {
+      const mark = screen.getByTestId(`states-tab-row-actions-cut-${theme}`);
+      expect(mark.textContent).toBe("Changed outside dohc");
+    }
+    expect(screen.getAllByText("narrow, changed on disk")).toHaveLength(2);
+    expect(screen.getAllByText("split: text failed beside a CSV in Raw")).toHaveLength(2);
+  });
+
   it("opens only at its address and only with the dev-tools grant", () => {
     expect(statesPageRequested(STATES_PAGE_HASH, true)).toBe(true);
     expect(statesPageRequested(STATES_PAGE_HASH, false)).toBe(false);

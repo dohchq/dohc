@@ -26,10 +26,10 @@ import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
 // shrink. `status` (a save state that needs the person, a slow open's
 // "Opening…") sits left of them and gives way first, before the tab names:
 // its words can change width without moving a control, and in a narrow pane
-// it ends in an ellipsis. A status with nothing visible, such as a calm save
+// a state mark shows only its mark. A status with nothing visible, such as a calm save
 // state or a quick open kept for screen readers, draws no box, so loading,
-// ready and failed views take the same width. Outside an editor group, as on the states page, they draw
-// in a row of their own.
+// ready and failed views take the same width. Outside an editor group, they
+// draw in a row of their own.
 //
 // `onRun` is for an app's entry file: Run opens the app's local preview. It
 // stands left of Share, so when it arrives nothing right of it moves.

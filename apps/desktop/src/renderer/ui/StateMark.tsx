@@ -86,7 +86,7 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   // invalid assets, a removal in progress) is stated by its own notice.
   "read-only-unavailable": { label: "Read-only", mark: "held" },
   "too-large": {
-    label: "Read-only",
+    label: "Too large to edit",
     mark: "held",
     title: "This file is too large to edit in dohc.",
   },
@@ -189,11 +189,11 @@ function Mark(props: { kind: StateMarkKind }) {
  * shell keep reading it. `shown` picks the row to draw when it differs from
  * the stored state, such as a disabled editor over a `saved` draft. `title`
  * replaces the row's title when the caller knows more, such as the engine's
- * own save error. `truncate` lets the label end in an ellipsis where room
- * runs out, such as a narrow file header. While the label is cut short, the
+ * own save error. `truncate` hides the words in a narrow file row. Above
+ * that threshold, a long label can still end in an ellipsis. While cut, the
  * chip takes keyboard focus and shows the whole label and its explanation in
- * a tooltip, on focus or hover, in place of the title; with room to spare it
- * is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
+ * a tooltip, on focus or hover, in place of the title. With room to spare
+ * it is not a tab stop and keeps its title. `quietWhenCalm` keeps a saved,
  * saving or saved-to-host chip for screen readers only: those pass on their
  * own, so typing never changes what the row draws. Words appear when the
  * file is held, a pending share has lasted (and then stay while the person
@@ -269,8 +269,6 @@ export function StateMark(props: {
       ref={chipRef}
       data-testid={props.testId}
       data-state={dataState ?? undefined}
-      // Cut short, the tooltip says what the title would, so the browser's
-      // own tooltip does not repeat it a moment later.
       title={cut ? undefined : title}
       tabIndex={cut || focused ? 0 : undefined}
       // The chip's words are its label, so only the explanation describes it.
@@ -291,11 +289,11 @@ export function StateMark(props: {
       }}
       // A 16px line box: the 11px face's default is 16.5px, and a half-pixel
       // chip moves everything under it by half a pixel.
-      className={`inline-flex items-center gap-1.5 text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 rounded" : ""} ${props.className ?? ""}`}
+      className={`inline-flex items-center gap-1.5 text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 rounded @max-[480px]/file-row:gap-0" : ""} ${props.className ?? ""}`}
     >
       <Mark kind={presentation.mark} />
       {props.truncate ? (
-        <span ref={label} className="min-w-0 truncate">
+        <span ref={label} className="min-w-0 truncate @max-[480px]/file-row:sr-only">
           {presentation.label}
         </span>
       ) : (

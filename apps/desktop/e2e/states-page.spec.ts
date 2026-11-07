@@ -402,9 +402,8 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // width, and its save state gives way before the tab's file name: the
     // name is cut only once the save state shows little more than an
     // ellipsis (under 13px; the ellipsis is 9.5px of 11px Inter). A row whose
-    // save state shows no words draws the same width as the loading row. The
-    // narrow specimen must really have cut its save state short, or the check
-    // proves nothing.
+    // calm save state draws the same width as the loading row. The narrow
+    // specimen must show only its mark, with its words kept for screen readers.
     for (const theme of THEMES) {
       const part = page.getByTestId(`states-${theme}`).locator('[data-part="tab-row-actions"]');
       const widths: number[] = [];
@@ -436,9 +435,11 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         failures.push(`the tab rows without save-state words (${theme}) draw different widths: ${widths.join(", ")}`);
       }
       const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
-      if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
-        failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
+      if (!(await label.evaluate((el) => getComputedStyle(el).position === "absolute" && el.clientWidth === 1))) {
+        failures.push(`the narrow tab row's save state (${theme}) does not show only its mark`);
       }
+      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveText("Changed outside dohc");
+      await expect(page.getByTestId(`states-mark-changed-on-disk-${theme}`)).toHaveAttribute("title", "This file changed outside dohc.");
     }
     // An overflowing strip fades only the edges it can still scroll past,
     // 24px each, and its active tab sits clear of them. Each specimen must
