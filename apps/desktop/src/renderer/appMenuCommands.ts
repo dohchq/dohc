@@ -20,7 +20,7 @@ export function useMenuCommandsWithoutWorkspace(
     else if (command === "toggle-theme") toggleTheme();
     else if (command === "close-tab" && bridge().platform === "darwin") {
       void bridge().closeThisWindow().catch((error) =>
-        reportError("Could not close this window.", error));
+        reportError("dohc could not close this window.", error));
     }
   }), [reportError, runUpdate]);
 }

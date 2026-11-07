@@ -3,10 +3,11 @@ import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "../worksp
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner } from "./rendererWorkspaceSessionOwner";
-import { windowShowsWorkspace } from "./workspaceWindowReuse";
+import { oldWindowState, windowShowsWorkspace } from "./workspaceWindowReuse";
 
 function renderer(id: number) {
-  return { id, isDestroyed: () => false, once: () => undefined };
+  let destroyed = false;
+  return { id, isDestroyed: () => destroyed, once: () => undefined, destroy: () => { destroyed = true; } };
 }
 
 const shared = {
@@ -14,12 +15,9 @@ const shared = {
   grantedSelector: { paths: ["docs"], versionId: null, access: "view" as const },
 };
 
-// Forget leaves the window that showed the workspace. Open folder on the same
-// folder registers its workspace again under the same id.
-it.each([
-  { kind: "a share view", shareView: shared },
-  { kind: "an ordinary workspace with no share record", shareView: null },
-])("doesn't count a window left from before Forget as showing $kind after it opens again", async ({ shareView }) => {
+// One workspace, its window, and Forget. Open folder on the same folder
+// registers its workspace again under the same id.
+async function shownWorkspace(shareView: typeof shared | null) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "root", kind: "personal", mode: "local-first", ...(shareView ? { shareView } : {}),
   };
@@ -55,13 +53,24 @@ it.each([
     },
   });
   const view = renderer(1);
-  const shows = () => windowShowsWorkspace(sessions.current(view), workspace.workspaceId, authorities);
-
   await sessions.open(view, register(), "document-1");
+  return {
+    workspace, authorities, sessions, view, register,
+    forget: () => forget(workspace.workspaceId),
+    isRegistered: () => registered !== null,
+  };
+}
+
+it.each([
+  { kind: "a share view", shareView: shared },
+  { kind: "an ordinary workspace with no share record", shareView: null },
+])("doesn't count a window left from before Forget as showing $kind after it opens again", async ({ shareView }) => {
+  const { workspace, authorities, sessions, view, register, forget, isRegistered } = await shownWorkspace(shareView);
+  const shows = () => windowShowsWorkspace(sessions.current(view), workspace.workspaceId, authorities);
   expect(shows()).toBe(true);
 
-  await forget(workspace.workspaceId);
-  expect(registered).toBeNull();
+  await forget();
+  expect(isRegistered()).toBe(false);
   expect(sessions.current(view)?.workspaceId).toBe(workspace.workspaceId);
 
   const binding = register();
@@ -73,4 +82,30 @@ it.each([
   await sessions.open(reopened, binding, "document-2");
   expect([view, reopened].filter(window =>
     windowShowsWorkspace(sessions.current(window), workspace.workspaceId, authorities))).toEqual([reopened]);
+});
+
+it("says whether another window shows the workspace a window was left with after Forget", async () => {
+  const { workspace, authorities, sessions, view, register, forget } = await shownWorkspace(null);
+  const reopened = renderer(2);
+  const stateOf = (window: ReturnType<typeof renderer>) => oldWindowState(
+    sessions.current(window),
+    [view, reopened].filter(other => other !== window),
+    other => sessions.current(other),
+    authorities,
+  );
+  expect(stateOf(view)).toBeNull();
+
+  await forget();
+  expect(stateOf(view)).toEqual({ workspaceId: workspace.workspaceId, shownIn: undefined });
+
+  await sessions.open(reopened, register(), "document-2");
+  expect(stateOf(view)).toEqual({ workspaceId: workspace.workspaceId, shownIn: reopened });
+  expect(stateOf(reopened)).toBeNull();
+
+  reopened.destroy();
+  expect(stateOf(view)).toEqual({ workspaceId: workspace.workspaceId, shownIn: undefined });
+});
+
+it("has no old window state for a window that shows no workspace", () => {
+  expect(oldWindowState(undefined, [], () => undefined, { isCurrentAttachment: () => false })).toBeNull();
 });

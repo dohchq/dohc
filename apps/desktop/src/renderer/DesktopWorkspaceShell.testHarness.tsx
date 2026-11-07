@@ -728,6 +728,7 @@ function makeBaseBridge(
       };
     }),
     closeThisWindow: vi.fn(async (): Promise<void> => undefined),
+    goToWorkspaceWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.

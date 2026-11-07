@@ -333,6 +333,7 @@ export const CHANNELS = {
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
   workspacePathOpenFailed: "desktop:workspace-path-open-failed",
+  oldWindowStateChanged: "desktop:old-window-state-changed",
   updateState: "desktop:update-state",
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",

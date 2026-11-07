@@ -86,6 +86,8 @@
   "desktop:read-workspace-trust": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:request-workspace-trust": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:restrict-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-old-window-state": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "rendererWorkspaceSessions.current(event.sender)" } },
+  "desktop:go-to-workspace-window": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "rendererWorkspaceSessions.current(event.sender)" } },
   "desktop:dismiss-crash-report": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:send-crash-report": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:read-collection-copies-left": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

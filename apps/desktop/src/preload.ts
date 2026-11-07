@@ -67,6 +67,8 @@ import {
   collectionCopiesLeftOperations,
   workspaceTrustOperations,
   WorkspaceTrustChangedEvent,
+  oldWindowOperations,
+  OldWindowStateChangedEvent,
   captureRecoveryOperations,
   fileObservationOperations,
   reportingOperations,
@@ -538,6 +540,9 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.workspaceActivated, WorkspaceActivated, ({ file, ...workspace }) => listener(workspace, file)),
   onWorkspacePathOpenFailed: (listener) =>
     onEvent(CHANNELS.workspacePathOpenFailed, WorkspacePathOpenFailedEvent, () => listener()),
+  ...operationBridge(oldWindowOperations, invoke),
+  onOldWindowStateChanged: (listener) =>
+    onEvent(CHANNELS.oldWindowStateChanged, OldWindowStateChangedEvent, () => listener()),
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),
