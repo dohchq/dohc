@@ -95,7 +95,7 @@ describe("agent badge", () => {
     const badge = screen.getByTestId("chats-post-agent-badge");
     expect(badge.getAttribute("aria-label")).toBe("connected agent");
     fireEvent.focus(badge);
-    const card = screen.getByRole("tooltip").textContent ?? "";
+    const card = screen.getByRole("tooltip", { hidden: true }).textContent ?? "";
     expect(card).toContain("Claude (as reported)");
     expect(card).toContain("Connected agent");
     expect(card).not.toContain("Owned by");
@@ -103,7 +103,7 @@ describe("agent badge", () => {
     render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Claude", authorOwnerDisplayName: "Ada", authorAgentId: "claude" }} presentation={mine} />);
     expect(screen.getByTestId("chats-post-agent-badge").getAttribute("aria-label")).toBe("agent");
     fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
-    expect(screen.getByRole("tooltip").textContent).not.toContain("(as reported)");
+    expect(screen.getByRole("tooltip", { hidden: true }).textContent).not.toContain("(as reported)");
   });
 
   it("says \"(as reported)\" once on a connected agent's card: on its reported line, else on a name it gave", () => {
@@ -112,7 +112,7 @@ describe("agent badge", () => {
       render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName, ...(authorReported ? { authorReported } : {}) }}
         presentation={connected} {...(named === undefined ? {} : { named })} />);
       fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
-      const text = screen.getByRole("tooltip").textContent;
+      const text = screen.getByRole("tooltip", { hidden: true }).textContent;
       cleanup();
       return text;
     };
@@ -133,7 +133,7 @@ describe("agent badge", () => {
       expect(badge.getAttribute("aria-label")).toBe("agent");
       expect(badge.querySelector(".lucide-plug")).not.toBeNull();
       fireEvent.focus(badge);
-      const text = screen.getByRole("tooltip").textContent;
+      const text = screen.getByRole("tooltip", { hidden: true }).textContent;
       cleanup();
       return text;
     };
