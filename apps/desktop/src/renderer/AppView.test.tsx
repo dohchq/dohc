@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, configure, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
@@ -372,13 +372,100 @@ describe("an owner app in its tab", () => {
       .toEqual([["p", "KeyP", true, false, false, false]]);
   });
 
-  it("puts focus in the app when its tab becomes the focused one", async () => {
-    const view = render(<Page focused={false} />);
+  it("puts focus in the app when its tab becomes the shown one", async () => {
+    const view = render(<Page visible={false} focused={false} />);
     await openedView();
     expect(guest.focus).not.toHaveBeenCalled();
-    view.rerender(<Page focused />);
+    view.rerender(<Page visible focused />);
     expect(guest.focus).toHaveBeenCalledOnce();
     expect(guest.focus.mock.contexts[0]).toBe(webview());
+  });
+
+  // Runs after any timer the app set before it.
+  const handled = () => act(() => new Promise(resolve => setTimeout(resolve)));
+
+  it("leaves focus where it went when focus in its group makes the shown app's group the focused one", async () => {
+    const tab = document.body.appendChild(document.createElement("button"));
+    try {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      tab.focus();
+      view.rerender(<Page visible focused />);
+      await handled();
+      expect(guest.focus).not.toHaveBeenCalled();
+    } finally {
+      tab.remove();
+    }
+  });
+
+  it("puts focus in the app each time its tab is pressed, also when the tab was already shown", async () => {
+    const tab = document.body.appendChild(document.createElement("button"));
+    try {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      tab.focus();
+      view.rerender(<Page visible focused />);
+      view.rerender(<Page visible focused focusRequest={1} />);
+      expect(guest.focus).toHaveBeenCalledOnce();
+      // Another app's tab was pressed.
+      view.rerender(<Page visible focused focusRequest={0} />);
+      expect(guest.focus).toHaveBeenCalledOnce();
+      view.rerender(<Page visible focused focusRequest={3} />);
+      expect(guest.focus).toHaveBeenCalledTimes(2);
+    } finally {
+      tab.remove();
+    }
+  });
+
+  describe("when its group becomes the focused one with focus on the page or the group's own area", () => {
+    let group: HTMLElement;
+    beforeEach(() => {
+      group = document.body.appendChild(document.createElement("section"));
+      group.dataset.focusSurface = "editor";
+      group.tabIndex = -1;
+    });
+    afterEach(() => group.remove());
+
+    it("puts focus in the app, as when the other group closes", async () => {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      // Focus fell to the page.
+      view.rerender(<Page visible focused />);
+      await waitFor(() => expect(guest.focus).toHaveBeenCalledOnce());
+      view.rerender(<Page visible focused={false} />);
+      // Focus fell back to the app's group itself.
+      group.dataset.active = "";
+      group.focus();
+      view.rerender(<Page visible focused />);
+      await waitFor(() => expect(guest.focus).toHaveBeenCalledTimes(2));
+    });
+
+    it("leaves focus on the group's blank area when a press there made the group the focused one", async () => {
+      const view = render(<Page visible focused={false} />);
+      await openedView();
+      // The press makes the group the focused one, then the browser focuses the area pressed.
+      view.rerender(<Page visible focused />);
+      group.dataset.active = "";
+      fireEvent.mouseDown(group);
+      group.focus();
+      await handled();
+      expect(guest.focus).not.toHaveBeenCalled();
+    });
+
+    it("leaves focus where a closing palette put it back", async () => {
+      const control = document.body.appendChild(document.createElement("button"));
+      try {
+        const view = render(<Page visible focused={false} />);
+        await openedView();
+        // The palette closes with the other group, so focus falls to the page before the palette puts it back.
+        view.rerender(<Page visible focused />);
+        control.focus();
+        await handled();
+        expect(guest.focus).not.toHaveBeenCalled();
+      } finally {
+        control.remove();
+      }
+    });
   });
 
   it("leaves focus where it went if the tab lost focus before the app opened", async () => {

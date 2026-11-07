@@ -24,11 +24,11 @@ vi.mock("./FileInspector", () => ({
 vi.mock("./SitePreviewPage", async () => {
   const { AppViewBody, useAppView } = await import("./AppView");
   return {
-    SitePreviewPage: (props: { workspaceId: string; siteRoot: string; visible?: boolean; focused?: boolean }) => {
+    SitePreviewPage: (props: { workspaceId: string; siteRoot: string; visible?: boolean; focused?: boolean; focusRequest?: number }) => {
       const isStatic = props.siteRoot.startsWith("sites/");
       const view = useAppView({
         workspaceId: props.workspaceId, appRoot: props.siteRoot, enabled: !isStatic,
-        visible: props.visible ?? true, focused: props.focused ?? false, approvals: 0, holdFocus: false,
+        visible: props.visible ?? true, focused: props.focused ?? false, focusRequest: props.focusRequest ?? 0, approvals: 0, holdFocus: false,
       });
       return (
         <div data-testid="site-preview-page" data-root={props.siteRoot}>
