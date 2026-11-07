@@ -1079,7 +1079,7 @@ describe("notice center", () => {
     renderNotices({
       workspaceErrors: [{
         id: "shell-error-4", title: "dohc could not merge Draft into Main", message,
-        details: "Error: busy", atMs: 1_000, canRetry: true, retryBlocked: "Close the open merge first.", seen: false,
+        copy: { report: "Error: busy" }, atMs: 1_000, canRetry: true, retryBlocked: "Close the open merge first.", seen: false,
       }],
       onRetryWorkspaceError: vi.fn(),
       onHideWorkspaceError: vi.fn(),
@@ -1099,7 +1099,7 @@ describe("notice center", () => {
     renderNotices({
       workspaceErrors: [{
         id: "shell-error-4", title: "dohc could not merge Draft into Main", message: "dohc is busy. Try again in a moment.",
-        details: "Error: busy", atMs: 1_000, canRetry: true, seen: false,
+        copy: { report: "Error: busy" }, atMs: 1_000, canRetry: true, seen: false,
       }],
       onRetryWorkspaceError: vi.fn(),
       onHideWorkspaceError: vi.fn(),
@@ -2785,7 +2785,7 @@ describe("opening a row", () => {
     stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
   };
   const failedSave = {
-    id: "save", title: "Trip/day-2.md did not save", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false,
+    id: "save", title: "Trip/day-2.md did not save", message: "dohc could not save Trip/day-2.md.", atMs: 1, canRetry: true, seen: false,
     target: { to: "file" as const, path: "Trip/day-2.md" },
   };
 
@@ -2900,7 +2900,7 @@ describe("opening a row", () => {
 
 describe("a row's parts", () => {
   it("draws a row's worded actions as the toast's bordered buttons, and its time line at 12px", () => {
-    const failed = { id: "e1", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false };
+    const failed = { id: "e1", message: "dohc could not save Trip/day-2.md.", atMs: 1, canRetry: true, seen: false };
     const toast = render(<WorkspaceErrorToast error={failed} onRetry={vi.fn()} />);
     const toastAction = within(toast.container).getByRole("button", { name: "Try again" }).className;
     toast.unmount();
