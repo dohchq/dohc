@@ -184,11 +184,15 @@ export async function createWorkspaceFolder(
   return (await createWorkspaceFolderWithFreshness(input)).workspace;
 }
 
-// Only dohc's own records, which this call wrote, and nothing else.
+// Only dohc's own records, which this call wrote, and nothing else. On a drive
+// without extended attributes, such as exFAT or FAT32, macOS keeps a record's
+// attributes in an AppleDouble file named "._" and the record's name.
 async function holdsOnlyNewMetadata(rootPath: string, metadataDir: string): Promise<boolean> {
   const [entries, metadata] = await Promise.all([readdir(rootPath), readdir(metadataDir)]);
-  return entries.length === 1 && entries[0] === ".dohc" &&
-    metadata.every((name) => name === "manifest.json" || name === "sync-history.json" || name === "collections.json");
+  const recordOrItsAttributes = (records: string[]) => (name: string) =>
+    records.includes(name.startsWith("._") ? name.slice(2) : name);
+  return entries.includes(".dohc") && entries.every(recordOrItsAttributes([".dohc"])) &&
+    metadata.every(recordOrItsAttributes(["manifest.json", "sync-history.json", "collections.json"]));
 }
 
 /**
