@@ -1013,11 +1013,10 @@ export function MarkdownView(props: {
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
-  // A disabled Edit says why: the chip's words, or the cause of the notice
-  // that says it when the chip has no sentence.
+  // A disabled Edit says why: the chip's words, or else the restriction its
+  // notice states. Never the chip's save state: a set-aside edit doesn't stop
+  // editing.
   const editReason = readOnlyWords || (props.lossyNote === "lossy" ? LOSSY_NOTE_TITLE
-    : typeof chipState === "string" && SAVE_STATE[chipState].title ? SAVE_STATE[chipState].title
-    : props.forceReadOnly ? SAVE_STATE["read-only"].title
     : props.truncated ? SAVE_STATE["too-large"].title
     : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned

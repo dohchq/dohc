@@ -90,6 +90,7 @@ import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddres
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
+import { EmptyEditorGroup } from "../workbench/EmptyEditorGroup";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
@@ -224,9 +225,21 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         onCreateGroupRight={noop}
         onCloseGroup={noop}
       />
-      {/* Tall enough to hold the tab list, which the capture opens, with
-          Close group and its shadow. */}
-      <div className="h-38 bg-bg" />
+      {props.tabs.length === 0 ? (
+        <div className="flex h-[640px] flex-col bg-bg">
+          <EmptyEditorGroup
+            platform="win32"
+            create={{ markdown: noop, collection: noop, drawing: noop }}
+            recent={["plan.md", "notes.md"]}
+            files={[{ path: "plan.md" }, { path: "notes.md" }]}
+            onOpen={noop}
+          />
+        </div>
+      ) : (
+        // Tall enough to hold the tab list, which the capture opens, with
+        // Close group and its shadow.
+        <div className="h-38 bg-bg" />
+      )}
     </>
   );
 }

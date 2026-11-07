@@ -209,6 +209,8 @@ describe("FileInspector renders markdown through the shared component map", () =
     const chip = await screen.findByTestId("markdown-save-state");
     expect(chip.dataset.state).toBe("recovery");
     expect(chip.getAttribute("title")).toBe("");
+    // Edit names the size limit, not the set-aside edit, which doesn't stop editing.
+    expect(screen.getByRole("button", { name: "Edit" }).getAttribute("title")).toBe("This file is too large to edit in dohc.");
   });
 
   it("shows truncated markdown in the bounded read-only source viewer", async () => {
