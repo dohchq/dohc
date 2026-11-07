@@ -168,6 +168,20 @@ describe("FileInspector renders markdown through the shared component map", () =
     expect(pane.parentElement?.className).toBe("tableWrapper");
   });
 
+  it("leaves a truncated file's reason to its notice: no strip sentence and no chip tooltip", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Large document\n\nThis is the bounded prefix.\n",
+      truncated: true,
+    });
+    render(<FileInspector workspaceId="ws-1" path="large.md" />);
+
+    await screen.findByTestId("markdown-source-view");
+    expect(screen.getByTestId("truncated-notice")).toBeTruthy();
+    // The bounded viewer has no read-only strip, and no chip repeats the notice.
+    expect(screen.queryByTestId("view-markdown-source")).toBeNull();
+    expect(screen.queryByTestId("markdown-save-state")?.getAttribute("title") ?? "").toBe("");
+  });
+
   it("shows truncated markdown in the bounded read-only source viewer", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Large document\n\nThis is the bounded prefix.\n",

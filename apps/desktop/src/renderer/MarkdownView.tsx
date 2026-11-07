@@ -869,7 +869,13 @@ export function MarkdownView(props: {
   const hasSetAsideEdit =
     engine.deletedDraftId !== null &&
     orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
-  const transition = transitionReason(engine, orphanedDrafts);
+  // Why editing is off. The source strip and the chip's tooltip both say it,
+  // and with no sentence the chip has no tooltip.
+  const readOnlyWords = readOnlyReasons({
+    accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
+    shared: !!props.forceReadOnly,
+    transition: transitionReason(engine),
+  }).join(" ");
 
   useEffect(() => {
     if (surfaceMode === "read") preloadMarkdownEditor();
@@ -2092,8 +2098,7 @@ export function MarkdownView(props: {
   // The read-only view that follows an ended share closes the live session,
   // so the draft that turn set aside is remembered here to keep its words.
   const readOnlyDraftId = useRef<number | null>(null);
-  // A failed history replacement's draft keeps its replacement words.
-  if (engine.readOnlyDraftId !== null && engine.readOnlyCause !== "lineage-failure") readOnlyDraftId.current = engine.readOnlyDraftId;
+  if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
       {changedOutsideNotice && !engine.deletedWhileEditing ? (
@@ -2140,18 +2145,12 @@ export function MarkdownView(props: {
                 ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
                 : engineChipState}
               title={
-                engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
-                  ? "Your access to this document ended."
-                  : transition ?? (engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
+                readOnly
+                  ? readOnlyWords
+                  : engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
                     engine.saveState.kind === "changed-on-disk"
-                  ? CHANGED_OUTSIDE_NOTICE
-                  : (engineChipState === "deleted" ||
-                  engineChipState === "object-changed") &&
-                hasSetAsideEdit
-                  ? goneNotice(engine.goneCause, true)
-                  : typeof engineChipState !== "string" && engineChipState.kind === "error" && engine.saveError
-                    ? engine.saveError
-                    : undefined)
+                    ? CHANGED_OUTSIDE_NOTICE
+                    : undefined
               }
               onRetry={engine.retryReplacement ?? undefined}
             />
@@ -2185,14 +2184,7 @@ export function MarkdownView(props: {
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
             <MarkdownSourceStrip
-              words={readOnly
-                ? readOnlyReasons({
-                    accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
-                    shared: !!props.forceReadOnly,
-                    tooLarge: !!props.truncated && !engine.available,
-                    transition,
-                  }).join(" ")
-                : "Read-only markdown source — switch back to Editor to make changes."}
+              words={readOnly ? readOnlyWords : "Read-only markdown source — switch back to Editor to make changes."}
               getText={() => sourceMarkdown}
             />
             {sourceMarkdown === null ? (
@@ -2304,7 +2296,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={readOnly ? readOnlyWords : undefined} />
             ) : null}
           </>
         }

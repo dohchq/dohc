@@ -618,10 +618,13 @@ describe("engine markdown source view", () => {
 
     expect((await screen.findByTestId("deleted-while-editing-notice")).textContent).toBe(notice);
     expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe("");
-    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).not.toBe(CONNECTION_LOST_REASON);
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
   });
 
-  it("leaves the strip to the notice when the file is deleted in source view", async () => {
+  it.each([
+    ["deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+  ] as const)("leaves the strip and the chip to the notice when the file is %s in source view", async (gone, notice) => {
     const user = userEvent.setup();
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
@@ -630,12 +633,32 @@ describe("engine markdown source view", () => {
     await user.click(screen.getByTestId("markdown-source-toggle"));
     await screen.findByTestId("view-markdown-source");
 
-    act(() => pushSaveState("deleted", 0));
+    act(() => pushSaveState(gone, 0));
 
-    expect((await screen.findByTestId("deleted-while-editing-notice")).textContent).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
-    );
+    expect((await screen.findByTestId("deleted-while-editing-notice")).textContent).toBe(notice);
     expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe("");
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
+  });
+
+  it("says the connection was lost beside the edit that turn set aside", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("read-only", 1, "reconnecting"));
+
+    // The row keeps the text but does not say why.
+    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
+      "This document became read-only. Copy your text to keep it.",
+    );
+    await waitFor(() => expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(CONNECTION_LOST_REASON));
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
+    expect(strip?.textContent).toBe(CONNECTION_LOST_REASON);
   });
 
   it.each([{ workspaceId: "ws-2" }, { path: "b.md" }, { engineVersionKey: 1 }])("does not carry an ended marker into a changed request %j", async (changed) => {
@@ -703,9 +726,8 @@ describe("engine markdown source view", () => {
         screen.getByTestId("markdown-editor").getAttribute("contenteditable"),
       ).toBe("false"),
     );
-    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
-    );
+    // The notice says why, so the chip has no tooltip.
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
   });
 
   // A share whose access ended refuses the edit. The notice says what
@@ -908,9 +930,7 @@ describe("engine markdown source view", () => {
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
       "This document reopened before your last edit saved. Copy your text to keep it.",
     );
-    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "This file was deleted while you had it open. Copy your set-aside edit to keep it.",
-    );
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
 
     // Reuse the existing Copy recovery action and prove it returns the
     // current Y.Doc text, including the edit that never settled.

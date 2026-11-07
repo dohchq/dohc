@@ -1033,7 +1033,7 @@ function createEngineDocSession(
     });
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token, cause: "lineage-failure", draftId: replacedDraftId, retry: tryAgain },
+      readOnlyTransition: { token, cause: "lineage-failure", draftId: null, retry: tryAgain },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {

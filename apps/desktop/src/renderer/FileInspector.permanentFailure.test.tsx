@@ -55,3 +55,15 @@ it("says dohc could not save an edit it refused for good", async () => {
   );
   expect(DOCUMENT_NOT_SAVED_DRAFT_NOTICE).toBe("dohc could not save this document. Copy your text to keep it.");
 });
+
+it("gives the chip no tooltip, not the raw error, when no sentence says why", async () => {
+  const user = userEvent.setup();
+  render(<FileInspector workspaceId="ws-1" path={PATH} />);
+  await screen.findByTestId("markdown-source-toggle");
+  harness.rejectNextApplyAsTooLarge();
+
+  await user.type(screen.getByTestId("page-title"), " Retitled");
+
+  await screen.findByTestId("orphaned-draft-notice");
+  await waitFor(() => expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(""));
+});
