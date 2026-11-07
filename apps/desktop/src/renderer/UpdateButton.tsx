@@ -53,23 +53,33 @@ export function updateStep(state: UpdateStateEvent | null, pending: "check" | "i
   }
 }
 
-export function updateFailureTitle(step: UpdateAction, version: string | undefined): string {
-  if (step === "check") return "dohc could not check for updates";
-  return `dohc could not ${step === "download" ? "download" : "install"} update ${version ?? ""}`.trimEnd();
+const FAILED_STEP: Record<UpdateAction, string> = {
+  check: "check for updates",
+  download: "download the update",
+  install: "install the update",
+};
+
+// A title names no version; the Settings line does.
+export function updateFailureTitle(step: UpdateAction): string {
+  return `dohc could not ${FAILED_STEP[step]}`;
 }
 
-// What a failure main reports says happened.
-function reportedFailureTitle(failure: NonNullable<UpdateStateEvent["failure"]>, version: string | undefined): string {
-  return failure.notInstalled ? `dohc didn't install update ${failure.notInstalled}` : updateFailureTitle(failure.step, version);
+// The step a failure main reports stopped. An update dohc opened without is
+// one it could not install, though Try again downloads it again.
+function failedStep(failure: NonNullable<UpdateStateEvent["failure"]>): UpdateAction {
+  return failure.notInstalled ? "install" : failure.step;
 }
 
-// The updater's sentence, or the step that failed when main reports one.
+// The updater's sentence, or the step that failed, with its version, when
+// main reports one.
 export function updateStatusLine(state: UpdateStateEvent): string {
   if (!state.failure) return state.message;
-  const title = reportedFailureTitle(state.failure, state.version);
+  const step = failedStep(state.failure);
+  const version = state.failure.notInstalled ?? state.version;
+  const said = step === "check" || !version ? updateFailureTitle(step) : `dohc could not ${step} version ${version}`;
   // One sentence, so it names dohc once.
-  if (state.failure.notInstalled && state.currentVersion) return `${title} and is still on version ${state.currentVersion}.`;
-  return readError(state.message).words ? `${title}. ${state.message}` : `${title}.`;
+  if (state.failure.notInstalled && state.currentVersion) return `${said} and is still on version ${state.currentVersion}.`;
+  return readError(state.message).words ? `${said}. ${state.message}` : `${said}.`;
 }
 
 /** The step's label, with a download's progress in fixed-width digits so
@@ -103,8 +113,6 @@ export function useDesktopUpdate(report: ReportShellFailure | null): DesktopUpda
   const [pending, setPending] = useState<"check" | "install" | null>(null);
   const reportRef = useRef(report);
   reportRef.current = report;
-  const versionRef = useRef(updateState?.version);
-  versionRef.current = updateState?.version;
   // A failed install ends the restart.
   const failureId = updateState?.failure?.id;
   useEffect(() => {
@@ -117,7 +125,7 @@ export function useDesktopUpdate(report: ReportShellFailure | null): DesktopUpda
   const run = useCallback(async function run(action: UpdateAction): Promise<void> {
     const failed = (cause: unknown) =>
       reportRef.current?.({
-        message: `${updateFailureTitle(action, versionRef.current)}.`,
+        message: `${updateFailureTitle(action)}.`,
         cause,
         retry: () => void run(action),
       });
@@ -197,7 +205,7 @@ export function useUpdateFailureNotices(
     shown.current = key;
     const quiet = toastedFailures.has(failure.id);
     toastedFailures.add(failure.id);
-    const title = reportedFailureTitle(failure, state.version);
+    const title = updateFailureTitle(failedStep(failure));
     report({
       kind: "update",
       quiet,

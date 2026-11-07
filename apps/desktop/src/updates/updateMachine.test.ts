@@ -47,7 +47,7 @@ describe("updateMachine", () => {
   it("reports up-to-date when no update exists, and can re-check from there", () => {
     const upToDate = run([{ type: "check" }, { type: "not-available" }]);
     expect(upToDate).toMatchObject({ status: "up-to-date" });
-    expect(upToDate.message).toMatch(/latest version/);
+    expect(upToDate.message).toBe("dohc is up to date.");
     expect(transition(upToDate, { type: "check" }).status).toBe("checking");
   });
 

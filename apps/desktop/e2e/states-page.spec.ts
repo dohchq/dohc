@@ -381,7 +381,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       for (const theme of THEMES) {
         const pane = page.getByTestId(`states-${theme}`);
-        for (const [answer, words] of [["copied", "Copied"], ["failed", "Couldn't copy"]] as const) {
+        for (const [answer, words] of [["copied", "Copied"], ["failed", "Could not copy"]] as const) {
           const withWords = pane.getByTestId(`states-copy-words-${answer}-${theme}`);
           await press(page, withWords, remainingMs());
           await expect(withWords).toHaveText(words, { timeout: remainingMs() });

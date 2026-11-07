@@ -167,13 +167,15 @@ const FAILED_STATUS = { check: "error", download: "available", install: "ready" 
  */
 export function debInstallFailure(error: Error, installer: string): InstallFailure {
   const [, program, status] = /^Command (\S+) exited with code (\d+)$/u.exec(error.message) ?? [];
+  // Each sits under the title "dohc could not install the update", so none
+  // says it again.
   if (program === "pkexec" && status === "126") {
-    return { message: "The update did not install without your password." };
+    return { message: "The update needs your password." };
   }
   const installCommand = `sudo apt install '${installer.replaceAll("'", "'\\''")}'`;
   return program === "pkexec" && status === "127"
-    ? { message: "dohc did not get permission to install the update. Run this command in a terminal to install it.", installCommand }
-    : { message: "The update did not install. Run this command in a terminal to install it.", installCommand };
+    ? { message: "dohc did not get permission. Run this command in a terminal to install it.", installCommand }
+    : { message: "Run this command in a terminal to install it.", installCommand };
 }
 // electron-updater's code when the feed has no channel file for this
 // platform. GitHubProvider sets it on a 404 for <channel>-mac.yml in the
