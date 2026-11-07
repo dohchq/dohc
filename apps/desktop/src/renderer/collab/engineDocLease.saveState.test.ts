@@ -343,7 +343,7 @@ it("makes a change outside dohc unsaved when typing lands after it", async () =>
 it("makes a change outside dohc unsaved when an agent's edit lands after it", async () => {
   await retainBound();
   harness.emitChangedOutside(false, 0);
-  harness.emitRemoteEdit(" agent", 1);
+  harness.emitRemoteEdit(" agent");
   expect(retained.snapshot.changedOutside?.unsaved).toBe(true);
   expect(retained.lease.unsavedEditsPending()).toBe(true);
 });
@@ -969,16 +969,9 @@ it("sets the text aside when another file takes the document's path", async () =
 });
 
 it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
-  // The boundary capture snapshots the doc synchronously at the
-  // deletion event and defers only the markdown PROJECTION (the part that
-  // needs the lazy Tiptap module). Nothing before this pin distinguished
-  // that from deferring the snapshot too — both pass every earlier test,
-  // because unmount alone does not corrupt a Y.Doc's encodable state.
-  //
-  // A remote update is the real discriminator: it is not gated by
-  // `writesRefused` (only LOCAL writes are refused after deletion), so it
-  // can still land on the same doc while the projection is in flight. A
-  // synchronous snapshot is immune to it; a deferred one would pick it up.
+  // The capture snapshots the doc at the deletion event and defers only the
+  // markdown projection. A remote edit landing while that projection is in
+  // flight must not reach the text set aside: the path it edits is gone.
   await retainBound();
 
   act(() => {
@@ -991,6 +984,55 @@ it("freezes the deleted doc's bytes at the event, immune to a remote edit that l
   harness.emitRemoteEdit("+remote");
 
   await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+});
+
+it("keeps remote edits on a winning lineage out of a deleted note's recovery", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  harness.emitRemoteEdit("+remote");
+
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("winner");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+
+  cleanup();
+  retained.release();
+  await disposeEngineDocLeasesForTests();
+  await retained.lease.dispose();
+  drafts = observeDrafts("notes/big.md");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+});
+
+it("applies remote edits on a winning lineage while the note exists", async () => {
+  await retainBound();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  harness.emitRemoteEdit("+remote");
+
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("winner+remote");
+});
+
+it("takes a head after a deletion without its edit, so a pending check settles", async () => {
+  await retainBound();
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+
+  harness.emitRemoteEdit("+remote", { sha256: "c".repeat(64) });
+
+  expect(boundOutcome().headSha256).toBe("c".repeat(64));
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
 });
 
 it("stores a deleted scene as portable Excalidraw JSON", async () => {
