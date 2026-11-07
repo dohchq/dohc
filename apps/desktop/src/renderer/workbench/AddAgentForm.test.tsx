@@ -37,7 +37,10 @@ beforeEach(() => {
   vi.resetAllMocks();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("AddAgentForm", () => {
   it("renders inside an overlay that Escape dismisses while idle and a press outside does not", () => {
@@ -121,5 +124,62 @@ describe("AddAgentForm", () => {
     expect(screen.getByTestId("chats-add-agent-cancel").hasAttribute("disabled")).toBe(false);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it("puts the title and actions in bands with a rule only while the body overflows", () => {
+    // ResizeObservers that report a resize when the test says so.
+    const observed = new Set<Element>();
+    const live = new Set<() => void>();
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private readonly callback: () => void) {}
+        observe(target: Element) {
+          observed.add(target);
+          live.add(this.callback);
+        }
+        disconnect() {
+          live.delete(this.callback);
+        }
+      },
+    );
+    const report = () => act(() => live.forEach((callback) => callback()));
+    render(
+      <AddAgentForm
+        workspaceId="ws-1"
+        onError={vi.fn()}
+        settings={FILLED_SETTINGS}
+        onSave={vi.fn()}
+        onDone={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    const form = screen.getByTestId("chats-add-agent");
+    const body = screen.getByTestId("chats-add-agent-body");
+    const header = screen.getByTestId("chats-add-agent-header");
+    const footer = screen.getByTestId("chats-add-agent-footer");
+    expect(observed.has(body)).toBe(true);
+    let contentHeight = 300;
+    Object.defineProperty(body, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(body, "scrollHeight", { configurable: true, get: () => contentHeight });
+    const banded = () => form.hasAttribute("data-scrolls") && header.classList.contains("border-b") && footer.classList.contains("border-t");
+
+    report();
+    expect(form.hasAttribute("data-scrolls")).toBe(false);
+    expect(header.classList.contains("border-b")).toBe(false);
+    expect(footer.classList.contains("border-t")).toBe(false);
+    expect(form.classList.contains("p-5")).toBe(true);
+
+    contentHeight = 520;
+    report();
+    expect(banded()).toBe(true);
+    expect(body.classList.contains("p-6")).toBe(true);
+    expect(form.classList.contains("p-5")).toBe(false);
+
+    contentHeight = 400;
+    report();
+    expect(form.hasAttribute("data-scrolls")).toBe(false);
+    expect(header.classList.contains("border-b")).toBe(false);
+    expect(form.classList.contains("p-5")).toBe(true);
   });
 });
