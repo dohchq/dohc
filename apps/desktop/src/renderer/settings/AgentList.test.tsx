@@ -670,6 +670,14 @@ it("moves focus to the first Add tile it can when there are no agents", async ()
   expect(document.activeElement).toBe(tile("Add Codex"));
 });
 
+it("moves focus to the Agents heading when trust turns on nothing", async () => {
+  bridgeMock.detectAgentTools.mockResolvedValueOnce({ workingDirectory: "C:\\Work", tools: [] });
+  const { rerender, onTrust } = await pressTrust({ settings: { ...SETTINGS, agents: {} } });
+  await within(tile("Add Codex")).findByText("Not found");
+  rerender({ trust: { trusted: true, asking: false, onTrust } });
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
+});
+
 it("puts focus back on Trust workspace when the person cancels main's dialog", async () => {
   const { rerender, onTrust } = await pressTrust();
   expect(document.activeElement).toBe(document.body);
