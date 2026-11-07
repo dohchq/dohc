@@ -107,7 +107,7 @@ export async function loadCollectionChange(api: Api, input: { workspaceId: strin
   const selection = { workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId };
   const described = await api.dataset({ ...selection, action: "describe" });
   const saved = await api.dataset({ ...selection, action: "historyRevision", revisionSha256: proposal.base.revisionSha256 });
-  if (described.kind !== "description" || saved.kind !== "history-revision") throw new Error(`dohc couldn't read ${proposal.name}. Try again.`);
+  if (described.kind !== "description" || saved.kind !== "history-revision") throw new Error(`dohc could not read ${proposal.name}.`);
   const head = described.dataset, base = saved.revision.definition;
   const { rows, paths, history } = await attribute(api, workspaceId, proposal, base, postedAtMs);
   const state = await changeState(api, { proposal, head, paths, history, postedAtMs, selection });
@@ -151,7 +151,7 @@ export async function applyCollectionChange(api: Pick<Api, "dataset">, workspace
   shown: { proposal: CollectionChangeProposal; rows: readonly CollectionChangeRow[] }): Promise<{ kind: "applied"; proposal: CollectionChangeProposal } | { kind: "edited" } | { kind: "deletes-more"; was: Deletes; now: Deletes }> {
   const { proposal } = shown;
   const prepared = await api.dataset({ workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId, action: "prepareMigration", migrationPath: proposal.migrationPath });
-  if (prepared.kind !== "migration-prepared") throw new Error("dohc couldn't prepare this change. Try again.");
+  if (prepared.kind !== "migration-prepared") throw new Error("dohc could not prepare this change.");
   let approving = false;
   try {
     let fresh: CollectionChangeProposal | null = null;
@@ -163,7 +163,7 @@ export async function applyCollectionChange(api: Pick<Api, "dataset">, workspace
     approving = true;
     const result = await api.dataset({ workspaceId, action: "approveMigration", preparationId: prepared.preparationId,
       revisionSha256: prepared.revision.revisionSha256, approvalDigest: prepared.approvalDigest, changeSha256: proposal.changeSha256 });
-    if (result.kind !== "migrated") throw new Error("dohc couldn't confirm this change. Refresh the Collection.");
+    if (result.kind !== "migrated") throw new Error("dohc could not confirm this change. Refresh the Collection.");
     return { kind: "applied", proposal: fresh };
   } finally {
     if (!approving) await api.dataset({ workspaceId, action: "discardMigration", preparationId: prepared.preparationId }).catch(() => undefined);
@@ -174,14 +174,14 @@ export async function applyCollectionChange(api: Pick<Api, "dataset">, workspace
 export async function undoCollectionChange(api: Pick<Api, "dataset">, workspaceId: string, proposal: CollectionChangeProposal): Promise<void> {
   const selection = { workspaceId, datasetPath: proposal.datasetPath, expectedDatasetId: proposal.datasetId };
   const described = await api.dataset({ ...selection, action: "describe" });
-  if (described.kind !== "description") throw new Error(`dohc couldn't read ${proposal.name}. Try again.`);
+  if (described.kind !== "description") throw new Error(`dohc could not read ${proposal.name}.`);
   if (described.dataset.revisionSha256 !== proposal.revisionSha256) throw new Error(`${proposal.name} changed after this change. Undo it from History.`);
   const prepared = await api.dataset({ ...selection, action: "prepareHistoryRestore", revision: described.dataset.revision, revisionSha256: described.dataset.revisionSha256,
     targetRevisionSha256: proposal.base.revisionSha256, changedRevisionSha256: proposal.revisionSha256 });
-  if (prepared.kind !== "migration-prepared") throw new Error("dohc couldn't prepare the undo. Try again.");
+  if (prepared.kind !== "migration-prepared") throw new Error("dohc could not prepare the undo.");
   const result = await api.dataset({ workspaceId, action: "approveMigration", preparationId: prepared.preparationId,
     revisionSha256: prepared.revision.revisionSha256, approvalDigest: prepared.approvalDigest });
-  if (result.kind !== "migrated") throw new Error("dohc couldn't confirm the undo. Refresh the Collection.");
+  if (result.kind !== "migrated") throw new Error("dohc could not confirm the undo. Refresh the Collection.");
 }
 
 /** A change prepared for the review dialog: what applying it does now, and each changed file before and after. */
@@ -199,11 +199,11 @@ export interface CollectionChangeReview {
 export async function prepareCollectionChangeReview(api: Api, workspaceId: string, asked: CollectionChangeProposal): Promise<CollectionChangeReview> {
   const selection = { workspaceId, datasetPath: asked.datasetPath, expectedDatasetId: asked.datasetId };
   const prepared = await api.dataset({ ...selection, action: "prepareMigration", migrationPath: asked.migrationPath });
-  if (prepared.kind !== "migration-prepared") throw new Error("dohc couldn't prepare this change. Try again.");
+  if (prepared.kind !== "migration-prepared") throw new Error("dohc could not prepare this change.");
   try {
     const proposal = collectionChangeProposal(prepared, { datasetPath: asked.datasetPath, migrationPath: asked.migrationPath, note: asked.note });
     const saved = await api.dataset({ ...selection, action: "historyRevision", revisionSha256: prepared.previousRevision.revisionSha256 });
-    if (saved.kind !== "history-revision") throw new Error(`dohc couldn't read ${asked.name}. Try again.`);
+    if (saved.kind !== "history-revision") throw new Error(`dohc could not read ${asked.name}.`);
     const { schemaPath, operationsPath } = prepared.revision.definition;
     const listed = { ...proposal, rows: collectionReviewRows(proposal.rows, { files: proposal.files, schemaPath, operationsPath }) };
     const { rows } = await attribute(api, workspaceId, listed, saved.revision.definition, Number.MAX_SAFE_INTEGER);
@@ -226,7 +226,7 @@ export async function prepareCollectionChangeReview(api: Api, workspaceId: strin
 /** Applies the reviewed preparation, bound to the change the dialog showed. */
 export async function applyCollectionChangeReview(api: Pick<Api, "dataset">, workspaceId: string, review: CollectionChangeReview): Promise<void> {
   const result = await api.dataset({ workspaceId, action: "approveMigration", ...review.preparation, changeSha256: review.change.proposal.changeSha256 });
-  if (result.kind !== "migrated") throw new Error("dohc couldn't confirm this change. Refresh the Collection.");
+  if (result.kind !== "migrated") throw new Error("dohc could not confirm this change. Refresh the Collection.");
 }
 
 /**

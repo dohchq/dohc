@@ -60,7 +60,7 @@ export function CollectionChangeReviewDialog(props: {
       held.current = review;
       setLoad({ kind: "ready", review });
     }, (error: unknown) => {
-      if (current) setLoad({ kind: "failed", words: ipcErrorMessage(error, "dohc couldn't prepare this change.") });
+      if (current) setLoad({ kind: "failed", words: ipcErrorMessage(error, "dohc could not prepare this change.") });
     });
     closed.current = false;
     return () => {
