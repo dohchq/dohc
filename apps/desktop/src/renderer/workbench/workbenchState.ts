@@ -614,8 +614,8 @@ function makeRoomForTabs(state: WorkbenchState, count: number, keep: ReadonlySet
 
 // The saved layout with every tab open in `shown` beside it, the one in view
 // still in view. A file open in both keeps its saved place. An app open in
-// `shown` stays in its group, because moving it reloads the app. Past the tab
-// limit, saved tabs close to make room, so no tab in `shown` closes.
+// `shown` stays in its group, where the person put it. Past the tab limit,
+// saved tabs close to make room, so no tab in `shown` closes.
 export function mergeSavedTabs(saved: WorkbenchState, shown: WorkbenchState): WorkbenchState {
   const holder = (state: WorkbenchState, path: string) =>
     state.editorGroups.find((group) => group.tabs.some((tab) => tab.path === path))?.id;

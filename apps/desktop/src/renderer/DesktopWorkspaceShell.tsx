@@ -26,6 +26,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type CSSProperties,
 } from "react";
 import type {
   CaptureFileHold,
@@ -127,6 +128,7 @@ import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
 import { useSavedTabsReread } from "./shell/useSavedTabsReread";
+import { leaveAppPage, routeAppTab } from "./shell/appTabOrder";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
@@ -513,6 +515,20 @@ function editorFocus(state: WorkbenchState): EditorFocus {
 function hasEditorFocus(state: WorkbenchState, focus: EditorFocus): boolean {
   const current = editorFocus(state);
   return current.groupId === focus.groupId && current.tab === focus.tab;
+}
+
+// A group's app slot, and the kept app's page that lies over it. A group's
+// place in the layout names both, so a reorder moves the page with it.
+const appSlotAnchor = (groupIndex: number) => `--editor-group-app-${groupIndex}`;
+const appPageId = (groupIndex: number) => `editor-group-app-${groupIndex}`;
+function appPlacement(groupIndex: number): CSSProperties {
+  return {
+    positionAnchor: appSlotAnchor(groupIndex),
+    top: "anchor(top)",
+    right: "anchor(right)",
+    bottom: "anchor(bottom)",
+    left: "anchor(left)",
+  };
 }
 
 function InvalidSitePathFallback({
@@ -1430,9 +1446,31 @@ export function DesktopWorkspaceShell(props: {
     resolveMomentDiffPath,
     resolveAppTitle,
   } = useTabTitles(workspaceId);
-  // App tabs each editor group has shown. They stay mounted while open, so
-  // switching tabs never reloads an app.
-  const shownAppTabs = useRef(new Map<string, string[]>());
+  // App tabs that have shown, in the order they first showed. Each app's page
+  // stays mounted under the editor area while its tab is open, and lies over
+  // the group that holds the tab. Switching or moving tabs changes only its
+  // placement, because Electron reloads a <webview> whose element moves.
+  const keptAppTabs = useRef<string[]>([]);
+  keptAppTabs.current = keptAppTabs.current.filter((path) =>
+    wb.editorGroups.some((group) => group.tabs.some((tab) => tab.path === path)),
+  );
+  for (const group of wb.editorGroups) {
+    const shown = parseTab(group.activeTab);
+    if (shown?.kind === "site" && shown.siteRoot !== null && !keptAppTabs.current.includes(shown.path)) {
+      keptAppTabs.current.push(shown.path);
+    }
+  }
+  const keptApps = keptAppTabs.current.flatMap((path) => {
+    const app = parseTab(path);
+    const groupIndex = wb.editorGroups.findIndex((group) => group.tabs.some((tab) => tab.path === path));
+    const group = wb.editorGroups[groupIndex];
+    if (app.kind !== "site" || app.siteRoot === null || !group) return [];
+    return [{ path, siteRoot: app.siteRoot, groupId: group.id, groupIndex, shown: group.activeTab === path }];
+  });
+  useEffect(() => {
+    window.addEventListener("keydown", routeAppTab);
+    return () => window.removeEventListener("keydown", routeAppTab);
+  }, []);
   const anyTabDirty = dirtyPaths.size > 0;
   const focusedTab = parseTab(focusedTabPath);
   const activeDocumentPath = TAB_KINDS[focusedTab?.kind ?? "removed"].virtual
@@ -6340,7 +6378,7 @@ export function DesktopWorkspaceShell(props: {
         {/* Editor area: independently active editor groups. Each group can
             host any tab surface, and its tab row carries the open
             document's actions. */}
-        <main className="flex min-w-0 flex-1 flex-col bg-bg">
+        <main className="relative flex min-w-0 flex-1 flex-col bg-bg">
           <EditorGroupLayout
             groups={wb.editorGroups.map((editorGroup, groupIndex) => {
               const tabPath = editorGroup.activeTab;
@@ -6352,10 +6390,6 @@ export function DesktopWorkspaceShell(props: {
                 : null;
               const groupTab = parseTab(tabPath);
               const groupSiteRoot = groupTab?.kind === "site" ? groupTab.siteRoot : null;
-              const openPaths = new Set(editorGroup.tabs.map((candidate) => candidate.path));
-              const keptAppTabs = (shownAppTabs.current.get(editorGroup.id) ?? []).filter((path) => openPaths.has(path));
-              if (groupSiteRoot && tabPath && !keptAppTabs.includes(tabPath)) keptAppTabs.push(tabPath);
-              shownAppTabs.current.set(editorGroup.id, keptAppTabs);
               const groupCollectionPath = groupTab?.kind === "collection" ? groupTab.collectionPath : null;
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
@@ -6805,36 +6839,15 @@ export function DesktopWorkspaceShell(props: {
               return unhandled;
             })()}
             </ErrorBoundary>
-            {keptAppTabs.map((path) => {
-              const app = parseTab(path);
-              if (app.kind !== "site" || app.siteRoot === null) return null;
-              const siteRoot = app.siteRoot;
-              const visible = path === tabPath;
-              return (
-                <div key={`${workspaceId}:${path}`} className={visible ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-                  <ErrorBoundary scope="editor" resetKeys={[workspaceId, versionEpoch]}>
-                    <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
-                      <LazySitePreviewPage
-                        workspaceId={workspaceId}
-                        reportError={reportShellError}
-                        notices={appNotices}
-                        visible={visible}
-                        focused={visible && editorGroup.id === wb.activeEditorGroup}
-                        onTitle={(title) => resolveAppTitle(siteRoot, title)}
-                        onOpenApp={openAppTab}
-                        siteRoot={siteRoot}
-                        onShowSource={() => showPathInExplorer(siteRoot, true)}
-                        sharedView={!!shareView}
-                        onShareSite={(target) =>
-                          setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
-                        }
-                        access={appAccess}
-                      />
-                    </Suspense>
-                  </ErrorBoundary>
-                </div>
-              );
-            })}
+            {/* The app this group shows lies over this slot. */}
+            {groupSiteRoot ? (
+              <div
+                data-testid="app-slot"
+                aria-owns={appPageId(groupIndex)}
+                style={{ anchorName: appSlotAnchor(groupIndex) }}
+                className="flex min-h-0 flex-1 flex-col"
+              />
+            ) : null}
                     </div>
                   </EditorGroupFrame>
                 ),
@@ -6848,6 +6861,44 @@ export function DesktopWorkspaceShell(props: {
               )
             }
           />
+          {/* Each kept app's page, over its group's slot while it is that
+              group's active tab. Only this placement changes when its tab
+              moves, so the page keeps what the person typed. */}
+          {keptApps.map(({ path, siteRoot, groupId, groupIndex, shown }) => (
+            <div
+              key={`${workspaceId}:${path}`}
+              id={shown ? appPageId(groupIndex) : undefined}
+              data-app-group-id={groupId}
+              style={shown ? appPlacement(groupIndex) : undefined}
+              className={shown ? "absolute flex flex-col" : "hidden"}
+              // The page is outside its group's element, so it focuses the group as the group's own content does.
+              onPointerDownCapture={() => focusWorkbenchEditorGroup(groupId)}
+              onFocusCapture={() => focusWorkbenchEditorGroup(groupId)}
+              onContextMenuCapture={() => focusWorkbenchEditorGroup(groupId)}
+            >
+              <ErrorBoundary scope="editor" resetKeys={[workspaceId, versionEpoch]}>
+                <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
+                  <LazySitePreviewPage
+                    workspaceId={workspaceId}
+                    reportError={reportShellError}
+                    notices={appNotices}
+                    visible={shown}
+                    focused={shown && groupId === wb.activeEditorGroup}
+                    onTitle={(title) => resolveAppTitle(siteRoot, title)}
+                    onOpenApp={openAppTab}
+                    siteRoot={siteRoot}
+                    onShowSource={() => showPathInExplorer(siteRoot, true)}
+                    sharedView={!!shareView}
+                    onShareSite={(target) =>
+                      setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
+                    }
+                    access={appAccess}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+              <span data-app-stop tabIndex={0} aria-hidden="true" onFocus={leaveAppPage} className="absolute size-0 overflow-hidden" />
+            </div>
+          ))}
         </main>
 
         {/* About rail — the right-hand secondary sidebar (every workspace,

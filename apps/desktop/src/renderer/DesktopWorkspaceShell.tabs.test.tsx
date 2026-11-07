@@ -75,6 +75,12 @@ vi.mock("./ConnectedTransactionalCollection", () => ({
   ),
 }));
 
+// The page of the app a group shows. It lies over the group's slot, outside the group's element.
+function shownAppPage(groupId: string): HTMLElement | null {
+  const page = document.querySelector<HTMLElement>(`[data-app-group-id="${groupId}"]:not(.hidden)`);
+  return page?.querySelector<HTMLElement>('[data-testid="site-preview-page"]') ?? null;
+}
+
 const tableId = "00000000-0000-4000-8000-000000000002";
 const cases = [
   { name: "file", path: "notes.txt", surface: "file-inspector", attributes: { "data-path": "notes.txt" } },
@@ -111,10 +117,15 @@ describe("shell tab surfaces", () => {
     requested.path = path;
     fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
     const pane = within(screen.getByTestId("editor-group-primary"));
-    const view = await pane.findByTestId(surface);
+    const shown = (testId: string) => testId === "site-preview-page" ? shownAppPage("primary") : pane.queryByTestId(testId);
+    const view = await waitFor(() => {
+      const found = shown(surface);
+      expect(found).not.toBeNull();
+      return found!;
+    });
     for (const [key, value] of Object.entries(attributes ?? {})) expect(view.getAttribute(key)).toBe(value);
     for (const other of new Set(cases.map(test => test.surface))) {
-      if (other !== surface) expect(pane.queryByTestId(other)).toBeNull();
+      if (other !== surface) expect(shown(other)).toBeNull();
     }
   });
 
@@ -149,7 +160,7 @@ describe("shell tab surfaces", () => {
         expect(view.getAttribute("data-version")).toBe("main");
         expect(pane.getByTestId(editorTabTestId(path))).toBeTruthy();
       }
-      expect(pane.queryByTestId("site-preview-page")).toBeNull();
+      expect(screen.queryByTestId("site-preview-page")).toBeNull();
       expect(pane.queryByTestId("collection-page")).toBeNull();
       expect(pane.queryByTestId("file-inspector")).toBeNull();
     } finally {
@@ -167,15 +178,18 @@ describe("shell tab surfaces", () => {
       fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
     };
     await open(siteTabPath("apps/trip"));
-    const app = await pane.findByTestId("site-preview-page");
+    const app = await screen.findByTestId("site-preview-page");
+    expect(shownAppPage("primary")).toBe(app);
+    expect(pane.getByTestId("app-slot")).toBeTruthy();
     await open("notes.txt");
     await pane.findByTestId("file-inspector");
-    expect(pane.getByTestId("site-preview-page")).toBe(app);
+    expect(screen.getByTestId("site-preview-page")).toBe(app);
     expect(app.parentElement?.className).toBe("hidden");
+    expect(pane.queryByTestId("app-slot")).toBeNull();
     await open(siteTabPath("apps/trip"));
     await waitFor(() => expect(pane.queryByTestId("file-inspector")).toBeNull());
-    expect(pane.getByTestId("site-preview-page")).toBe(app);
-    expect(app.parentElement?.className).not.toBe("hidden");
+    expect(screen.getByTestId("site-preview-page")).toBe(app);
+    expect(shownAppPage("primary")).toBe(app);
   });
 
   it("keeps the empty editor state when no tab is open", async () => {

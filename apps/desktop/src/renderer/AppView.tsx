@@ -101,8 +101,9 @@ export function useAppView(options: {
     const { holdFocus, focused, visible } = latest.current;
     if (!wantsFocus.current || holdFocus || !focused || !visible || !webview.current) return;
     wantsFocus.current = false;
-    // A dialog that opened while the app was opening keeps focus.
-    if (!hasBlockingModal()) webview.current.focus();
+    // A dialog that opened while the app was opening keeps focus. Shift+Tab into the app passes through its page's
+    // end stop, and the browser goes on from there into the app's last control.
+    if (!hasBlockingModal() && !document.activeElement?.matches("[data-app-stop]")) webview.current.focus();
   }, []);
 
   const fail = useCallback((message: string, cause: unknown) => {
