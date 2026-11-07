@@ -945,7 +945,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           editable: await read(editor(page).evaluateAll(nodes => nodes.map(node => node.getAttribute("contenteditable")))),
           saveState: await read(saveState(page).evaluateAll(nodes => nodes.map(node => node.getAttribute("data-state")))),
           ended: await read(page.getByTestId("shared-view-banner").evaluateAll(nodes => nodes.map(node => node.getAttribute("data-ended")))),
-          editDisabled: await read(page.getByTestId("markdown-edit-toggle").evaluateAll(nodes => nodes.map(node => (node as HTMLButtonElement).disabled))),
+          editDisabled: await read(page.getByTestId("markdown-edit-toggle").evaluateAll(nodes => nodes.map(node => ({ disabled: (node as HTMLButtonElement).disabled, ariaDisabled: node.getAttribute("aria-disabled") })))),
           documents: await read(page.getByTestId("view-markdown").count()),
           notices: await read(page.getByTestId("orphaned-draft-notice").allInnerTexts()),
           copyLabels: await read(page.getByTestId("orphaned-draft-copy").allInnerTexts()),

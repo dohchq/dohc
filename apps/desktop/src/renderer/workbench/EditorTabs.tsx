@@ -6,7 +6,9 @@ import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { isMacContextClick } from "../ui/keys";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
-import { ChevronDown, Columns2, X } from "lucide-react";
+import { ChevronDown, Columns2, Share2, X } from "lucide-react";
+import { shortcutAria, shortcutText } from "../../shortcuts/shortcutRegistry";
+import { NARROW_GROUP_HIDDEN, NARROW_GROUP_NO_MIN_WIDTH } from "./tabRowActions";
 import {
   memo,
   useEffect,
@@ -752,6 +754,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   ) => void;
   onCreateGroupRight: (groupId: string) => void;
   onCloseGroup?: (groupId: string) => void;
+  // Shares the active tab's file. Absent where its view draws no Share file.
+  onShare?: (path: string) => void;
   // The element the open document's actions render into (tabRowActions).
   actionsRef?: (element: HTMLElement | null) => void;
 }) {
@@ -942,17 +946,34 @@ export const EditorTabs = memo(function EditorTabs(props: {
       resize?.disconnect();
     };
   }, [drag, props.tabs, props.activeTab]);
-  // The tab list ends with the group's own action. Its id starts with "/",
-  // which no tab's path does.
-  const closeGroup = props.onCloseGroup;
-  const groupActions: MenuEntry[] = closeGroup
-    ? [MENU_SEPARATOR, { id: "/close-group", label: "Close group", icon: <X size={14} aria-hidden />, onSelect: () => closeGroup(props.groupId) }]
-    : [];
+  // The tab list ends with the group's own actions. New editor group right and
+  // Share file are always here, because a narrow group hides their buttons
+  // (NARROW_GROUP_HIDDEN). Share sits next to Close group. Their ids start
+  // with "/", which no tab's path does.
+  const { onShare, onCloseGroup: closeGroup, activeTab, groupId } = props;
+  const platform = window.dohcDesktop?.platform;
+  const groupActions: MenuEntry[] = [
+    MENU_SEPARATOR,
+    {
+      id: "/new-group-right",
+      label: "New editor group right",
+      icon: <Columns2 size={14} aria-hidden />,
+      shortcut: { label: shortcutText("new-editor-group-right", platform), keys: shortcutAria("new-editor-group-right", platform) },
+      disabled: TAB_KINDS[parseTab(activeTab)?.kind ?? "removed"].singleton,
+      onSelect: () => props.onCreateGroupRight(groupId),
+    },
+    ...(onShare && activeTab
+      ? [{ id: "/share", label: "Share file", icon: <Share2 size={14} aria-hidden />, onSelect: () => onShare(activeTab) }]
+      : []),
+    ...(closeGroup
+      ? [{ id: "/close-group", label: "Close group", icon: <X size={14} aria-hidden />, onSelect: () => closeGroup(groupId) }]
+      : []),
+  ];
   return (
     <div
       ref={frameRef}
       data-testid="editor-tabs"
-      className="group/strip relative flex h-9 shrink-0 bg-panel"
+      className="@container/file-row group/strip relative flex h-9 shrink-0 bg-panel"
     >
       <span
         aria-hidden
@@ -1002,7 +1023,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         ))}
         {/* Continues the hairline across the empty strip — only the active
             tab interrupts it. */}
-        <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
+        <div aria-hidden className={`min-w-4 flex-1 border-b border-line ${NARROW_GROUP_NO_MIN_WIDTH}`} />
       </div>
       {/* The fades at the strip's edges, shown by styles.css at an edge it
           can still scroll past. The strip starts at the frame's left edge;
@@ -1041,7 +1062,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         title="New editor group right"
         disabled={empty || TAB_KINDS[parseTab(props.activeTab)?.kind ?? "removed"].singleton}
         onClick={() => props.onCreateGroupRight(props.groupId)}
-        className={`${STRIP_BUTTON} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
+        className={`${STRIP_BUTTON} ${empty ? "" : NARROW_GROUP_HIDDEN} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
       >
         <Columns2 size={14} aria-hidden />
       </button>

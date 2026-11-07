@@ -8,6 +8,7 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
+  LOSSY_NOTE_TITLE,
   OpeningState,
   ViewActions,
   OrphanedDraftNotices,
@@ -20,6 +21,7 @@ import {
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  SAVE_STATE,
   StateMark,
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
@@ -1011,6 +1013,12 @@ export function MarkdownView(props: {
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
+  // A disabled Edit says why: the chip's words, or else the restriction its
+  // notice states. Never the chip's save state: a set-aside edit doesn't stop
+  // editing.
+  const editReason = readOnlyWords || (props.lossyNote === "lossy" ? LOSSY_NOTE_TITLE
+    : props.truncated ? SAVE_STATE["too-large"].title
+    : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
   // the flip. See writeDraftNow and the unmount flush.
@@ -2310,7 +2318,7 @@ export function MarkdownView(props: {
               label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE : undefined,
+              title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
               onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {

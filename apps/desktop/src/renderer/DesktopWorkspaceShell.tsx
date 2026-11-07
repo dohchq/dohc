@@ -6605,6 +6605,10 @@ export function DesktopWorkspaceShell(props: {
                       {...(wb.editorGroups.length > 1
                         ? { onCloseGroup: closeGroupAfterFlush }
                         : {})}
+                      // Where the group's file view draws Share file.
+                      {...(tabPath && !TAB_KINDS[groupTab?.kind ?? "removed"].virtual && !shareView && !isMountedSharePath(tabPath)
+                        ? { onShare: onSharePath }
+                        : {})}
                     />
                   )}>
                     <div className="flex min-h-0 flex-1 flex-col">

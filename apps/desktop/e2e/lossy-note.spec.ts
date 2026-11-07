@@ -101,7 +101,7 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await explorerRow(page, "readme.md").click();
     const notice = page.getByTestId("lossy-note-notice");
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText("dohc can't edit this note yet without changing parts it can't show.");
+    await expect(notice).toContainText("This note has parts dohc can't show.");
     await expect(page.getByTestId("view-markdown")).toContainText("Hidden until opened.");
     // The raw HTML shows as its text, at the note's left edge like the rest.
     const lefts = await page.locator(".dohc-readable-text").evaluate((view, needles) =>

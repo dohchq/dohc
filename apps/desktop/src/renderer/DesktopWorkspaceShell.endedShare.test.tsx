@@ -524,7 +524,7 @@ describe("ended Edit Collection shares", () => {
       fireEvent.click(screen.getByRole("button", { name: "Open Retained task" }));
       const edit = await screen.findByTestId("markdown-edit-toggle");
       await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
-      expect(edit.hasAttribute("disabled")).toBe(true);
+      expect(edit.hasAttribute("disabled") || edit.getAttribute("aria-disabled") === "true").toBe(true);
       act(() => bridge.emitMenuCommand("command-palette"));
       expect(screen.queryByText("New collection")).toBeNull();
     },

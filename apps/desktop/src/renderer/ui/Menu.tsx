@@ -28,6 +28,8 @@ export type MenuItem = {
   icon?: ReactNode;
   /** A second line under the label, such as why a disabled row cannot run. It stays at full strength. */
   description?: string;
+  /** The chord that runs the row's action anywhere: `label` after the label, `keys` as aria-keyshortcuts. */
+  shortcut?: { label: string; keys: string | undefined };
   title?: string;
   testId?: string;
   data?: Readonly<Record<`data-${string}`, string>>;
@@ -115,9 +117,9 @@ export const MENU_LABEL = "min-w-0 flex-1 truncate";
 /** A row's label when a detail follows it on the same line, such as a path or a hint. */
 export const MENU_TITLE = "max-w-[65%] shrink-0 truncate";
 /** The detail after a row's title, in the rest of the row. */
-export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-subtle";
+export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-muted";
 /** The line a list shows when nothing matches. */
-export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-subtle";
+export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-muted";
 
 /**
  * Whether a mousemove came from a pointer that moved. A row that opens or
@@ -471,7 +473,7 @@ export function Menu(props: {
                       <span>{field.error}</span>
                     </p>
                   ) : field.hint ? (
-                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p>
+                    <p id={hintId} className="m-0 mt-1 px-2 text-[11px] leading-4 text-muted">{field.hint}</p>
                   ) : null}
                 </div>
               );
@@ -490,6 +492,7 @@ export function Menu(props: {
                 aria-current={entry.current || undefined}
                 aria-disabled={entry.disabled || undefined}
                 aria-describedby={describedBy}
+                aria-keyshortcuts={entry.shortcut?.keys}
                 title={entry.title}
                 data-testid={entry.testId}
                 {...entry.data}
@@ -521,6 +524,7 @@ export function Menu(props: {
                 ) : (
                   <span className={`${MENU_LABEL} ${dim}`}>{entry.label}</span>
                 )}
+                {entry.shortcut ? <span aria-hidden className={`${MENU_SHORTCUT} ${dim}`}>{entry.shortcut.label}</span> : null}
               </button>
             );
           })}

@@ -357,7 +357,7 @@ async function openDoc(page, name) {
   const surface = await page.waitForFunction(() => {
     if (document.body.innerText.includes('dohc could not open this document for editing.')) return 'refused';
     if (document.querySelector('[contenteditable="true"]')) return 'editable';
-    if (document.querySelector('[data-testid="markdown-edit-toggle"]:not(:disabled)')?.textContent === 'Edit') return 'read';
+    if (document.querySelector('[data-testid="markdown-edit-toggle"]:not(:disabled):not([aria-disabled="true"])')?.textContent === 'Edit') return 'read';
     return false;
   }, null, { timeout: 30000, polling: 50 });
   const settledSurface = await surface.jsonValue();

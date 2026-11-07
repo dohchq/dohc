@@ -217,7 +217,7 @@ describe("engine-mode export with no mounted serializer", () => {
     // No engine session: the file on disk IS the document, so the plain
     // editor's own serializer answers and the export must still work.
     const toggle = await screen.findByTestId("markdown-edit-toggle");
-    await vi.waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    await vi.waitFor(() => expect(toggle.getAttribute("aria-disabled")).not.toBe("true"));
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 

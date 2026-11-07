@@ -39,6 +39,8 @@ import { TextViewActions } from "../TextEditorView";
 import {
   DOCUMENT_NOT_SAVED_DRAFT_NOTICE,
   DocumentControls,
+  LossyNoteNoticeView,
+  LOSSY_NOTE_TITLE,
   MarkdownSourceStrip,
   OPENING_TITLE,
   OpeningState,
@@ -88,6 +90,7 @@ import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddres
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
+import { EmptyEditorGroup } from "../workbench/EmptyEditorGroup";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
@@ -222,9 +225,21 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         onCreateGroupRight={noop}
         onCloseGroup={noop}
       />
-      {/* Tall enough to hold the tab list, which the capture opens, with
-          Close group and its shadow. */}
-      <div className="h-38 bg-bg" />
+      {props.tabs.length === 0 ? (
+        <div className="flex h-[640px] flex-col bg-bg">
+          <EmptyEditorGroup
+            platform="win32"
+            create={{ markdown: noop, collection: noop, drawing: noop }}
+            recent={["plan.md", "notes.md"]}
+            files={[{ path: "plan.md" }, { path: "notes.md" }]}
+            onOpen={noop}
+          />
+        </div>
+      ) : (
+        // Tall enough to hold the tab list, which the capture opens, with
+        // the group's actions and its shadow.
+        <div className="h-46 bg-bg" />
+      )}
     </>
   );
 }
@@ -250,7 +265,7 @@ function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
 
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; dirty?: boolean; children: ReactNode }) {
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; dirty?: boolean; children: ReactNode; body?: ReactNode }) {
   const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
@@ -274,7 +289,7 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
         )}
       >
         {props.children}
-        <div className="h-4 rounded-b-lg bg-bg" />
+        {props.body ?? <div className="h-4 rounded-b-lg bg-bg" />}
       </EditorGroupFrame>
     </div>
   );
@@ -303,6 +318,7 @@ function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode
             onMove={noop}
             onMoveToGroup={noop}
             onCreateGroupRight={noop}
+            onShare={noop}
           />
         )}
       >
@@ -419,7 +435,7 @@ function Row(props: {
   name: string;
   folder?: boolean;
   app?: boolean;
-  selected?: boolean;
+  picked?: boolean;
   active?: boolean;
   drop?: boolean;
   force?: string;
@@ -430,7 +446,8 @@ function Row(props: {
         row={treeRow(props.name, props.folder || props.app)}
         collection={false}
         app={props.app ?? false}
-        selected={props.selected ?? false}
+        selected={Boolean(props.picked || props.active)}
+        picked={props.picked ?? false}
         active={props.active ?? false}
         tabbable={false}
         dropPreview={props.drop ? { kind: "move", role: "target" } : null}
@@ -471,6 +488,7 @@ function KindRows(props: { label: string; selected: boolean }) {
           collection={false}
           app={false}
           selected={props.selected}
+          picked={props.selected}
           active={false}
           tabbable={false}
           dropPreview={null}
@@ -1929,10 +1947,10 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="rest" folder />
           <Row name="hover" force="hover" />
           <Row name="focused" force="focus-visible" />
-          <Row name="selected" selected />
-          <Row name="focused, selected" selected force="focus-visible" />
           <Row name="active" active />
-          <Row name="focused, hover" force="hover focus-visible" />
+          <Row name="picked" picked />
+          <Row name="picked, active" picked active />
+          <Row name="focused, picked" picked force="focus-visible" />
           <Row name="drop target" folder drop />
           <Row name="2026-07-08-meeting-notes-with-the-venue-team.md" />
           <Row name="quarterly-planning-and-budget-review-2026" folder />
@@ -2159,14 +2177,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The capture opens each part's tab list. */}
+      {/* The first part opens its tab list. The empty active group is
+          captured with menus closed: opening the other group's tab list
+          focuses that group, and in a split specimen focus makes a group
+          active (#3391). */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
         </Specimen>
       </Section>
 
-      <Section part="editor-groups-empty" title="Editor groups, empty active group">
+      <Section part="editor-groups-empty" title="Editor groups, empty active group" menusAtRest>
         <Specimen label="split: an empty active group, then one with tabs">
           <EditorGroupsSpecimen activeHasTabs={false} />
         </Specimen>
@@ -2370,12 +2391,18 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="failed" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" body={
+            <div className="flex h-56 flex-col rounded-b-lg bg-bg">
+              <EmptyState icon={AlertTriangle} tone="danger" title="dohc could not read this file.">
+                <SecondaryButton data-testid="file-read-retry" onClick={noop}>Try again</SecondaryButton>
+              </EmptyState>
+            </div>
+          }>
             <ViewActions
               onShare={noop}
               actions={
                 <DocumentControls
-                  toggle={{ label: "Edit", disabled: true }}
+                  toggle={{ label: "Edit", disabled: true, title: "dohc could not open this file." }}
                   menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
                 />
               }
@@ -3137,6 +3164,20 @@ function Pane(props: { theme: "light" | "dark" }) {
           the tab row, as a document does: a calm save state says so only to
           screen readers. */}
       <Section part="file-view-actions" title="File view actions" menusAtRest>
+        {([false, true] as const).map((held) => (
+          <Specimen key={String(held)} label={held ? "held change" : "read-only note"} className="w-full">
+            <TabRowActionsSpecimen width="w-full" body={
+              <LossyNoteNoticeView held={held}>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Open externally</button>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Edit anyway</button>
+              </LossyNoteNoticeView>
+            }>
+              <ViewActions onShare={noop} actions={
+                <DocumentControls toggle={{ label: "Edit", disabled: true, title: LOSSY_NOTE_TITLE }} menu={null} />
+              } />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
         {FILE_VIEW_CSV_STATES.map((specimen) => (
           <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
             <TabRowActionsSpecimen width="w-full" path="data/funnel.csv">
@@ -3169,7 +3210,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
             <Row name="trip-planner" app />
-            <Row name="signup" app selected />
+            <Row name="signup" app picked />
             <Row name="dashboard" app force="focus-visible" />
           </ul>
         </Specimen>
