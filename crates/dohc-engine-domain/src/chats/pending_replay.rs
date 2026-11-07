@@ -5,7 +5,7 @@ use super::{
     index_replicated_chat_message_search_rows, is_agent_id, mark_live_bookmarks_pending,
     normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_display_name,
     normalize_reported_agent, parse_mention_handles, reported_agent_json, resolve_feed_coordinate,
-    resolve_follow_target, resolve_thread_message,
+    resolve_follow_target, resolve_thread_message, validate_replicated_link_author,
 };
 use crate::AutomationClaim;
 use crate::automations::{AutomationGroupMessage, claim_group_message_in_tx};
@@ -64,7 +64,8 @@ struct PendingMessageAppend {
     /// A link message's link, which sync apply also checked.
     link_grant_id: Option<String>,
     link_principal_id: Option<String>,
-    /// The agent connection of an agent's link message, which sync apply also checked.
+    /// The agent connection of an agent's link message. A build that did not
+    /// know the field parked it unchecked, so replay checks it.
     agent_connection_id: Option<String>,
     /// The agent that wrote an agent message, which sync apply also checked.
     author_agent_id: Option<String>,
@@ -531,13 +532,14 @@ fn replay_pending_chat_operation(
                 )?;
                 return Ok(PendingReplayOutcome::Deferred);
             }
-            automation_claims.extend(apply_pending_message(
+            apply_pending_message(
                 tx,
                 workspace_id,
+                &operation.origin_id,
                 payload,
                 author_reported,
-            )?);
-            Ok(PendingReplayOutcome::Applied)
+                automation_claims,
+            )
         }
         _ => Ok(PendingReplayOutcome::Refused(
             "pending chat operation kind is invalid",
@@ -557,12 +559,16 @@ fn pending_reported_agent(
     normalize_reported_agent(payload.author_kind == "agent", reported.as_ref()).ok()
 }
 
+/// Stores a parked message whose thread exists. A stored message adds its
+/// Group automation claims to `automation_claims`.
 fn apply_pending_message(
     tx: &Transaction<'_>,
     workspace_id: &str,
+    origin_id: &str,
     payload: PendingMessageAppend,
     author_reported: Option<super::ChatReportedAgent>,
-) -> Result<Vec<AutomationClaim>, DomainError> {
+    automation_claims: &mut Vec<AutomationClaim>,
+) -> Result<PendingReplayOutcome, DomainError> {
     let owner_name = normalize_agent_owner_name(
         payload.author_kind != "human",
         payload.author_owner_display_name.as_deref(),
@@ -598,6 +604,28 @@ fn apply_pending_message(
         return Err(DomainError::StateCorrupt {
             reason: "pending chat message agent id is invalid",
         });
+    }
+    // Checked from the same values as sync apply, so replay refuses only a
+    // link author that sync apply would have refused.
+    let link_author = validate_replicated_link_author(
+        origin_id,
+        &payload.message_id,
+        &payload.author_kind,
+        payload.link_grant_id.as_deref(),
+        payload.link_principal_id.as_deref(),
+        payload.agent_connection_id.as_deref(),
+        author_user_id.is_some()
+            || owner_name.is_some()
+            || payload.origin.is_some()
+            || payload.chain_depth.is_some()
+            || payload.author_agent_id.is_some()
+            || author_reported.is_some(),
+        &body,
+    );
+    if link_author.is_err() {
+        return Ok(PendingReplayOutcome::Refused(
+            "pending chat message link author is invalid",
+        ));
     }
     let previous: i64 = tx
         .query_row(
@@ -655,7 +683,7 @@ fn apply_pending_message(
         )
         .map_err(DomainError::sql_persist)?;
     if inserted == 0 {
-        return Ok(Vec::new());
+        return Ok(PendingReplayOutcome::Applied);
     }
     for handle in parse_mention_handles(&body) {
         tx.execute(
@@ -718,7 +746,7 @@ fn apply_pending_message(
         &body,
     )?;
     bump_chat_conversation_revision(tx, workspace_id, &payload.thread_id)?;
-    claim_group_message_in_tx(
+    automation_claims.extend(claim_group_message_in_tx(
         tx,
         workspace_id,
         &AutomationGroupMessage {
@@ -734,7 +762,8 @@ fn apply_pending_message(
             automation_id: None,
             chain_depth: payload.chain_depth,
         },
-    )
+    )?);
+    Ok(PendingReplayOutcome::Applied)
 }
 
 fn park_pending_chat_operation(
