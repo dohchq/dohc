@@ -3102,7 +3102,7 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(opened);
   });
 
-  it("posts as the agent of a run dohc started after it ends, only in its own workspace", async () => {
+  it("posts a finished run's late write as an agent's, not your agent's, only in its own workspace", async () => {
     if (!store) throw new Error("Store is not available");
     // The run has let go of the slot; main still knows the workspace of the
     // id it gave the run.
@@ -3110,7 +3110,8 @@ describe("CLI socket server", () => {
     serverOptions.agentRunWorkspace = (runId) => runId === "run_finished" ? WORKSPACE_ID : undefined;
     const late = await post({ actor: "human", title: "Late", body: "Published the trip app.", runId: "run_finished" });
     const [message] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${late.threadId.slice("th_".length)}` });
-    expect(message?.author.kind).toBe("agent");
+    // Chat reads show run ids, so a finished run's id doesn't make a write your agent's.
+    expect([message?.author.kind, message?.authorAgentId, message?.author.displayName]).toEqual(["agent", undefined, "Agent"]);
 
     // A run id dohc never gave out leaves the caller's actor as it is.
     const unknown = await post({ actor: "human", title: "Mine", body: "My own post.", runId: "run_never_issued" });
