@@ -4,7 +4,7 @@ import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import { Lock, Play, Share2 } from "lucide-react";
+import { FilePenLine, Lock, Play, Share2 } from "lucide-react";
 import { useEffect, useId, useState, type ComponentProps, type ReactNode } from "react";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
@@ -361,6 +361,7 @@ export function LossyNoteNotice(props: {
       </span>
       {confirming && props.onEditAnyway ? (
         <ConfirmDialog
+          icon={FilePenLine}
           title="Edit this note anyway?"
           intent="danger"
           confirmLabel="Edit anyway"
@@ -373,7 +374,7 @@ export function LossyNoteNotice(props: {
             props.onEditAnyway?.();
           }}
         >
-          <p className="mt-2 text-[13px] text-muted">
+          <p>
             Saving rewrites the parts dohc can't show, such as raw HTML or reference links.
             {historyLine ? ` ${historyLine}` : null}
           </p>

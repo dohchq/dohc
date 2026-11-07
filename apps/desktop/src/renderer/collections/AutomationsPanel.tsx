@@ -1,5 +1,5 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Server, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Save, Server, X, Zap } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
@@ -1145,6 +1145,7 @@ function OwnerAutomationsPanel(props: {
       {retryDialog}
       {reformat ? (
         <ConfirmDialog
+          icon={Save}
           title={`Save ${AUTOMATIONS_FILE} in dohc's layout?`}
           confirmLabel="Save"
           testId="automations-reformat"
@@ -1157,7 +1158,7 @@ function OwnerAutomationsPanel(props: {
             agreed();
           }}
         >
-          <p className="m-0 mt-2 text-[13px] text-muted">
+          <p>
             dohc rewrites the whole file when it saves, so you lose its comments and hand formatting.
           </p>
         </ConfirmDialog>

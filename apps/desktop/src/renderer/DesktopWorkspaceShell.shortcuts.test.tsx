@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
+import { Trash2 } from "lucide-react";
 import { describe, expect, it, vi } from "vitest";
 import { makeBridge, renderShell, STORED_STATE, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 import { SHORTCUTS, matchShellShortcut, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
@@ -199,6 +200,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
       const [open, setOpen] = useState(true);
       return open ? (
         <ConfirmDialog
+          icon={Trash2}
           title="Confirm"
           confirmLabel="Confirm"
           testId="shortcut-confirm"

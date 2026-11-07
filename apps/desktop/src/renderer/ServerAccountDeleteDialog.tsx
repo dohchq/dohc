@@ -1,10 +1,11 @@
-import { CloudOff, Folder } from "lucide-react";
+import { CloudOff, Folder, UserX } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { formatStoredBytes, type ServerAccountDeletionPreview } from "@dohc/cli/account";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { DangerButton, SecondaryButton } from "./ui/controls";
+import { ConfirmActions, ConfirmationCard, ConfirmationHead, confirmPanel } from "./ui/ConfirmDialog";
 import { SkeletonRows } from "./ui/SkeletonRows";
 
 export interface ServerAccountDeleted {
@@ -132,95 +133,101 @@ function Delete(props: ServerAccountDeleteDialogProps) {
     <Overlay
       appearance="warning"
       onClose={deleting ? undefined : props.onClose}
-      panelProps={{ role: "dialog", "aria-modal": true, "aria-labelledby": "delete-server-account-title" }}
+      panelProps={confirmPanel(
+        "delete-server-account-title",
+        preview ? "delete-server-account-server delete-server-account-facts" : "delete-server-account-server",
+      )}
     >
-      <form
-        data-testid="server-account-delete"
-        className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-120 max-w-[90vw] flex-col gap-4 overflow-auto rounded-xl border border-line bg-panel p-5 text-ink"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void deleteAccount();
-        }}
-      >
-        <div>
-          <h2 id="delete-server-account-title" className="m-0 text-base font-semibold">
-            Delete {preview?.email ?? props.email} on this server?
-          </h2>
-          <p className="m-0 mt-1 font-mono text-[11px] text-subtle" data-testid="server-account-delete-server">{server}</p>
-        </div>
-        {changed ? (
-          <p role="status" data-testid="server-account-delete-changed" className="m-0 text-[13px] text-warning">{changed}</p>
-        ) : null}
-        {!preview ? (
-          <SkeletonRows rows={3} label="Listing what deletion removes…" />
-        ) : (
-          <>
-            <section data-testid="server-account-delete-scope" className="flex flex-col gap-2 text-[13px]">
-              <h3 className="m-0 text-[12px] font-semibold">The server deletes</h3>
-              {preview.workspaces.length === 0 && preview.workspacesElsewhere === 0 ? (
-                <p className="m-0 text-muted">The account and no workspaces</p>
-              ) : (
-                <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label="Workspaces the server deletes">
-                  {preview.workspaces.map((workspace) => (
-                    <li key={workspace.workspaceId} className="flex items-center gap-1.5">
-                      <Folder size={13} aria-hidden className="shrink-0 text-subtle" />
-                      <span className="truncate" title={workspace.name}>{workspace.name}</span>
-                    </li>
-                  ))}
-                  {preview.workspacesElsewhere > 0 ? (
-                    <li data-testid="server-account-delete-elsewhere" className="flex items-center gap-1.5 text-muted">
-                      <CloudOff size={13} aria-hidden className="shrink-0 text-subtle" />
-                      {counted(preview.workspacesElsewhere, "workspace", "workspaces")} not on this computer
-                    </li>
-                  ) : null}
-                </ul>
-              )}
-              <p className="m-0 text-muted" data-testid="server-account-delete-size">
-                {formatStoredBytes(preview.storedBytes)} of files, data, apps, chats, and history
-              </p>
-              <p className="m-0 text-muted" data-testid="server-account-delete-shares">
-                {counted(preview.ownedShareCount, "share", "shares")} you own end. People you shared with lose access and keep their copies.
-              </p>
-              <p className="m-0 text-muted" data-testid="server-account-delete-grants">
-                Your access to shares others gave you ends.
-              </p>
-            </section>
-            <p className="m-0 text-[13px] text-muted">Workspaces on this computer stay, with their files.</p>
-            <p className="m-0 text-[13px] text-danger">
-              This cannot be undone. If you create an account again later, this server will not accept your old copies of these workspaces.
-            </p>
-            <p className="m-0 text-[13px] text-muted">The server's backups keep this data until they expire.</p>
-            <label className="block text-[11px] font-medium text-subtle">
-              Server account password
-              <input
-                type="password"
-                autoComplete="current-password"
-                data-testid="server-account-delete-password"
-                value={password}
-                disabled={busy}
-                aria-invalid={passwordProblem !== null}
-                aria-describedby={passwordProblem !== null ? "server-account-delete-password-problem" : undefined}
-                onChange={(event) => {
-                  setPassword(event.currentTarget.value);
-                  setPasswordProblem(null);
-                }}
-                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-              />
-            </label>
-            {passwordProblem ? (
-              <p id="server-account-delete-password-problem" role="alert" data-testid="server-account-delete-password-problem" className="m-0 -mt-2 text-xs text-danger">
-                {passwordProblem}
-              </p>
-            ) : null}
-          </>
-        )}
-        <div className="flex justify-end gap-2">
-          <SecondaryButton disabled={deleting} onClick={props.onClose}>Cancel</SecondaryButton>
-          <DangerButton type="submit" data-testid="server-account-delete-confirm" disabled={busy || !preview || !password}>
-            {deleting ? "Deleting…" : "Delete account"}
-          </DangerButton>
-        </div>
-      </form>
+      <ConfirmationCard icon={UserX} intent="danger" testId="server-account-delete">
+        {/* `contents`, so each part stays a part of the card's column. */}
+        <form
+          className="contents"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void deleteAccount();
+          }}
+        >
+          <ConfirmationHead titleId="delete-server-account-title" bodyId="delete-server-account-server" title={`Delete ${preview?.email ?? props.email} on this server?`}>
+            <p className="font-mono text-[11px] text-subtle" data-testid="server-account-delete-server">{server}</p>
+          </ConfirmationHead>
+          {changed ? (
+            <p role="status" data-testid="server-account-delete-changed" className="m-0 text-[13px] text-warning">{changed}</p>
+          ) : null}
+          {!preview ? (
+            <SkeletonRows rows={3} label="Listing what deletion removes…" />
+          ) : (
+            <>
+              <section data-testid="server-account-delete-scope" className="flex flex-col gap-2 text-[13px]">
+                <h3 className="m-0 text-[12px] font-semibold">The server deletes</h3>
+                {preview.workspaces.length === 0 && preview.workspacesElsewhere === 0 ? (
+                  <p className="m-0 text-muted">The account and no workspaces</p>
+                ) : (
+                  <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label="Workspaces the server deletes">
+                    {preview.workspaces.map((workspace) => (
+                      <li key={workspace.workspaceId} className="flex items-center gap-1.5">
+                        <Folder size={13} aria-hidden className="shrink-0 text-subtle" />
+                        <span className="truncate" title={workspace.name}>{workspace.name}</span>
+                      </li>
+                    ))}
+                    {preview.workspacesElsewhere > 0 ? (
+                      <li data-testid="server-account-delete-elsewhere" className="flex items-center gap-1.5 text-muted">
+                        <CloudOff size={13} aria-hidden className="shrink-0 text-subtle" />
+                        {counted(preview.workspacesElsewhere, "workspace", "workspaces")} not on this computer
+                      </li>
+                    ) : null}
+                  </ul>
+                )}
+                <p className="m-0 text-muted" data-testid="server-account-delete-size">
+                  {formatStoredBytes(preview.storedBytes)} of files, data, apps, chats, and history
+                </p>
+                <p className="m-0 text-muted" data-testid="server-account-delete-shares">
+                  {counted(preview.ownedShareCount, "share", "shares")} you own end. People you shared with lose access and keep their copies.
+                </p>
+                <p className="m-0 text-muted" data-testid="server-account-delete-grants">
+                  Your access to shares others gave you ends.
+                </p>
+              </section>
+              <div id="delete-server-account-facts" className="flex flex-col gap-1 text-[13px] text-muted">
+                <p className="m-0">Workspaces on this computer stay, with their files.</p>
+                <p className="m-0 text-danger">
+                  This cannot be undone. If you create an account again later, this server will not accept your old copies of these workspaces.
+                </p>
+                <p className="m-0">The server's backups keep this data until they expire.</p>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="block text-[11px] font-medium text-subtle">
+                  Server account password
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    data-testid="server-account-delete-password"
+                    value={password}
+                    disabled={busy}
+                    aria-invalid={passwordProblem !== null}
+                    aria-describedby={passwordProblem !== null ? "server-account-delete-password-problem" : undefined}
+                    onChange={(event) => {
+                      setPassword(event.currentTarget.value);
+                      setPasswordProblem(null);
+                    }}
+                    className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+                  />
+                </label>
+                {passwordProblem ? (
+                  <p id="server-account-delete-password-problem" role="alert" data-testid="server-account-delete-password-problem" className="m-0 text-xs text-danger">
+                    {passwordProblem}
+                  </p>
+                ) : null}
+              </div>
+            </>
+          )}
+          <ConfirmActions>
+            <SecondaryButton disabled={deleting} onClick={props.onClose}>Cancel</SecondaryButton>
+            <DangerButton type="submit" data-testid="server-account-delete-confirm" disabled={busy || !preview || !password}>
+              {deleting ? "Deleting…" : "Delete account"}
+            </DangerButton>
+          </ConfirmActions>
+        </form>
+      </ConfirmationCard>
     </Overlay>
   );
 }

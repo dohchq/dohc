@@ -2,7 +2,7 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, SearchX } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Diff, Globe2, Merge, MoreHorizontal, Plus, SearchX, Trash2 } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
@@ -51,7 +51,7 @@ import { SETTINGS_SECTIONS } from "../settings/settingsRegistry";
 import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
-import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, EmptyState, GhostButton, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
@@ -1316,7 +1316,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
   return (
     // `contain: paint` makes this box the containing block of the frame's
     // fixed backdrop, so the dialog sits over these rows and not the window.
-    <div className="relative h-72 w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
+    <div className="relative h-80 w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
       <div className="flex flex-col gap-2 p-4 text-[13px] text-muted">
         <span>Research</span>
         <span>competitors.md</span>
@@ -1325,6 +1325,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
       <OverlayFrame panelRef={panelRef}>
         <ConfirmDialogCard
           intent="danger"
+          icon={Trash2}
           title="Delete 12 files from Research?"
           confirmLabel="Delete files"
           onCancel={noop}
@@ -1333,10 +1334,8 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
           cancelTestId={`states-dialog-cancel-${props.theme}`}
           confirmTestId={`states-dialog-confirm-${props.theme}`}
         >
-          <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
-            restore them.
-          </p>
+          <p>They move to the system trash, where you can restore them.</p>
+          <p className="text-[12px]">If the system trash refuses one, it goes to .dohc/local/trash in this workspace.</p>
         </ConfirmDialogCard>
       </OverlayFrame>
     </div>
@@ -1609,6 +1608,11 @@ function Pane(props: { theme: "light" | "dark" }) {
           <DangerButton size="compact" data-force-state="focus-visible">Delete</DangerButton>
           <DangerButton size="compact" disabled>Delete</DangerButton>
         </Specimen>
+        <Specimen label="danger row">
+          <DangerButton size="row">Delete</DangerButton>
+          <DangerButton size="row" data-force-state="hover">Delete</DangerButton>
+          <DangerButton size="row" disabled>Delete</DangerButton>
+        </Specimen>
         <Specimen label="secondary: rest, hover, focus-visible, disabled">
           <SecondaryButton>Cancel</SecondaryButton>
           <SecondaryButton data-force-state="hover">Cancel</SecondaryButton>
@@ -1621,10 +1625,17 @@ function Pane(props: { theme: "light" | "dark" }) {
           <SecondaryButton size="compact" data-force-state="focus-visible">Cancel</SecondaryButton>
           <SecondaryButton size="compact" disabled>Cancel</SecondaryButton>
         </Specimen>
-        <Specimen label="secondary row: rest, hover, aria-disabled">
+        <Specimen label="secondary row: rest, hover, aria-disabled, disabled">
           <SecondaryButton size="row">Open</SecondaryButton>
           <SecondaryButton size="row" data-force-state="hover">Open</SecondaryButton>
           <SecondaryButton size="row" aria-disabled="true">Open</SecondaryButton>
+          <SecondaryButton size="row" disabled>Open</SecondaryButton>
+        </Specimen>
+        <Specimen label="ghost: rest, hover, focus-visible, disabled">
+          <GhostButton>Change</GhostButton>
+          <GhostButton data-force-state="hover">Change</GhostButton>
+          <GhostButton data-force-state="focus-visible">Change</GhostButton>
+          <GhostButton disabled>Change</GhostButton>
         </Specimen>
         <Specimen label="icon: rest, hover, focus-visible, disabled">
           <IconButton aria-label="More"><MoreHorizontal size={14} aria-hidden /></IconButton>
