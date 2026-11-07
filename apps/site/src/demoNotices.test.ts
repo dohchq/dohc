@@ -26,10 +26,10 @@ beforeAll(() => {
     </div>`;
 });
 
-it("places the notice toasts against the demo window and keeps them inside", () => {
+it("places the notice toasts against the demo window, inside it and clear of the activity bar", () => {
   const toasts = document.querySelector('[data-testid="notice-toasts"]')!;
   expect(getComputedStyle(toasts).position).toBe("absolute");
-  expect(getComputedStyle(toasts).maxWidth).toBe("calc(100% - 24px)");
+  expect(getComputedStyle(toasts).maxWidth).toBe("calc(100% - 68px)");
   expect(getComputedStyle(toasts.firstElementChild!).maxWidth).toBe("100%");
 });
 
