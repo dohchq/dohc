@@ -1015,7 +1015,7 @@ async fn an_uncaptured_outside_edit_imports_without_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn matching_disk_bytes_on_another_lineage_still_import() {
+async fn a_checkpoint_from_before_a_settled_edit_imports() {
     // The checkpoint's base predates "warm", so the settled file matches the
     // projection but not the checkpoint's lineage.
     let (scratch, db, supervisor, actor, state, _, _) = setup().await;
@@ -1062,6 +1062,69 @@ async fn matching_disk_bytes_on_another_lineage_still_import() {
     assert_eq!(receipts(&db, "outage-typing"), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deletion_settled_after_the_checkpoint_base_imports() {
+    // A deletion keeps the state vector, so the lineage still matches, but the
+    // settled file is no longer the base's text.
+    let (scratch, db, supervisor, actor, state, _, _) = setup().await;
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update).unwrap();
+    let before = hex_sha256(&disk(scratch.path(), FILE));
+    let warm = doc.plaintext_insert(0, "warm\n");
+    record(
+        &actor,
+        &state,
+        FILE,
+        ContentKind::Plaintext,
+        warm,
+        "warm",
+        4,
+    )
+    .await;
+    let mut input = checkpoint_at(&state, FILE, &doc, before);
+    let other = Ydoc::wire();
+    other.apply(&doc.encode_full_state()).unwrap();
+    let deletion = other.plaintext_delete(5, 5);
+    record(
+        &actor,
+        &state,
+        FILE,
+        ContentKind::Plaintext,
+        deletion,
+        "delete",
+        5,
+    )
+    .await;
+    settle(
+        &actor,
+        scratch.path(),
+        &state,
+        FILE,
+        ContentKind::Plaintext,
+        6,
+    )
+    .await;
+    assert_eq!(disk(scratch.path(), FILE), b"warm\n");
+    input
+        .updates
+        .push(typed("outage-typing", doc.plaintext_insert(0, "outage\n")));
+    input.text = doc.plaintext_string();
+    let RecoveryImportOutcome::Imported { moment_id } =
+        import(&actor, scratch.path(), input).await.unwrap()
+    else {
+        panic!("must import")
+    };
+    let moment = actor
+        .get_moment(WS.into(), moment_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(moment.before_text.as_deref(), Some("outage\nwarm\nbase\n"));
+    assert_eq!(disk(scratch.path(), FILE), b"warm\n");
+    supervisor.close(&db).unwrap();
+    assert_eq!(receipts(&db, "outage-typing"), 0);
+}
+
 const NOTE: &str = "note.md";
 
 enum Warm {
@@ -1080,6 +1143,8 @@ struct Rich {
     input: Option<RecoveryImport>,
     /// The file the checkpoint names, before dohc settled "Warm.".
     at_base: Vec<u8>,
+    /// The file just before the import runs.
+    settled: Vec<u8>,
 }
 
 /// A rich note seeded from `seed` and settled, then warmed and settled again
@@ -1176,6 +1241,7 @@ async fn rich(seed: &str, warm: Warm) -> Rich {
         doc.richdoc_append_paragraph("Typed after the quit."),
     ));
     input.text = doc.project(ContentKind::Richdoc).unwrap().content;
+    let settled = disk(scratch.path(), NOTE);
     Rich {
         scratch,
         db,
@@ -1184,6 +1250,7 @@ async fn rich(seed: &str, warm: Warm) -> Rich {
         state,
         input: Some(input),
         at_base,
+        settled,
     }
 }
 
@@ -1200,9 +1267,9 @@ async fn assert_typing_kept(
         supervisor,
         actor,
         state,
+        settled,
         ..
     } = rich;
-    let settled = disk(scratch.path(), NOTE);
     let recoveries = actor.capture_recoveries(WS.into()).await.unwrap();
     let kept = match outcome {
         Ok(RecoveryImportOutcome::Replayed) => {
@@ -1311,5 +1378,6 @@ async fn replay_leaves_a_pending_markdown_obligation_for_settlement() {
                WHERE operation_id='pending-session' AND completed=0";
     let pending: i64 = raw.query_row(sql, [], |r| r.get(0)).unwrap();
     assert_eq!(pending, 1);
+    drop(raw);
     assert_eq!(assert_typing_kept(rich, &text, outcome).await, "replayed");
 }
