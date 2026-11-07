@@ -855,7 +855,7 @@ describe("ended Edit Collection shares", () => {
     bridge.getWorkspaceUiState.mockResolvedValue(storedStateWithTabs(openFile === "no file open" ? [] : ["docs/shared.md"]));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
       files: [{ path: "docs/shared.md", kind: "file" }], folders: ["docs"] });
-    const refused = { ok: false as const, probed: true, changedPaths: 0,
+    const refused = { ok: false as const, probed: true as const, changedPaths: 0,
       errorKind: "collision-record" as const, errorMessage: sharedViewRefusalWords };
     const cause = "EBUSY: resource busy or locked";
     bridge.refreshSharedView.mockResolvedValueOnce({ ...refused, errorCause: cause }).mockResolvedValue(refused);
