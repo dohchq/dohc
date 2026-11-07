@@ -180,11 +180,11 @@ it("offers Try again for an Undo that fails after the chat closed, and says once
   const proposal = ask(place);
   const renamed: CollectionChangeRow = { kind: "collection-renamed", key: "collection:name", from: "Volunteers", to: "Helpers" };
   vi.mocked(loadCollectionChange).mockResolvedValueOnce({ proposal, rows: [renamed], state: { kind: "applied", current: true } });
-  vi.mocked(undoCollectionChange).mockRejectedValueOnce(new Error("dohc couldn't prepare the undo. Try again.")).mockResolvedValueOnce(undefined);
+  vi.mocked(undoCollectionChange).mockRejectedValueOnce(new Error("dohc could not prepare the undo.")).mockResolvedValueOnce(undefined);
   const view = card();
   fireEvent.click(await screen.findByTestId("lane-change-undo"));
   view.unmount();
-  await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc couldn't prepare the undo. Try again.", expect.any(Error), expect.any(Function)));
+  await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not prepare the undo.", expect.any(Error), expect.any(Function)));
   (onError.mock.calls[0]![2] as () => void)();
   await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid the change to Volunteers"));
   expect(undoCollectionChange).toHaveBeenCalledTimes(2);
