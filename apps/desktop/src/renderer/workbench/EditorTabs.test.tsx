@@ -524,6 +524,39 @@ describe("EditorTabs strip scrolling", () => {
     expect(active.classList).toContain("dohc-focus-row");
   });
 
+  it("reports a click on a tab, and Enter or Space on it, as a press after any activation", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    const calls: string[] = [];
+    try {
+      render(
+        <EditorTabs
+          groupId="left"
+          groupNumber={1}
+          tabs={tabs}
+          activeTab="a.md"
+          activeTabDirty={false}
+          recoveryPaths={new Set<string>()}
+          onActivate={(_, path) => calls.push(`activate ${path}`)}
+          onPress={(_, path) => calls.push(`press ${path}`)}
+          onClose={(_, path) => calls.push(`close ${path}`)}
+          onContextMenu={noop}
+          onMove={noop}
+          onMoveToGroup={noop}
+          onCreateGroupRight={noop}
+        />,
+      );
+      fireEvent.click(screen.getByTestId("tab-a.md"));
+      fireEvent.keyDown(screen.getByTestId("tab-a.md"), { key: "Enter" });
+      fireEvent.keyDown(screen.getByTestId("tab-b.md"), { key: " " });
+      fireEvent.click(screen.getByRole("button", { name: "Close a.md" }));
+      // A macOS Control press opens the context menu.
+      fireEvent.click(screen.getByTestId("tab-c.md"), { ctrlKey: true });
+      expect(calls).toEqual(["press a.md", "activate a.md", "press a.md", "activate b.md", "press b.md", "close a.md"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps the overflow menu clear of the window's right edge", async () => {
     const user = userEvent.setup();
     renderTabs("a.md");

@@ -3501,6 +3501,11 @@ export function DesktopWorkspaceShell(props: {
     },
     [invalidateDeferredFileOpenForGroupChange, mutateWb],
   );
+  // The last press on an app's tab, which puts focus in that app.
+  const [appTabPress, setAppTabPress] = useState({ groupId: "", path: "", count: 0 });
+  const pressEditorTab = useCallback((groupId: string, path: string) => {
+    if (parseTab(path).kind === "site") setAppTabPress(({ count }) => ({ groupId, path, count: count + 1 }));
+  }, []);
   const focusWorkbenchEditorGroup = useCallback(
     (groupId: string) => {
       const current = wbRef.current;
@@ -6379,6 +6384,7 @@ export function DesktopWorkspaceShell(props: {
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
                       onActivate={activateEditorTab}
+                      onPress={pressEditorTab}
                       onClose={closeFileTab}
                       onContextMenu={showTabContextMenu}
                       onMove={moveFileTab}
@@ -6820,6 +6826,7 @@ export function DesktopWorkspaceShell(props: {
                         notices={appNotices}
                         visible={visible}
                         focused={visible && editorGroup.id === wb.activeEditorGroup}
+                        focusRequest={appTabPress.groupId === editorGroup.id && appTabPress.path === path ? appTabPress.count : 0}
                         onTitle={(title) => resolveAppTitle(siteRoot, title)}
                         onOpenApp={openAppTab}
                         siteRoot={siteRoot}

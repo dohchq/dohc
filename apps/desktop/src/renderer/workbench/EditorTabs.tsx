@@ -160,6 +160,7 @@ const Tab = memo(function Tab(props: {
   active: boolean;
   dirty: boolean;
   onActivate: (groupId: string, path: string) => void;
+  onPress: ((groupId: string, path: string) => void) | undefined;
   onClose: (groupId: string, path: string) => void;
   onContextMenu: (groupId: string, path: string) => void;
   onDragStart: (event: ReactPointerEvent<HTMLDivElement>, path: string) => void;
@@ -177,7 +178,12 @@ const Tab = memo(function Tab(props: {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           props.onActivate(props.groupId, props.path);
+          props.onPress?.(props.groupId, props.path);
         }
+      }}
+      // A drag that moved the tab ends with no click.
+      onClick={(event) => {
+        if (!isMacContextClick(event)) props.onPress?.(props.groupId, props.path);
       }}
       // Middle-click closes (VS Code convention); auxclick is the only
       // reliable middle-button event.
@@ -710,6 +716,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   // inactive tab keeps its marker.
   recoveryPaths: ReadonlySet<string>;
   onActivate: (groupId: string, path: string) => void;
+  // A click on a tab, or Enter or Space on it, after any activation.
+  onPress?: (groupId: string, path: string) => void;
   onClose: (groupId: string, path: string) => void;
   onContextMenu: (groupId: string, path: string) => void;
   onMove: (groupId: string, path: string, toIndex: number) => void;
@@ -958,6 +966,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
               props.recoveryPaths.has(tab.path)
             }
             onActivate={props.onActivate}
+            onPress={props.onPress}
             onClose={props.onClose}
             onContextMenu={props.onContextMenu}
             onDragStart={drag.begin}

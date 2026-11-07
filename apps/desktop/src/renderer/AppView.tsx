@@ -67,6 +67,8 @@ export function useAppView(options: {
   enabled: boolean;
   visible: boolean;
   focused: boolean;
+  // Changes each time the person presses the app's tab. 0 until then.
+  focusRequest: number;
   approvals: number;
   holdFocus: boolean;
   notices?: AppViewNotices | undefined;
@@ -256,17 +258,27 @@ export function useAppView(options: {
     void bridge().appView({ action: "colorScheme", workspaceId, colorScheme: theme }).catch(() => undefined);
   }, [enabled, theme, workspaceId]);
 
-  // Switching to the tab, or clicking it, puts focus in the app.
-  const wasFocused = useRef(options.focused);
+  // Switching to the tab puts focus in the app. Focus that only makes the app's group the focused one, such as Tab
+  // onto the group's tabs or a click on its toolbar, stays where it went.
+  const was = useRef({ visible: options.visible, focused: options.focused });
   useEffect(() => {
-    const before = wasFocused.current;
-    wasFocused.current = options.focused;
+    const before = was.current;
+    was.current = { visible: options.visible, focused: options.focused };
     // Focus that moved elsewhere before the app finished opening stays there.
     if (!options.focused) { wantsFocus.current = false; return; }
-    if (before) return;
+    if (before.visible || before.focused) return;
     wantsFocus.current = true;
     tryFocus();
-  }, [options.focused, tryFocus]);
+  }, [options.visible, options.focused, tryFocus]);
+  // A click on the app's tab, or Enter or Space on it, puts focus in the app, also when the tab was already shown.
+  const pressSeen = useRef(options.focusRequest);
+  useEffect(() => {
+    if (pressSeen.current === options.focusRequest) return;
+    pressSeen.current = options.focusRequest;
+    if (!options.focusRequest) return;
+    wantsFocus.current = true;
+    tryFocus();
+  }, [options.focusRequest, tryFocus]);
   useEffect(() => {
     if (!options.holdFocus) tryFocus();
   }, [options.holdFocus, tryFocus]);

@@ -372,13 +372,33 @@ describe("an owner app in its tab", () => {
       .toEqual([["p", "KeyP", true, false, false, false]]);
   });
 
-  it("puts focus in the app when its tab becomes the focused one", async () => {
-    const view = render(<Page focused={false} />);
+  it("puts focus in the app when its tab becomes the shown one", async () => {
+    const view = render(<Page visible={false} focused={false} />);
     await openedView();
     expect(guest.focus).not.toHaveBeenCalled();
-    view.rerender(<Page focused />);
+    view.rerender(<Page visible focused />);
     expect(guest.focus).toHaveBeenCalledOnce();
     expect(guest.focus.mock.contexts[0]).toBe(webview());
+  });
+
+  it("leaves focus where it is when focus elsewhere in its group makes the shown app's group the focused one", async () => {
+    const view = render(<Page visible focused={false} />);
+    await openedView();
+    view.rerender(<Page visible focused />);
+    expect(guest.focus).not.toHaveBeenCalled();
+  });
+
+  it("puts focus in the app each time its tab is pressed, also when the tab was already shown", async () => {
+    const view = render(<Page visible focused={false} />);
+    await openedView();
+    view.rerender(<Page visible focused />);
+    view.rerender(<Page visible focused focusRequest={1} />);
+    expect(guest.focus).toHaveBeenCalledOnce();
+    // Another app's tab was pressed.
+    view.rerender(<Page visible focused focusRequest={0} />);
+    expect(guest.focus).toHaveBeenCalledOnce();
+    view.rerender(<Page visible focused focusRequest={3} />);
+    expect(guest.focus).toHaveBeenCalledTimes(2);
   });
 
   it("leaves focus where it went if the tab lost focus before the app opened", async () => {
