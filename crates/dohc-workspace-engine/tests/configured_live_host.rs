@@ -45,6 +45,20 @@ impl Drop for Daemon {
     }
 }
 impl Daemon {
+    /// Closes stdin and expects a clean exit. A failure shows the daemon's stderr.
+    fn close_cleanly(&mut self) {
+        drop(self.0.stdin.take());
+        let status = self.0.wait().unwrap();
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = self.0.stderr.take() {
+            let _ = pipe.read_to_end(&mut stderr);
+        }
+        assert!(
+            status.success(),
+            "the daemon exited with {status}; stderr:\n{}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
     fn streamed(
         &mut self,
         id: u64,
@@ -270,8 +284,7 @@ fn production_entrypoint_settles_bootstrap_and_replays_receipt_coverage() {
         panic!("missing terminal refusal")
     };
     assert_eq!(refused.error.code, ErrorCode::InvalidParams);
-    drop(daemon.0.stdin.take());
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
 }
 
 #[test]
@@ -432,8 +445,7 @@ fn production_entrypoint_unloads_a_settled_document_and_reloads_its_accepted_edi
         std::fs::read_to_string(root.join("note.md")).unwrap(),
         markdown
     );
-    drop(daemon.0.stdin.take());
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
 }
 
 #[test]
@@ -503,8 +515,7 @@ fn production_entrypoint_starts_empty_and_changes_membership_without_restarting(
     ));
     // The same connection kept every operation; the daemon never restarted.
     assert!(listed(&mut daemon, 9).is_empty());
-    daemon.0.stdin.take();
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
 
     // A daemon without a configured host offers none of these operations.
     let mut ordinary = Daemon(command(None).spawn().unwrap());
@@ -627,8 +638,7 @@ fn production_entrypoint_discovers_fixed_roots_after_authentication() {
         };
         assert_eq!(error.error.code, ErrorCode::Forbidden, "{method}");
     }
-    daemon.0.stdin.take();
-    assert!(daemon.0.wait().unwrap().success());
+    daemon.close_cleanly();
     let store =
         dohc_engine_storage::EngineStore::open(&root.join(".dohc/engine/engine.db"), 0).unwrap();
     assert_eq!(
@@ -841,8 +851,7 @@ fn ordinary_and_configured_processes_share_writer_exclusion_and_crash_release() 
     let mut reopened = Daemon(command(Some(&path)).spawn().unwrap());
     reopened.hello("configured-test-secret");
     assert!(matches!(reopened.read(), Envelope::HelloAck(_)));
-    reopened.0.stdin.take();
-    assert!(reopened.0.wait().unwrap().success());
+    reopened.close_cleanly();
     let other_root = scratch.path().join("other-root");
     std::fs::create_dir_all(other_root.join(".dohc/engine")).unwrap();
     std::fs::hard_link(
