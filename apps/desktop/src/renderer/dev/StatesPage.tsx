@@ -1869,7 +1869,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           data-force-state="focus focus-visible"
           data-force-target="[role=menuitem]:nth-child(1)"
         >
-          <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
+          <DocumentMenu workspaceId="states" path="states.md" suggestedName="states" getMarkdown={() => null} />
         </div>
       </Section>
 
@@ -2165,7 +2165,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => null }}
                 />
               }
             />
@@ -2179,7 +2179,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2193,7 +2193,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2207,7 +2207,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2221,7 +2221,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
@@ -2234,7 +2234,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Edit", disabled: true }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
                 />
               }
             />
@@ -2250,7 +2250,7 @@ function Pane(props: { theme: "light" | "dark" }) {
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
-                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                  menu={{ workspaceId: "states", path: "plan.md", suggestedName: "plan", getMarkdown: () => "# Plan" }}
                 />
               }
             />
