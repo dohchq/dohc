@@ -182,7 +182,7 @@ function DropZone(props: { onDrop: (files: File[]) => void }) {
         const files = [...event.dataTransfer.files];
         if (files.length > 0) props.onDrop(files);
       }}
-      className={`flex h-11 items-center justify-center gap-2 rounded-lg border border-dashed text-[13px] transition-colors duration-100 ${over ? "border-accent bg-hover text-ink" : "border-line text-subtle"}`}
+      className={`flex h-11 items-center justify-center gap-2 rounded-lg border border-dashed text-[13px] transition-colors duration-100 ${over ? "border-accent bg-hover text-ink" : "border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] text-subtle"}`}
     >
       <Upload size={16} aria-hidden />
       Drop files here to add them
