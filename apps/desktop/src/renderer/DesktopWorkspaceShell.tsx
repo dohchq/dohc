@@ -5760,15 +5760,16 @@ export function DesktopWorkspaceShell(props: {
     : null;
   // Facts a person can paste into a report. The version comes from the
   // updater's state; a bridge without it leaves the line out. A shared view
-  // goes by what it shares, so its share id rides beside the name.
+  // goes by what it shares, so its share id rides beside the name. Time is
+  // when the problem happened, so an open report keeps one text.
   const reportFacts = useCallback(
-    (): ReadonlyArray<readonly [string, string | null | undefined]> => [
+    (atMs: number): ReadonlyArray<readonly [string, string | null | undefined]> => [
       ["Workspace", workspaceName(props.workspace)],
       ["Share id", props.workspace.shareView?.shareId],
       ["Folder", props.workspace.rootPath],
       ["dohc", appVersion],
       ["Platform", bridge().platform],
-      ["Time", new Date().toISOString()],
+      ["Time", new Date(atMs).toISOString()],
     ],
     [appVersion, props.workspace],
   );
@@ -5791,7 +5792,7 @@ export function DesktopWorkspaceShell(props: {
               ...(error.title ? [["Title", error.title] as const] : []),
               ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
               ...(error.details ?? []),
-              ...reportFacts(),
+              ...reportFacts(error.atMs),
             ]) } }),
         atMs: error.atMs,
         canRetry: error.retry !== null,
@@ -5836,7 +5837,7 @@ export function DesktopWorkspaceShell(props: {
       ["Engine", syncStatus?.engineStoreRefusedDetail],
       ["Workspace id", props.workspace.workspaceId],
       ["Data store", `${props.workspace.rootPath}/.dohc/engine`],
-      ...reportFacts(),
+      ...reportFacts(Date.now()),
     ],
     [storeUpdateRefusal, syncStatus?.engineStoreRefusedDetail, props.workspace, reportFacts],
   );
@@ -7176,7 +7177,7 @@ export function DesktopWorkspaceShell(props: {
                   ["Error", "Couldn't open this workspace"],
                   ["Detail", workspaceOpenFailure.message],
                   ["Cause", workspaceOpenFailure.cause],
-                  ...reportFacts(),
+                  ...reportFacts(Date.now()),
                 ])
               }
             />
