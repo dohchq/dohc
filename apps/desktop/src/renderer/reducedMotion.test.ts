@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
 import { initReducedMotion, prefersReducedMotion } from "./reducedMotion";
+import css from "./styles.css?raw";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -99,4 +100,26 @@ it("uses the media query on other platforms and when a native read fails", async
   expect(prefersReducedMotion()).toBe(true);
   expect(document.documentElement.dataset.systemReducedMotion).toBeUndefined();
   stopLinux();
+});
+
+// A transition of any length starts on every colour change, because every
+// element transitions `all`. An animation keeps a tiny length so menus and
+// dialogs still get animationend. The e2e reduced-motion spec reads the
+// computed values in the real renderer.
+it("ends transitions at once and keeps a tiny animation in both reduced-motion rules", () => {
+  const rule = (selector: string) => {
+    const start = css.indexOf(`${selector} {
+`);
+    expect(start, selector).toBeGreaterThan(-1);
+    const body = css.slice(css.indexOf("{", css.indexOf("&, &::before", start)) + 1, css.indexOf("}", start));
+    return Object.fromEntries([...body.matchAll(/([a-z-]+): ([^;]+);/g)].map(([, name, value]) => [name, value]));
+  };
+  const media = ":where(:root:not([data-system-reduced-motion='false']))";
+  expect(css).toContain(`@media (prefers-reduced-motion: reduce) {
+  ${media} {`);
+  for (const selector of [media, ":where(:root[data-system-reduced-motion='true'])"]) {
+    const declarations = rule(selector);
+    expect(declarations["transition-duration"], "reduced-motion transition").toBe("0s !important");
+    expect(declarations["animation-duration"], "reduced-motion animation").toBe("0.001ms !important");
+  }
 });
