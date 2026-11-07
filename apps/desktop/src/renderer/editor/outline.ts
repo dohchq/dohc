@@ -5,6 +5,7 @@
 // before the reading position). Both are DOM-free.
 
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { documentChange } from "./pmHelpers";
 
 export type OutlineHeading = {
   /** Heading level, 1-6. */
@@ -20,19 +21,54 @@ export type OutlineHeading = {
  *  jump to and would just be noise in the rail/panel. */
 export function extractOutline(doc: ProseMirrorNode): OutlineHeading[] {
   const headings: OutlineHeading[] = [];
-  // A textblock holds only inline content, so the walk never enters one.
-  doc.descendants((node, pos) => {
-    if (node.type.name !== "heading") return !node.isTextblock;
-    const text = node.textContent.trim();
-    if (!text) return false;
-    const level =
-      typeof node.attrs.level === "number" && Number.isInteger(node.attrs.level)
-        ? node.attrs.level
-        : 1;
-    headings.push({ level, text, pos });
-    return false;
-  });
+  doc.descendants((node, pos) => visitHeading(headings, node, pos));
   return headings;
+}
+
+/** Pure: the outline of `doc`, given the outline of `before`. Only headings
+ *  that overlap the changed range are read again, so typing in a long note
+ *  does not walk all of its blocks. */
+export function updateOutline(
+  previous: readonly OutlineHeading[],
+  before: ProseMirrorNode,
+  doc: ProseMirrorNode,
+): readonly OutlineHeading[] {
+  const { range } = documentChange(before, doc);
+  if (!range) return previous;
+  const changed = new Set<number>();
+  // A textblock holds only inline content, so the walk never enters one.
+  before.nodesBetween(range.from, range.toBefore, (node, pos) => {
+    if (node.type.name === "heading") changed.add(pos);
+    return !node.isTextblock;
+  });
+  const shift = range.to - range.toBefore;
+  const kept = (heading: OutlineHeading) => !changed.has(heading.pos);
+  return [
+    ...previous.filter((heading) => heading.pos < range.from && kept(heading)),
+    ...headingsBetween(doc, range.from, range.to),
+    ...previous
+      .filter((heading) => heading.pos >= range.toBefore && kept(heading))
+      .map((heading) => ({ ...heading, pos: heading.pos + shift })),
+  ];
+}
+
+function headingsBetween(doc: ProseMirrorNode, from: number, to: number): OutlineHeading[] {
+  const headings: OutlineHeading[] = [];
+  doc.nodesBetween(from, to, (node, pos) => visitHeading(headings, node, pos));
+  return headings;
+}
+
+// A textblock holds only inline content, so the walk never enters one.
+function visitHeading(headings: OutlineHeading[], node: ProseMirrorNode, pos: number): boolean {
+  if (node.type.name !== "heading") return !node.isTextblock;
+  const text = node.textContent.trim();
+  if (!text) return false;
+  const level =
+    typeof node.attrs.level === "number" && Number.isInteger(node.attrs.level)
+      ? node.attrs.level
+      : 1;
+  headings.push({ level, text, pos });
+  return false;
 }
 
 /** Pure: given the headings (in document order) and the document position

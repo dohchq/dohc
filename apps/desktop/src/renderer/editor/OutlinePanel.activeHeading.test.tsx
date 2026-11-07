@@ -203,29 +203,48 @@ function renderActiveHeadingHarness(
       folded.has(index) ? rect(0, 0) : rect(100 + tops[index]! - scroller.scrollTop, 30);
     return element;
   };
-  const doc = {
-    content: { size: 1_000 },
-    descendants(callback: (node: {
-      type: { name: string };
-      attrs: { level: number };
-      textContent: string;
-    }, pos: number) => void) {
-      for (const heading of headings) {
-        callback(
-          {
-            type: { name: "heading" },
-            attrs: { level: heading.level },
-            textContent: heading.text,
-          },
-          heading.pos,
-        );
-      }
+  type FakeHeadingNode = {
+    type: { name: string };
+    attrs: { level: number };
+    textContent: string;
+    isTextblock: true;
+  };
+  // A document of the current headings. Each edit makes a new one, which
+  // differs from the last everywhere.
+  const headingsDoc = () => {
+    const shown = [...headings];
+    const node = (heading: OutlineHeading): FakeHeadingNode => ({
+      type: { name: "heading" },
+      attrs: { level: heading.level },
+      textContent: heading.text,
+      isTextblock: true,
+    });
+    return {
+      content: {
+        size: 1_000,
+        findDiffStart: () => 0,
+        findDiffEnd: () => ({ a: 1_000, b: 1_000 }),
+      },
+      descendants(callback: (node: FakeHeadingNode, pos: number) => void) {
+        for (const heading of shown) callback(node(heading), heading.pos);
+      },
+      nodesBetween(from: number, to: number, callback: (node: FakeHeadingNode, pos: number) => void) {
+        for (const heading of shown) {
+          if (heading.pos >= from && heading.pos < to) callback(node(heading), heading.pos);
+        }
+      },
+      textBetween: () => "Intro Plan Review",
+    };
+  };
+  let doc = headingsDoc();
+  const state = {
+    get doc() {
+      return doc;
     },
-    textBetween: () => "Intro Plan Review",
   };
   const editor = {
-    state: { doc },
-    view: { posAtCoords, nodeDOM, dom: editorDom, state: { doc } },
+    state,
+    view: { posAtCoords, nodeDOM, dom: editorDom, state },
     on(event: string, callback: () => void) {
       if (event === "update") updateListeners.add(callback);
       if (event === "transaction") {
@@ -415,6 +434,7 @@ function renderActiveHeadingHarness(
     replaceHeadings(next: readonly OutlineHeading[], nextTops: readonly number[]) {
       headings = [...next];
       tops = [...nextTops];
+      doc = headingsDoc();
     },
     flushFrames() {
       act(flushFrames);
