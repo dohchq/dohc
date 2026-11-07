@@ -3212,9 +3212,10 @@ describe("CLI socket server", () => {
     const engineThread = listed.groups.flatMap(group => group.threads).find(candidate => cliThreadId(candidate.id) === thread);
     if (!engineThread) throw new Error("Posted thread is not listed");
     const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: engineThread.id });
+    // Outside a run, an agent that gives no name is the unnamed "Agent".
     expect(messages.map(message => [message.author.displayName, message.authorReported])).toEqual([
-      ["Nova", reported],
-      ["Nova", { product: "Claude Code" }],
+      ["Agent", reported],
+      ["Agent", { product: "Claude Code" }],
       ["Sam", undefined],
     ]);
 
