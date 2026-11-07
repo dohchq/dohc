@@ -222,6 +222,39 @@ it("shows how dohc starts an agent in its details", async () => {
   expect(within(row("Codex")).queryByTestId("agent-details")).toBeNull();
 });
 
+it("keeps a tool's profile when its command is saved as shown, and adds your own flags to it", async () => {
+  const { onSave } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+  const details = within(row("Codex"));
+  await userEvent.click(details.getByRole("button", { name: "Use your own command" }));
+  const field = details.getByRole<HTMLInputElement>("textbox", { name: "Command that starts Codex" });
+  expect(field.value).toBe("C:\\Tools\\codex.exe");
+  expect(details.getByText("dohc adds its reply tool and sandbox. The conversation arrives through stdin. Flags you add apply only to runs you start, and can change what dohc adds.")).toBeTruthy();
+  await userEvent.type(field, "x", { initialSelectionStart: field.value.length, initialSelectionEnd: field.value.length });
+  expect(field.value).toBe("C:\\Tools\\codex.exex");
+  expect(details.getByText("dohc runs this command as typed. The conversation arrives through stdin.")).toBeTruthy();
+  await userEvent.keyboard("{Backspace}{Enter}");
+  expect(onSave).not.toHaveBeenCalled();
+  await userEvent.click(details.getByRole("button", { name: "Use your own command" }));
+  const again = details.getByRole<HTMLInputElement>("textbox", { name: "Command that starts Codex" });
+  await userEvent.type(again, " --model o3{Enter}", { initialSelectionStart: again.value.length, initialSelectionEnd: again.value.length });
+  expect(onSave).toHaveBeenCalledOnce();
+  expect(onSave.mock.calls[0]![0].agents.codex?.launch).toEqual({ tool: "codex", executable: "C:\\Tools\\codex.exe", arguments: ["--model", "o3"] });
+});
+
+it("shows a tool's program with your own flags as its command", async () => {
+  renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents,
+    codex: testAgent({ name: "Codex", hue: "blue", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe", arguments: ["--model", "o3"] } }) } } });
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+  const details = within(row("Codex"));
+  expect(await details.findByText("Codex 0.98, signed in")).toBeTruthy();
+  expect(details.getByText("C:\\Tools\\codex.exe --model o3")).toBeTruthy();
+  expect(details.queryByText("Program")).toBeNull();
+  expect(details.getByRole("button", { name: "Change the command that starts Codex" })).toBeTruthy();
+});
+
 // An agent's swatches are squares, olive first, and set only that agent's color.
 it("sets an agent's color in its details", async () => {
   const { onSave } = renderList();
@@ -242,7 +275,7 @@ it("says what each tool needs before it can be added", async () => {
   bridgeMock.detectAgentTools.mockResolvedValueOnce({
     workingDirectory: "C:\\Work",
     tools: [
-      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.300", auth: "signed-out", probe: "detected" },
+      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.317", auth: "signed-out", probe: "detected" },
       { tool: "codex", executable: null, version: null, auth: "unknown", probe: "not-found" },
     ],
   });
