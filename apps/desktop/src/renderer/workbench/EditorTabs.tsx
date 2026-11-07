@@ -266,7 +266,13 @@ function editorGroupAtPoint(
   clientY: number,
 ): { groupId: string; toIndex: number } | null {
   const hit = document.elementFromPoint?.(clientX, clientY);
-  const group = hit?.closest<HTMLElement>("[data-editor-group-id]");
+  // An app's page lies over its group, outside the group's element.
+  const appGroupId = hit?.closest<HTMLElement>("[data-app-group-id]")?.dataset.appGroupId;
+  const group = appGroupId === undefined
+    ? hit?.closest<HTMLElement>("[data-editor-group-id]")
+    : [...document.querySelectorAll<HTMLElement>("[data-editor-group-id]")].find(
+      (candidate) => candidate.dataset.editorGroupId === appGroupId,
+    );
   const groupId = group?.dataset.editorGroupId;
   if (!group || !groupId) return null;
 
