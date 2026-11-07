@@ -15,11 +15,15 @@ function tabOrders() {
   const dom = [...modalFocusableElements(document.body), ...document.querySelectorAll<HTMLElement>(`${PAGE} webview, ${PAGE} iframe`)]
     .filter((item) => !item.closest(`${PAGE}.hidden`))
     .sort(byPlace);
-  const place = (item: HTMLElement) => {
-    const page = item.closest<HTMLElement>(PAGE);
-    return (page && document.querySelector(`[aria-owns="${page.id}"]`)) || item;
-  };
-  return { dom, screen: [...dom].sort((a, b) => byPlace(place(a), place(b)) || byPlace(a, b)) };
+  // Each stop's slot is looked up once, not on every comparison.
+  const screen = dom
+    .map((item) => {
+      const page = item.closest<HTMLElement>(PAGE);
+      return { item, place: (page && document.querySelector(`[aria-owns="${page.id}"]`)) || item };
+    })
+    .sort((a, b) => byPlace(a.place, b.place) || byPlace(a.item, b.item))
+    .map(({ item }) => item);
+  return { dom, screen };
 }
 
 let entering: HTMLElement | null = null;
