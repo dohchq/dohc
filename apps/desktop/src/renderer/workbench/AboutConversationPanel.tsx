@@ -86,7 +86,12 @@ export type ConversationLinksView =
 
 const LINKS_FAILED = "dohc could not load the files this conversation mentions.";
 
-const authorKey = (author: Author) => `${author.kind}\0${author.presentation.group}\0${author.displayName}`;
+// What a screen reader hears before a name in the strip: an agent that joined
+// with a link is an agent, then a link holder, as beside its posts.
+const authorKindLabel = (author: Author) =>
+  author.kind !== "link" ? author.kind : author.linkAgent ? "agent link holder" : "link holder";
+const authorKey = (author: Author) =>
+  `${author.kind}\0${author.linkAgent ? "agent" : ""}\0${author.presentation.group}\0${author.displayName}`;
 
 // Each entry is one mention, newest first. A file shows once, where it was
 // last mentioned, with everyone who mentioned it in the pages read so far.
@@ -266,7 +271,7 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
         <span className="flex min-w-0 max-w-full items-center gap-1.5 text-[12px] leading-4">
           <span className="flex shrink-0">
             {file.authors.slice(0, 3).map((author) => (
-              <ChatAvatar key={authorKey(author)} name={author.displayName} kind={author.kind}
+              <ChatAvatar key={authorKey(author)} name={author.displayName} kind={author.kind} linkAgent={author.linkAgent === true}
                 presentation={author.presentation} size="strip" className="-ml-1 first:ml-0" />
             ))}
           </span>
@@ -275,8 +280,8 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
             {file.authors.map((author, index) => (
               <Fragment key={authorKey(author)}>
                 {index > 0 ? ", " : null}
-                {author.kind === "human" ? null : <span className="sr-only">{author.kind === "link" ? "link holder" : author.kind} </span>}
-                <AgentName kind={author.kind} presentation={author.presentation}>{author.displayName}</AgentName>
+                {author.kind === "human" ? null : <span className="sr-only">{authorKindLabel(author)} </span>}
+                <AgentName kind={author.kind} presentation={author.presentation} linkAgent={author.linkAgent === true}>{author.displayName}</AgentName>
               </Fragment>
             ))}
           </span>

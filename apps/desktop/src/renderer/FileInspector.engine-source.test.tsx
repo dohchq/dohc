@@ -10,6 +10,8 @@ import { createHash } from "node:crypto";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
+import { ACCESS_ENDED_REASON, CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "./readOnlyReasons";
+import { DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE, REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE } from "./ui/StateMark";
 import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -217,7 +219,7 @@ describe("engine markdown source view", () => {
       }
     };
     const pushSaveState = (
-      state: "settling" | "saved" | "error" | "deleted" | "read-only",
+      state: "settling" | "saved" | "error" | "deleted" | "object-changed" | "read-only",
       seq: number,
       readOnlyCause?: import("../ipc/bridgeContract").ReadOnlyTransitionCause,
     ) => {
@@ -554,7 +556,11 @@ describe("engine markdown source view", () => {
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
   });
 
-  it.each(["reconnecting", "lineage-failure"] as const)("uses unavailable words for %s without a draft", async (cause) => {
+  it.each([
+    ["reconnecting", CONNECTION_LOST_REASON],
+    ["lineage-failure", REPLACEMENT_FAILED_REASON],
+  ] as const)("says why %s left the document read-only without a draft", async (cause, reason) => {
+    const user = userEvent.setup();
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -562,8 +568,99 @@ describe("engine markdown source view", () => {
     act(() => pushSaveState("read-only", 0, cause));
     const marker = await screen.findByTestId("markdown-save-state");
     expect(marker.dataset.state).toBe("read-only");
-    expect(marker.getAttribute("title")).toBeNull();
+    // The editor has no strip, so the chip's tooltip says it.
+    expect(marker.getAttribute("title")).toBe(reason);
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
+    expect(strip?.textContent).toBe(reason);
+  });
+
+  it.each([
+    ["reconnecting", CONNECTION_LOST_REASON],
+    ["lineage-failure", REPLACEMENT_FAILED_REASON],
+  ] as const)("says why %s left the document read-only beside an older session's draft", async (cause, reason) => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    // Every edit of this session saved, so this turn sets nothing aside.
+    act(() => pushSaveState("read-only", 0, cause));
+    const marker = await screen.findByTestId("markdown-save-state");
+    await waitFor(() => expect(marker.getAttribute("title")).toBe(reason));
+    expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(1);
+
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
+    expect(strip?.textContent).toBe(reason);
+  });
+
+  it.each([
+    ["reconnecting", CONNECTION_LOST_REASON, "deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["reconnecting", CONNECTION_LOST_REASON, "object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["access-ended", ACCESS_ENDED_REASON, "deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["access-ended", ACCESS_ENDED_REASON, "object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+  ] as const)("drops the %s reason once the file is %s", async (cause, reason, gone, notice) => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+    act(() => pushSaveState("read-only", 0, cause));
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe(reason),
+    );
+
+    act(() => pushSaveState(gone, 0));
+
+    expect((await screen.findByTestId("deleted-while-editing-notice")).textContent).toBe(notice);
+    expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe("");
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
+  });
+
+  it.each([
+    ["deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+  ] as const)("leaves the strip and the chip to the notice when the file is %s in source view", async (gone, notice) => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    await screen.findByTestId("view-markdown-source");
+
+    act(() => pushSaveState(gone, 0));
+
+    expect((await screen.findByTestId("deleted-while-editing-notice")).textContent).toBe(notice);
+    expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe("");
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
+  });
+
+  it("says the connection was lost beside the edit that turn set aside", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("read-only", 1, "reconnecting"));
+
+    // The row keeps the text but does not say why.
+    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
+      "This document became read-only. Copy your text to keep it.",
+    );
+    await waitFor(() => expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(CONNECTION_LOST_REASON));
+    await user.click(screen.getByTestId("markdown-source-toggle"));
+    const strip = (await screen.findByTestId("view-markdown-source")).querySelector("span");
+    expect(strip?.textContent).toBe(CONNECTION_LOST_REASON);
   });
 
   it.each([{ workspaceId: "ws-2" }, { path: "b.md" }, { engineVersionKey: 1 }])("does not carry an ended marker into a changed request %j", async (changed) => {
@@ -631,9 +728,8 @@ describe("engine markdown source view", () => {
         screen.getByTestId("markdown-editor").getAttribute("contenteditable"),
       ).toBe("false"),
     );
-    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.",
-    );
+    // The notice says why, so the chip has no tooltip.
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
   });
 
   // A share whose access ended refuses the edit. The notice says what
@@ -836,9 +932,7 @@ describe("engine markdown source view", () => {
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
       "This document reopened before your last edit saved. Copy your text to keep it.",
     );
-    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "This file was deleted while you had it open. Copy your set-aside edit to keep it.",
-    );
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe("");
 
     // Reuse the existing Copy recovery action and prove it returns the
     // current Y.Doc text, including the edit that never settled.
@@ -1285,7 +1379,7 @@ describe("engine markdown source view", () => {
     "---\ntitle: Plan\n---\n\n# Plan\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
 
   function flashedBlockText(): string | undefined {
-    return document.querySelector(".dohc-outline-target-flash")?.textContent ?? undefined;
+    return document.querySelector(".dohc-target-flash")?.textContent ?? undefined;
   }
 
   it("lands an engine-backed search jump on the block holding the line", async () => {
@@ -1823,7 +1917,7 @@ describe("engine markdown source view", () => {
       function (this: HTMLElement) {
         revealedTargets.push({
           connected: this.isConnected,
-          flashed: this.classList.contains("dohc-outline-target-flash"),
+          flashed: this.classList.contains("dohc-target-flash"),
           text: this.textContent,
         });
       },

@@ -515,7 +515,7 @@ describe("retained failures", () => {
     expect((await screen.findByTestId("collection-write-copy-refused")).textContent).toBe(
       "Could not copy. Select the value above to copy it.",
     );
-    // The button's own "Couldn't copy" lasts COPY_FEEDBACK_MS; the line stays.
+    // The button's own "Could not copy" lasts COPY_FEEDBACK_MS; the line stays.
     await waitFor(() => expect(screen.getByTestId("collection-write-copy").textContent).toBe("Copy value"), {
       timeout: COPY_FEEDBACK_MS * 3,
     });

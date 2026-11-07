@@ -4,6 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
+import type { NoticeTarget } from "./noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -107,6 +108,9 @@ export interface ShellError {
   // closes its toast and keeps the row.
   // afterRetry puts the action after Try again, so F6 lands on Try again.
   action?: { label: string; run: () => void; ends?: boolean; reads?: boolean; afterRetry?: true; additional?: {label: string; run: () => void}[] };
+  // Where a press on the row goes: what it is about. Opening never runs
+  // the row's action, so it never retries or ends the row.
+  target?: NoticeTarget;
   onDismiss?: () => void;
   // The row has no Dismiss: it stays until its action runs or the workspace
   // closes.
@@ -398,6 +402,7 @@ export function useShellError(workspaceId: string) {
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
+      target?: NoticeTarget;
       noDismiss?: boolean;
       kind?: ShellErrorKind;
       identity?: string;
@@ -421,6 +426,7 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(action ? { action } : {}),
+        ...(failure.target ? { target: failure.target } : {}),
         ...(failure.noDismiss ? { noDismiss: true } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
@@ -467,6 +473,7 @@ export function useShellError(workspaceId: string) {
           message: notice.message,
           retry,
           action: { label: "Sync settings", run: openSyncSettings },
+          target: { to: "sync-settings" },
           kind: "collections-waiting",
         },
         notice.toast ? false : "keep",
@@ -500,7 +507,8 @@ export function useShellError(workspaceId: string) {
           ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
           // A held note's row stays until the change is saved.
           ...(markdownHeld && path && openFile ? step("Open note", () => openFile(path)) : {}),
-          ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}) };
+          ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}),
+          ...(attributionRefused ? { target: { to: "history" } as const } : path ? { target: { to: "file", path } as const } : {}) };
       }),
     ]);
   }, []);
@@ -589,6 +597,7 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         retry: notice.retry,
         action: { label: "Open History", run: notice.openHistory, reads: true },
+        target: { to: "history" },
       }, notice.toast ? false : "repeat");
     },
     [clearIdentity, push, workspaceId],
@@ -743,12 +752,13 @@ export function useShellError(workspaceId: string) {
   // A kind makes a newer message replace the row of an older one, such as
   // one import's result replacing the last import's.
   const showSuccessNotice = useCallback(
-    (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"]) => {
+    (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"], target?: NoticeTarget) => {
       push({
         message,
         retry: null,
         tone: "success",
         ...(kind ? { kind } : {}),
+        ...(target ? { target } : {}),
         ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
     },
@@ -792,6 +802,7 @@ export function useShellError(workspaceId: string) {
       kind: "reports",
       reports,
       action: { label: "Privacy settings", run: openPrivacy },
+      target: { to: "privacy-settings" },
     });
   }, [push]);
   // One row per kept copy the engine lists. A copy listed for the first time
@@ -866,6 +877,7 @@ export function useShellError(workspaceId: string) {
         details: [["File", recovery.path, recovery.path.length], ["Change id", recovery.momentId]],
         retry: null,
         action: { label: "Open History", run: recovery.open },
+        target: { to: "history-change", moment: recovery.momentId, path: recovery.path },
         onDismiss: recovery.dismiss,
         atMs,
         seen: false,
@@ -921,18 +933,19 @@ export function useShellError(workspaceId: string) {
       push({ identity, title: `Kept a copy of ${path}`,
         message: `It changed outside dohc. That change is now in ${copy}.`,
         retry: null, tone: "warning", onDismiss: dismiss,
-        action: { label: "Open copy", run: () => { open(copy); dismiss(); }, ends: true } }, seen);
+        action: { label: "Open copy", run: () => { open(copy); dismiss(); }, ends: true },
+        target: { to: "file", path: copy } }, seen);
     }
     if (JSON.stringify(saved) !== stored) persist();
   }, [push, workspaceId]);
   // A native copy that was saved opens from its new path.
   const showKeptCopySaved = useCallback(
-    (message: string, open: (() => void) | null) => {
+    (message: string, saved: { path: string; open: () => void } | null) => {
       push({
         message,
         retry: null,
         tone: "success",
-        ...(open ? { action: { label: "Open", run: open, ends: true } } : {}),
+        ...(saved ? { action: { label: "Open", run: saved.open, ends: true }, target: { to: "file", path: saved.path } as const } : {}),
       });
     },
     [push],
@@ -957,7 +970,7 @@ export function useShellError(workspaceId: string) {
     const fresh = arrived.map((file): ShellError => ({
       id: `shell-error-${++nextId.current}`, identity: `capture-held:${file.path}`, kind: "capture-held", tone: "warning",
       title: "Outside edit not recorded", message: file.message,
-      details: [["File", file.path, file.path.length]], retry: file.retry, atMs: Date.now(), seen: false,
+      details: [["File", file.path, file.path.length]], retry: file.retry, target: { to: "file", path: file.path }, atMs: Date.now(), seen: false,
     }));
     setShellErrors(current => {
       const stays = current.filter(row => row.kind !== "capture-held" || listed.has(row.identity!.slice("capture-held:".length)));

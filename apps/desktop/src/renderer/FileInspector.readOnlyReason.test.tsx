@@ -47,7 +47,9 @@ describe("read-only reason on the text and CSV chips", () => {
     ["notes.txt", "view-text-save-state"],
     ["main.ts", "view-text-save-state"],
     ["index.html", "view-text-save-state"],
+    // Data files share the json kind, but only a .json file takes its view.
     ["config.yaml", "view-text-save-state"],
+    ["settings.toml", "view-text-save-state"],
     ["config.json", "view-json-save-state"],
     ["rows.csv", "csv-save-state"],
   ] as const) {

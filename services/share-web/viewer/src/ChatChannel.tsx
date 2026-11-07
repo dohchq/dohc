@@ -40,12 +40,13 @@ function LinkHolderMark() {
 function ChatMessage({message}: {message: NamedChatMessage}) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(() => message.body === null ? null : renderSafeMarkdown(message.body, () => null), [message.body]);
-  const agent = message.authorKind === "agent" || message.authorKind === "automation";
+  // An agent that joined with the link wears the agent mark, then the link mark.
+  const agent = message.authorKind === "agent" || message.authorKind === "automation" || message.linkAgent;
   // A safe integer can lie outside the Date range; such a message shows without a time.
   const sent = new Date(message.createdAtMs), dated = !Number.isNaN(sent.getTime());
   return <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
     <p className="chat-meta">
-      {agent && <span className="chat-agent-mark" role="img" aria-label={message.authorKind === "agent" ? "Agent" : "Automation"}/>}
+      {agent && <span className="chat-agent-mark" role="img" aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}/>}
       <span className="chat-author">{message.authorDisplayName}</span>
       {message.authorKind === "link" && <LinkHolderMark/>}
       {agent && message.authorOwnerDisplayName && <span className="chat-owner">Owned by {message.authorOwnerDisplayName}</span>}

@@ -62,6 +62,13 @@ describe("dataset publication inventory", () => {
     expect(() => parseAppPublicationCandidate(value, limits)).toThrow(/bundle path/);
   });
 
+  it("refuses Review app's display words in a candidate, which is what an approval binds", () => {
+    const value = datasetCandidate();
+    const shown = { ...value, capabilities: value.capabilities.map(capability => capability.kind === "dataset"
+      ? { ...capability, operations: capability.operations.map(operation => ({ ...operation, display: { kind: "create" as const, label: "Submit", fields: ["Name"] } })) } : capability) };
+    expect(() => parseAppPublicationCandidate(shown, limits)).toThrow(/capability/);
+  });
+
   it("rejects combined dataset and document collection authority", () => {
     const value = datasetCandidate();
     value.capabilities.push({ kind: "collection-create", collectionPath: "app/responses", schemaSha256: hash, allowedFields: ["name"], requiredFields: [], readFields: [] });

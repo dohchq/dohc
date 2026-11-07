@@ -21,7 +21,7 @@ const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture the update notice screenshots");
 
 const CHOSEN = "0.1.1-nightly.20261030.158.1";
-const TITLE = `dohc didn't install update ${CHOSEN}`;
+const TITLE = "dohc could not install the update";
 const ELECTRON = (createRequire(join(desktopRoot, "package.json"))("electron/package.json") as { version: string }).version;
 
 // A feed that offers an update and holds its download open, so the title
@@ -106,7 +106,7 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
 
     await page.getByTestId(activityPin("settings")).click();
     const line = page.getByTestId("desktop-updates-status");
-    await expect(line).toHaveText(`${TITLE} and is still on version ${currentVersion}.`);
+    await expect(line).toHaveText(`dohc could not install version ${CHOSEN} and is still on version ${currentVersion}.`);
     await line.scrollIntoViewIfNeeded();
     await shoot(page, "03-settings-update-line");
     await page.getByRole("button", { name: "Close settings" }).click();

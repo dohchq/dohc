@@ -438,16 +438,21 @@ describe("Links for an open conversation", () => {
     expect(screen.queryByTestId("about-links-toggle")).toBeNull();
   });
 
-  it("names an agent or an automation as one to a screen reader, as the avatar shows it", async () => {
+  it("names an agent, an automation or a link holder as one to a screen reader, as the avatar shows it", async () => {
     const automation = { kind: "automation", displayName: "Stamp the date", presentation: { group: "stamp", hue: null, self: false } } as const;
+    const linkAgent = { kind: "link", linkAgent: true, displayName: "Claude Code", presentation: { group: "7", hue: null, self: false } } as const;
+    const linkHolder = { kind: "link", displayName: "Wren", presentation: { group: "8", hue: null, self: false } } as const;
     bridgeMock.chatLinks.mockResolvedValue(linksPage([
-      mention("data/funnel.csv", NOVA, 3), mention("notes/plan.md", automation, 2), mention("notes/brief.md", SAM, 1),
+      mention("data/funnel.csv", NOVA, 5), mention("notes/plan.md", automation, 4), mention("notes/brief.md", SAM, 3),
+      mention("trip/cabin.md", linkAgent, 2), mention("trip/cabin.md", linkHolder, 1),
     ]));
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
     const rows = await screen.findAllByRole("button", { name: /Mentioned by/ });
     expect(rows.map((row) => row.textContent?.slice(row.textContent.indexOf("Mentioned by")))).toEqual([
       "Mentioned by agent Nova", "Mentioned by automation Stamp the date", "Mentioned by Sam Rivera",
+      // An agent that joined with a link is an agent, then a link holder, as beside its posts.
+      "Mentioned by agent link holder Claude Code, link holder Wren",
     ]);
     // The words are for screen readers; the avatar's shape shows the kind.
     const words = screen.getAllByText(/^(agent|automation)$/);

@@ -474,7 +474,7 @@ describe("ChatsView work and run links", () => {
 
     const chip = await screen.findByRole("button", { name: "3f2a91c0-5b7d-4e2a-9c1f-2d8e6a4b7c90.json" });
     expect(screen.getByTestId("chats-attachment-chip")).toBe(chip);
-    expect(chip.querySelector("svg")?.classList.contains("lucide-file-code")).toBe(true);
+    expect(chip.querySelector("svg")?.classList.contains("lucide-file-braces")).toBe(true);
   });
 
   it("opens attachment paths and shows linked agent-run details", async () => {

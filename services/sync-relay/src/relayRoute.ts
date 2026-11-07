@@ -1,3 +1,4 @@
+import type {AgentChatRoute} from "./agentChatRoutes";
 import type {AgentConnectionRoute} from "./agentConnectionRoutes";
 import type {AppBackendRoute} from "./appBackendRoutes";
 import type {WorkReferenceRoute} from "./workReferenceRoutes";
@@ -30,6 +31,7 @@ import {MAX_SHARE_PROPOSAL_OPS} from "@dohc/security-contract/share-proposal-bou
 type SyncRelayRoute =
   | AgentConnectionRoute
   | WorkReferenceRoute
+  | AgentChatRoute
   | AppBackendRoute
   | DatasetRoute
   | { route: "named-dataset"; shareId: string; datasetId?: string; action: "list" | "describe" | "invoke" | "upload" | "file" | "press" }
@@ -116,6 +118,10 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 4 && (parts[3] === "consent" || parts[3] === "decision")) {
       return { route: "agent-authorizations", action: parts[3] };
     }
+    throw notFound();
+  }
+  if (parts.length === 4 && parts[0] === "sync" && parts[1] === "link" && parts[2] === "agent-chat") {
+    if (parts[3] === "post" || parts[3] === "wait") return { route: "agent-chat", action: parts[3] };
     throw notFound();
   }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {

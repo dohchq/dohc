@@ -27,10 +27,9 @@ export function chatsNavigationRequiresRemount(
   // when the destination thread is already live, remount it with the new
   // focus target so ChatsView gets another chance to scroll (and so clicking
   // the same backlink twice remains useful after the user has scrolled away).
-  return (
-    (next.level === "thread" || next.level === "dm") &&
-    Boolean(next.focusMessageId)
-  );
+  // Naming a channel's chat lane is a command too.
+  if (next.level === "channel") return Boolean(next.focusMessageId || next.lane);
+  return (next.level === "thread" || next.level === "dm") && Boolean(next.focusMessageId);
 }
 
 // Thread navigation stays within its channel, so the tab keeps that name.

@@ -462,6 +462,8 @@ export const REPLACED_HISTORY_DRAFT_NOTICE =
   "This document changed while you were editing. Your earlier edits are set aside here.";
 // So does the notice for a save refused because the file is gone.
 export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your text to keep it.";
+// The row for an edit dohc refused to save for good, in either editor.
+export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE = "dohc could not save this document. Copy your text to keep it.";
 
 export function OrphanedDraftNotices(props: {
   workspaceId: string;
@@ -478,38 +480,56 @@ export function OrphanedDraftNotices(props: {
   return (
     <div>
       {drafts.map((draft) => (
-        <div
+        <SetAsideEditRow
           key={draft.id}
-          data-testid="orphaned-draft-notice"
-          className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
-        >
-          <span className="text-danger">
-            {(props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
-              (draft.recovery?.reason === "deleted"
-                ? DELETED_FILE_DRAFT_NOTICE
-                // Until storage keeps the draft, a copy is still the way to keep it.
-                : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
-                  ? REPLACED_HISTORY_DRAFT_NOTICE
-                  : "This document reopened before your last edit saved. Copy your text to keep it.")}
-          </span>
-          <div className="flex items-center gap-2">
-            {/* Same rule as the recovery list's Copy: a draft the projection
-                never refined carries the document inside an encoded comment,
-                and the decode runs at the click. */}
-            <CopyButton
-              testId="orphaned-draft-copy"
-              getText={() => restoreRecoveryDraftText(draft.text)}
-            />
-            {/* Deleting the only copy needs the explicit confirm step (#579
-                review, r6) — the same control the recovery list uses. */}
-            <DismissDraftControls
-              onDismiss={() =>
-                dismissOrphanedDraft(props.workspaceId, props.path, draft.id)
-              }
-            />
-          </div>
-        </div>
+          message={
+            (props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
+            (draft.recovery?.reason === "deleted"
+              ? DELETED_FILE_DRAFT_NOTICE
+              // Until storage keeps the draft, a copy is still the way to keep it.
+              : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
+                ? REPLACED_HISTORY_DRAFT_NOTICE
+                : "This document reopened before your last edit saved. Copy your text to keep it.")
+          }
+          // Same rule as the recovery list's Copy: a draft the projection
+          // never refined carries the document inside an encoded comment,
+          // and the decode runs at the click.
+          getText={() => restoreRecoveryDraftText(draft.text)}
+          onDismiss={() => dismissOrphanedDraft(props.workspaceId, props.path, draft.id)}
+        />
       ))}
+    </div>
+  );
+}
+
+// One set-aside edit above the page, with its Copy and Dismiss.
+export function SetAsideEditRow(props: {
+  message: string;
+  getText: ComponentProps<typeof CopyButton>["getText"];
+  onDismiss: ComponentProps<typeof DismissDraftControls>["onDismiss"];
+}) {
+  return (
+    <div
+      data-testid="orphaned-draft-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+    >
+      <span className="text-danger">{props.message}</span>
+      <div className="flex items-center gap-2">
+        <CopyButton testId="orphaned-draft-copy" getText={props.getText} />
+        {/* Deleting the only copy needs the explicit confirm step (#579
+            review, r6) — the same control the recovery list uses. */}
+        <DismissDraftControls onDismiss={props.onDismiss} />
+      </div>
+    </div>
+  );
+}
+
+// The strip over the markdown source view, with the source's Copy.
+export function MarkdownSourceStrip(props: { words: string; getText: ComponentProps<typeof CopyButton>["getText"] }) {
+  return (
+    <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-muted">
+      <span>{props.words}</span>
+      <CopyButton testId="markdown-source-copy" getText={props.getText} />
     </div>
   );
 }

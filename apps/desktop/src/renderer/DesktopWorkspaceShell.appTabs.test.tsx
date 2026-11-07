@@ -166,7 +166,8 @@ describe("an app's page when its tab moves", () => {
     const bridge = appBridge(Promise.resolve({
       ...STORED_STATE,
       editorGroups: [
-        { id: "left", tabs: ["notes.txt"], activeTab: "notes.txt", size: 0.5 },
+        // Only an empty group shows its own close control.
+        { id: "left", tabs: [], activeTab: null, size: 0.5 },
         { id: "right", tabs: [trip], activeTab: trip, size: 0.5 },
       ],
       activeEditorGroup: "right",

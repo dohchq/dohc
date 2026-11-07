@@ -1108,11 +1108,13 @@ export function SettingsDialog(props: {
                 ) : undefined}
                 testId="settings-row-desktop-updates"
               >
-                <span className="mr-1 shrink-0 text-[12px] tabular-nums text-subtle">
-                  <span data-testid="desktop-updates-version">{updateState?.currentVersion ?? "unknown"}</span>
-                  {" · "}
-                  <span data-testid="desktop-updates-channel">{updateState?.channel ?? "unknown"}</span>
-                </span>
+                {/* No channel: a nightly's version names it, and "latest"
+                    beside a failure reads as up to date. */}
+                {updateState?.currentVersion ? (
+                  <span data-testid="desktop-updates-version" className="mr-1 shrink-0 text-[12px] tabular-nums text-subtle">
+                    Version {updateState.currentVersion}
+                  </span>
+                ) : null}
                 {/* One button for every step. It fills once the next step is
                     the person's: Update, then Restart to update. */}
                 {update.step ? (

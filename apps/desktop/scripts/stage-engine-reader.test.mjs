@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -12,12 +11,11 @@ import { stageEngineReader, requireEngineReader } from "./stage-engine-reader.mj
 import { readPinnedCompilerNode } from "./stage-app-compiler.mjs";
 import { cachedNodeFetch, useCachedNodeDownloads } from "./pinned-node-downloads.testSupport.mjs";
 import { installedReaderConfig } from "../src/workspaces/installedReaderConfig.ts";
+import { builderRequire } from "./electron-builder.testSupport.mjs";
 
-const require = createRequire(import.meta.url);
-const builder = createRequire(require.resolve("electron-builder/package.json"));
-builder("app-builder-lib");
-const { getFileMatchers, copyFiles } = builder("app-builder-lib/out/fileMatcher.js");
-const { WinPackager } = builder("app-builder-lib/out/winPackager.js");
+builderRequire("app-builder-lib");
+const { getFileMatchers, copyFiles } = builderRequire("app-builder-lib/out/fileMatcher.js");
+const { WinPackager } = builderRequire("app-builder-lib/out/winPackager.js");
 const desktop = fileURLToPath(new URL("..", import.meta.url));
 useCachedNodeDownloads();
 
@@ -197,8 +195,8 @@ test("macOS signing uses the reader hook without enabling Electron Node mode", a
   const config = load(await readFile(new URL("../electron-builder.yml", import.meta.url), "utf8"));
   assert.equal(config.mac.sign, "scripts/sign-engine-reader-macos.mjs");
   assert.equal(config.electronFuses.runAsNode, false);
-  await builder("app-builder-lib/out/util/config/config.js").validateConfiguration(config);
-  const hook = await builder("app-builder-lib/out/util/resolve.js").resolveFunction("module", join(desktop, config.mac.sign), "sign", desktop);
+  await builderRequire("app-builder-lib/out/util/config/config.js").validateConfiguration(config);
+  const hook = await builderRequire("app-builder-lib/out/util/resolve.js").resolveFunction("module", join(desktop, config.mac.sign), "sign", desktop);
   assert.equal(typeof hook, "function");
 });
 

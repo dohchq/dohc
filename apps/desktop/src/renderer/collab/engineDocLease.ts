@@ -340,7 +340,7 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     retry?: () => void;
   } | null;
-  permanentFailure: { token: number } | null;
+  permanentFailure: { token: number; draftId: number | null } | null;
   // The file changed outside dohc while this session held it, and whether
   // the document then had edits no save carried.
   changedOutside: { token: number; unsaved: boolean } | null;
@@ -959,7 +959,7 @@ function createEngineDocSession(
     if (!disposed) {
       publish((current) => ({
         ...current,
-        permanentFailure: { token },
+        permanentFailure: { token, draftId: recovery.draftId },
       }));
       reportSaveState(saveProblem("error", "dohc could not confirm the file was saved."), readError(error).words);
     }
