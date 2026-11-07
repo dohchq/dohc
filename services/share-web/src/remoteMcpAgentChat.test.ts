@@ -105,11 +105,12 @@ it("returns messages with an opaque cursor that resumes from where the relay sto
 });
 
 it("returns the messages that fit its result, with a cursor that resumes after the last one", async () => {
-  // The answer fits share-web's 1 MiB read of it. The result repeats the Group with each message, so only two fit there.
+  // A synthetic answer, past the relay's 512 KiB cap and with a longer Group name than a real one, that still fits
+  // share-web's 1 MiB read of it. The result repeats the Group with each message, so only two fit there.
   const body = "x".repeat(300 * 1024);
   const name = "n".repeat(50_000);
   const f = fixture({wait: ({input}) => Response.json({ok: true, group: {channelWireId: "wire-team", name}, mention: "@Helper",
-    messages: input.cursor === undefined ? [41, 42, 43].map(relaySeq => message(relaySeq, {body})) : [],
+    messages: input.cursor === undefined ? [41, 42, 43].map(relaySeq => message(relaySeq, {body})) : input.cursor === 42 ? [message(43, {body})] : [],
     cursor: input.cursor === undefined ? 43 : 60})});
   const client = await f.connect();
   const first = await client.callTool({name: "dohc_wait_for_messages", arguments: {}});
@@ -117,8 +118,10 @@ it("returns the messages that fit its result, with a cursor that resumes after t
   expect(Buffer.byteLength(textOf(first))).toBeLessThanOrEqual(1024 * 1024);
   expect((structured(first)!.messages as Array<{messageId: string}>).map(kept => kept.messageId)).toEqual(["message-41", "message-42"]);
 
-  await client.callTool({name: "dohc_wait_for_messages", arguments: {cursor: structured(first)!.cursor}});
+  const second = await client.callTool({name: "dohc_wait_for_messages", arguments: {cursor: structured(first)!.cursor}});
   expect(f.waits.map(call => call.input.cursor)).toEqual([undefined, 42]);
+  expect(second.isError).toBeFalsy();
+  expect((structured(second)!.messages as Array<{messageId: string}>).map(kept => kept.messageId)).toEqual(["message-43"]);
 });
 
 it("holds within this request's deadline and never past the relay's bound", async () => {
