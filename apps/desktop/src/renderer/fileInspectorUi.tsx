@@ -531,7 +531,7 @@ export function SetAsideEditRow(props: {
     >
       <span className="text-danger">{props.message}</span>
       <div className="flex items-center gap-2">
-        <CopyButton testId="orphaned-draft-copy" getText={props.getText} />
+        <CopyButton testId="orphaned-draft-copy" label="Copy edits" getText={props.getText} />
         {/* Deleting the only copy needs the explicit confirm step (#579
             review, r6) — the same control the recovery list uses. */}
         <DismissDraftControls onDismiss={props.onDismiss} />
