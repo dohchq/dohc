@@ -67,3 +67,9 @@ describe("resolveFloatingMenuPosition", () => {
     expect(position.bottom).toBeUndefined();
   });
 });
+
+it("opens above when asked and there is room, and below when there is none", () => {
+  const input = { viewportWidth: 1000, viewportHeight: 800, menuWidth: 200, menuMaxHeight: 100, margin: 4, gap: 4, prefer: "above" as const };
+  expect(resolveFloatingMenuPosition({ ...input, cursorRect: { left: 50, top: 400, bottom: 420 } })).toMatchObject({ placement: "above", bottom: 404 });
+  expect(resolveFloatingMenuPosition({ ...input, cursorRect: { left: 50, top: 40, bottom: 60 } })).toMatchObject({ placement: "below", y: 64 });
+});
