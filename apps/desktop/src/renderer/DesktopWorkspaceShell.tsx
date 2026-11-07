@@ -5532,6 +5532,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportChatsError,
+    onNotice: showSuccessNotice,
     onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,

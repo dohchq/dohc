@@ -25,7 +25,7 @@ const by = (name: string, atMs: number | null) => atMs === null ? name : `${name
 /** What a failed Apply says. The server answers "not found" for a Collection the caller can't change, so a 404 names the server. */
 export const collectionApplyFailure = (name: string) => (error: unknown) => isDatasetServerNotFound(error)
   ? { words: `The server that keeps ${name} refused this change. Nothing changed. Ask its owner to apply it.`, retry: false }
-  : { words: ipcErrorMessage(error, "dohc couldn't apply this change."), retry: true };
+  : { words: ipcErrorMessage(error, `dohc could not apply the change to ${name}.`), retry: true };
 /** What Apply says when it holds a change that records made delete more than the card shows. */
 export const collectionDeletesMoreFailure = (was: { records: number; values: number }, now: { records: number; values: number }) => ({
   words: `Records changed after it was sent, and it would now delete ${collectionDeletesMore(was, now)}. Review the source change to apply it.`, retry: false });
@@ -61,6 +61,10 @@ export function CollectionChangeCard(props: {
   /** Posts the reply that applying or undoing the change makes, attaching `attach` when given. Resolves once it posts. */
   onReply: (input: { body: string; resolves: boolean; attach?: string }) => Promise<void>;
   onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  /** Says what Apply or Undo did when it finishes after the chat closed, since its reply posts out of sight. */
+  onNotice?: (message: string) => void;
+  /** Where its reply posts, as a reply that fails to post names it: "#planning" or "your chat with Claude". */
+  chatName: string;
   testIdPrefix: string;
 }) {
   const { workspaceId, message, path } = props;
@@ -96,15 +100,16 @@ export function CollectionChangeCard(props: {
         if (!current) return;
         remember(shownKey, loaded);
         setChange(loaded);
-      } catch (error) { if (current) setLoadFailure(ipcErrorMessage(error, "dohc couldn't read this change.")); }
+      } catch (error) { if (current) setLoadFailure(ipcErrorMessage(error, "dohc could not read this change.")); }
     })();
     return () => { current = false; };
   }, [workspaceId, path, shownKey, since, reload, props.appliedBy?.id, props.undoneBy?.id]);
 
-  // A failure stays on the card while it shows, and goes to the shell's toasts once the chat closed.
-  const fail = (failure: { words: string; retry: boolean }, error: unknown) => {
+  // A failure stays on the card while it shows. Once the chat closed it goes to the shell's toasts,
+  // where Try again runs the same Apply or Undo again.
+  const fail = (failure: { words: string; retry: boolean }, error: unknown, again: () => void) => {
     if (mounted.current) setPhase({ kind: "failed", ...failure });
-    else props.onError(failure.words, error);
+    else props.onError(failure.words, error, failure.retry ? again : undefined);
   };
   // A reply that didn't post can be posted again from its notice, so the message still gets its answer.
   const posted = (body: string, resolves: boolean, words: string, attach?: string) => {
@@ -116,30 +121,42 @@ export function CollectionChangeCard(props: {
   const recorded = (asked: CollectionChangeProposal, applied: CollectionChangeProposal) =>
     applied.changeSha256 === asked.changeSha256 && sameCollectionChange(asked.rows, applied.rows) ? Promise.resolve(undefined)
       : recordCollectionChange(bridge(), workspaceId, applied).catch((error: unknown) => {
-        props.onError(ipcErrorMessage(error, "dohc applied the change but couldn't save which change it applied."), error);
+        props.onError(ipcErrorMessage(error, "dohc applied the change but could not save which change it applied."), error);
         return undefined;
       });
-  const settled = () => { if (mounted.current) { setPhase({ kind: "idle" }); setReload(value => value + 1); } };
+  // Once the chat closed, a notice says what Apply or Undo did, since its reply posts out of sight
+  // and may not post at all.
+  const settled = (done?: string) => {
+    if (mounted.current) { setPhase({ kind: "idle" }); setReload(value => value + 1); }
+    else if (done) props.onNotice?.(done);
+  };
 
+  // Apply prepares the change from the Collection as it is now, so Try again does too.
   const apply = async (shown: CollectionChange) => {
+    const again = () => void apply(shown);
+    const done = `Applied the change to ${shown.proposal.name}`;
     setPhase({ kind: "applying", words: "Applying…" });
     try {
       const result = await applyCollectionChange(bridge(), workspaceId, shown);
-      if (result.kind === "deletes-more") return fail(collectionDeletesMoreFailure(result.was, result.now), null);
-      if (result.kind === "applied") {
-        await posted(`Applied the change to ${shown.proposal.name}.`, true, "dohc applied the change but couldn't post that it did.", await recorded(shown.proposal, result.proposal));
-      } else if (mounted.current) setStale(true);
-      settled();
-    } catch (error) { fail(collectionApplyFailure(shown.proposal.name)(error), error); }
+      if (result.kind === "deletes-more") return fail(collectionDeletesMoreFailure(result.was, result.now), null, again);
+      if (result.kind === "edited") {
+        if (!mounted.current) return fail({ words: "Its files changed after it was sent. Review the change to apply it.", retry: false }, null, again);
+        setStale(true);
+        return settled();
+      }
+      await posted(`${done}.`, true, `dohc applied the change to ${shown.proposal.name} but could not post its reply in ${props.chatName}.`, await recorded(shown.proposal, result.proposal));
+      settled(done);
+    } catch (error) { fail(collectionApplyFailure(shown.proposal.name)(error), error, again); }
   };
 
   const undo = async (shown: CollectionChange) => {
+    const done = `Undid the change to ${shown.proposal.name}`;
     setPhase({ kind: "applying", words: "Undoing…" });
     try {
       await undoCollectionChange(bridge(), workspaceId, shown.proposal);
-      await posted(`Undid the change to ${shown.proposal.name}.`, false, "dohc undid the change but couldn't post that it did.");
-      settled();
-    } catch (error) { fail({ words: ipcErrorMessage(error, "dohc couldn't undo this change."), retry: true }, error); }
+      await posted(`${done}.`, false, `dohc undid the change to ${shown.proposal.name} but could not post its reply in ${props.chatName}.`);
+      settled(done);
+    } catch (error) { fail({ words: ipcErrorMessage(error, `dohc could not undo the change to ${shown.proposal.name}.`), retry: true }, error, () => void undo(shown)); }
   };
 
   if (proposal === null) return null;
@@ -161,9 +178,9 @@ export function CollectionChangeCard(props: {
           throw error;
         }
         // A review can apply another change than the one asked.
-        await posted(`Applied the change to ${proposal.name}.`, true, "dohc applied the change but couldn't post that it did.", await recorded(reviewing.proposal, review.change.proposal));
+        await posted(`Applied the change to ${proposal.name}.`, true, `dohc applied the change to ${proposal.name} but could not post its reply in ${props.chatName}.`, await recorded(reviewing.proposal, review.change.proposal));
         if (mounted.current) setStale(false);
-        settled();
+        settled(`Applied the change to ${proposal.name}`);
       }} />, document.body) : null}
   </>;
 }

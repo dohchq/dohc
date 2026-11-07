@@ -4,9 +4,13 @@ import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import { generateDatasetSchemaChange } from "../src/workspaces/datasetSchemaChanges";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { assertDesktopEngineHealthy, launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openExplorerHome, openWorkspaceFromFirstRun, showExplorerFiles } from "./helpers/workspace";
+import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
+import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openChatsView, openExplorerHome, openWorkspaceFromFirstRun, showExplorerFiles } from "./helpers/workspace";
 
 async function openManagement(collection: Locator): Promise<void> {
   const trigger = collection.getByLabel("Manage Collection", { exact: true });
@@ -279,5 +283,75 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
     expect(JSON.stringify(read)).toContain("Grace");
     assertDesktopEngineHealthy(desktop.logs);
     expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
+  } finally { await cleanupDesktopWorkspace(desktop, workspace); }
+});
+
+test("@dataset-collection Apply on a chat's change card gives the Collection the field its files add", async () => {
+  test.setTimeout(180_000);
+  const workspace = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    desktop = await launchDesktopApp({ workspace });
+    const { page } = desktop;
+    const { workspaceId } = await openWorkspaceFromFirstRun(page, workspace);
+    await waitForCliEndpoint(workspace.homeDir);
+    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
+    const create = page.getByTestId("new-collection-dialog");
+    await create.getByLabel("Collection name").fill("Volunteers");
+    await create.getByTestId("new-collection-create").click();
+    await expect(create).toBeHidden();
+    const volunteers = async () => {
+      const listed = await page.evaluate(async id => window.dohcDesktop!.dataset({ workspaceId: id, action: "list" }), workspaceId);
+      const found = listed.kind === "list" ? listed.datasets.find(entry => entry.name === "Volunteers" && entry.datasetPath) : undefined;
+      if (!found?.datasetPath) throw Error("Expected the Volunteers Collection.");
+      return { ...found, datasetPath: found.datasetPath, fields: found.tables[0]!.fields.map(field => field.name) };
+    };
+    const before = await volunteers();
+    const at = (path: string) => join(workspace.rootPath, path);
+    const fileFields = async () => (JSON.parse(await readFile(at(before.datasetPath), "utf8")) as DatasetDefinition).tables[0]!.fields.map(field => field.name);
+
+    // An agent adds a Due date field to the Collection's files, then asks in a chat to apply it.
+    const definition = JSON.parse(await readFile(at(before.datasetPath), "utf8")) as DatasetDefinition;
+    const schemaSql = await readFile(at(definition.schemaPath), "utf8");
+    const operationSource = await readFile(at(definition.operationsPath), "utf8");
+    const generated = generateDatasetSchemaChange({
+      revision: describeDatasetRevision({ definition, revision: before.revision, schemaSql, operationSource }),
+      schemaSql, operationSource,
+      change: { kind: "addField", tableId: before.tables[0]!.tableId, field: { name: "Due date", type: "date", required: false, unique: false } },
+    });
+    for (const [path, source] of Object.entries(generated.files)) {
+      const target = at(path === generated.descriptorPath ? before.datasetPath : path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, source);
+    }
+    const asked = await runDohcCli(workspace, ["dataset", "askToApply",
+      JSON.stringify({ workspaceId, datasetPath: before.datasetPath, migrationPath: generated.migrationPath }), "--as-agent", "--json"]);
+    expect(asked.stderr).toBe("");
+    const changeFile = asked.stdout.match(/[\w./-]*changes\/[0-9a-f-]{36}\.json/u)?.[0];
+    if (!changeFile) throw Error(`askToApply wrote no change file: ${asked.stdout}`);
+    await page.evaluate(async id => { await window.dohcDesktop!.createChatChannel({ workspaceId: id, name: "Sign-ups", type: "chat" }); }, workspaceId);
+    const posted = await runDohcCli(workspace, ["chat", "post", "Sign-ups", "--attach", changeFile, "--needs-decision", "--as-agent",
+      "I can add a Due date field to Volunteers. Apply it?"]);
+    expect(posted.stderr).toBe("");
+    const threadId = posted.stdout.match(/^posted (\S+) /mu)?.[1];
+    if (!threadId) throw Error(`chat post named no thread: ${posted.stdout}`);
+
+    // Until Apply, only the files have the field.
+    expect(await fileFields()).toContain("Due date");
+    expect((await volunteers()).fields).not.toContain("Due date");
+
+    await (await openChatsView(page)).getByTestId("chats-channel").filter({ hasText: "Sign-ups" }).click();
+    const card = page.getByTestId("chats-channel-view").getByTestId("chats-lane-change-card");
+    await expect(card).toHaveAttribute("data-state", "waiting", { timeout: 30_000 });
+    await card.getByTestId("chats-lane-change-apply").click();
+    await expect(card).toHaveAttribute("data-state", "applied", { timeout: 30_000 });
+
+    const after = await volunteers();
+    expect(after.revision).toBeGreaterThan(before.revision);
+    expect(after.fields).toContain("Due date");
+    expect(after.fields).toEqual(await fileFields());
+    expect((await runDohcCli(workspace, ["chat", "show", threadId, "--peek"])).stdout).toContain("Applied the change to Volunteers.");
+    expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
+    assertDesktopEngineHealthy(desktop.logs);
   } finally { await cleanupDesktopWorkspace(desktop, workspace); }
 });

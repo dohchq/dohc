@@ -63,6 +63,8 @@ export function ChatLane(props: {
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string, cause?: unknown, retry?: () => void) => void;
+  // What a change card's Apply or Undo did, when it finishes after the chat closed.
+  onNotice?: (message: string) => void;
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
@@ -502,6 +504,8 @@ export function ChatLane(props: {
   const failedEnd = useMemo(() => failedRun ? failedRunEnd(failedRun, runs, messages) : null, [failedRun, messages, runs]);
   // Under a message: its question, and why the agent didn't answer it. A
   // choice answers at once. Answer starts a reply in the question's thread.
+  // Where a change card's reply posts, as a reply that fails to post names it.
+  const replyPlace = agentDm ? `your chat with ${props.agentName ?? "your agent"}` : `#${props.channel.name}`;
   const renderFooter = useCallback((message: ChatMessageRecord, answer: () => void) => {
     const decision = decisionsByMessage.get(message.id);
     const asked = decision ? changeFileOf(message) : undefined;
@@ -526,6 +530,8 @@ export function ChatLane(props: {
         onOpenPath={props.onOpenPath}
         onReply={(input) => replyToChange(message, changeFile, input)}
         onError={onError}
+        onNotice={props.onNotice}
+        chatName={replyPlace}
         testIdPrefix="chats-lane"
       /> : decision ? <DecisionStatus
         decision={decision}
@@ -540,7 +546,7 @@ export function ChatLane(props: {
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
       /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, onError, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (
