@@ -558,7 +558,8 @@ test("failed agent checks stay readable above Settings and remain in Notices", a
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await desktop!.app.evaluate(({ clipboard }) => clipboard.clear());
       try {
-        await page.getByTestId("workspace-shell-error-copy").click({ timeout: remainingMs() });
+        await page.getByTestId("workspace-shell-error-details").click({ timeout: remainingMs() });
+        await page.getByTestId("workspace-shell-error-details-copy").click({ timeout: remainingMs() });
         await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toContain(reason);
       } finally {
         await desktop!.app.evaluate(({ clipboard }) => clipboard.clear()).catch(() => undefined);

@@ -60,9 +60,7 @@ export type Notice = {
   // Agent notices carry when they happened; system notices are stateful
   // ("cloud disconnected") and render no time.
   timeMs?: number;
-  // A report a person can paste: shown as a copy control on the row.
-  copyText?: string;
-  copyLabel?: string;
+  copy?: NoticeCopy;
   filePaths?: readonly string[];
   // A terminal command the body asks the person to run, shown with its copy.
   command?: string;
@@ -75,11 +73,17 @@ export type Notice = {
   Icon: typeof Bell;
 };
 
-// A workspace error the shell reported. `details` is the report Copy puts
-// on the clipboard; `seen` means its toast was closed and only the row in
-// Notices remains. `read` means the row was read, not only its toast closed.
+// What a message lets a person copy. A report says what happened, and its
+// text decides how it shows (useDetails). A named copy is the person's own
+// work to use elsewhere, so it keeps its own Copy and has no Details.
+export type NoticeCopy =
+  | { report: string }
+  | { label: "Copy file paths"; text: string };
+
+// A workspace error the shell reported. `seen` means its toast was closed and
+// only the row in Notices remains. `read` means the row was read, not only its
+// toast closed.
 export interface WorkspaceErrorNotice {
-  copyLabel?: string;
   // Omitted for a failure. A warning needs the person, though nothing failed.
   tone?: "success" | "warning";
   // A success toast that stays until it is closed, rather than fading.
@@ -91,7 +95,7 @@ export interface WorkspaceErrorNotice {
   paths?: readonly string[];
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
-  details: string;
+  copy?: NoticeCopy;
   filePaths?: readonly string[];
   atMs: number;
   canRetry: boolean;
@@ -112,7 +116,7 @@ export interface WorkspaceErrorNotice {
 }
 
 // The crash report main keeps on this computer. `text` is the whole report,
-// what Copy report copies. Send report asks main, which shows the text in
+// what Details shows. Send report asks main, which shows the text in
 // its own dialog before anything leaves.
 export interface CrashReportNotice {
   revision: number;
@@ -291,10 +295,85 @@ function RowNote(props: { note: string }) {
   );
 }
 
+// A message's copy control, from what it copies. A report the message shows
+// whole is a Copy icon beside it. A report with anything more, even the time,
+// is Details, so a person sees what they copy. A named copy keeps its name.
+type CopyControls = {
+  // The icon beside the text, or null.
+  icon: ReactNode;
+  // Details or Hide details, last on the actions line, or null.
+  action: ReactNode;
+  // The report, under the actions while Details is open, or null.
+  block: ReactNode;
+  open: boolean;
+};
+const NO_COPY: CopyControls = { icon: null, action: null, block: null, open: false };
+
+function useDetails(props: {
+  copy: NoticeCopy | undefined;
+  // What the message shows, one part per line.
+  shown: readonly (string | undefined)[];
+  // A repeat that replaces the message opens closed.
+  since?: number;
+  actionClass: string;
+  testId: string;
+  onOpenChange?: (open: boolean) => void;
+}): CopyControls {
+  const id = useId();
+  const [open, setOpen] = useState(false);
+  const [openedSince, setOpenedSince] = useState(props.since);
+  if (openedSince !== props.since) {
+    setOpenedSince(props.since);
+    setOpen(false);
+  }
+  const { copy, testId } = props;
+  if (!copy) return NO_COPY;
+  const copyIcon = (label: string, text: string) => (
+    <CopyButton iconOnly pinName label={label} testId={`${testId}-copy`} getText={() => text} />
+  );
+  if (!("report" in copy)) return { ...NO_COPY, icon: copyIcon(copy.label, copy.text) };
+  const { report } = copy;
+  if (report === props.shown.filter(Boolean).join("\n")) return { ...NO_COPY, icon: copyIcon("Copy details", report) };
+  const blockId = `${id}-details`;
+  const toggle = () => {
+    setOpen(!open);
+    props.onOpenChange?.(!open);
+  };
+  return {
+    icon: null,
+    action: (
+      <button
+        type="button"
+        data-testid={`${testId}-details`}
+        aria-expanded={open}
+        aria-controls={blockId}
+        onClick={toggle}
+        className={`flex items-center gap-0.5 ${props.actionClass}`}
+      >
+        {open ? "Hide details" : "Details"}
+        <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out motion-reduce:transition-none${open ? " rotate-180" : ""}`} />
+      </button>
+    ),
+    // Copy comes first, so the Tab after Details reaches it.
+    block: open ? (
+      <div id={blockId} data-testid={`${testId}-details-text`} data-row-above="" className="relative mt-1.5 rounded-md border border-line bg-panel-2">
+        <span className="absolute right-1 top-1">
+          <CopyButton iconOnly pinName label="Copy details" testId={`${testId}-details-copy`} getText={() => report} />
+        </span>
+        <pre tabIndex={0} className="m-0 max-h-[240px] overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-anywhere select-text py-1.5 pl-2 pr-8 font-sans text-[11px] leading-snug text-muted">
+          {report}
+        </pre>
+      </div>
+    ) : null,
+    open,
+  };
+}
+
 // A notice's title and text, in its row or its toast, clipped to fit. A
 // click on clipped text, or Show more, shows all of it in place, wrapped
-// and selectable. A body with one fact per line shows its first 3 facts
-// whole, so none is cut in half; prose clamps at 3 lines. Paths are facts
+// and selectable. Open Details shows it whole too, so Show more never sits
+// beside it. A body with one fact per line shows its first 3 facts whole, so
+// none is cut in half; prose clamps at 3 lines. Paths are facts
 // after the body, each cut in the middle to fit its line until it opens.
 function NoticeText(props: {
   title: string;
@@ -310,14 +389,20 @@ function NoticeText(props: {
   // Opens the row's target. A click on clipped text then opens the row
   // rather than the text, which Show more opens.
   onOpenRow?: () => void;
+  // Told whenever Show more or Details opens or closes the whole text.
   onOpenChange?: (open: boolean) => void;
+  copy?: NoticeCopy;
+  since?: number;
+  actionClass: string;
   testId: string;
-  children: (text: { title: ReactNode; body: ReactNode }) => ReactNode;
+  // The copy controls' test ids start with this. Default testId.
+  copyTestId?: string;
+  children: (text: { title: ReactNode; body: ReactNode; copy: CopyControls }) => ReactNode;
 }) {
   const id = useId();
   const titleRef = useRef<HTMLSpanElement>(null);
   const bodyRef = useRef<HTMLParagraphElement>(null);
-  const [open, setOpen] = useState(false);
+  const [more, setMore] = useState(false);
   const [clipped, setClipped] = useState(false);
   const clamp = props.clamp ?? true;
   const lines = props.body ? props.body.split("\n") : [];
@@ -325,9 +410,18 @@ function NoticeText(props: {
   const facts = lines.length + paths.length;
   const byFacts = clamp && facts > 1;
   const { onOpenChange } = props;
+  const copy = useDetails({
+    copy: props.copy,
+    shown: [props.title, props.body, ...paths, props.after],
+    since: props.since,
+    actionClass: props.actionClass,
+    testId: props.copyTestId ?? props.testId,
+    onOpenChange: (details) => onOpenChange?.(details || more),
+  });
+  const open = more || copy.open;
   const show = (next: boolean) => {
-    setOpen(next);
-    onOpenChange?.(next);
+    setMore(next);
+    onOpenChange?.(next || copy.open);
   };
   useLayoutEffect(() => {
     if (open) return;
@@ -405,22 +499,28 @@ function NoticeText(props: {
         {props.after && (open || !hidden) ? (
           <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">{props.after}</p>
         ) : null}
-        {hidden || open ? (
+        {!copy.open && (hidden || more) ? (
           <button
             type="button"
             data-testid={`${props.testId}-more`}
-            aria-expanded={open}
+            aria-expanded={more}
             aria-controls={props.body ? `${id}-title ${id}-body` : `${id}-title`}
-            onClick={() => show(!open)}
+            onClick={() => show(!more)}
             className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[11px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
           >
-            {open ? "Show less" : "Show more"}
-            <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out${open ? " rotate-180" : ""}`} />
+            {more ? "Show less" : "Show more"}
+            <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out${more ? " rotate-180" : ""}`} />
           </button>
         ) : null}
       </>
     ),
+    copy,
   });
+}
+
+// A toast that is not a NoticeText takes its copy control from here.
+function WithDetails(props: Parameters<typeof useDetails>[0] & { children: (copy: CopyControls) => ReactNode }) {
+  return props.children(useDetails(props));
 }
 
 // The one notice for every step a narrower share stopped. It names each
@@ -709,6 +809,10 @@ function toneClass(tone: Notice["tone"]): string {
   return "text-subtle";
 }
 
+// A success has nothing to report, so it has nothing to copy.
+const shownCopy = (error: WorkspaceErrorNotice): NoticeCopy | undefined =>
+  error.tone === "success" ? undefined : error.copy;
+
 // Beside a Try again button, a message drops a closing "Try again." sentence,
 // so the notice says it once. A longer ending, such as "Try again later.",
 // or a sentence that ends in it, such as "then choose Try again.", stays.
@@ -751,7 +855,7 @@ export function WorkspaceErrorToast(props: {
     </button>
   ) : null;
   const message = retry ? besideTryAgain(error.message, error.retryBlocked !== undefined) : error.message;
-  const actions = Boolean(props.onAction && (error.actionLabel || error.additionalActionLabels?.length)) || retry !== null;
+  const steps = Boolean(props.onAction && (error.actionLabel || error.additionalActionLabels?.length)) || retry !== null;
   useEffect(() => {
     if (!fades || held || !onHide) return;
     const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
@@ -781,9 +885,14 @@ export function WorkspaceErrorToast(props: {
         paths={error.paths}
         after={error.lastLine}
         onOpenChange={setOpen}
+        copy={shownCopy(error)}
+        since={error.atMs}
+        actionClass={TOAST_ACTION_CLASS}
         testId="workspace-shell-toast"
+        copyTestId="workspace-shell-error"
       >
         {(text) => (
+          <>
           <div className="min-w-0 flex-1">
             <div className="min-w-0 select-text">
               <div className="flex min-w-0">{text.title}</div>
@@ -798,8 +907,8 @@ export function WorkspaceErrorToast(props: {
                 </div>
               ) : null}
             </div>
-            {actions ? (
-              <div className={TOAST_ACTIONS_CLASS}>
+            {steps || text.copy.action ? (
+              <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
                 {error.actionAfterRetry ? retry : null}
                 {error.actionLabel && props.onAction ? (
                   <button
@@ -819,6 +928,7 @@ export function WorkspaceErrorToast(props: {
                   </button>
                 )) : null}
                 {error.actionAfterRetry ? null : retry}
+                {text.copy.action}
               </div>
             ) : null}
             {/* A disabled control says why, where the keyboard can't miss it. */}
@@ -827,17 +937,12 @@ export function WorkspaceErrorToast(props: {
                 {error.retryBlocked}
               </p>
             ) : null}
+            {text.copy.block}
           </div>
+          {text.copy.icon}
+          </>
         )}
       </NoticeText>
-      {error.tone !== "success" && (error.filePaths === undefined || error.filePaths.length > 0) ? <CopyButton
-        key={error.id}
-        iconOnly
-        pinName
-        label={error.copyLabel ?? (notice ? "Copy notice details" : "Copy error details")}
-        testId="workspace-shell-error-copy"
-        getText={() => error.details}
-      /> : null}
       {props.onHide ? (
         <button
           type="button"
@@ -889,6 +994,9 @@ export function LocalNoticeRow(props: {
         clamp={notice.filePaths === undefined}
         after={props.note === undefined ? notice.lastLine : undefined}
         onOpenRow={props.onOpen}
+        copy={notice.copy}
+        since={notice.timeMs}
+        actionClass={ROW_ACTION_CLASS}
         testId={`notice-${notice.id}`}
       >
         {(text) => (
@@ -896,15 +1004,7 @@ export function LocalNoticeRow(props: {
             <div className="flex min-w-0 items-start gap-2">
               <RowTitle title={text.title} testId={`notice-${notice.id}`} onOpen={props.onOpen} busy={props.opening} />
               <span className={ROW_CONTROLS_CLASS}>
-                {notice.copyText !== undefined && !notice.filePaths?.length ? (
-                  <CopyButton
-                    iconOnly
-                    pinName
-                    label={notice.copyLabel ?? "Copy error details"}
-                    testId={`notice-${notice.id}-copy`}
-                    getText={() => notice.copyText ?? ""}
-                  />
-                ) : null}
+                {notice.filePaths?.length ? null : text.copy.icon}
                 {notice.onDismiss ? (
                   <button
                     type="button"
@@ -934,16 +1034,13 @@ export function LocalNoticeRow(props: {
                   {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
                   {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
                 </ul>
-                {notice.copyText !== undefined ? (
-                  <CopyButton iconOnly pinName label={notice.copyLabel ?? "Copy error details"}
-                    testId={`notice-${notice.id}-copy`} getText={() => notice.copyText ?? ""} />
-                ) : null}
+                {text.copy.icon}
               </div>
             ) : null}
-            {notice.actions?.length ? (
+            {notice.actions?.length || text.copy.action ? (
               <>
                 <div className={ROW_ACTIONS_CLASS}>
-                  {notice.actions.map((action, index) => (
+                  {notice.actions?.map((action, index) => (
                     <button
                       key={action.label}
                       type="button"
@@ -956,14 +1053,16 @@ export function LocalNoticeRow(props: {
                       {action.label}
                     </button>
                   ))}
+                  {text.copy.action}
                 </div>
-                {notice.actions.map((action, index) => action.reason === undefined ? null : (
+                {notice.actions?.map((action, index) => action.reason === undefined ? null : (
                   <p key={action.label} id={`${reasonId}-${index}`} className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
                     {action.reason}
                   </p>
                 ))}
               </>
             ) : null}
+            {text.copy.block}
             {notice.timeMs !== undefined ? (
               <time
                 dateTime={new Date(notice.timeMs).toISOString()}
@@ -1413,8 +1512,7 @@ export function NoticeCenter(props: {
         ...(props.onDismissCrashReport ? { onDismiss: props.onDismissCrashReport } : {}),
         onRead: () => setClosedCrashRevision(crashReport.revision),
         timeMs: crashReport.atMs,
-        copyText: crashReport.text,
-        copyLabel: "Copy report",
+        copy: { report: crashReport.text },
         Icon: AlertTriangle,
       });
     }
@@ -1466,9 +1564,7 @@ export function NoticeCenter(props: {
         read: error.read === true,
         ...(error.target ? { target: error.target } : {}),
         timeMs: error.atMs,
-        // A success has nothing to report, so it has nothing to copy.
-        copyText: error.tone === "success" || error.filePaths?.length === 0 ? undefined : error.details,
-        copyLabel: error.copyLabel ?? (error.tone === "warning" ? "Copy notice details" : undefined),
+        copy: shownCopy(error),
         filePaths: error.filePaths,
         ...(error.paths?.length ? { paths: error.paths } : {}),
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
@@ -1529,7 +1625,7 @@ export function NoticeCenter(props: {
         // Try again changes state, so the row goes only where Live documents goes.
         ...(liveDelivery.recovery === "live-documents" && onOpenLiveDocuments ? { target: { to: "live-documents" } as const } : {}),
         onRead: () => setDismissedLiveDeliveryKey(liveDeliveryKey),
-        copyText: liveDeliveryDetails,
+        copy: { report: liveDeliveryDetails },
         Icon: liveDelivery.Icon,
       });
     }
@@ -1546,7 +1642,7 @@ export function NoticeCenter(props: {
           ? { actions: [{ label: "Live documents", onClick: onOpenLiveDocuments }], target: { to: "live-documents" } as const }
           : {}),
         onRead: () => setDismissedRefusalsKey(refusalsKey),
-        copyText: refusalsDetails,
+        copy: { report: refusalsDetails },
         Icon: AlertTriangle,
       });
     }
@@ -1638,7 +1734,7 @@ export function NoticeCenter(props: {
             new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
           ),
         onRead: () => closeDecline(declined),
-        copyText: sharingDeclinedDetails(props.workspaceId, declined),
+        copy: { report: sharingDeclinedDetails(props.workspaceId, declined) },
         Icon: AlertTriangle,
       });
     }
@@ -1918,6 +2014,14 @@ export function NoticeCenter(props: {
             />
           ) : null}
           {sentToast ? (
+            <WithDetails
+              key={sentToastKey}
+              copy={sentToastFails ? { report: failureDetails(sentToast.notice) } : undefined}
+              shown={[sentToast.notice.title, sentToast.notice.body]}
+              actionClass={TOAST_ACTION_CLASS}
+              testId="sent-notice-toast"
+            >
+            {(details) => (
             <div
               data-testid="sent-notice-toast"
               role={sentToastFades || isHeld(sentToast.notice) ? "status" : "alert"}
@@ -1940,8 +2044,8 @@ export function NoticeCenter(props: {
                     </span>
                   ) : null}
                 </span>
-                {sentToastRetries || sentToastOpens ? (
-                  <div className={TOAST_ACTIONS_CLASS}>
+                {sentToastRetries || sentToastOpens || details.action ? (
+                  <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
                     {sentToastRetries ? (
                       <button
                         type="button"
@@ -1968,19 +2072,12 @@ export function NoticeCenter(props: {
                         {isHeld(sentToast.notice) ? "Open note" : "Open"}
                       </button>
                     ) : null}
+                    {details.action}
                   </div>
                 ) : null}
+                {details.block}
               </div>
-              {sentToastFails ? (
-                <CopyButton
-                  key={sentToastKey}
-                  iconOnly
-                  pinName
-                  label={isHeld(sentToast.notice) ? "Copy notice details" : "Copy error details"}
-                  testId="sent-notice-toast-copy"
-                  getText={() => failureDetails(sentToast.notice)}
-                />
-              ) : null}
+              {details.icon}
               {onHideSentNoticeToast ? (
                 <button
                   type="button"
@@ -1992,8 +2089,18 @@ export function NoticeCenter(props: {
                 </button>
               ) : null}
             </div>
+            )}
+            </WithDetails>
           ) : null}
           {liveDeliveryToastVisible && liveDelivery ? (
+            <WithDetails
+              key={liveDeliveryKey}
+              copy={{ report: liveDeliveryDetails }}
+              shown={[`${liveDelivery.title}. ${liveDelivery.body}`]}
+              actionClass={TOAST_ACTION_CLASS}
+              testId="owner-live-delivery-toast"
+            >
+            {(details) => (
             <div
               data-testid="owner-live-delivery-toast"
               role="status"
@@ -2005,8 +2112,8 @@ export function NoticeCenter(props: {
                 <span className="block select-text cursor-text break-words leading-snug">
                   {liveDelivery.title}. {liveDelivery.body}
                 </span>
-                {liveDeliveryAction ? (
-                  <div className={TOAST_ACTIONS_CLASS}>
+                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                  {liveDeliveryAction ? (
                     <button
                       type="button"
                       data-testid="owner-live-delivery-toast-action"
@@ -2015,17 +2122,12 @@ export function NoticeCenter(props: {
                     >
                       {liveDeliveryAction.label}
                     </button>
-                  </div>
-                ) : null}
+                  ) : null}
+                  {details.action}
+                </div>
+                {details.block}
               </div>
-              <CopyButton
-                key={liveDeliveryKey}
-                iconOnly
-                pinName
-                label="Copy live editing details"
-                testId="owner-live-delivery-toast-copy"
-                getText={() => liveDeliveryDetails}
-              />
+              {details.icon}
               <button
                 type="button"
                 aria-label="Dismiss live editing notice"
@@ -2035,8 +2137,18 @@ export function NoticeCenter(props: {
                 <X size={12} aria-hidden />
               </button>
             </div>
+            )}
+            </WithDetails>
           ) : null}
           {refusalsToastVisible ? (
+            <WithDetails
+              key={refusalsKey}
+              copy={{ report: refusalsDetails }}
+              shown={[`${OWNER_LIVE_REFUSALS_TITLE}. ${OWNER_LIVE_REFUSALS_BODY}`]}
+              actionClass={TOAST_ACTION_CLASS}
+              testId="owner-live-refusals-toast"
+            >
+            {(details) => (
             <div
               data-testid="owner-live-refusals-toast"
               role="status"
@@ -2048,8 +2160,8 @@ export function NoticeCenter(props: {
                 <span className="block select-text cursor-text break-words leading-snug">
                   {OWNER_LIVE_REFUSALS_TITLE}. {OWNER_LIVE_REFUSALS_BODY}
                 </span>
-                {onOpenLiveDocuments ? (
-                  <div className={TOAST_ACTIONS_CLASS}>
+                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                  {onOpenLiveDocuments ? (
                     <button
                       type="button"
                       data-testid="owner-live-refusals-toast-action"
@@ -2058,17 +2170,12 @@ export function NoticeCenter(props: {
                     >
                       Live documents
                     </button>
-                  </div>
-                ) : null}
+                  ) : null}
+                  {details.action}
+                </div>
+                {details.block}
               </div>
-              <CopyButton
-                key={refusalsKey}
-                iconOnly
-                pinName
-                label="Copy share details"
-                testId="owner-live-refusals-toast-copy"
-                getText={() => refusalsDetails}
-              />
+              {details.icon}
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
                 type="button"
@@ -2079,8 +2186,18 @@ export function NoticeCenter(props: {
                 <X size={12} aria-hidden />
               </button>
             </div>
+            )}
+            </WithDetails>
           ) : null}
           {declineToast ? (
+            <WithDetails
+              key={sharingDeclinedKey(props.workspaceId, declineToast)}
+              copy={{ report: sharingDeclinedDetails(props.workspaceId, declineToast) }}
+              shown={[`${SHARING_DECLINED_TITLE}. ${sharingDeclinedBody(declineToast)}`]}
+              actionClass={TOAST_ACTION_CLASS}
+              testId="sharing-declined-toast"
+            >
+            {(details) => (
             <div
               data-testid="sharing-declined-toast"
               role="status"
@@ -2092,8 +2209,8 @@ export function NoticeCenter(props: {
                 <span className="block select-text cursor-text break-words leading-snug">
                   {SHARING_DECLINED_TITLE}. {sharingDeclinedBody(declineToast)}
                 </span>
-                {onOpenSharingDeclined ? (
-                  <div className={TOAST_ACTIONS_CLASS}>
+                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                  {onOpenSharingDeclined ? (
                     <button
                       type="button"
                       data-testid="sharing-declined-toast-open"
@@ -2105,17 +2222,12 @@ export function NoticeCenter(props: {
                     >
                       Open document
                     </button>
-                  </div>
-                ) : null}
+                  ) : null}
+                  {details.action}
+                </div>
+                {details.block}
               </div>
-              <CopyButton
-                key={sharingDeclinedKey(props.workspaceId, declineToast)}
-                iconOnly
-                pinName
-                label="Copy error details"
-                testId="sharing-declined-toast-copy"
-                getText={() => sharingDeclinedDetails(props.workspaceId, declineToast)}
-              />
+              {details.icon}
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
                 type="button"
@@ -2126,8 +2238,18 @@ export function NoticeCenter(props: {
                 <X size={12} aria-hidden />
               </button>
             </div>
+            )}
+            </WithDetails>
           ) : null}
           {crashToastVisible && crashReport ? (
+            <WithDetails
+              key={crashReport.revision}
+              copy={{ report: crashReport.text }}
+              shown={[crashReport.title]}
+              actionClass={TOAST_ACTION_CLASS}
+              testId="crash-report-toast"
+            >
+            {(details) => (
             <div
               data-testid="crash-report-toast"
               role="alert"
@@ -2138,8 +2260,8 @@ export function NoticeCenter(props: {
                 <span className="block select-text cursor-text break-words leading-snug">
                   {crashReport.title}
                 </span>
-                {props.onSendCrashReport ? (
-                  <div className={TOAST_ACTIONS_CLASS}>
+                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                  {props.onSendCrashReport ? (
                     <button
                       type="button"
                       data-testid="crash-report-toast-send"
@@ -2148,17 +2270,12 @@ export function NoticeCenter(props: {
                     >
                       Send report
                     </button>
-                  </div>
-                ) : null}
+                  ) : null}
+                  {details.action}
+                </div>
+                {details.block}
               </div>
-              <CopyButton
-                key={crashReport.revision}
-                iconOnly
-                pinName
-                label="Copy report"
-                testId="crash-report-toast-copy"
-                getText={() => crashReport.text}
-              />
+              {details.icon}
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
                 type="button"
@@ -2169,6 +2286,8 @@ export function NoticeCenter(props: {
                 <X size={12} aria-hidden />
               </button>
             </div>
+            )}
+            </WithDetails>
           ) : null}
         </div>
       ))}
@@ -2347,6 +2466,9 @@ export function NoticeCenter(props: {
                             titleClass={unread ? "font-medium text-ink" : "text-muted"}
                             body={openNote === undefined ? notice.body : ""}
                             onOpenRow={openRowNotice}
+                            copy={copies ? { report: failureDetails(notice) } : undefined}
+                            since={notice.createdAtMs}
+                            actionClass={ROW_ACTION_CLASS}
                             testId={`sent-notice-${notice.noticeId}`}
                           >
                             {(text) => (
@@ -2354,15 +2476,7 @@ export function NoticeCenter(props: {
                                 <div className="flex min-w-0 items-start gap-2">
                                   <RowTitle title={text.title} testId={`sent-notice-${notice.noticeId}`} onOpen={openRowNotice} busy={busy} />
                                   <span className={ROW_CONTROLS_CLASS}>
-                                    {copies ? (
-                                      <CopyButton
-                                        iconOnly
-                                        pinName
-                                        label={isHeld(notice) ? "Copy notice details" : "Copy error details"}
-                                        testId={`sent-notice-${notice.noticeId}-copy`}
-                                        getText={() => failureDetails(notice)}
-                                      />
-                                    ) : null}
+                                    {text.copy.icon}
                                     {dismissNotice ? (
                                       <button
                                         type="button"
@@ -2380,7 +2494,7 @@ export function NoticeCenter(props: {
                                   </span>
                                 </div>
                                 {openNote === undefined ? text.body : <RowNote note={openNote} />}
-                                {runNow || retry || openNotice ? (
+                                {runNow || retry || openNotice || text.copy.action ? (
                                   <div className={ROW_ACTIONS_CLASS}>
                                     {runNow ? (
                                       <button
@@ -2415,8 +2529,10 @@ export function NoticeCenter(props: {
                                         {busy ? "Opening…" : isHeld(notice) ? "Open note" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
                                       </button>
                                     ) : null}
+                                    {text.copy.action}
                                   </div>
                                 ) : null}
+                                {text.copy.block}
                                 <p className="m-0 mt-1 flex min-w-0 gap-2 text-[12px] text-subtle">
                                   <time dateTime={new Date(notice.createdAtMs).toISOString()}>
                                     {relativeTime(notice.createdAtMs)}

@@ -188,7 +188,8 @@ describe("document save notices", () => {
     expect(toast.textContent).toContain("Couldn't save notes/a.md");
     expect(toast.textContent).toContain("The file is read-only. Make it writable, then try again.");
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(copied.mock.calls[0]![0]).toContain("Cause: The file is read-only.");
     expect(copied.mock.calls[0]![0]).toContain("File: notes/a.md");
     expect(await rows(user)).toHaveLength(1);
@@ -262,7 +263,8 @@ describe("document save notices", () => {
     expect(toast.textContent).toContain("Couldn't save notes/a.md");
     expect(toast.textContent).toContain("The file was moved or deleted outside dohc.");
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
-    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(copied.mock.calls[0]![0]).toBe("Error: The file was moved or deleted outside dohc.\nTitle: Couldn't save notes/a.md\nFile: notes/a.md");
 
     await user.click(within(toast).getByRole("button", { name: "Save it again" }));
@@ -427,7 +429,8 @@ describe("document save notices", () => {
     expect(toast.textContent).toContain("Couldn't save data.csv");
     expect(toast.textContent).toContain("dohc couldn't write the file.");
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(copied.mock.calls[0]![0]).toContain("File: data.csv");
     expect(copied.mock.calls[0]![0]).toContain(`Cause: ${READ_ONLY_ON_DISK}`);
     expect(titleBar().textContent).toBe("Couldn't save 1 file");
@@ -677,7 +680,8 @@ describe("document save notices", () => {
     const toast = screen.getByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("notes/a.md");
     expect(toast.textContent).toContain(REPLACED_DOCUMENT_UNSAVED);
-    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
     expect(copied.mock.calls[0]![0]).toContain("File: notes/a.md");
     expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(1);
 

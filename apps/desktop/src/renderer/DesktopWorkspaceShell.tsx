@@ -227,7 +227,7 @@ import {
 import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { countInput } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
-import { NoticeCenter } from "./workbench/NoticeCenter";
+import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCenter";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useSentNoticeProps, type NoticeShare } from "./shell/useSentNoticeProps";
@@ -335,6 +335,12 @@ import { ipcErrorMessage } from "./ipcError";
 // refuses every write to the reserved prefix regardless — but it uses the
 // same alias-normalizing predicate as main so a case-variant path arriving
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
+// A share capture lists the files it kept out. Their paths are for the person
+// to use elsewhere, so they copy as a named list, not a report.
+function shareCaptureCopy(paths: readonly string[]): Pick<WorkspaceErrorNotice, "filePaths" | "copy"> {
+  return { filePaths: paths, ...(paths.length ? { copy: { label: "Copy file paths", text: paths.join("\n") } } : {}) };
+}
+
 // One Notices row per bookmark page an archive refused.
 function archiveRefusalIdentity(workspaceId: string, path: string): string {
   return `chat-archive-refused:${workspaceId}:${path}`;
@@ -5907,7 +5913,7 @@ export function DesktopWorkspaceShell(props: {
     [appVersion, props.workspace],
   );
   // Errors as the notice center shows them: the message, whether it can be
-  // asked again, and the report Copy puts on the clipboard.
+  // asked again, and what it lets a person copy.
   const workspaceErrors = useMemo(
     () =>
       shellErrors.map((error) => ({
@@ -5919,14 +5925,14 @@ export function DesktopWorkspaceShell(props: {
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.paths ? { paths: error.paths } : {}),
         ...(error.command ? { command: error.command } : {}),
-        ...(error.kind === "share-capture" ? { filePaths: error.details?.map(detail => String(detail[1])) ?? [], copyLabel: "Copy file paths" } : {}),
-        details: error.kind === "share-capture" ? (error.details ?? []).map(detail => String(detail[1])).join("\n") : errorDetails([
-          [error.tone ? "Notice" : "Error", error.message],
-          ...(error.title ? [["Title", error.title] as const] : []),
-          ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
-          ...(error.details ?? []),
-          ...reportFacts(),
-        ]),
+        ...(error.kind === "share-capture" ? shareCaptureCopy(error.details?.map(detail => String(detail[1])) ?? [])
+          : { copy: { report: errorDetails([
+              [error.tone ? "Notice" : "Error", error.message],
+              ...(error.title ? [["Title", error.title] as const] : []),
+              ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
+              ...(error.details ?? []),
+              ...reportFacts(),
+            ]) } }),
         atMs: error.atMs,
         canRetry: error.retry !== null,
         retryBusy: error.retryBusy,
