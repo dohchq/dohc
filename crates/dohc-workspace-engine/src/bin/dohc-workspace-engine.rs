@@ -24,7 +24,7 @@ use dohc_workspace_engine::live_application_ingress::{
     LiveApplicationIngress, LiveApplicationIngressConfig, UploadCompletion,
 };
 use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -308,12 +308,17 @@ where
     let writer_signal = writer_gone_tx.clone();
     let writer_active_egress = Arc::clone(&active_egress);
     let writer_connection = Arc::clone(&connection);
+    let input_closed = Arc::new(AtomicBool::new(false));
+    let writer_input_closed = Arc::clone(&input_closed);
     let writer = tokio::spawn(async move {
         let result =
             write_output(output, &mut output_rx, &writer_limits, writer_active_egress).await;
+        // Read before this task retires anything, so a writer failure that came
+        // before the client closed its input stays a failure.
+        let after_input_closed = writer_input_closed.load(Ordering::SeqCst);
         writer_connection.retire();
         let _ = writer_signal.send(true);
-        result
+        (result, after_input_closed)
     });
 
     // Service-initiated notices become wire Event envelopes, sequenced per
@@ -360,7 +365,6 @@ where
     let mut negotiated_max_frame_bytes = WireLimits::default().max_frame_bytes;
     let mut keep_running = true;
     let mut read_error: Option<io::Error> = None;
-    let mut input_closed = false;
     let active_requests = Arc::new(Mutex::new(HashSet::new()));
     let mut request_tasks = JoinSet::new();
     while keep_running {
@@ -409,7 +413,7 @@ where
             }
         };
         if read == 0 {
-            input_closed = !*writer_gone_rx.borrow();
+            input_closed.store(true, Ordering::SeqCst);
             break;
         }
         decoder.push(&read_buf[..read]);
@@ -679,7 +683,7 @@ where
     let _ = event_forwarder.await;
     drop(output_tx);
     drop(writer_gone_tx);
-    let writer_result = writer
+    let (writer_result, after_input_closed) = writer
         .await
         .map_err(|_| io::Error::other("stdout writer task failed"))?;
     // Surface the guaranteed-run workspace close first (a resource/durability
@@ -689,10 +693,10 @@ where
     if let Some(error) = read_error {
         return Err(error);
     }
-    // The client closed its input while the writer still ran, so this
-    // shutdown retired the connection. A frame that retirement cut short was
-    // going to a client that had already left.
-    if input_closed
+    // The writer stopped after the client closed its input, so this shutdown's
+    // retirement cut the frame short. The client was done sending and is not
+    // waiting on that frame.
+    if after_input_closed
         && writer_result
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionAborted)
@@ -1591,7 +1595,7 @@ mod tests {
     use dohc_engine_protocol::transport::{RequestContext, ServiceResponse};
     use dohc_engine_protocol::wire::{BlobStart, Request as WireRequest, Response as WireResponse};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
     use std::task::{Context as TaskContext, Poll};
     use std::time::Duration;
     use tokio::io::ReadBuf;
@@ -4246,19 +4250,16 @@ mod tests {
         // that is left, and that flush never finishes.
         let limits = WireLimits::default();
         let mut decoder = FrameDecoder::new(limits.clone());
-        let mut read = [0; 4096];
-        let mut answered = Vec::new();
-        while answered.is_empty() {
-            let count = client_input.read(&mut read).await.unwrap();
-            assert_ne!(count, 0, "the daemon closed before its acknowledgement");
-            decoder.push(&read[..count]);
-            while let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() {
-                if let Envelope::Response(response) = decode_control(&payload, &limits).unwrap() {
-                    answered.push(response.id);
-                }
-            }
-        }
-        assert_eq!(answered, [91]);
+        let Envelope::HelloAck(_) = next_envelope(&mut decoder, &mut client_input, &limits).await
+        else {
+            panic!("expected the helloAck");
+        };
+        let Envelope::Response(response) =
+            next_envelope(&mut decoder, &mut client_input, &limits).await
+        else {
+            panic!("expected the acknowledgement");
+        };
+        assert_eq!(response.id, 91);
         client_output.shutdown().await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), run)
             .await
