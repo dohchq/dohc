@@ -81,10 +81,12 @@ test("a notice's Details opens its report in place, scrolls a long one, and keep
       // A long report scrolls inside its block, which stops at 240px.
       for (const block of [toasts.nth(2).getByTestId("workspace-shell-error-details-text"), part.getByTestId("notice-details-long-details-text")]) {
         const report = block.locator("pre");
-        const size = await report.evaluate((node) => ({ client: node.clientHeight, scroll: node.scrollHeight }));
+        const size = await report.evaluate((node) => ({ client: node.clientHeight, scroll: node.scrollHeight, overflow: getComputedStyle(node).overflowY }));
         expect(size.client).toBeLessThanOrEqual(240);
         expect(size.scroll).toBeGreaterThan(size.client);
-        await report.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+        expect(size.overflow).toBe("auto");
+        const scrolled = await report.evaluate((node) => { node.scrollTop = node.scrollHeight; return node.scrollTop; });
+        expect(scrolled, "the report scrolls inside its block").toBeGreaterThan(0);
       }
       await shoot(page, part, `notice-details-${theme}-scrolled`);
 
