@@ -1977,7 +1977,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* Details closed, open, and open with a report long enough to scroll. */}
-      <Section part="details" title="Details">
+      <Section part="notice-details" title="Notice details">
         <div className={`flex w-full flex-wrap items-start gap-x-6 gap-y-4 ${SHADOW_ROOM}`}>
           <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
           <DetailsOpen>
