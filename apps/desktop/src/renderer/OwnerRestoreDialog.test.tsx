@@ -358,16 +358,16 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   const unnamed = connected.find(badge => badge !== plugged)!;
   const run = badges.find(badge => badge.getAttribute("aria-label") === "agent")!;
   fireEvent.focus(plugged);
-  expect(screen.getByRole("tooltip").textContent).toContain("Claude (as reported)");
-  expect(screen.getByRole("tooltip").textContent).toContain("Connected agent");
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Claude (as reported)");
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Connected agent");
   fireEvent.blur(plugged);
   // An agent that gave no name shows as "Agent", not by dohc's id for it, and nothing marks it as reported.
   expect(shownName(unnamed)).toBe("Agent");
   fireEvent.focus(unnamed);
-  expect(screen.getByRole("tooltip").textContent).toBe("AgentConnected agent");
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toBe("AgentConnected agent");
   fireEvent.blur(unnamed);
   fireEvent.focus(run);
-  expect(screen.getByRole("tooltip").textContent).toContain("Owned by Account reader");
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toContain("Owned by Account reader");
   // Neither the card nor the row shows the id.
   expect(run.closest("li")!.textContent!.split("Change details")[0]).not.toContain("trip");
   expect(run.parentElement!.nextElementSibling!.textContent).toBe("Agent");
