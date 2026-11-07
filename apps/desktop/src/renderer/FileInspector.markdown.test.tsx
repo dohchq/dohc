@@ -16,6 +16,7 @@ import {
 } from "vitest";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 // Collect the real lazy modules before hook and renderer assertion timers start.
@@ -125,6 +126,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    resetOrphanedDrafts();
   });
 
   it("opens a note over the limit in bytes as the read preview, even under it in characters", async () => {
@@ -169,6 +171,8 @@ describe("FileInspector renders markdown through the shared component map", () =
   });
 
   it("leaves a truncated file's reason to its notice: no strip sentence and no chip tooltip", async () => {
+    // A set-aside edit puts the chip up, which a clean truncated file has not.
+    captureOrphanedDraft("ws-1", "large.md", "Earlier text");
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Large document\n\nThis is the bounded prefix.\n",
       truncated: true,
@@ -177,9 +181,11 @@ describe("FileInspector renders markdown through the shared component map", () =
 
     await screen.findByTestId("markdown-source-view");
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
-    // The bounded viewer has no read-only strip, and no chip repeats the notice.
+    // The bounded viewer has no read-only strip, and the chip doesn't repeat the notice.
     expect(screen.queryByTestId("view-markdown-source")).toBeNull();
-    expect(screen.queryByTestId("markdown-save-state")?.getAttribute("title") ?? "").toBe("");
+    const chip = await screen.findByTestId("markdown-save-state");
+    expect(chip.dataset.state).toBe("recovery");
+    expect(chip.getAttribute("title")).toBe("");
   });
 
   it("shows truncated markdown in the bounded read-only source viewer", async () => {

@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
-import { CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "./readOnlyReasons";
+import { ACCESS_ENDED_REASON, CONNECTION_LOST_REASON, REPLACEMENT_FAILED_REASON } from "./readOnlyReasons";
 import { DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE, REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE } from "./ui/StateMark";
 import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -599,9 +599,11 @@ describe("engine markdown source view", () => {
   });
 
   it.each([
-    ["deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
-    ["object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
-  ] as const)("drops the lost connection's reason once the file is %s", async (gone, notice) => {
+    ["reconnecting", CONNECTION_LOST_REASON, "deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["reconnecting", CONNECTION_LOST_REASON, "object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["access-ended", ACCESS_ENDED_REASON, "deleted", DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+    ["access-ended", ACCESS_ENDED_REASON, "object-changed", REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE],
+  ] as const)("drops the %s reason once the file is %s", async (cause, reason, gone, notice) => {
     const user = userEvent.setup();
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
@@ -609,9 +611,9 @@ describe("engine markdown source view", () => {
     await screen.findByTestId("markdown-source-toggle");
     await user.click(screen.getByTestId("markdown-source-toggle"));
     await screen.findByTestId("view-markdown-source");
-    act(() => pushSaveState("read-only", 0, "reconnecting"));
+    act(() => pushSaveState("read-only", 0, cause));
     await waitFor(() =>
-      expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe(CONNECTION_LOST_REASON),
+      expect(screen.getByTestId("view-markdown-source").querySelector("span")?.textContent).toBe(reason),
     );
 
     act(() => pushSaveState(gone, 0));

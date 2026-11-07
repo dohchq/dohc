@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { CONNECTION_LOST_REASON, readOnlyReasons, transitionReason } from "./readOnlyReasons";
 
-const NONE = { accessEnded: false, shared: false, transition: undefined };
-const TURN = { readOnlyWhileEditing: true, readOnlyCause: "reconnecting", deletedWhileEditing: false } as const;
+const NONE = { gone: false, accessEnded: false, shared: false, transition: undefined, notSaved: false };
+const TURN = { readOnlyWhileEditing: true, readOnlyCause: "reconnecting" } as const;
 
 describe("readOnlyReasons", () => {
   it("says a shared document is shared to read", () => {
@@ -19,6 +19,18 @@ describe("readOnlyReasons", () => {
     ]);
   });
 
+  it("says dohc could not save once the refused edit's row is dismissed", () => {
+    expect(readOnlyReasons({ ...NONE, notSaved: true })).toEqual([
+      "dohc could not save this document. Close and reopen it to edit.",
+    ]);
+  });
+
+  it("gives no sentence once the file is gone, whatever else applies", () => {
+    expect(
+      readOnlyReasons({ gone: true, accessEnded: true, shared: true, transition: CONNECTION_LOST_REASON, notSaved: true }),
+    ).toEqual([]);
+  });
+
   it("gives no sentence for a cause whose own notice states it", () => {
     expect(readOnlyReasons(NONE)).toEqual([]);
   });
@@ -33,9 +45,5 @@ describe("transitionReason", () => {
     // Ended access has its own sentence.
     expect(transitionReason({ ...TURN, readOnlyCause: "access-ended" })).toBeUndefined();
     expect(transitionReason({ ...TURN, readOnlyWhileEditing: false })).toBeUndefined();
-  });
-
-  it("leaves the reason to the notice once the file is gone", () => {
-    expect(transitionReason({ ...TURN, deletedWhileEditing: true })).toBeUndefined();
   });
 });

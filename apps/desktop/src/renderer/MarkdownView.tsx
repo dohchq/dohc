@@ -872,9 +872,13 @@ export function MarkdownView(props: {
   // Why editing is off. The source strip and the chip's tooltip both say it,
   // and with no sentence the chip has no tooltip.
   const readOnlyWords = readOnlyReasons({
+    gone: engine.deletedWhileEditing,
     accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
     shared: !!props.forceReadOnly,
     transition: transitionReason(engine),
+    // Its set-aside row says why until the person dismisses it.
+    notSaved: engine.permanentFailureWhileEditing &&
+      !orphanedDrafts.some((draft) => draft.id === engine.permanentFailureDraftId),
   }).join(" ");
 
   useEffect(() => {
