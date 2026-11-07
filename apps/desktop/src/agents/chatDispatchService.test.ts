@@ -3194,7 +3194,7 @@ describe("chatDispatchService", () => {
           workspaceId: WORKSPACE_ID, triggerMessageId: `later-${index}`,
           threadId: first.threadId, agentId: "default",
         });
-        const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "runner" });
+        const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
         if (!claim) throw new Error("Expected a run.");
         if (index === 2) {
           await fixture.dispatch.completeRun({ runId: claim.run.runId, exitCode: 0 });
@@ -3271,14 +3271,14 @@ describe("chatDispatchService", () => {
       let runId = first.runId;
       if (failure === "capped") {
         await fixture.service.retryStoppedRun(WORKSPACE_ID, first.threadId, runId);
-        const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "runner" });
+        const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
         if (!second) throw new Error("Expected the second attempt.");
         runId = second.run.runId;
       } else {
         await fixture.dispatch.recordTrigger({
           workspaceId: WORKSPACE_ID, threadId: first.threadId, triggerMessageId: "posted", agentId: "default",
         });
-        const posted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "runner" });
+        const posted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
         if (!posted) throw new Error("Expected a run.");
         runId = posted.run.runId;
         await linkAgentReply(fixture, first.threadId, runId);
@@ -3321,7 +3321,7 @@ describe("chatDispatchService", () => {
         expect(await stateOf(fixture, run.threadId)).toMatchObject({ runId: run.runId, retryable: true });
         await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
         expect(await stateOf(fixture, run.threadId)).toBeUndefined();
-        const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "runner" });
+        const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
         if (!second) throw new Error("Expected the second attempt.");
         await finish(second.run.runId);
         await fixture.owedRunNotices.add(WORKSPACE_ID, second.run.runId);
@@ -3361,7 +3361,7 @@ describe("chatDispatchService", () => {
         await fixture.dispatch.recordTrigger({
           workspaceId: WORKSPACE_ID, triggerMessageId: message.id, threadId, agentId: "default",
         });
-        const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "runner" });
+        const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
         if (!first) throw new Error("Expected a run.");
         let runId = first.run.runId;
         if (failure === "posted") {
@@ -3373,7 +3373,7 @@ describe("chatDispatchService", () => {
           await fixture.dispatch.failRun({ runId, reason: "app restart during run" });
           await activate(fixture);
           await fixture.service.retryStoppedRun(WORKSPACE_ID, threadId, runId);
-          const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "runner" });
+          const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { agentId: "default", command: "runner" });
           if (!second) throw new Error("Expected the second attempt.");
           runId = second.run.runId;
           // The next launch records the interrupted second attempt and owes its notice.

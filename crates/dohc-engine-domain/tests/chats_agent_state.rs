@@ -1295,7 +1295,7 @@ fn every_failed_ending_can_requeue_once() {
                         .is_empty()
                 );
                 let claim = chats
-                    .claim_next_pending(WS, "run-2", "agent", None, 40, &NO_FAULTS)
+                    .claim_next_pending(WS, "default", "run-2", "agent", None, 40, &NO_FAULTS)
                     .expect("claim")
                     .expect("second attempt");
                 assert_eq!(claim.dispatch.attempt_count, 2);
@@ -1393,7 +1393,7 @@ fn requeue_of_a_completed_failure_and_its_covered_requests_is_atomic() {
                 .expect("enqueue");
         }
         chats
-            .claim_next_pending(WS, "run", "agent", None, 20, &NO_FAULTS)
+            .claim_next_pending(WS, "default", "run", "agent", None, 20, &NO_FAULTS)
             .expect("claim")
             .expect("some claim");
         chats
