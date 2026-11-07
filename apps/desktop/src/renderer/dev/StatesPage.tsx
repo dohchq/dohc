@@ -60,6 +60,7 @@ import { SettingsNav } from "../settings/SettingsNav";
 import { SETTINGS_SECTIONS } from "../settings/settingsRegistry";
 import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "../settings/UsageRecordSettings";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
+import { deleteConfirmText } from "../workbench/deleteConfirm";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
@@ -1322,14 +1323,23 @@ function notice(id: string, tone: "danger" | "success") {
 }
 
 // A failure whose text runs past three lines: the row clips it and offers Show more.
+const SELF_TEST_TITLE = "Nova didn't reply to the check.";
+const SELF_TEST_BODY =
+  "Nova's runner stopped at step 3 of 5, before its tools started, so the check never reached Nova. dohc kept the runner's log and the step that stopped with this notice, and Copy puts both on your clipboard. Fix what the log names, then run the check again.";
 const LONG_NOTICE = {
   id: "self-test",
   tone: "danger" as const,
-  title: "The self-test did not finish",
-  body: "dohc stopped the self-test at its third step and kept the log at C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log. Open the log to see the step that stopped, then try again.",
+  title: SELF_TEST_TITLE,
+  body: SELF_TEST_BODY,
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop }],
-  copyText: "The self-test did not finish",
+  // The body promises that Copy gives the log and the step that stopped.
+  copyText: [
+    SELF_TEST_TITLE,
+    SELF_TEST_BODY,
+    "Log: C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log",
+    "Step that stopped: 3 of 5",
+  ].join("\n"),
   onDismiss: noop,
 };
 
@@ -1371,12 +1381,28 @@ const MERGE_BLOCKED_NOTICE = {
   onDismiss: noop,
 };
 
+// Twelve files picked in Research, as Explorer lists them.
+const DELETE_PATHS = [
+  "Research/competitors.md",
+  "Research/meeting-2026-07-08.md",
+  "Research/meeting-2026-07-15.md",
+  "Research/interview-notes.md",
+  "Research/pricing.md",
+  "Research/survey-results.csv",
+  "Research/market-size.md",
+  "Research/open-questions.md",
+  "Research/sources.md",
+  "Research/summary.md",
+  "Research/timeline.md",
+  "Research/whiteboard.png",
+];
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
     // `contain: paint` makes this box the containing block of the frame's
     // fixed backdrop, so the dialog sits over these rows and not the window.
-    <div className="relative h-72 w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
+    <div className="relative h-[30rem] w-full overflow-hidden rounded-lg border border-line bg-bg [contain:paint]">
       <div className="flex flex-col gap-2 p-4 text-[13px] text-muted">
         <span>Research</span>
         <span>competitors.md</span>
@@ -1384,20 +1410,13 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
       </div>
       <OverlayFrame panelRef={panelRef}>
         <ConfirmDialogCard
-          intent="danger"
-          title="Delete 12 files from Research?"
-          confirmLabel="Delete files"
+          {...deleteConfirmText(DELETE_PATHS, null)}
           onCancel={noop}
           onConfirm={noop}
           testId={`states-dialog-${props.theme}`}
           cancelTestId={`states-dialog-cancel-${props.theme}`}
           confirmTestId={`states-dialog-confirm-${props.theme}`}
-        >
-          <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
-            restore them.
-          </p>
-        </ConfirmDialogCard>
+        />
       </OverlayFrame>
     </div>
   );

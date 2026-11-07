@@ -4,6 +4,7 @@ import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isDeleteKey } from "../ui/keys";
 import { SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { deleteConfirmText } from "./deleteConfirm";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MiddleCutName } from "../ui/MiddleCutName";
@@ -2092,9 +2093,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
       {confirmDelete ? (
         <ConfirmDialog
-          title={`Delete ${confirmDelete.length === 1 ? basenameOf(confirmDelete[0]!) : `${confirmDelete.length} items`}?`}
-          confirmLabel="Delete"
-          intent="danger"
+          {...deleteConfirmText(confirmDelete, props.shareView)}
           testId="delete-confirm"
           cancelTestId="cancel-delete"
           confirmTestId="confirm-delete"
@@ -2103,31 +2102,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             performDeletes(confirmDelete);
             setConfirmDelete(null);
           }}
-          details={
-            confirmDelete.length > 1 ? (
-              <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
-                {confirmDelete.map((path) => (
-                  <li
-                    key={path}
-                    className="border-b border-line px-2 py-1 text-[12px] text-muted last:border-b-0"
-                  >
-                    <span className="break-all">{path}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null
-          }
-        >
-          <p className="m-0 mt-2 text-[13px] text-muted">
-            {props.shareView
-              ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-                  confirmDelete.length === 1 ? "it" : "them"
-                } from. ${
-                  props.shareView.granterEmail ?? "The person who shared it"
-                } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-              : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
-          </p>
-        </ConfirmDialog>
+        />
       ) : null}
     </>
   );
