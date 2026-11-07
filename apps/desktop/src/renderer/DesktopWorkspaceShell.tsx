@@ -745,6 +745,12 @@ export function DesktopWorkspaceShell(props: {
   // The address a failed attempt used. Only set when a notice's Try again has
   // to reopen the connection dialog, and cleared when that dialog closes.
   const [cloudRetryServerUrl, setCloudRetryServerUrl] = useState("");
+  // The dialog signs in again to the session's server, for a sign-in the
+  // server stopped accepting. Cleared when the dialog closes.
+  const [cloudRenew, setCloudRenew] = useState(false);
+  // Counts each Sign in again. Keyed on it, a renewal dialog already open
+  // starts over, as a newly opened one would, though nothing else changed.
+  const [cloudRenewal, setCloudRenewal] = useState(0);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   // The part a Customize… command opened Settings for, if one did.
   const [settingsFocus, setSettingsFocus] = useState<CustomizePart | null>(null);
@@ -1307,6 +1313,7 @@ export function DesktopWorkspaceShell(props: {
   const closeCloud = useCallback(() => {
     setCloudOpen(false);
     setCloudRetryServerUrl("");
+    setCloudRenew(false);
     // A sign-in/out inside the dialog changes the relay session —
     // refresh so Chats presence lights up (or goes dormant) at once.
     refreshCloudStatus();
@@ -1391,6 +1398,29 @@ export function DesktopWorkspaceShell(props: {
       onDeleteAccount: startAccountDeletion,
     };
   }, [startAccountDeletion, reviewingAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, hasReceivedShares, openSettings, refreshCloudStatus, reportShellFailure, workspaceId]);
+  // Notices' Try again while dohc can't confirm the workspace's account: the
+  // enable that Settings' Try again runs. A failure it can't fix here, such as
+  // a passphrase, retries from Settings.
+  const confirmSyncAccount = useCallback(() => {
+    const forWorkspace = workspaceId;
+    const current = () => workspaceIdRef.current === forWorkspace;
+    void bridge().cloudEnableSync({ workspaceId: forWorkspace }).then(
+      () => {
+        if (current()) refreshCloudStatus();
+      },
+      (cause: unknown) => {
+        if (!current()) return;
+        reportShellFailure({
+          message: ipcErrorMessage(cause, "dohc could not enable sync for this workspace."),
+          cause,
+          retry: () => {
+            if (reviewingAccountDeletion()) return false;
+            openSettings("cloud");
+          },
+        });
+      },
+    );
+  }, [openSettings, refreshCloudStatus, reportShellFailure, reviewingAccountDeletion, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
@@ -2153,6 +2183,42 @@ export function DesktopWorkspaceShell(props: {
   const [syncStatus, syncStatusLane] = useSnapshotLane<SyncStatusResult | null>(
     engineHistoryToken,
     null,
+  );
+  // Sign in again, from Notices or Settings: the Cloud dialog starts the same
+  // sign-in as Connect server at the session's server, with no Disconnect.
+  // The new session rebuilds the engine, so sync resumes with nothing else
+  // asked for, and a saved pause stays.
+  const signInAgain = useCallback(() => {
+    closeSettings();
+    setCloudRetryServerUrl("");
+    setCloudRenew(true);
+    setCloudRenewal((renewal) => renewal + 1);
+    setCloudOpen(true);
+  }, [closeSettings]);
+  // A renewal's failure, whatever step failed. Once its dialog has closed,
+  // Try again signs in again from the start: the expired session is still
+  // saved, and a plain dialog would hand it to Settings and start nothing.
+  const reportRenewalError = useCallback(
+    (error: ConnectionErrorReport) => {
+      reportShellFailure({
+        message: error.message,
+        cause: error.cause,
+        retry: () => {
+          if (reviewingAccountDeletion()) return false;
+          if (error.retry?.()) return;
+          signInAgain();
+        },
+      });
+    },
+    [reviewingAccountDeletion, reportShellFailure, signInAgain],
+  );
+  // Only the sync status knows the server stopped accepting the sign-in: the
+  // saved session still matches the workspace. A conflict can take the title
+  // bar meanwhile, and the switch still mustn't read on.
+  const signInExpired = syncStatus?.signInExpired === true;
+  const settingsCloud = useMemo<CloudSettings>(
+    () => ({ ...cloudSettings, signInExpired, onSignInAgain: signInAgain }),
+    [cloudSettings, signInAgain, signInExpired],
   );
   const shownStopFailures=useRef(new Map<string,string>());
   useEffect(() => {
@@ -6398,6 +6464,10 @@ export function DesktopWorkspaceShell(props: {
               shareChangeNotices={shareChangeNotices}
               onReviewShareChanges={setReviewProposalId}
               onOpenSettings={() => openSettings()}
+              onConnectServer={cloudSettings.onConnect}
+              onSignInAgain={signInAgain}
+              onConfirmSyncAccount={confirmSyncAccount}
+              onOpenSyncSettings={openSyncSettings}
               onRebuildEngineStore={(returnFocus) => {
                 const refusal = syncStatus?.engineStoreRefused;
                 if (!refusal || engineStoreRefusalRecovery(refusal) !== "rebuild") return;
@@ -7443,15 +7513,20 @@ export function DesktopWorkspaceShell(props: {
           {/* Once signed in, what is left is settings: the account and the
               sync switch. A session the dialog finds goes there too. */}
           <CloudLogin
+            key={cloudRenewal}
             handOffSession
+            renew={cloudRenew}
             onClose={closeCloud}
             onConnected={() => {
               setCloudOpen(false);
               setCloudRetryServerUrl("");
               refreshCloudStatus();
-              openSettings("cloud");
+              // A renewed sign-in resumes sync by itself: nothing in Settings
+              // is left to do.
+              if (cloudRenew) setCloudRenew(false);
+              else openSettings("cloud");
             }}
-            onConnectionError={reportConnectionError}
+            onConnectionError={cloudRenew ? reportRenewalError : reportConnectionError}
             initialServerUrl={cloudRetryServerUrl}
           />
         </Overlay>
@@ -7540,7 +7615,7 @@ export function DesktopWorkspaceShell(props: {
             initialSection={settingsSection}
             {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
             onClose={closeSettings}
-            cloud={cloudSettings}
+            cloud={settingsCloud}
             onOpenSharing={(target) => {
               closeSettings();
               setSharingFocus(target);

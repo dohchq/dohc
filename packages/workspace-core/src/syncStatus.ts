@@ -7,7 +7,12 @@ type SyncState =
   | "local-changes"
   | "conflict"
   | "sync-failed"
-  | "cloud-disconnected";
+  | "not-connected"
+  | "account-unconfirmed"
+  | "sign-in-expired"
+  | "update-required";
+
+type SyncBlocked = "not-connected" | "account-unconfirmed" | "sign-in-expired" | "update-required";
 
 interface SyncStatus {
   state: SyncState;
@@ -21,15 +26,18 @@ interface SyncStatusInput {
   hasConflict: boolean;
   // The last sync pass failed and none has succeeded since.
   syncFailed: boolean;
-  cloudEnabled: boolean;
-  cloudConnected: boolean;
+  // Sync is on but can't run until someone acts: nobody is connected to a
+  // server, dohc can't confirm the account that syncs the workspace, the
+  // server stopped accepting the sign-in, or one side must update. Null
+  // while sync can run, and for a local-only workspace.
+  syncBlocked: SyncBlocked | null;
   lastSyncedAtMs: number | null;
 }
 
 // Single source of truth for state precedence so the shell never re-derives
 // it: conflict beats everything, then a failed sync (a retry in flight does
-// not undo it), then in-flight, then disconnect (cloud only), then pending
-// edits, then settled.
+// not undo it), then in-flight, then a blocked sync, then pending edits,
+// then settled.
 export function deriveSyncStatus(input: SyncStatusInput): SyncStatus {
   const base = {
     pendingChangeCount: input.pendingChangeCount,
@@ -38,11 +46,7 @@ export function deriveSyncStatus(input: SyncStatusInput): SyncStatus {
   if (input.hasConflict) return { ...base, state: "conflict" };
   if (input.syncFailed) return { ...base, state: "sync-failed" };
   if (input.inFlight) return { ...base, state: "syncing" };
-  // Disconnection only matters once the user has opted into cloud sync;
-  // local-only workspaces are never "disconnected".
-  if (input.cloudEnabled && !input.cloudConnected) {
-    return { ...base, state: "cloud-disconnected" };
-  }
+  if (input.syncBlocked) return { ...base, state: input.syncBlocked };
   if (input.pendingChangeCount > 0) return { ...base, state: "local-changes" };
   return { ...base, state: "synced" };
 }

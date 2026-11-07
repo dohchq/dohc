@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
-import { Check, Minus, Plus, RotateCcw } from "lucide-react";
+import { Check, LoaderCircle, Minus, Plus, RotateCcw } from "lucide-react";
 import { AGENT_HUES, IDENTITY_HUES, palette, type AgentHue, type IdentityHue } from "../tokens";
 import { useRadioGroup } from "../ui/SegmentedControl";
 
@@ -303,34 +303,42 @@ export function SwitchControl(props: {
   onChange: (checked: boolean) => void;
   ref?: Ref<HTMLButtonElement>;
 }) {
+  // While busy, a spinner sits left of the switch. A row's controls hold its
+  // right edge, so the switch does not move when the spinner shows. Under
+  // reduced motion the global rule stops the spin, so it shows a still ring.
   return (
-    <button
-      ref={props.ref}
-      type="button"
-      role="switch"
-      aria-label={props.label}
-      aria-labelledby={props.labelledBy}
-      title={props.tooltip}
-      aria-description={props.description}
-      aria-checked={props.checked}
-      aria-busy={props.busy || undefined}
-      disabled={props.disabled}
-      onClick={() => {
-        if (!props.disabled) props.onChange(!props.checked);
-      }}
-      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
-        props.checked ? "border-accent bg-accent" : "border-line bg-line"
-      }`}
-    >
-      {/* Anchored at the track's left edge: without left-0.5 the thumb
-          started from the button's centered content and slid off the end. */}
-      <span
-        aria-hidden
-        className={`absolute left-0.5 top-0.5 size-3.5 rounded-full transition-transform ${
-          props.checked ? "translate-x-4 bg-bg" : "translate-x-0 bg-muted"
+    <>
+      {props.busy ? (
+        <LoaderCircle data-testid="switch-busy" size={12} aria-hidden className="shrink-0 animate-spin text-subtle" />
+      ) : null}
+      <button
+        ref={props.ref}
+        type="button"
+        role="switch"
+        aria-label={props.label}
+        aria-labelledby={props.labelledBy}
+        title={props.tooltip}
+        aria-description={props.description}
+        aria-checked={props.checked}
+        aria-busy={props.busy || undefined}
+        disabled={props.disabled}
+        onClick={() => {
+          if (!props.disabled) props.onChange(!props.checked);
+        }}
+        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
+          props.checked ? "border-accent bg-accent" : "border-line bg-line"
         }`}
-      />
-    </button>
+      >
+        {/* Anchored at the track's left edge: without left-0.5 the thumb
+            started from the button's centered content and slid off the end. */}
+        <span
+          aria-hidden
+          className={`absolute left-0.5 top-0.5 size-3.5 rounded-full transition-transform ${
+            props.checked ? "translate-x-4 bg-bg" : "translate-x-0 bg-muted"
+          }`}
+        />
+      </button>
+    </>
   );
 }
 
