@@ -504,7 +504,6 @@ describe("CLI socket server", () => {
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
         agentIdsNamedIn: async () => [],
-        isOwnAgentId: async () => false,
         localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
@@ -1233,7 +1232,7 @@ describe("CLI socket server", () => {
     expect(history.undoHistoryOperation).not.toHaveBeenCalled();
   });
 
-  it("keeps MCP moves and deletes relative to a subfolder cwd under the agent's name", async () => {
+  it("keeps MCP moves and deletes relative to a subfolder cwd, as the unnamed agent outside a run", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
     const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: input.fromPath, toPath: input.toPath }));
@@ -1247,7 +1246,7 @@ describe("CLI socket server", () => {
     expect(await deleteWorkspacePath(ctx, { path: "notes" })).toEqual({
       ok: false, deleted: ["notes/a.txt"], path: "notes/b.txt", reason: "History could not record the delete of notes/b.txt.",
     });
-    expect(movePath.mock.calls[0]?.slice(0, 2)).toEqual([{ fromPath: "app/a.txt", toPath: "app/b.txt" }, expect.objectContaining({ actorOriginId: "Client" })]);
+    expect(movePath.mock.calls[0]?.slice(0, 2)).toEqual([{ fromPath: "app/a.txt", toPath: "app/b.txt" }, expect.objectContaining({ actorOriginId: "dohc-mcp" })]);
     expect(deletePath.mock.calls[0]?.slice(0, 2)).toEqual(["app/notes", expect.objectContaining({ actorOriginId: "dohc-mcp" })]);
     // Every path a failure names reads as the caller spells it.
     movePath.mockResolvedValueOnce({ ok: false, path: "app/a.txt", deleted: ["app/dest/1.txt"],
@@ -1443,13 +1442,13 @@ describe("CLI socket server", () => {
     expect(describedEndpoint).not.toBe(join(stateDir, CLI_SOCKET_FILE));
   });
 
-  it("derives stop provenance for people, named agents, and agent runs", async () => {
+  it("derives stop provenance for people, connected agents, and agent runs", async () => {
     const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
     context.stopSync = stop;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
     expect(stop).toHaveBeenLastCalledWith(undefined);
     await invoke("stopSync", { cwd: workspaceRoot, actor: "agent", agent: "Claude" });
-    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 });
     agentRunDepth = 2;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
     expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
@@ -2724,14 +2723,13 @@ describe("CLI socket server", () => {
       path: "notes/plan.md",
       replacement: "Appended.",
     })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
-    // An agent that names itself is recorded under that name, and one that
-    // does not uses the unnamed agent label.
+    // Outside a run, an agent is the unnamed agent, whatever name it gives.
     const agent = { actorKind: "agent", onBehalfOf: "person-local", depth: 0 };
     expect(edits).toEqual([
       {
         path: "notes/plan.md",
         edit: { find: "Draft.", replacement: "Final." },
-        origin: { actorOriginId: "claude-code", attribution: agent },
+        origin: { actorOriginId: "dohc-mcp", attribution: agent },
       },
       {
         path: "notes/plan.md",
@@ -3067,7 +3065,7 @@ describe("CLI socket server", () => {
     expect(calls.openWorkspace).toBe(opened);
   });
 
-  it("records a named MCP client's file write and reply in a dispatched run as one agent", async () => {
+  it("records a named MCP client's file write and reply as one agent: a dispatched run's, else the unnamed agent", async () => {
     if (!store) throw new Error("Store is not available");
     const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
     context.writeFiles = writeFiles;
@@ -3077,32 +3075,38 @@ describe("CLI socket server", () => {
     const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
     const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
     const threadId = `thread-${posted.threadId.slice("th_".length)}`;
-    // The client announced "Codex" in its MCP handshake, and the MCP server
-    // names it on the file write and the reply.
-    async function writeAndReply() {
-      await writeWorkspaceFile(ctx, { path: "plan.txt", content: "Day 2" }, "Codex");
-      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." }, "Codex");
+    // The MCP server names the client on the file write and the reply: the
+    // name from its handshake, or a claim to "default", the person's first agent's id.
+    async function writeAndReply(name: string) {
+      await writeWorkspaceFile(ctx, { path: "plan.txt", content: "Day 2" }, name);
+      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." }, name);
       if (!reply.ok) throw new Error(reply.reason);
       const message = (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).find((row) => row.id === reply.messageId);
       const origin = writeFiles.mock.lastCall?.[1];
       if (!origin || !message?.authorActorKey) throw new Error("Expected the file write and the reply.");
       return {
-        file: deriveMomentActor(agentWriteAuthor(origin), { source: "own-store", workspaceId: WORKSPACE_ID, identity }, "Codex").key,
+        file: deriveMomentActor(agentWriteAuthor(origin), { source: "own-store", workspaceId: WORKSPACE_ID, identity }, name).key,
         reply: parseActorKey(message.authorActorKey),
         name: message.author.displayName,
       };
     }
 
+    // In a run, both are the run's agent, whatever name the client gives.
     dispatchedRun = "codex";
-    const during = await writeAndReply();
-    expect(during.reply).toEqual(during.file);
+    for (const name of ["Codex", "default"]) {
+      const during = await writeAndReply(name);
+      expect(during.file).toMatchObject({ kind: "agent", claimedName: "codex" });
+      expect(during.reply).toEqual(during.file);
+    }
 
-    // Outside a run, the client's writes keep the name it gave.
+    // Outside a run, both are the unnamed agent's, and the reply shows the name given.
     dispatchedRun = null;
-    const outside = await writeAndReply();
-    expect(outside.file).toMatchObject({ kind: "agent", claimedName: "Codex" });
-    expect(outside.reply).toEqual(outside.file);
-    expect(outside.name).toBe("Codex");
+    for (const name of ["Codex", "default"]) {
+      const outside = await writeAndReply(name);
+      expect(outside.file).toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
+      expect(outside.reply).toEqual(outside.file);
+      expect(outside.name).toBe(name);
+    }
   });
 
   it("creates a Markdown document with provenance the door derives", async () => {
@@ -3148,7 +3152,7 @@ describe("CLI socket server", () => {
       path: "notes/new.md",
       markdown: "# New",
       origin: {
-        actorOriginId: "claude-code",
+        actorOriginId: "dohc-mcp",
         attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 },
       },
     }]);

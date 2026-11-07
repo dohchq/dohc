@@ -125,7 +125,6 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
     agentIdsNamedIn: async () => [],
-    isOwnAgentId: async () => false,
     localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
@@ -1070,11 +1069,11 @@ describe("raw fileWrite socket requests", () => {
     expect(await f.invoke([{ path, contentBase64: "bmV3" }])).toMatchObject({ ok: false });
     expect(f.capture.writeAuthoredFile).not.toHaveBeenCalled();
   });
-  it.each([undefined, "Client name"])("records the %s handshake name at the run depth", async agent => {
+  it.each([undefined, "Client name"])("records a connected agent named %s as the unnamed agent at the run depth", async agent => {
     const f = await setup();
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     expect(await f.invoke([{ path: "plain.txt", contentBase64: "bmV3" }], "agent", agent)).toEqual({ ok: true, written: ["plain.txt"] });
-    expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2]).toEqual({ kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 });
+    expect(f.capture.writeAuthoredFile.mock.calls[0]?.[2]).toEqual({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 4 });
   });
   it("enforces byte limits and base64 validation without MCP", async () => {
     const f = await setup();
@@ -1237,7 +1236,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       expect(result).toMatchObject({ok: true, fromPath: "old.md", toPath: "new.md", undo: {available: false, paths: [],
         reason: "Rename finished. dohc could not save Undo information or update links to this file. Rename it back yourself."}});
       const authored = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
-      expect(authored).toMatchObject({author: {kind: "agent", agentId: "Client"}});
+      expect(authored).toMatchObject({author: {kind: "agent", agentId: "dohc-mcp"}});
       expect(await readMoveRecovery(f.root, authored.operationId)).toBeUndefined();
       expect(await readFile(join(f.root, "new.md"), "utf8")).toBe("original");
       expect(engine).not.toHaveBeenCalled();
@@ -1478,14 +1477,14 @@ describe("raw fileMove and fileDelete socket requests", () => {
     expect(await readFile(join(f.root, "plain.txt"), "utf8")).toBe("original");
   });
 
-  it.each([undefined, "Client name"])("records the %s handshake name at the run depth", async agent => {
+  it.each([undefined, "Client name"])("records a connected agent named %s as the unnamed agent at the run depth", async agent => {
     const f = await setup();
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     await writeFile(join(f.root, "plain.txt"), "original");
     expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
       .toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "plain.txt", toPath: "moved.txt", undo: { available: true } });
     expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/local\/trash\//) });
-    const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
+    const author = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
       { operation: "move", author, operationId: expect.stringMatching(/^dohc-operation:/) }, { operation: "delete", author, operationId: expect.stringMatching(/^dohc-operation:/) },
     ]);

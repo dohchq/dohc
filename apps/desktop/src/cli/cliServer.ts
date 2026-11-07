@@ -741,15 +741,12 @@ function writeActor(
   return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
 }
 
-// The agent writing through this socket: its handshake or --agent name. A
-// run dohc dispatched is its agent, by id, whatever name a write claims, so
-// the run's file edits and replies are one actor.
-function claimedAgentName(
-  agent: string | undefined,
-  context: CliWorkspaceContext,
-  options: CliServerOptions,
-): string | undefined {
-  return options.dispatchedAgent(context.workspaceId) ?? agent;
+// The agent an edit through this socket is recorded as. A run dohc dispatched
+// is its agent, by id, so the run's file edits and replies are one actor. Any
+// other agent is the unnamed agent: a name it gives itself is only a claim,
+// and History names an agent id by your Settings when it shows the edit.
+function editingAgentId(context: CliWorkspaceContext, options: CliServerOptions): string {
+  return options.dispatchedAgent(context.workspaceId) ?? UNNAMED_AGENT_ID;
 }
 
 // Who a chat write through this socket is. An agent's message during a run
@@ -772,7 +769,7 @@ function cliChatWriter(
 }
 
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
-// traffic carries its claimed name, or `dohc-mcp` when unnamed,
+// traffic is the run's agent, or the unnamed agent outside a run,
 // acting on behalf of the local owner, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
@@ -780,12 +777,11 @@ function collectionWriteAuthor(
   actor: CliActor,
   context: CliWorkspaceContext,
   options: CliServerOptions,
-  agent: string | undefined,
 ): ChangeAuthor {
   if (writeActor(actor, context, options) === "agent") {
     return {
       kind: "agent",
-      agentId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
+      agentId: editingAgentId(context, options),
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     };
@@ -812,16 +808,15 @@ const CREATE_AS_AGENT_REFUSAL = "a document created through the CLI socket is re
 
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under its claimed name or the unnamed agent label,
+// local owner, recorded as the run's agent or the unnamed agent,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
-  agent: string | undefined,
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): LiveDocumentEditOrigin {
   return {
-    actorOriginId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
+    actorOriginId: editingAgentId(context, options),
     attribution: {
       actorKind: "agent",
       onBehalfOf: options.localPersonId(),
@@ -900,7 +895,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
 // socket would be, at its run's depth, or the person. A press counts in the
 // chain as that agent's own record write does, and stops at the cap.
 function pressActor(actor: CliActor, context: CliWorkspaceContext, options: CliServerOptions): AutomationPressActor {
-  const author = collectionWriteAuthor(actor, context, options, undefined);
+  const author = collectionWriteAuthor(actor, context, options);
   return author.kind === "agent" ? { kind: "agent", originId: author.agentId, depth: author.depth } : { kind: "human" };
 }
 
@@ -2559,7 +2554,7 @@ async function dispatchWorkspace(
     case "stopSync":
       if (context.readOnly || !context.stopSync) throw new CliCommandError("Open the owning workspace to stop its sync.");
       return context.stopSync(writeActor(request.args.actor, context, options) === "agent"
-        ? { kind: "agent", agentId: claimedAgentName(request.args.agent, context, options) ?? UNNAMED_AGENT_ID, onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) }
+        ? { kind: "agent", agentId: editingAgentId(context, options), onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) }
         : undefined);
     case "shareCopy":
       if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
@@ -2929,7 +2924,7 @@ async function dispatchWorkspace(
         const outcome = await collections.writes.setFields({
           recordPath: validated.normalized,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, context, options, request.args.agent),
+          author: collectionWriteAuthor(request.args.actor, context, options),
         });
         return { ok: true as const, recordPath: outcome.path };
       } catch (error) {
@@ -2972,7 +2967,7 @@ async function dispatchWorkspace(
           name: request.args.name,
           recordId: request.args.recordId,
           fields: request.args.fields,
-          author: collectionWriteAuthor(request.args.actor, context, options, request.args.agent),
+          author: collectionWriteAuthor(request.args.actor, context, options),
         });
         if ("kind" in outcome) return { ok: false as const, reason: creationPartialMessage(outcome), partial: outcome };
         return {
@@ -3072,7 +3067,7 @@ async function dispatchWorkspace(
       if (request.args.actor !== "agent") return { ok: false, written: [], reason: `A file write through the CLI socket is recorded as an agent's; send actor "agent".` };
       if (!context.writeFiles) return { ok: false, written: [], reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
       try {
-        const result = await context.writeFiles(request.args.files, documentEditOrigin(request.args.agent, context, options), request.args.requestId);
+        const result = await context.writeFiles(request.args.files, documentEditOrigin(context, options), request.args.requestId);
         if (result.written?.length) await notifyWrite(options, context);
         return result;
       } catch (error) { return pathFreeFailure(error, "dohc could not write the files."); }
@@ -3086,7 +3081,7 @@ async function dispatchWorkspace(
       if (!context.historyOperation || !context.historyUndo) return { ok: false, reason: "The workspace engine is not running." };
       try {
         if (request.verb === "historyOperation") return await context.historyOperation(request.args);
-        const result = await context.historyUndo(request.args, documentEditOrigin(request.args.agent, context, options));
+        const result = await context.historyUndo(request.args, documentEditOrigin(context, options));
         if (result.ok) await notifyWrite(options, context);
         return result;
       } catch (error) { return pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`); }
@@ -3097,7 +3092,7 @@ async function dispatchWorkspace(
       if (request.args.actor !== "agent") return {ok: false, reason: 'Duplicate through the CLI socket requires actor "agent".'};
       if (!context.duplicateFile) return {ok: false, reason: "Restart dohc before duplicating this file."};
       return await onceForRequestId(context, options, request.args.requestId, ["fileDuplicate", request.args.path, request.args.agent ?? null], async () => {
-        const result = await context.duplicateFile!(request.args.path, documentEditOrigin(request.args.agent, context, options), request.args.requestId)
+        const result = await context.duplicateFile!(request.args.path, documentEditOrigin(context, options), request.args.requestId)
           .catch(error => pathFreeFailure(error, "dohc could not duplicate the file."));
         if (result.ok) await notifyWrite(options, context);
         return { done: result.ok, result };
@@ -3109,7 +3104,7 @@ async function dispatchWorkspace(
       if (request.args.actor !== "agent") return { ok: false, reason: `A file ${change} through the CLI socket is recorded as an agent's; send actor "agent".` };
       if (!context.movePath || !context.deletePath) return { ok: false, reason: "dohc could not start the engine for this workspace. Restart dohc to try again." };
       try {
-        const origin = documentEditOrigin(request.args.agent, context, options);
+        const origin = documentEditOrigin(context, options);
         if (request.verb === "fileMove") {
           const result = await context.movePath({ fromPath: request.args.fromPath, toPath: request.args.toPath,
             ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}) }, origin, request.args.requestId);
@@ -3373,7 +3368,7 @@ async function dispatchWorkspace(
             ...(request.args.allowLossySourceSha256 ? { allowLossySourceSha256: request.args.allowLossySourceSha256 } : {}),
             path,
             edit: { find, replacement },
-            origin: documentEditOrigin(agent, context, options),
+            origin: documentEditOrigin(context, options),
           });
           return { done: true, result: { ok: true as const, ...outcome } };
         } catch (error) {
@@ -3393,7 +3388,7 @@ async function dispatchWorkspace(
     case "documentCreate": {
       const documents = context.documents;
       if (!documents) return documentsUnavailable();
-      const { actor, agent, markdown } = request.args;
+      const { actor, markdown } = request.args;
       if (actor !== "agent") return { ok: false as const, reason: CREATE_AS_AGENT_REFUSAL };
       // A new file, so the stricter materialization rules apply.
       const path = request.args.path;
@@ -3408,7 +3403,7 @@ async function dispatchWorkspace(
           ...(await documents.create({
             path: validated.normalized,
             markdown,
-            origin: documentEditOrigin(agent, context, options),
+            origin: documentEditOrigin(context, options),
           })),
         };
       } catch (error) {
