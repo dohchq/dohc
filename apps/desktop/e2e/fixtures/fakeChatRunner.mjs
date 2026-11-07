@@ -193,7 +193,7 @@ if (profileTool) {
     { args: ["--workspace", process.cwd(), "--home", process.env.DOHC_STATE_DIR, "--tool", "dohc_write_file", "--tool", "dohc_reply_to_chat"], cwd: process.cwd() },
     ["dohc_write_file", "dohc_reply_to_chat"],
     [
-      { name: "dohc_write_file", arguments: { path: "notes/run.md", content: "Run notes.\n" } },
+      { name: "dohc_write_file", arguments: { path: "notes/run.txt", content: "Run notes.\n" } },
       { name: "dohc_reply_to_chat", arguments: { threadId, runId, body: "done: checked the exports" } },
     ],
     true,
