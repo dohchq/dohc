@@ -611,7 +611,7 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
                 >
                   {file.path}
                 </button>
-                <p className="m-0 px-1 text-[12px] text-muted">{reviewReason(file, words.after)}</p>
+                <p className="m-0 whitespace-pre-line px-1 text-[12px] text-muted">{reviewReason(file, words.after)}</p>
               </li>
             ))}
           </ul>
@@ -625,5 +625,5 @@ function reviewReason(file: Restored["review"][number], after: string): string {
   if (file.reason === "changed-since") return `${file.changedBy ?? "Another author"} changed it after ${after}.`;
   if (file.reason === "folder-in-use") return "This Collection holds files someone else added.";
   if (file.reason === "rules-unreadable") return restoreRulesUnreadableWords(file.unreadable);
-  return `dohc could not restore it. ${file.detail}`;
+  return file.detail;
 }

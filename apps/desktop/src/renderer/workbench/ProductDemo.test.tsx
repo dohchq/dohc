@@ -52,14 +52,14 @@ it("keeps a demo Explorer collision in Notices after the toast closes", async ()
 
   const toast = await demo.findByTestId("workspace-shell-error");
   expect(toast.textContent).toContain("A folder already exists at welcome.md");
-  expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+  expect(within(toast).getByRole("button", { name: "Copy details" })).toBeTruthy();
   fireEvent.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
   expect(demo.queryByTestId("workspace-shell-error")).toBeNull();
   fireEvent.click(demo.getByRole("button", { name: "Notices, 1 unread" }));
   expect(demo.getByText("A folder already exists at welcome.md")).toBeTruthy();
-  const copy = demo.getByRole("button", { name: "Copy error details" });
+  const copy = demo.getByRole("button", { name: "Copy details" });
   fireEvent.pointerDown(copy, { bubbles: true, composed: true });
-  expect(demo.getByRole("button", { name: "Copy error details" })).toBe(copy);
+  expect(demo.getByRole("button", { name: "Copy details" })).toBe(copy);
   fireEvent.pointerDown(demo.getByRole("button", { name: "New file" }), { bubbles: true, composed: true });
   expect(demo.queryByTestId("notice-center")).toBeNull();
   fireEvent.click(demo.getByRole("button", { name: "Notices, 1 unread" }));

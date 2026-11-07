@@ -102,7 +102,7 @@ test("a sync the server cannot take names the server, offers Try again, and clea
     await syncRow.getByRole("button", { name: "Try again" }).click();
     await expect(toast).toContainText("dohc could not reach the server.", { timeout: 60_000 });
     await expect(page.getByTestId("workspace-shell-error-retry")).toBeVisible();
-    await expect(page.getByTestId("workspace-shell-error-copy")).toBeVisible();
+    await expect(page.getByTestId("workspace-shell-error-details")).toBeVisible();
     await expect(titlebar).toHaveText("Server unreachable");
 
     // The server comes back. Nothing else would start a pass for ten

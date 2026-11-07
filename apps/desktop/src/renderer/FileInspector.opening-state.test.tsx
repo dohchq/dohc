@@ -548,7 +548,7 @@ describe("markdown document opening state", () => {
     // the same commit).
     expect(
       screen.getByTestId("orphaned-draft-notice").textContent,
-    ).toContain("Copy your text to keep it.");
+    ).toContain("Copy your edits to keep them.");
     await user.click(screen.getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(

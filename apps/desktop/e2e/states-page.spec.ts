@@ -45,7 +45,7 @@ const THEMES = ["light", "dark"] as const;
 const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "collections-rows", "menu", "document-menu",
-  "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-first-version", "menu-overflow", "menu-danger",
+  "empty", "loading", "toasts", "notice-details", "notices", "dialog", "menu-radio", "menu-field", "menu-first-version", "menu-overflow", "menu-danger",
   "editor-groups", "editor-groups-empty",
   "kind-glyph",
   "block-menu", "table-menu",

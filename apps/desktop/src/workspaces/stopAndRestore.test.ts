@@ -436,7 +436,7 @@ describe("restoring what a person wrote directly", () => {
   it("tells the owner that a reviewed automations file kept its runs", async () => {
     const auto = moment("m-auto", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, WIPE));
     const { dependencies } = engine([auto]);
-    const outcome = await restoreDirectWrites({...dependencies, reviewPath: () => "Changed on this device since the last saved version"}, [file("m-auto", "o-auto", auto.path)]);
+    const outcome = await restoreDirectWrites({...dependencies, reviewPath: () => "Changed on this device since the last saved version."}, [file("m-auto", "o-auto", auto.path)]);
     expect(outcome).toMatchObject({review: [{detail: "Changed on this device since the last saved version. Runs from this file's automations were kept."}], wroteAutomations: true});
     expect(dependencies.undoRuns).not.toHaveBeenCalled();
   });

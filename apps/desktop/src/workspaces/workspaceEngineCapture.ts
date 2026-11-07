@@ -1322,7 +1322,7 @@ export class RestoreHeadChangedError extends Error {
 }
 
 export class RestoreLocalChangesError extends Error {
-  constructor(readonly path: string, detail = "Changed on this device since the last saved version") {
+  constructor(readonly path: string, detail = "Changed on this device since the last saved version.") {
     super(detail);
     this.name = "RestoreLocalChangesError";
   }
