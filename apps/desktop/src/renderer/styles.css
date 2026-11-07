@@ -38,7 +38,7 @@
   --dohc-line: #e4e1d8;
   --dohc-ink: #1c1b18;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
   /* The fill of loading bars. */
   --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.40);
@@ -49,8 +49,8 @@
   --dohc-agent: #666d2e;
   --dohc-match: #326fce;
   --dohc-success: #38684e;
-  --dohc-warning: #8a6420;
-  --dohc-danger: #a43e2a;
+  --dohc-warning: #87621f;
+  --dohc-danger: #9d3c28;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
   /* Identity hues: olive belongs to the agent default.
@@ -73,18 +73,18 @@
   --dohc-line: #2a2925;
   --dohc-ink: #f6f4ee;
   --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 14%, transparent);
   --dohc-skeleton: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
   --dohc-scrim: rgba(0, 0, 0, 0.65);
-  --dohc-muted: #a9a599;
+  --dohc-muted: #aba79b;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
   --dohc-focus: color-mix(in srgb, var(--dohc-accent) 50%, transparent);
   --dohc-agent: #c0c585;
-  --dohc-match: #377afa;
+  --dohc-match: #4382fa;
   --dohc-success: #82c29b;
   --dohc-warning: #d9a94e;
-  --dohc-danger: #e08065;
+  --dohc-danger: #e1866c;
   --dohc-selection: rgba(102, 148, 245, 0.30);
   --dohc-hue-rust: #dc9378;
   --dohc-hue-amber: #d9b05a;
@@ -126,6 +126,14 @@
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
   --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Noto Serif', 'Times New Roman', serif;
+}
+
+/* Subtle text misses AA on the selected fill, so inside it subtle shows in
+ * muted. Every variant and @apply of bg-selected carries this, and a hover or
+ * focus color on a control inside still wins. */
+@utility bg-selected {
+  background-color: var(--dohc-selected);
+  --dohc-subtle: var(--dohc-muted);
 }
 
 html,
@@ -2815,10 +2823,14 @@ body {
   @apply bg-selected;
 }
 
+/* Keyboard focus takes the hover fill, like other focus rows, so a focused
+ * option never looks chosen. The chosen option keeps its fill under focus. */
 [data-keyboard-nav] .dohc-callout-type-option:focus-visible {
-  @apply bg-selected;
   outline: 1px solid var(--dohc-accent);
   outline-offset: -1px;
+}
+[data-keyboard-nav] .dohc-callout-type-option:not([aria-selected='true']):focus-visible {
+  @apply bg-hover;
 }
 
 .dohc-callout-title-input {
@@ -2938,10 +2950,10 @@ mark.dohc-highlight,
  * field, and the empty/error states so math reads correctly in both themes.
  * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
 :root {
-  --dohc-math-error-color: #a43e2a;
+  --dohc-math-error-color: #9d3c28;
 }
 [data-theme='dark'] {
-  --dohc-math-error-color: #e08065;
+  --dohc-math-error-color: #e1866c;
 }
 
 .dohc-math-inline {

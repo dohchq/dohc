@@ -48,10 +48,10 @@ describe("the surface ladder", () => {
 
 describe("state fills", () => {
   // The decided alphas (MEGA-PLAN step 2), and a scrim with no blur.
-  it("are 7% hover and 11% selected in both themes, and a 40% or 65% scrim", () => {
+  it("are 7% hover and 14% selected in both themes, and a 40% or 65% scrim", () => {
     for (const mode of ["light", "dark"] as const) {
       expect(inkAlpha(palette[mode].hover, "hover")).toBe(0.07);
-      expect(inkAlpha(palette[mode].selected, "selected")).toBe(0.11);
+      expect(inkAlpha(palette[mode].selected, "selected")).toBe(0.14);
     }
     expect(palette.light.scrim).toBe("rgba(0, 0, 0, 0.40)");
     expect(palette.dark.scrim).toBe("rgba(0, 0, 0, 0.65)");
@@ -116,6 +116,10 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "agent", bg: "bg", min: 4.5 },
     { fg: "agent", bg: "panel", min: 4.5 },
     { fg: "agent", bg: "panel2", min: 4.5 },
+    // Warning is text: notices, the source view's strips on panel-2.
+    { fg: "warning", bg: "bg", min: 4.5 },
+    { fg: "warning", bg: "panel", min: 4.5 },
+    { fg: "warning", bg: "panel2", min: 4.5 },
     // subtle is decorative (kbd hints, timestamps): 3.0 is the bar — on
     // every surface it actually sits on, not just bg (count pills and
     // section headers render text-subtle on panel-2).
@@ -173,6 +177,16 @@ describe("WCAG AA contrast, both modes", () => {
           // fill, the only fill rows use (see the attenuation scan below).
           expect(contrast(palette[mode].match, fill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
         }
+      }
+    });
+
+    // Subtle text misses AA on the selected fill, so inside it subtle shows
+    // in muted (the bg-selected utility in styles.css).
+    it(`${mode} subtle text on the selected fill shows in muted at AA`, () => {
+      const amount = inkAlpha(palette[mode].selected, "selected");
+      for (const surface of SURFACES) {
+        const ratio = contrast(palette[mode].muted, mix(palette[mode].ink, palette[mode][surface], amount));
+        expect(ratio, `muted on selected/${surface} (${mode}) = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
       }
     });
 
@@ -241,6 +255,12 @@ describe("styles.css mirrors tokens.ts", () => {
     }
   });
 
+  it("the selected fill shows subtle text in muted", () => {
+    const rule = block("@utility bg-selected");
+    expect(rule).toContain("background-color: var(--dohc-selected);");
+    expect(rule).toContain("--dohc-subtle: var(--dohc-muted);");
+  });
+
   it("type stacks match", () => {
     for (const [name, value] of Object.entries(fonts)) {
       expect(blocks.light, name).toContain(`${name}: ${value};`);
@@ -267,6 +287,19 @@ describe("renderer rows use the full state fills", () => {
     expect(sources.length).toBeGreaterThan(100);
     const offenders = sources.filter((name) => /\bbg-(selected|hover)\//.test(readFileSync(join(root, name), "utf8")));
     expect(offenders).toEqual([]);
+  });
+
+  // bg-selected shows subtle text in muted. A source that paints the selected
+  // fill itself, like Ref's gradient, must do the same.
+  it("shows subtle text in muted wherever a source paints the selected fill itself", () => {
+    const root = fileURLToPath(new URL(".", import.meta.url));
+    const painters = readdirSync(root, { recursive: true, encoding: "utf8" })
+      .filter((name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name))
+      .filter((name) => /var\(--(color|dohc)-selected\)/.test(readFileSync(join(root, name), "utf8")));
+    expect(painters.map((name) => name.replace(/\\/g, "/"))).toContain("ui/Ref.tsx");
+    for (const name of painters) {
+      expect(readFileSync(join(root, name), "utf8"), name).toContain("[--dohc-subtle:var(--dohc-muted)]");
+    }
   });
 });
 
