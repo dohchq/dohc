@@ -4085,7 +4085,6 @@ const HOME_SPECIMEN: ExplorerProps = {
   onActivateTab: noop,
   onCloseTab: noop,
   onCloseAllTabs: noop,
-  onNewUntitledTextFile: noop,
   onCollapseFolders: noop,
   onSetFolderExpanded: noop,
   onToggleFolder: noop,

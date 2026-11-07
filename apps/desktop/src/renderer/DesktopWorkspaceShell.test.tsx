@@ -1231,43 +1231,24 @@ describe("open editors", () => {
     expect(await screen.findAllByTestId("tree-row")).toHaveLength(2);
   });
 
-  it("surfaces open-editor title actions for untitled files and close-all", async () => {
+  it("closes every editor from the Open editors header, which has no new-file action", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New untitled text file"));
+    const rows = await screen.findAllByTestId("tree-row");
+    for (const path of ["a.md", "b.md"]) {
+      await user.click(rows.find((row) => row.getAttribute("data-path") === path)!);
+      expect(await screen.findByTestId(`tab-${path}`)).toBeTruthy();
+    }
+    expect(screen.getAllByTestId("open-editor-row")).toHaveLength(2);
+    const header = screen.getByTestId("open-editors-header");
+    expect(within(header).queryByLabelText("New untitled text file")).toBeNull();
 
-    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-      relativePath: "Untitled.txt",
-      initialText: "",
-    });
-    expect(await screen.findByTestId("tab-Untitled.txt")).toBeTruthy();
-
-    await user.click(screen.getByLabelText("Close all editors"));
-    await waitFor(() => expect(screen.queryByTestId("tab-Untitled.txt")).toBeNull());
-    expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
-  });
-
-  it("numbers untitled text files after case-insensitive file and folder matches", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
-      files: [{ path: "untitled.txt", kind: "file" as const }],
-      folders: ["UNTITLED 2.TXT"],
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findAllByTestId("tree-row");
-    await user.click(screen.getByLabelText("New untitled text file"));
-
-    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test",
-      relativePath: "Untitled 3.txt",
-      initialText: "",
-    });
+    await user.click(within(header).getByLabelText("Close all editors"));
+    await waitFor(() => expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0));
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+    expect(screen.queryByTestId("tab-b.md")).toBeNull();
   });
 
   it("surfaces file title actions for create, refresh, and collapse folders", async () => {
