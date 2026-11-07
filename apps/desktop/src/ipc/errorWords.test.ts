@@ -20,6 +20,7 @@ import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, MergeStoppedPartwayError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
+import { sharedViewRefusal, sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   CollectionMoveUnfinishedError,
@@ -47,6 +48,7 @@ import {
   readCollectionReopenWait,
   readCollectionsRefusal,
   readError,
+  refusalCode,
   shouldRecheckShareAccess,
   versionNameRefusal,
   VOLUME_SHARES_NEW_FILES_WORDS,
@@ -69,6 +71,13 @@ it("explains the held-file live-open refusal after Electron serializes it", () =
 function acrossIpc(error: unknown, channel = "desktop:list-workspace-versions"): Error {
   return new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(error))}`);
 }
+
+it("shows a refused shared-file read in plain words after an IPC rejection", async () => {
+  const received = acrossIpc(await sharedViewRefusal(), "desktop:read-workspace-text");
+  expect(readError(received).words, "IPC refusal uses only the shared-file message").toBe(sharedViewRefusalWords);
+  expect(refusalCode(received)).toBe("share-collision-record");
+  expect(ipcErrorMessage(received, "Could not read the file.")).toBe(sharedViewRefusalWords);
+});
 
 it("keeps a server Collection's not found code across Electron, with the words other callers show", () => {
   const error = acrossIpc(markDatasetServerNotFound(new Error("That share isn't available anymore."), 404, { code: "not_found" }), "desktop:dataset");
