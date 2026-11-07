@@ -524,9 +524,14 @@ describe("EditorTabs strip scrolling", () => {
     expect(active.classList).toContain("dohc-focus-row");
   });
 
-  it("reports a click on a tab, and Enter or Space on it, as a press after any activation", () => {
+  it("reports a press that ends in a release, Enter or Space, and an All tabs pick as a press after any activation", async () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    const user = userEvent.setup();
     const calls: string[] = [];
+    const press = (target: HTMLElement, init: { ctrlKey?: boolean } = {}) => {
+      fireEvent.pointerDown(target, { button: 0, pointerId: 1, clientX: 10, clientY: 10, ...init });
+      fireEvent.pointerUp(target, { pointerId: 1, clientX: 10, clientY: 10 });
+    };
     try {
       render(
         <EditorTabs
@@ -545,13 +550,30 @@ describe("EditorTabs strip scrolling", () => {
           onCreateGroupRight={noop}
         />,
       );
-      fireEvent.click(screen.getByTestId("tab-a.md"));
+      press(screen.getByTestId("tab-a.md"));
+      press(screen.getByTestId("tab-b.md"));
       fireEvent.keyDown(screen.getByTestId("tab-a.md"), { key: "Enter" });
       fireEvent.keyDown(screen.getByTestId("tab-b.md"), { key: " " });
-      fireEvent.click(screen.getByRole("button", { name: "Close a.md" }));
+      const close = screen.getByRole("button", { name: "Close a.md" });
+      press(close);
+      fireEvent.click(close);
       // A macOS Control press opens the context menu.
-      fireEvent.click(screen.getByTestId("tab-c.md"), { ctrlKey: true });
-      expect(calls).toEqual(["press a.md", "activate a.md", "press a.md", "activate b.md", "press b.md", "close a.md"]);
+      press(screen.getByTestId("tab-c.md"), { ctrlKey: true });
+      // The shown tab, picked in All tabs.
+      await user.click(screen.getByTestId("tabs-overflow"));
+      await user.click(screen.getByRole("menuitem", { name: "a.md" }));
+      expect(calls).toEqual([
+        "press a.md",
+        "activate b.md",
+        "press b.md",
+        "activate a.md",
+        "press a.md",
+        "activate b.md",
+        "press b.md",
+        "close a.md",
+        "activate a.md",
+        "press a.md",
+      ]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -628,6 +650,7 @@ describe("EditorTabs pointer drag", () => {
   function renderGroup(order = tabs) {
     const onMove = vi.fn();
     const onMoveToGroup = vi.fn();
+    const onPress = vi.fn();
     const strip = (current: typeof tabs) => (
       <div data-editor-group-id="left">
         <EditorTabs
@@ -642,6 +665,7 @@ describe("EditorTabs pointer drag", () => {
           onContextMenu={noop}
           onMove={onMove}
           onMoveToGroup={onMoveToGroup}
+          onPress={onPress}
           onCreateGroupRight={noop}
         />
       </div>
@@ -651,6 +675,7 @@ describe("EditorTabs pointer drag", () => {
     return {
       onMove,
       onMoveToGroup,
+      onPress,
       unmount: view.unmount,
       reorder: (current: typeof tabs) => view.rerender(strip(current)),
     };
@@ -707,6 +732,18 @@ describe("EditorTabs pointer drag", () => {
     expect(first.dataset.dragging).toBeUndefined();
     expect(second.style.transform).toBe("");
     expect(third.style.transform).toBe("");
+  });
+
+  it("reports a press when a drag that moved the tab ends in a release, and none when it's cancelled", () => {
+    const { onMove, onPress } = renderGroup();
+    const first = screen.getByTestId("tab-a.md");
+    dragTab(first, 4, 260);
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 260, clientY: 10 });
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
+    expect(onPress).toHaveBeenCalledExactlyOnceWith("left", "a.md");
+    dragTab(first, 5, 260);
+    fireEvent.pointerCancel(first, { pointerId: 5 });
+    expect(onPress).toHaveBeenCalledOnce();
   });
 
   it("counts the release position even when its frame never ran", () => {

@@ -181,10 +181,6 @@ const Tab = memo(function Tab(props: {
           props.onPress?.(props.groupId, props.path);
         }
       }}
-      // A drag that moved the tab ends with no click.
-      onClick={(event) => {
-        if (!isMacContextClick(event)) props.onPress?.(props.groupId, props.path);
-      }}
       // Middle-click closes (VS Code convention); auxclick is the only
       // reliable middle-button event.
       onAuxClick={(event) => {
@@ -374,6 +370,8 @@ interface TabDragHost {
   // new slot once that render has landed.
   settle: (tab: HTMLElement, visualLeft: number) => void;
   sync: () => void;
+  // The press on this tab ended in a release, after a drag or without one.
+  press: (path: string) => void;
 }
 
 // Pointer-drag reorder (no dnd dep). A press only becomes a drag after 4px
@@ -531,6 +529,8 @@ function createTabDrag(host: TabDragHost) {
       cancelAnimationFrame(s.frame);
       s.frame = 0;
     }
+    // After the browser has moved focus for the press. A drag that moved the tab ends with no click.
+    if (release) host.press(s.path);
     if (!s.active) {
       // A press that never became a drag may still hold a frozen settle.
       s.tab.style.transform = "";
@@ -716,7 +716,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
   // inactive tab keeps its marker.
   recoveryPaths: ReadonlySet<string>;
   onActivate: (groupId: string, path: string) => void;
-  // A click on a tab, or Enter or Space on it, after any activation.
+  // A press on a tab that ends in a release, Enter or Space on it, or a pick of it in All tabs, after any activation.
   onPress?: (groupId: string, path: string) => void;
   onClose: (groupId: string, path: string) => void;
   onContextMenu: (groupId: string, path: string) => void;
@@ -806,6 +806,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         });
       },
       sync: () => syncCorners.current(),
+      press: (path) => latest.current.onPress?.(latest.current.groupId, path),
     });
   }
   const drag = tabDrag.current;
@@ -1138,7 +1139,10 @@ export const EditorTabs = memo(function EditorTabs(props: {
               />
             ),
             current: tab.path === props.activeTab,
-            onSelect: () => props.onActivate(props.groupId, tab.path),
+            onSelect: () => {
+              props.onActivate(props.groupId, tab.path);
+              props.onPress?.(props.groupId, tab.path);
+            },
           }))}
         />
       ) : null}
