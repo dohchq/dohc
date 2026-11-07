@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { MANIFEST_SCHEMA, NO_UPDATE_FEED, hashTree, launchPreview, previewArgs, previewEnvironment, previewPaths,
   readManifest, startNoUpdateFeed, verifyDelivery } from "./preview-launch.mjs";
-import { checkSmoke, packagingEnvironment, parseArgs, requirePinnedSource } from "./preview.mjs";
+import { checkSmoke, packagingEnvironment, parseArgs, requirePinnedSource, signingStatus } from "./preview.mjs";
 
 const sha = "a".repeat(40);
 const scratch = (t) => {
@@ -162,6 +162,14 @@ test("the builder packages only a clean checkout at the named commit", (t) => {
 test("packaging never sees a signing identity, telemetry key or build override", () => {
   assert.deepEqual(packagingEnvironment({ PATH: "bin", WIN_CSC_LINK: "x", CSC_LINK: "x", csc_key_password: "x", APPLE_ID: "x",
     DOHC_POSTHOG_KEY: "x", VITE_FLAG: "x", NODE_OPTIONS: "x", NODE_ENV: "development" }), { PATH: "bin", CSC_IDENTITY_AUTO_DISCOVERY: "false" });
+});
+
+test("signing status comes from dohc's own binaries, not a vendor's", () => {
+  const vendor = { path: "resources/app-compiler/node.exe", status: "Valid", signer: "CN=OpenJS Foundation" };
+  const exe = { path: "dohc.exe", status: "NotSigned" }, engine = { path: "resources/workspace-engine/dohc-workspace-engine.exe", status: "NotSigned" };
+  assert.equal(signingStatus([exe, engine, vendor]).status, "unsigned");
+  assert.equal(signingStatus([{ ...exe, status: "Valid" }, engine]).status, "dohc.exe: Valid, resources/workspace-engine/dohc-workspace-engine.exe: NotSigned");
+  assert.throws(() => signingStatus([exe, vendor]), /missing/u);
 });
 
 test("a smoke passes only when it completed against the package's own files", () => {

@@ -92,10 +92,25 @@ export function tryItText({ output, manifestSha256, manifest }) {
   ].join("\n");
 }
 
-function authenticodeStatus(path) {
-  return run("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-    `(Get-AuthenticodeSignature -LiteralPath '${path.replaceAll("'", "''")}').Status.ToString()`], { quietStdout: true })
-    .then(({ stdout }) => stdout.trim());
+// Every executable and library, with its signer. Vendors such as Node and
+// Microsoft sign some of the files electron-builder copies in.
+async function authenticode(packageDir) {
+  const script = `$root = '${packageDir.replaceAll("'", "''")}'
+@(Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' } | ForEach-Object {
+  $s = Get-AuthenticodeSignature -LiteralPath $_.FullName
+  [pscustomobject]@{ path = $_.FullName.Substring($root.Length + 1).Replace('\\', '/'); status = $s.Status.ToString(); signer = $s.SignerCertificate.Subject }
+}) | ConvertTo-Json -Compress`;
+  // An encoded command keeps the script's quotes and lines intact through the job wrapper.
+  const { stdout } = await run("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(script, "utf16le").toString("base64")], { quietStdout: true });
+  return [JSON.parse(stdout.trim())].flat();
+}
+
+// dohc's own binaries decide the status. A vendor's signature is recorded but does not count.
+export function signingStatus(binaries) {
+  const own = binaries.filter((binary) => [CRITICAL_FILES.executable, CRITICAL_FILES.engine].includes(binary.path));
+  if (own.length !== 2) throw new Error("The package's executable or engine is missing from the signature check.");
+  return { status: own.every((binary) => binary.status === "NotSigned") ? "unsigned" : own.map((binary) => `${binary.path}: ${binary.status}`).join(", "), binaries };
 }
 
 async function criticalHashes(packageDir) {
@@ -154,8 +169,7 @@ async function main(options) {
     if (built.sha256 !== copied.sha256) throw new Error("The copied package differs from electron-builder's output.");
     const critical = await criticalHashes(packageDir);
     Object.assign(manifest.package, { files: copied.files, treeSha256: copied.sha256, critical });
-    const authenticode = await authenticodeStatus(join(packageDir, CRITICAL_FILES.executable));
-    manifest.signing = { status: authenticode === "NotSigned" ? "unsigned" : authenticode, authenticode };
+    manifest.signing = signingStatus(await authenticode(packageDir));
     copyFileSync(launcherSource, join(options.output, "launch.mjs"));
     manifest.launcher = { file: "launch.mjs", sha256: await fileSha256(join(options.output, "launch.mjs")) };
     writeFileSync(join(options.output, "Try it.cmd"), "@echo off\r\nnode \"%~dp0launch.mjs\"\r\nif errorlevel 1 pause\r\n");
