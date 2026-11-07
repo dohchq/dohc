@@ -121,7 +121,7 @@
   --color-hue-rose: var(--dohc-hue-rose);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
-  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', serif;
+  --font-serif: 'Iowan Old Style', 'Charter', Georgia, 'Noto Serif', 'Times New Roman', serif;
 }
 
 html,
@@ -921,6 +921,12 @@ body {
   font-weight: 600;
 }
 
+/* A cell ends at its padding when a paragraph ends it. The editor draws the
+ * column-resize handle after the cell's last block, so it does not count. */
+.dohc-notion-editor :is(th, td) > p:nth-last-child(1 of :not(.column-resize-handle)) {
+  margin-bottom: 0;
+}
+
 /* Tiptap cell-selection tint. */
 .dohc-notion-editor .selectedCell {
   background: var(--dohc-selection);
@@ -1317,6 +1323,12 @@ body {
 .dohc-wikilink-pill--broken {
   border-style: dashed;
   color: var(--dohc-subtle);
+}
+
+/* Node-selected, the pill takes the text selection's tint over its fill,
+ * as a selected Ref chip does. */
+.dohc-wikilink-pill.ProseMirror-selectednode {
+  background-image: linear-gradient(var(--dohc-selection), var(--dohc-selection));
 }
 
 .dohc-wikilink-pill__label {
