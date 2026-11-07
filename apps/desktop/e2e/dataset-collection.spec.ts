@@ -286,7 +286,7 @@ test("@dataset-collection a deleted Collection leaves every list, and its files 
   } finally { await cleanupDesktopWorkspace(desktop, workspace); }
 });
 
-test("@dataset-collection Apply on a chat's change card gives the Collection the field its files add", async () => {
+test("@dataset-collection Apply on a chat's change card gives the Collection the field its files add, and its table beside the chat shows it", async () => {
   test.setTimeout(180_000);
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -300,6 +300,11 @@ test("@dataset-collection Apply on a chat's change card gives the Collection the
     await create.getByLabel("Collection name").fill("Volunteers");
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
+    // Volunteers stays in view in one editor group while the chat opens in the other.
+    const table = page.getByRole("region", { name: "Volunteers", exact: true });
+    await expect(table.getByRole("columnheader").filter({ hasText: "Name" })).toBeVisible({ timeout: 30_000 });
+    await page.getByTestId("create-editor-group-right").click();
+    await expect(page.getByRole("region", { name: "Editor group 2", exact: true })).toBeVisible();
     const volunteers = async () => {
       const listed = await page.evaluate(async id => window.dohcDesktop!.dataset({ workspaceId: id, action: "list" }), workspaceId);
       const found = listed.kind === "list" ? listed.datasets.find(entry => entry.name === "Volunteers" && entry.datasetPath) : undefined;
@@ -343,8 +348,13 @@ test("@dataset-collection Apply on a chat's change card gives the Collection the
     await (await openChatsView(page)).getByTestId("chats-channel").filter({ hasText: "Sign-ups" }).click();
     const card = page.getByTestId("chats-channel-view").getByTestId("chats-lane-change-card");
     await expect(card).toHaveAttribute("data-state", "waiting", { timeout: 30_000 });
+    await expect(table).toHaveCount(1);
+    await expect(table.getByRole("columnheader").filter({ hasText: "Name" })).toBeVisible();
+    await expect(table.getByRole("columnheader").filter({ hasText: "Due date" })).toHaveCount(0);
     await card.getByTestId("chats-lane-change-apply").click();
     await expect(card).toHaveAttribute("data-state", "applied", { timeout: 30_000 });
+    // The table beside the chat reads the Collection again, with no Refresh.
+    await expect(table.getByRole("columnheader").filter({ hasText: "Due date" })).toBeVisible({ timeout: 30_000 });
 
     const after = await volunteers();
     expect(after.revision).toBeGreaterThan(before.revision);

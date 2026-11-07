@@ -873,10 +873,16 @@ function notifyCollectionAutomationsChanged(workspaceId: string): void {
   notifyWorkspaceWindows(workspaceId, CHANNELS.collectionAutomationsChanged);
 }
 
-function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
+// A change to a Collection's fields or rules applied: the windows on that
+// workspace read that Collection again where they show it.
+function notifyCollectionRulesChanged(workspaceId: string, datasetId: string): void {
+  notifyWorkspaceWindows(workspaceId, CHANNELS.collectionRulesChanged, { datasetId });
+}
+
+function notifyWorkspaceWindows(workspaceId: string, channel: string, details: Record<string, string> = {}): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId !== workspaceId) continue;
-    win.webContents.send(channel, { workspaceId });
+    win.webContents.send(channel, { ...details, workspaceId });
   }
 }
 
@@ -6768,6 +6774,7 @@ function registerIpcHandlers(): void {
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
     moveToServer,
+    collectionRulesChanged: notifyCollectionRulesChanged,
     collectionPlace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string, signal: AbortSignal): Promise<DatasetPlace> => {
       const authority = await collectionsAuthorityFor(workspace, signal);
       if (authority.kind === "server") return { kind: "server", host: new URL(authority.server.credentials.relayUrl ?? authority.server.credentials.serverUrl).host };

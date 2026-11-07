@@ -271,6 +271,7 @@ export const CHANNELS = {
   findDatasetCollection: "desktop:find-dataset-collection",
   findAutomationCollection: "desktop:find-automation-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
+  collectionRulesChanged: "desktop:collection-rules-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.
   listAutomationButtons: "desktop:list-automation-buttons",

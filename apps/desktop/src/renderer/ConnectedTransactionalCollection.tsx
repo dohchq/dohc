@@ -170,6 +170,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   // A run or its Undo changes records without touching a file, whether a press, a record change, or a schedule
   // started it, so the table reads them again when runs end.
   useEffect(() => bridge().onAutomationRunsChanged(event => { if (event.workspaceId === workspaceId) setRecordsChanged(value => value + 1); }), [workspaceId]);
+  // A change to this Collection's fields applied, as from a chat's change card, so the page reads it again.
+  useEffect(() => bridge().onCollectionRulesChanged(event => {
+    if (event.workspaceId === workspaceId && event.datasetId === describedId.current) void refresh();
+  }), [workspaceId, refresh]);
   const buttonColumns = useMemo((): TransactionalButtons | undefined => buttons === null || buttonFields.length === 0 ? undefined : {
     fields: buttonFields,
     // A dataset record's id goes to main as JSON, since the table's key can be a number.
@@ -467,11 +471,11 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
       }}
       onApproveChoices={async (input, signal) => {
         signal.throwIfAborted();
-        const sequence = request.current;
         const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        signal.throwIfAborted();
-        if (sequence !== request.current) throw Error("The Collection changed. Refresh to check its choices.");
         if (result.kind !== "migrated") throw Error("dohc could not confirm these choices. Refresh the Collection.");
+        // The choices are approved even if the page read the Collection again
+        // meanwhile, as it does when they apply, so what follows still happens.
+        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
         setCreatingForm(false);
         await refresh();
       }}
