@@ -34,7 +34,7 @@ export function AgentPresenceHint(props: {
       role="status"
       aria-label={`Agent is ${props.activity}`}
       title={`Agent is ${props.activity}`}
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-subtle"
+      className="inline-flex shrink-0 items-center gap-1 text-[10px] tabular-nums text-muted"
     >
       <span
         aria-hidden

@@ -84,7 +84,7 @@ function RunLine(props: { run: ChatRunRecord; askedBy?: ChatMessageRecord; repor
           endedAtMs === undefined ? "animate-pulse bg-agent" : failed ? "bg-warning" : "bg-success"
         }`}
       />
-      <span>{label}</span>
+      <span className="text-muted">{label}</span>
       {props.askedBy ? <RunAskedBy message={props.askedBy} /> : null}
       <RunChip run={props.run} reported={props.reported} />
     </div>
@@ -258,7 +258,7 @@ function RunAskedBy(props: { message: ChatMessageRecord }) {
       className="inline-flex min-w-0 items-center gap-1 text-[11px] text-subtle"
     >
       <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-      <span className="truncate">Asked by {props.message.authorDisplayName}</span>
+      <span className="truncate text-muted">Asked by {props.message.authorDisplayName}</span>
       {person ? <span className="sr-only"> for {person}</span> : null}
     </span>
   );
@@ -311,7 +311,7 @@ function RunChip(props: { run: ChatRunRecord; reported?: ChatReportedAgentRecord
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
-        className="rounded border border-line px-1.5 font-mono text-[10px] text-subtle hover:text-ink"
+        className="rounded border border-line px-1.5 font-mono text-[10px] text-muted hover:text-ink"
       >
         run {props.run.runId.slice(0, 7)}
       </button>
