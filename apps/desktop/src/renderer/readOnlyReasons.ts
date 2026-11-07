@@ -5,11 +5,12 @@ import { SAVE_STATE } from "./ui/StateMark";
 export const ACCESS_ENDED_REASON = "Your access to this document ended.";
 // The chip's Try again finishes the replacement.
 export const REPLACEMENT_FAILED_REASON = "dohc could not finish replacing this document. Try again to finish it.";
-// The session stays read-only until the document is reopened.
-export const CONNECTION_LOST_REASON = "dohc lost its connection to this document. Close and reopen it to edit.";
-// An edit dohc refused for good, once its set-aside row is dismissed. Reopening
-// starts a fresh session.
-export const NOT_SAVED_REASON = "dohc could not save this document. Close and reopen it to edit.";
+// Tabs showing the document share one session. It stays read-only until every
+// tab closes, and reopening then starts a fresh one.
+export const CONNECTION_LOST_REASON = "dohc lost its connection to this document. Close every tab showing it, then reopen it to edit.";
+// An edit dohc refused for good, once its set-aside row is dismissed. Tabs share
+// one session, so only closing every tab ends it.
+export const NOT_SAVED_REASON = "dohc could not save this document. Close every tab showing it, then reopen it to edit.";
 
 // Why this session became read-only, beside any row it set aside, since no row
 // says why. None when access ended, which has its own reason.

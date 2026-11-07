@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CONNECTION_LOST_REASON, readOnlyReasons, transitionReason } from "./readOnlyReasons";
+import { CONNECTION_LOST_REASON, NOT_SAVED_REASON, readOnlyReasons, transitionReason } from "./readOnlyReasons";
 
 const NONE = { gone: false, accessEnded: false, shared: false, transition: undefined, notSaved: false };
 const TURN = { readOnlyWhileEditing: true, readOnlyCause: "reconnecting" } as const;
@@ -15,13 +15,13 @@ describe("readOnlyReasons", () => {
 
   it("adds the reason a session became read-only", () => {
     expect(readOnlyReasons({ ...NONE, transition: CONNECTION_LOST_REASON })).toEqual([
-      "dohc lost its connection to this document. Close and reopen it to edit.",
+      "dohc lost its connection to this document. Close every tab showing it, then reopen it to edit.",
     ]);
   });
 
   it("says dohc could not save once the refused edit's row is dismissed", () => {
     expect(readOnlyReasons({ ...NONE, notSaved: true })).toEqual([
-      "dohc could not save this document. Close and reopen it to edit.",
+      "dohc could not save this document. Close every tab showing it, then reopen it to edit.",
     ]);
   });
 
@@ -33,6 +33,15 @@ describe("readOnlyReasons", () => {
 
   it("gives no sentence for a cause whose own notice states it", () => {
     expect(readOnlyReasons(NONE)).toEqual([]);
+  });
+});
+
+describe("the next step", () => {
+  it("asks the person to close every tab, since tabs share one session", () => {
+    expect(CONNECTION_LOST_REASON).toBe(
+      "dohc lost its connection to this document. Close every tab showing it, then reopen it to edit.",
+    );
+    expect(NOT_SAVED_REASON).toBe("dohc could not save this document. Close every tab showing it, then reopen it to edit.");
   });
 });
 
