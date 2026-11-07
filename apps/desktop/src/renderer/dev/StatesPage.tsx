@@ -981,6 +981,7 @@ function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFa
         retryBusy={props.busy ?? false}
         onRetryFailedRun={noop}
         onOpenAgentSettings={noop}
+        onAskAgain={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}

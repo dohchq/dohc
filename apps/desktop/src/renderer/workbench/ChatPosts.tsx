@@ -476,6 +476,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   retryBusy: boolean;
   onRetryFailedRun?: () => void;
   onOpenAgentSettings?: () => void;
+  onAskAgain?: (agentId: string, mention: boolean) => void;
   reactionsByMessage: Map<string, ChatReactionRecord[]>;
   decisionsByMessage: Map<string, ChatDecisionRecord>;
   attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
@@ -513,6 +514,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     retryBusy,
     onRetryFailedRun,
     onOpenAgentSettings,
+    onAskAgain,
     reactionsByMessage,
     decisionsByMessage,
     attachmentsByMessage,
@@ -560,6 +562,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         busy={retryBusy}
         onRetry={failedRun.retryable ? onRetryFailedRun : undefined}
         onOpenAgentSettings={onOpenAgentSettings}
+        onAskAgain={onAskAgain}
         chatAgentId={nav.channel.kind === "agent" ? nav.channel.agentId : undefined}
         className={className}
       >
