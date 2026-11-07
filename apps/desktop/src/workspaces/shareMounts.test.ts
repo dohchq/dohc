@@ -1214,11 +1214,12 @@ describe("share mount refresh failures", () => {
     });
   });
 
-  it("reports an ordinary failure as unchanged and moves on", () => {
+  // "unchanged" said the share was current when dohc had not reached it.
+  it("reports an ordinary failure as failed and moves on", () => {
     for (const error of [new Error("offline"), "nonsense", null]) {
       expect(classifyShareMountRefreshError(error)).toEqual({
         kind: "row",
-        status: "unchanged",
+        status: "failed",
       });
     }
   });
@@ -1238,11 +1239,20 @@ describe("refresh result wire shape", () => {
   });
 
   it("carries every status the refresh loop can emit", () => {
-    for (const status of ["updated", "unchanged", "ended", "damaged"]) {
+    for (const status of ["updated", "unchanged", "ended", "damaged", "failed"]) {
       expect(
         RefreshShareMountsResult.safeParse({ results: [row(status)] }).success,
         `main emits ${status} but the wire schema drops the whole result`,
       ).toBe(true);
+    }
+  });
+
+  it("carries a collision-record refusal and a set-aside record", () => {
+    for (const result of [
+      { ...row("failed"), errorKind: "collision-record" },
+      { ...row("unchanged"), collisionRecordQuarantined: true },
+    ]) {
+      expect(RefreshShareMountsResult.parse({ results: [result] }).results).toEqual([result]);
     }
   });
 
@@ -1285,6 +1295,27 @@ describe("share mount result rows", () => {
         changedPaths: 3,
       }),
     ).toEqual({ shareId: "s-1", label: "alex", status: "updated", changedPaths: 3 });
+  });
+
+  it("carries what dohc did with a share collision record", () => {
+    expect(
+      shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status: "failed",
+        changedPaths: 0,
+        errorKind: "collision-record",
+      }),
+    ).toEqual({ shareId: "s-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" });
+    expect(
+      shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status: "updated",
+        changedPaths: 2,
+        collisionRecordQuarantined: true,
+      }),
+    ).toEqual({ shareId: "s-1", label: "alex", status: "updated", changedPaths: 2, collisionRecordQuarantined: true });
   });
 
   it("drops a row whose identity the schema cannot carry, and nothing else", () => {

@@ -1,3 +1,5 @@
+import type { ShareMountStatusRow } from "../../ipc/bridgeContract";
+
 // What a removed mount does to path-keyed UI state.
 //
 // A folder that went takes its tabs, pins and drafts with it — the same
@@ -50,23 +52,28 @@ export function goneMountProjections(input: {
 // One line, because a second call replaces the first: damage reported before
 // the summary was overwritten by it, and the user saw only "Shares
 // refreshed", which is exactly the wrong half. Damage is carried INTO the
-// summary, and the instruction that fixes it survives.
+// summary, and the instruction that fixes it survives. So is a share that
+// did not refresh: the line counts the shares that did.
 export function shareRefreshSummary(
-  results: ReadonlyArray<{
-    label: string;
-    status: "updated" | "unchanged" | "ended" | "damaged";
-    changedPaths: number;
-  }>,
+  results: ReadonlyArray<Pick<ShareMountStatusRow, "label" | "status" | "changedPaths">>,
 ): string {
   if (results.length === 0) return "No shares are added to this workspace.";
   const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
   const ended = results.filter((row) => row.status === "ended");
   const damaged = results.filter((row) => row.status === "damaged");
-  const refreshed = `Shares refreshed — ${changed} ${
-    changed === 1 ? "file" : "files"
-  } updated${
+  const refreshedCount = results.filter(
+    (row) => row.status !== "failed" && row.status !== "damaged",
+  ).length;
+  const updated = `${changed} ${changed === 1 ? "file" : "files"} updated${
     ended.length > 0 ? `; ${ended.map((row) => row.label).join(", ")} ended` : ""
   }.`;
+  const shares = `${results.length} ${results.length === 1 ? "share" : "shares"}`;
+  const refreshed =
+    refreshedCount === results.length
+      ? `Shares refreshed — ${updated}`
+      : refreshedCount === 0
+        ? `dohc could not refresh ${shares}.`
+        : `Refreshed ${refreshedCount} of ${shares}. ${updated}`;
   if (damaged.length === 0) return refreshed;
   return `${refreshed} dohc can't read what ${damaged
     .map((row) => row.label)

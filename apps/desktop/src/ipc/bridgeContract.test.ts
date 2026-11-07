@@ -198,6 +198,7 @@ import {
   RelayShareSelector,
   ReadShareProposalChangesResult,
   RefreshSharedViewResult,
+  RefreshShareMountsResult,
   SettleShareProposalPayload,
   SubmitShareChangesPayload,
   SubmitShareChangesResult,
@@ -1453,6 +1454,16 @@ describe("shared view refresh IPC contract", () => {
       takesLocalWrites: false,
     };
     expect(RefreshSharedViewResult.parse(failed)).toEqual(failed);
+  });
+});
+
+describe("share mount refresh IPC contract", () => {
+  it("carries the rows of a refresh that stopped, with why it stopped", () => {
+    const stopped = {
+      results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }],
+      abortMessage: "Your server session expired. Sign in again, then refresh shares.",
+    };
+    expect(RefreshShareMountsResult.parse(stopped)).toEqual(stopped);
   });
 });
 

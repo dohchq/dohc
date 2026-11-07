@@ -303,6 +303,15 @@ export class ShareViewMountRollbackError extends Error {
   }
 }
 
+// A mount refresh that failed after its capture set the share's collision
+// record aside. `failure` is what stopped it.
+export class SetAsideRefreshError extends Error {
+  constructor(readonly failure: unknown) {
+    super(errorMessage(failure), { cause: failure });
+    this.name = "SetAsideRefreshError";
+  }
+}
+
 const STATUS_PATH_LIMIT = 20;
 const ICON_SOURCE_MAX_BYTES = 64 * 1024;
 const ICON_READ_CONCURRENCY = 8;
@@ -1019,7 +1028,8 @@ export function createShareViewFiles(
     } catch (error) {
       // The capture set the record aside, so a refresh that then fails
       // says so too.
-      if (target.kind !== "standalone" || !recovered.collisionRecordQuarantined) throw error;
+      if (!recovered.collisionRecordQuarantined) throw error;
+      if (target.kind !== "standalone") throw new SetAsideRefreshError(error);
       return {
         kind: "refresh",
         outcome: { ...standaloneShareViewFailureOutcome(error, localChanges), ...setAsideCollisionRecord(recovered) },

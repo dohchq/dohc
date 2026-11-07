@@ -5774,8 +5774,14 @@ export const ShareMountStatusRow = z.object({
   // refresh again. Permanent, like an ended share, and reported per ROW so
   // one damaged record cannot stop the other mounts refreshing — which it
   // could not do at all until this schema carried the word.
-  status: z.enum(["updated", "unchanged", "ended", "damaged"]),
+  // "failed": this refresh stopped for this mount. The next one tries again.
+  status: z.enum(["updated", "unchanged", "ended", "damaged", "failed"]),
   changedPaths: z.number().int().nonnegative(),
+  // With "failed": dohc could not read this share's record of the person's
+  // files with the same path as a shared file, so it changed nothing.
+  errorKind: z.literal("collision-record").optional(),
+  // dohc set that record aside because it could not read it.
+  collisionRecordQuarantined: z.literal(true).optional(),
 });
 export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
 
@@ -5792,6 +5798,9 @@ export type RefreshShareMountsPayload = z.infer<typeof RefreshShareMountsPayload
 
 export const RefreshShareMountsResult = z.object({
   results: z.array(ShareMountStatusRow).max(200),
+  // Why the refresh stopped before every share refreshed, such as an expired
+  // session. The rows say what it did up to then.
+  abortMessage: z.string().min(1).max(500).optional(),
 });
 export type RefreshShareMountsResult = z.infer<typeof RefreshShareMountsResult>;
 

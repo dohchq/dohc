@@ -20,10 +20,12 @@ it("keeps newer mount props when an older registry reload resolves", async () =>
   const refreshFiles = vi.fn().mockResolvedValue(undefined);
   const reportShellError = vi.fn();
   const showSuccessNotice = vi.fn();
+  const reportShellFailure = vi.fn();
+  const clearIdentity = vi.fn();
   const { result, rerender } = renderHook(
     ({ shareMounts }) => useShareMounts(
       "ws-1", shareMounts, refreshWorkspaceRegistry, onExplorerPathsChanged,
-      refreshFiles, reportShellError, showSuccessNotice,
+      refreshFiles, reportShellError, showSuccessNotice, reportShellFailure, clearIdentity,
     ),
     { initialProps: { shareMounts: mounts } },
   );
@@ -53,7 +55,7 @@ it("reports a failed unmount with Try again", async () => {
   const mounts = [{ shareId: "share-1", label: "alex", granterEmail: null }];
   const { result } = renderHook(() => useShareMounts(
     "ws-1", mounts, vi.fn().mockResolvedValue([]), vi.fn(),
-    vi.fn().mockResolvedValue(undefined), reportShellError, showSuccessNotice,
+    vi.fn().mockResolvedValue(undefined), reportShellError, showSuccessNotice, vi.fn(), vi.fn(),
   ));
 
   await act(async () => { await result.current.unmountShare("shared-with-me/alex"); });
@@ -77,7 +79,7 @@ it("reports every announced share refresh under one kind", async () => {
   const showSuccessNotice = vi.fn();
   const { result } = renderHook(() => useShareMounts(
     "ws-1", [{ shareId: "share-1", label: "alex", granterEmail: null }], vi.fn().mockResolvedValue([]), vi.fn(),
-    vi.fn().mockResolvedValue(undefined), reportShellError, showSuccessNotice,
+    vi.fn().mockResolvedValue(undefined), reportShellError, showSuccessNotice, vi.fn(), vi.fn(),
   ));
 
   await act(async () => { await result.current.refreshShareMounts(true); });
@@ -105,8 +107,11 @@ it("lets only the newest announced refresh write its summary", async () => {
   const mounts = [{ shareId: "share-1", label: "alex", granterEmail: null }];
   const refreshRegistry = vi.fn().mockResolvedValue([]);
   const onPathsChanged = vi.fn();
+  const reportShellFailure = vi.fn();
+  const clearIdentity = vi.fn();
   const { result } = renderHook(() => useShareMounts(
     "ws-1", mounts, refreshRegistry, onPathsChanged, refreshFiles, reportShellError, showSuccessNotice,
+    reportShellFailure, clearIdentity,
   ));
 
   let older!: Promise<void>;
@@ -117,5 +122,156 @@ it("lets only the newest announced refresh write its summary", async () => {
 
   await act(async () => { finishFiles(); await older; });
   expect(showSuccessNotice).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+const REFUSAL_WORDS =
+  "dohc did not update alex because it could not read " +
+  "shared-with-me/alex/.dohc/local/share-refresh/share-collision-record.json. " +
+  "It keeps a refresh from replacing your own files.";
+
+function mountRows() {
+  const reportShellError = vi.fn();
+  const showSuccessNotice = vi.fn();
+  const reportShellFailure = vi.fn();
+  const clearIdentity = vi.fn();
+  const mounts = [
+    { shareId: "share-1", label: "alex", granterEmail: null },
+    { shareId: "share-2", label: "kim", granterEmail: null },
+  ];
+  const registry = vi.fn().mockResolvedValue([]);
+  const onPathsChanged = vi.fn();
+  const refreshFiles = vi.fn().mockResolvedValue(undefined);
+  const hook = renderHook(
+    ({ shareMounts }) => useShareMounts(
+      "ws-1", shareMounts, registry, onPathsChanged, refreshFiles, reportShellError, showSuccessNotice,
+      reportShellFailure, clearIdentity,
+    ),
+    { initialProps: { shareMounts: mounts } },
+  );
+  return { ...hook, reportShellError, reportShellFailure, clearIdentity };
+}
+
+const refused = { shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" };
+const kimUpdated = { shareId: "share-2", label: "kim", status: "updated", changedPaths: 1 };
+
+// The record keeps the person's own files apart while dohc can't read it, so
+// the row has no × and ends only when that share's refresh completes.
+it("keeps a share's collision-record refusal in Notices until that share refreshes", async () => {
+  const refresh = vi.fn()
+    .mockResolvedValueOnce({ results: [refused, kimUpdated] })
+    .mockResolvedValueOnce({ results: [refused, kimUpdated] })
+    .mockResolvedValue({ results: [{ ...refused, status: "unchanged", errorKind: undefined }, kimUpdated] });
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const { result, reportShellError, reportShellFailure, clearIdentity } = mountRows();
+
+  // A refresh the person starts has one toast, its summary: the row goes into
+  // Notices unread.
+  await act(async () => { await result.current.refreshShareMounts(true); });
+  expect(reportShellFailure).toHaveBeenCalledOnce();
+  expect(reportShellFailure).toHaveBeenCalledWith({
+    message: REFUSAL_WORDS,
+    retry: expect.any(Function),
+    noDismiss: true,
+    kind: "share-collision-record",
+    identity: "share-mount-collision-record:share-1",
+    quiet: true,
+  });
+  expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-collision-record:share-1");
+  expect(reportShellError).toHaveBeenCalledWith(
+    "Refreshed 1 of 2 shares. 1 file updated.", null, expect.any(Function), "share-refresh",
+  );
+
+  // A polled refusal of the same share updates its row without a new toast.
+  await act(async () => { await result.current.refreshShareMounts(); });
+  expect(reportShellFailure).toHaveBeenCalledTimes(2);
+  expect(reportShellFailure.mock.calls[1]![0]).toMatchObject({ message: REFUSAL_WORDS, repeat: true });
+  expect(reportShellError).toHaveBeenCalledOnce();
+
+  // Try again refreshes as the person asked, and the completed refresh ends the row.
+  const retry = reportShellFailure.mock.calls[0]![0].retry as () => void;
+  await act(async () => { retry(); });
+  await vi.waitFor(() => expect(clearIdentity).toHaveBeenCalledWith("share-mount-collision-record:share-1"));
+  expect(refresh).toHaveBeenCalledTimes(3);
+  expect(reportShellFailure).toHaveBeenCalledTimes(2);
+  vi.unstubAllGlobals();
+});
+
+// Mounts always get the replace words: a mount never takes the person's writes.
+it("tells the person when dohc set aside a share's collision record", async () => {
+  vi.stubGlobal("dohcDesktop", {
+    refreshShareMounts: vi.fn().mockResolvedValue({
+      results: [{ shareId: "share-1", label: "alex", status: "updated", changedPaths: 2, collisionRecordQuarantined: true }],
+    }),
+  });
+  const { result, reportShellFailure, clearIdentity } = mountRows();
+
+  await act(async () => { await result.current.refreshShareMounts(); });
+  expect(reportShellFailure).toHaveBeenCalledWith({
+    message:
+      "dohc could not read its record of your files with the same path as a file in alex. " +
+      "A refresh can replace them with the shared version, and dohc keeps no copy of yours.",
+    identity: "share-mount-collision-record-set-aside:share-1",
+  });
+  expect(clearIdentity).toHaveBeenCalledWith("share-mount-collision-record:share-1");
+
+  // From a refresh the person starts, the summary is the toast.
+  await act(async () => { await result.current.refreshShareMounts(true); });
+  expect(reportShellFailure).toHaveBeenLastCalledWith(expect.objectContaining({
+    identity: "share-mount-collision-record-set-aside:share-1",
+    quiet: true,
+  }));
+  vi.unstubAllGlobals();
+});
+
+it("ends a removed share's refusal row", () => {
+  const { rerender, clearIdentity } = mountRows();
+  rerender({ shareMounts: [{ shareId: "share-2", label: "kim", granterEmail: null }] });
+  expect(clearIdentity).toHaveBeenCalledWith("share-mount-collision-record:share-1");
+  expect(clearIdentity).not.toHaveBeenCalledWith("share-mount-collision-record:share-2");
+});
+
+// An older poll that finishes late must not refile a row a newer refresh ended.
+it("lets only the newest refresh write a share's rows", async () => {
+  let finishOlder!: (value: unknown) => void;
+  const refresh = vi.fn()
+    .mockReturnValueOnce(new Promise((done) => { finishOlder = done; }))
+    .mockResolvedValueOnce({ results: [{ ...refused, status: "unchanged", errorKind: undefined }, kimUpdated] });
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const { result, reportShellFailure, clearIdentity } = mountRows();
+
+  let older!: Promise<void>;
+  act(() => { older = result.current.refreshShareMounts(); });
+  await act(async () => { await result.current.refreshShareMounts(); });
+  expect(clearIdentity).toHaveBeenCalledWith("share-mount-collision-record:share-1");
+
+  await act(async () => { finishOlder({ results: [refused, kimUpdated] }); await older; });
+  expect(reportShellFailure).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+// The older refresh set the record aside, so the newer one finds no record to
+// report. The older refresh's row is the only one the person gets.
+it("files an older refresh's set-aside row", async () => {
+  let finishOlder!: (value: unknown) => void;
+  const refresh = vi.fn()
+    .mockReturnValueOnce(new Promise((done) => { finishOlder = done; }))
+    .mockResolvedValueOnce({ results: [{ shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0 }] });
+  vi.stubGlobal("dohcDesktop", { refreshShareMounts: refresh });
+  const { result, reportShellFailure } = mountRows();
+
+  let older!: Promise<void>;
+  act(() => { older = result.current.refreshShareMounts(); });
+  await act(async () => { await result.current.refreshShareMounts(); });
+  expect(reportShellFailure).not.toHaveBeenCalled();
+
+  await act(async () => {
+    finishOlder({ results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }] });
+    await older;
+  });
+  expect(reportShellFailure).toHaveBeenCalledOnce();
+  expect(reportShellFailure).toHaveBeenCalledWith(expect.objectContaining({
+    identity: "share-mount-collision-record-set-aside:share-1",
+  }));
   vi.unstubAllGlobals();
 });

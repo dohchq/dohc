@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   RelayUnauthorizedError,
@@ -34,6 +34,8 @@ const SELECTOR = {
 };
 const LEASE = {} as WorkspaceOperationLease;
 const assertCurrent = () => undefined;
+const SESSION_EXPIRED = "Your server session expired. Sign in again, then refresh shares.";
+const ALEX_FAILED = { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0 };
 
 function retiringCaller() {
   let current = true;
@@ -867,7 +869,7 @@ describe("share mount commands", () => {
         workspace: WORKSPACE,
         assertCurrent: caller.assertCurrent,
       }),
-    ).rejects.toThrow("session expired");
+    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
     expect(h.events).toEqual([
       "lease:start",
       "files:reconcile",
@@ -893,9 +895,7 @@ describe("share mount commands", () => {
 
     await expect(
       h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
-    ).rejects.toThrow(
-      "session expired",
-    );
+    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
     expect(h.events.at(-1)).toBe("notify:workspace-one");
   });
 
@@ -925,7 +925,7 @@ describe("share mount commands", () => {
 
     await expect(
       h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
-    ).rejects.toThrow("session expired");
+    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
     expect(loggedErrors).toEqual([notifyFailure]);
   });
 
@@ -1183,5 +1183,145 @@ it("recovers a missing received pin once without fetching detail on every refres
   await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
   expect(h.dependencies.fetchInfo).toHaveBeenCalledOnce();
   expect(h.dependencies.loadCredentials).toHaveBeenCalledOnce();
+  expect(h.files.reconcile).toHaveBeenCalledTimes(2);
+});
+
+// One mount refreshed through the real files path, so the refresh reads its
+// records on disk.
+async function mountOnDisk(
+  h: ReturnType<typeof harness>,
+  overrides: (record: string, mountRoot: string) => Partial<Parameters<typeof createShareViewFiles>[0]>,
+) {
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example", recipientEmail: null, grantedSelector: SELECTOR }];
+  const mountRoot = await createTestScratch("share-mount-commands-");
+  await mkdir(join(mountRoot, ".dohc", "local"), { recursive: true });
+  const record = join(mountRoot, ".dohc", "local", "share-refresh", "share-collision-record.json");
+  const opened = { localStateReady: true };
+  readLocalStateFrom({ currentBinding: () => opened, localStateOpenAt: async () => ({ current: () => true }) });
+  const files = createShareViewFiles({
+    resolveTarget: () => preparedTarget({ rootPath: mountRoot }),
+    openStore: () => ({ ensureMainVersion: async () => ({ id: "main" }), listTextFileMetadata: async () => [] } as unknown as import("./shareViewFiles").ShareViewFilesStore),
+    resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+    pull: async () => { throw new Error("This test has no pull."); },
+    recordRefusals: async () => undefined, updateUnsavedPaths: async () => undefined,
+    markEnded: async () => undefined, retireTarget: async () => undefined, assertProjectionRoot: async () => undefined,
+    createMount: async () => undefined, removeMount: async () => ({ folderLeft: false }),
+    ...overrides(record, mountRoot),
+  });
+  h.dependencies.files = () => files;
+  h.dependencies.withWorkspaceOperation = (_root, run) => withExclusiveWorkspaceOperation(WORKSPACE.rootPath, (_changed, lease) => run(lease));
+  return { record };
+}
+
+// The renderer words the refusal from its kind, so the kind has to survive
+// the refresh loop. Before, the row said "unchanged".
+it("reports a mount refresh that can't read its collision record as that refusal", async () => {
+  const h = harness();
+  const { record } = await mountOnDisk(h, (recordPath, mountRoot) => ({
+    pull: async (_target, _relay, input) => {
+      await mkdir(join(mountRoot, "docs"), { recursive: true });
+      await writeFile(join(mountRoot, "docs", "a.md"), "my own file");
+      await writeFile(recordPath, "not json");
+      await input.recordCollisions?.(["docs/a.md"]);
+      throw new Error("The pull went on past an unreadable collision record.");
+    },
+  }));
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result.results).toEqual([
+    { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" },
+  ]);
+  expect(await readFile(record, "utf8")).toBe("not json");
+});
+
+it("reports a mount refresh that set aside its collision record", async () => {
+  const h = harness();
+  const { record } = await mountOnDisk(h, () => ({ resolveRelay: async () => null }));
+  await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+  await writeFile(record, "not json");
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result.results).toEqual([
+    { shareId: SHARE_ID, label: "alex", status: "unchanged", changedPaths: 0, collisionRecordQuarantined: true },
+  ]);
+  expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
+});
+
+it("reports a mount refresh that set aside its collision record and then failed", async () => {
+  const h = harness();
+  const { record } = await mountOnDisk(h, () => ({}));
+  await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+  await writeFile(record, "not json");
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result.results).toEqual([
+    { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true },
+  ]);
+  expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
+});
+
+it("reports a mount refresh that set aside its collision record and then failed to mark the share ended", async () => {
+  const h = harness();
+  const { record } = await mountOnDisk(h, () => ({
+    pull: async () => { throw new ShareUnavailableError(); },
+    markEnded: async () => { throw new Error("could not save the ended share"); },
+  }));
+  await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+  await writeFile(record, "not json");
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result.results).toEqual([
+    { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true },
+  ]);
+  expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
+});
+
+it("keeps a mount's set-aside row when its refresh then finds the session expired", async () => {
+  const h = harness();
+  const { record } = await mountOnDisk(h, () => ({
+    pull: async () => { throw new RelayUnauthorizedError(); },
+  }));
+  await mkdir(dirname(record), { recursive: true, mode: 0o700 });
+  await writeFile(record, "not json");
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result).toEqual({
+    results: [{ ...ALEX_FAILED, collisionRecordQuarantined: true }],
+    abortMessage: SESSION_EXPIRED,
+  });
+  expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
+});
+
+it("keeps an earlier mount's set-aside row when a later one finds the session expired", async () => {
+  const h = harness();
+  h.mounts = ["alex", "blair", "casey"].map((label, index) => ({
+    shareId: `${index + 1}`.repeat(8) + "-1111-4111-8111-111111111111",
+    label,
+    granterEmail: null,
+    relayUrl: "https://relay.example",
+    recipientEmail: null,
+    grantedSelector: SELECTOR,
+  }));
+  vi.mocked(h.files.reconcile)
+    .mockResolvedValueOnce({
+      kind: "refresh",
+      outcome: { status: "updated", changedPaths: 1, collisionRecordQuarantined: true },
+    } as Awaited<ReturnType<ShareViewFiles["reconcile"]>>)
+    .mockRejectedValueOnce(new RelayUnauthorizedError());
+
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+
+  expect(result).toEqual({
+    results: [
+      { shareId: SHARE_ID, label: "alex", status: "updated", changedPaths: 1, collisionRecordQuarantined: true },
+      { shareId: "22222222-1111-4111-8111-111111111111", label: "blair", status: "failed", changedPaths: 0 },
+    ],
+    abortMessage: SESSION_EXPIRED,
+  });
   expect(h.files.reconcile).toHaveBeenCalledTimes(2);
 });
