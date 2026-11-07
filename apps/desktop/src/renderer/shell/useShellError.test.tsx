@@ -11,6 +11,8 @@ import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 import { CollectionMoveUnfinishedError, ipcWireError } from "../../ipc/errorWords";
+import { sharedViewRefusal, sharedViewRefusalWords } from "../../testing/sharedViewRefusal.fixture";
+import { createOwnedProjectionRepairer } from "../../workspaces/ownedProjectionRepair";
 
 afterEach(() => { cleanup(); localStorage.clear(); });
 
@@ -19,6 +21,65 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it.each(["refresh first", "file read first"])("shows a refused shared-view refresh once, in plain words: %s", async order => {
+    const error = new Error(`Error invoking remote method 'desktop:read-workspace-text': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    const refresh = () => result.current.reportShellFailure({
+      message: sharedViewRefusalWords, retry, noDismiss: true,
+      kind: "share-collision-record", identity: "share-collision-record",
+    });
+    const read = () => result.current.reportShellError("Could not read the file.", error);
+    act(() => { if (order === "refresh first") { refresh(); read(); } else { read(); refresh(); } });
+    expect(result.current.shellErrors, "One refusal has one Notices row").toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({
+      identity: "share-collision-record", kind: "share-collision-record", noDismiss: true,
+      message: sharedViewRefusalWords, seen: false, retry,
+    });
+    const first = result.current.shellErrors[0]!;
+    act(() => result.current.hideShellError(first.id));
+    act(read);
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ id: first.id, message: sharedViewRefusalWords, seen: true });
+    act(() => result.current.retryShellError(first.id));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(result.current.shellErrors).toHaveLength(1);
+    act(() => result.current.clearIdentity("share-collision-record"));
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it.each(["cause", "message"] as const)("keeps a second refused read on the same row through its %s", async field => {
+    const error = new Error(`Error invoking remote method 'desktop:read-workspace-text': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    const report = () => result.current.reportShellFailure(field === "cause"
+      ? { message: "Could not read the file.", cause: error, identity: "open-file", title: "Could not open" }
+      : { message: error.message, identity: "open-file" });
+    act(report);
+    expect(result.current.shellErrors[0]?.identity, "A refused read uses the shared-view row").toBe("share-collision-record");
+    expect(result.current.shellErrors[0]).toMatchObject({ message: sharedViewRefusalWords, noDismiss: true, retry });
+    expect(result.current.shellErrors[0]?.title).toBeUndefined();
+    act(report);
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]?.message).toBe(sharedViewRefusalWords);
+  });
+
+  it("puts an open-file repair refusal on the shared-view row", async () => {
+    const refusal = await sharedViewRefusal();
+    const rootPath = "/refused-open-file";
+    const repair = createOwnedProjectionRepairer({
+      projectionStatus: vi.fn(async () => ({ state: "current" as const })),
+      reconcile: vi.fn(async () => { throw refusal; }),
+    });
+    const received = await repair({ rootPath, target: { kind: "standalone", workspaceId: "ws-a" } })
+      .catch(error => new Error(`Error invoking remote method 'desktop:read-workspace-text': ${String(ipcWireError(error))}`));
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    act(() => result.current.reportShellError("Could not read the file.", received));
+    expect(result.current.shellErrors[0]?.identity, "An open-file repair uses the shared-view row").toBe("share-collision-record");
+    expect(result.current.shellErrors[0]).toMatchObject({ message: sharedViewRefusalWords, noDismiss: true, retry });
+  });
+
   it("drops a late History refusal from the previous workspace", () => {
     const { result, rerender } = renderHook(({ workspaceId }) => useShellError(workspaceId), {
       initialProps: { workspaceId: "before" },

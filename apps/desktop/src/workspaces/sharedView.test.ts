@@ -62,6 +62,7 @@ import { deniedReadCode, denyRead, restoreRead } from "@dohc/workspace-fs/testin
 import { createTestScratch } from "./testTemp";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { LocalStateUnavailableError, readLocalStateFrom } from "./workspaceLocalState";
+import { ipcWireError, readError, refusalCode } from "../ipc/errorWords";
 
 // This suite isolates shared-view primitives. Owner admission itself is kept
 // real in shareViewFiles.test.ts and every file-operation/mount e2e suite.
@@ -8612,8 +8613,9 @@ describe("share-refresh records in .dohc/local", () => {
     try {
       await writeFile(view.collisionRecord, "not json", "utf8");
 
-      await expect(recordCollisionPaths(view.rootDir, SHARE_ID, ["docs/other.md"])).rejects.toMatchObject({
-        name: "CollisionRecordRefusal",
+      await expect(recordCollisionPaths(view.rootDir, SHARE_ID, ["docs/other.md"]), "A refused shared-file update keeps the shared-view code").rejects.toMatchObject({
+        name: "Error",
+        code: "share-collision-record",
         message: UNREADABLE_RECORD_WORDS,
       });
       expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
@@ -8621,6 +8623,25 @@ describe("share-refresh records in .dohc/local", () => {
       expect(errorLog).not.toHaveBeenCalledWith(expect.stringContaining("set it aside"));
     } finally {
       errorLog.mockRestore();
+      await view.store.close();
+    }
+  });
+
+  it("keeps a late refused shared-file read recognizable across IPC", async () => {
+    const view = await collidedView();
+    try {
+      await rm(join(view.rootDir, view.path));
+      await writeFile(join(view.rootDir, "docs/seed.md"), "edited seed", "utf8");
+      const failure = await captureSharedViewLocalDivergence(
+        view.rootDir, WORKSPACE, view.store, true, SHARE_ID,
+        { beforeCaptureWrite: async () => { await writeFile(view.collisionRecord, "not json", "utf8"); } },
+      ).catch(error => error);
+      const received = new Error(`Error invoking remote method 'desktop:read-workspace-text': ${String(ipcWireError(failure))}`);
+      expect(refusalCode(received), "A late refusal keeps the shared-view code").toBe("share-collision-record");
+      expect(readError(received).words).toBe(UNREADABLE_RECORD_WORDS);
+      expect(failure).toMatchObject({ capturedPaths: 1, repairedPaths: 1 });
+      expect(await readFile(view.collisionRecord, "utf8")).toBe("not json");
+    } finally {
       await view.store.close();
     }
   });
