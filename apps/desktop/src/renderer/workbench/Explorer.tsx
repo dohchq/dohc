@@ -91,8 +91,6 @@ export interface ExplorerProps {
   onModeChange: (mode: ExplorerMode) => void;
   // Whether the workspace's first listing has landed. Home waits for it.
   listed: boolean;
-  // Opened paths and tabs, most recent first, for Home's Recent.
-  recentFiles: readonly string[];
   files: WorkspaceFileEntry[];
   folders: string[];
   editorGroups: EditorGroup[];
@@ -556,6 +554,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     openEditorsResize.previewValue ?? props.openEditorsHeight,
     viewportCap,
   );
+  // Changes whenever Open editors may change height, so the rows below it
+  // are measured again. A second group adds headings with no new tab.
+  const openEditorsLayout = `${openEditorsExpanded} ${openEditorsHeight} ${openEditorCount} ${props.editorGroups.length}`;
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
   // fires with a stale closure — without this latch the edit would commit
@@ -753,13 +754,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   useLayoutEffect(() => {
     updateVirtualRange();
-  }, [
-    updateVirtualRange,
-    filesExpanded,
-    openEditorsExpanded,
-    openEditorsHeight,
-    openEditorCount,
-  ]);
+  }, [updateVirtualRange, filesExpanded, openEditorsLayout]);
 
   useEffect(() => {
     const container = fileTreeRef.current;
@@ -1796,25 +1791,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {home ? (
-          <ExplorerHome
-            explorer={props}
-            files={projected.files}
-            fileByPath={fileByPath}
-            folders={folderPathSet}
-            activePath={activeTab}
-            scrollerRef={fileTreeRef}
-            editingPath={editing?.mode === "rename" ? editing.path : null}
-            renderEditRow={editRow}
-            onMenu={onHomeMenu}
-            onRename={beginRename}
-            onDelete={setConfirmDelete}
-            onShowInFiles={showInFiles}
-            drag={homeDrag}
-            dropPreviewFor={dropPreviewFor}
-          />
-        ) : (
-        <>
         <section
           data-testid="open-editors-section"
           aria-label="Open editors"
@@ -1971,7 +1947,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 ))}
               </ul>
             ) : (
-              <div className="px-3 py-1.5 text-[11px] text-subtle">
+              <div className="flex h-7 items-center px-3 text-[11px] text-subtle">
                 No open editors
               </div>
             )
@@ -2021,6 +1997,25 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           ) : null}
         </section>
 
+        {home ? (
+          <ExplorerHome
+            explorer={props}
+            files={projected.files}
+            fileByPath={fileByPath}
+            folders={folderPathSet}
+            activePath={activeTab}
+            scrollerRef={fileTreeRef}
+            aboveLayout={openEditorsLayout}
+            editingPath={editing?.mode === "rename" ? editing.path : null}
+            renderEditRow={editRow}
+            onMenu={onHomeMenu}
+            onRename={beginRename}
+            onDelete={setConfirmDelete}
+            onShowInFiles={showInFiles}
+            drag={homeDrag}
+            dropPreviewFor={dropPreviewFor}
+          />
+        ) : (
         <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
           <header
             data-testid="explorer-files-header"
@@ -2086,7 +2081,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             </>
           ) : null}
         </section>
-        </>
         )}
       </nav>
 

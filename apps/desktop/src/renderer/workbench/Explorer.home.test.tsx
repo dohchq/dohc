@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { ExplorerApps } from "./AppsSection";
 import { Explorer, type ExplorerProps } from "./Explorer";
-import { OTHER_FILES_SHOWN, RECENT_SHOWN } from "./explorerHomeModel";
-import { collectionTabPath, siteTabPath, transactionalCollectionTabPath } from "./workbenchState";
+import { OTHER_FILES_SHOWN } from "./explorerHomeModel";
+import { collectionTabPath, siteTabPath } from "./workbenchState";
 
 const app = {
   root: "trip",
@@ -53,7 +53,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "home",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       file("notes.md"),
       file("Plans/Spring.md"),
@@ -115,6 +114,36 @@ function rowLabels(name: string): string[] {
     .map((element) => element.querySelector(".truncate")?.textContent ?? element.textContent ?? "");
 }
 
+const PAGE_PATHS = Array.from({ length: 500 }, (_, index) => `file-${String(index).padStart(4, "0")}.md`);
+
+// Home with 500 pages and 40 of them open in one group.
+function largeHome(): Partial<ExplorerProps> {
+  return {
+    files: PAGE_PATHS.map(file), folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(),
+    editorGroups: [{ id: "group-1", tabs: PAGE_PATHS.slice(0, 40).map((path) => ({ path })), activeTab: PAGE_PATHS[0]!, size: 1 }],
+  };
+}
+
+function mounted(path: string): boolean {
+  return document.querySelector(`[data-home-key="pages:${path}"]`) !== null;
+}
+
+function rect(top: number, height: number) {
+  return { x: 0, y: top, top, left: 0, right: 280, bottom: top + height, width: 280, height, toJSON: () => ({}) };
+}
+
+// Renders Home in a 280 px scroller, 100 rows into Pages less `offset`: how
+// far Open editors pushes Pages down.
+function scrolledHome(props: ExplorerProps, offset: () => number) {
+  const view = render(<Explorer {...props} />);
+  const scroller = screen.getByTestId("file-tree");
+  Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 280 });
+  vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue(rect(0, 280));
+  vi.spyOn(section("Pages").querySelector("ul")!, "getBoundingClientRect").mockImplementation(() => rect(-2_800 + offset(), 14_000));
+  fireEvent.scroll(scroller);
+  return view;
+}
+
 const showExplorerMenu = vi.fn(async (_input: unknown) => null);
 
 beforeEach(() => {
@@ -128,13 +157,37 @@ afterEach(() => {
 });
 
 describe("Explorer Home", () => {
-  it("orders its sections Pinned, Recent, Pages, Collections, Apps, Other files", () => {
-    render(<Explorer {...explorerProps({ pinned: ["notes.md"], recentFiles: ["budget.csv"] })} />);
+  it("orders its sections Open editors, Pinned, Pages, Collections, Apps, Other files", () => {
+    render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
 
-    const sections = [...screen.getByTestId("explorer-home").querySelectorAll(":scope > section")];
+    const sections = [...screen.getByTestId("file-tree").querySelectorAll("section")];
     expect(sections.map((element) => element.getAttribute("aria-label")))
-      .toEqual(["Pinned", "Recent", "Pages", "Collections", "Apps", "Other files"]);
+      .toEqual(["Open editors", "Pinned", "Pages", "Collections", "Apps", "Other files"]);
     expect(screen.getByTestId("file-tree").getAttribute("aria-label")).toBe("Home");
+  });
+
+  it("shows Files' Open editors, and Tab moves on from it into Home's list", async () => {
+    const onActivateTab = vi.fn();
+    const onCloseTab = vi.fn();
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps({
+      onActivateTab,
+      onCloseTab,
+      editorGroups: [{ id: "group-1", tabs: [{ path: "notes.md" }, { path: "budget.csv" }], activeTab: "notes.md", size: 1 }],
+    })} />);
+
+    const openEditors = section("Open editors");
+    expect(within(openEditors).getAllByTestId("open-editor-row").map((row) => row.dataset.path)).toEqual(["notes.md", "budget.csv"]);
+    expect(within(openEditors).getByRole("separator", { name: "Resize open editors" })).toBeTruthy();
+    await user.click(within(openEditors).getByRole("button", { name: "budget.csv" }));
+    expect(onActivateTab).toHaveBeenCalledWith("group-1", "budget.csv");
+    const close = within(openEditors).getByRole("button", { name: "Close budget.csv" });
+    await user.click(close);
+    expect(onCloseTab).toHaveBeenCalledWith("group-1", "budget.csv");
+
+    close.focus();
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByTestId("explorer-pages-toggle"));
   });
 
   it("leaves Files to Open editors and the folder tree", () => {
@@ -145,13 +198,16 @@ describe("Explorer Home", () => {
     expect(screen.queryByTestId("explorer-home")).toBeNull();
   });
 
-  it("draws no Pinned or Recent section with nothing in it, and always draws Pages with its +", async () => {
+  it("draws no Pinned section with nothing in it, and always draws Open editors and Pages with its +", async () => {
     const onNewPage = vi.fn();
     const user = userEvent.setup();
-    render(<Explorer {...explorerProps({ files: [], folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(), onNewPage })} />);
+    render(<Explorer {...explorerProps({
+      files: [], folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(), onNewPage,
+      editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
+    })} />);
 
+    expect(within(section("Open editors")).getByText("No open editors")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Pinned" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "Recent" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
     expect(rowLabels("Pages")).toEqual([]);
@@ -194,11 +250,11 @@ describe("Explorer Home", () => {
   it("moves through every section as one list", async () => {
     const onOpenFile = vi.fn();
     const user = userEvent.setup();
-    render(<Explorer {...explorerProps({ onOpenFile, recentFiles: ["budget.csv"] })} />);
+    render(<Explorer {...explorerProps({ onOpenFile, pinned: ["budget.csv"] })} />);
 
-    const recentToggle = screen.getByTestId("explorer-recent-toggle");
-    expect(recentToggle.tabIndex).toBe(0);
-    recentToggle.focus();
+    const pinnedToggle = screen.getByTestId("explorer-pinned-toggle");
+    expect(pinnedToggle.tabIndex).toBe(0);
+    pinnedToggle.focus();
     await user.keyboard("{ArrowDown}");
     await user.keyboard("{Enter}");
     expect(onOpenFile).toHaveBeenLastCalledWith("budget.csv");
@@ -264,23 +320,6 @@ describe("Explorer Home", () => {
     expect(rowLabels("Pinned")).toEqual(["Trip", "notes", "tasks"]);
   });
 
-  it("shows the five most recent things that still exist, across kinds", () => {
-    render(<Explorer {...explorerProps({
-      recentFiles: [
-        "gone.md",
-        siteTabPath("trip"),
-        transactionalCollectionTabPath("guests/dataset.json", TABLE),
-        "budget.csv",
-        "Plans/Spring.md",
-        collectionTabPath("tasks"),
-        "notes.md",
-      ],
-    })} />);
-
-    expect(rowLabels("Recent")).toEqual(["Trip", "Guests", "budget.csv", "Spring", "tasks"]);
-    expect(rowLabels("Recent")).toHaveLength(RECENT_SHOWN);
-  });
-
   it("shows the Files menu for a row, with an app folder's sidebar pin", async () => {
     render(<Explorer {...explorerProps({ apps: apps({ pinnedApps: ["trip"] }) })} />);
 
@@ -289,6 +328,44 @@ describe("Explorer Home", () => {
     await userEvent.hover(within(section("Apps")).getByTestId("sites-row"));
     fireEvent.click(within(section("Apps")).getByRole("button", { name: "More actions for Trip" }));
     expect(showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "trip", kind: "folder", pinned: true });
+  });
+
+  it("measures the Pages window again while Open editors above it is resized", () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1_000 });
+    try {
+      scrolledHome(
+        explorerProps({ ...largeHome(), openEditorsHeight: 56 }),
+        () => Number.parseFloat(screen.getByTestId("open-editors-list").style.maxHeight) - 56,
+      );
+      expect(mounted("file-0100.md")).toBe(true);
+      expect(mounted("file-0080.md")).toBe(false);
+
+      const handle = screen.getByTestId("open-editors-resize");
+      Object.defineProperty(handle, "setPointerCapture", { value: vi.fn() });
+      fireEvent.pointerDown(handle, { button: 0, buttons: 1, clientY: 0, pointerId: 1 });
+      fireEvent.pointerMove(handle, { buttons: 1, clientY: 1_000, pointerId: 1 });
+
+      expect(screen.getByTestId("open-editors-list").style.maxHeight).toBe("600px");
+      expect(mounted("file-0080.md")).toBe(true);
+    } finally {
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+    }
+  });
+
+  it("measures the Pages window again when a tab moves into a new group", () => {
+    const props = explorerProps(largeHome());
+    // Each group heading pushes Pages down, here by an exaggerated 150 px.
+    const view = scrolledHome(props, () => 150 * section("Open editors").querySelectorAll('[role="heading"]').length);
+    expect(mounted("file-0080.md")).toBe(false);
+
+    const tabs = props.editorGroups[0]!.tabs;
+    view.rerender(<Explorer {...props} editorGroups={[
+      { id: "group-1", tabs: tabs.slice(0, 20), activeTab: tabs[0]!.path, size: 1 },
+      { id: "group-2", tabs: tabs.slice(20), activeTab: tabs[20]!.path, size: 1 },
+    ]} />);
+
+    expect(mounted("file-0080.md")).toBe(true);
   });
 
   it("switches to Files to reveal a path", () => {
