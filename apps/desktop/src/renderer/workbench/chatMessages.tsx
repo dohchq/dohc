@@ -505,6 +505,17 @@ export function continuesRun(previous: ChatMessageRecord | undefined, message: C
     message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
 }
 
+// The day pinned over the list for its topmost visible row, or null. A row
+// that starts its day carries that day's divider; any other row's divider is
+// further up, out of view. The label shows only while the divider is out of
+// view or crossing the top edge, so it never covers a divider for its own day.
+export function pinnedChatDay(
+  topRow: { day: string; startsDay: boolean; dividerFullyVisible: boolean } | null,
+): string | null {
+  if (!topRow || topRow.startsDay && topRow.dividerFullyVisible) return null;
+  return topRow.day;
+}
+
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 const messageKeyExtractor = (message: ChatMessageRecord) => message.id;
 
@@ -586,20 +597,88 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     },
     getScrollableNode: () => list.current?.getScrollableNode() ?? null,
   }), [indexes]);
-  // The day of the topmost visible message, pinned over the list while the
-  // reader is somewhere in history: neither the first nor the last message is
-  // in view. Legend reports viewability once per change of the visible set,
-  // and an unchanged label is a no-op update.
+  // The day of the topmost visible message, pinned over the list while its
+  // day's divider is out of view. Legend reports the visible set, and an
+  // IntersectionObserver on the mounted day dividers reports each divider that
+  // crosses the scroller's top edge. Nothing reads layout while scrolling, and
+  // state changes only with the label.
   const [topDay, setTopDay] = useState<string | null>(null);
-  const messageCount = useRef(props.messages.length);
-  messageCount.current = props.messages.length;
-  const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
-    const first = info.viewableItems[0];
-    const last = info.viewableItems[info.viewableItems.length - 1];
-    const inHistory =
-      first !== undefined && first.index > 0 && last !== undefined && last.index < messageCount.current - 1;
-    setTopDay(inHistory ? formatChatDay(first.item.createdAtMs) : null);
+  const messagesRef = useRef(props.messages);
+  messagesRef.current = props.messages;
+  const indexesRef = useRef(indexes);
+  indexesRef.current = indexes;
+  const topMessageId = useRef<string | null>(null);
+  const clippedDividers = useRef(new Set<string>());
+  const dividers = useRef(new Map<string, HTMLElement>());
+  const dividerObserver = useRef<IntersectionObserver | null>(null);
+  const updateTopDay = useCallback(() => {
+    const messages = messagesRef.current;
+    const at = topMessageId.current === null ? undefined : indexesRef.current.get(topMessageId.current);
+    const message = at === undefined ? undefined : messages[at];
+    const label = at === undefined || !message ? null : pinnedChatDay({
+      day: formatChatDay(message.createdAtMs),
+      startsDay: at === 0 || !sameChatDay(messages[at - 1]!.createdAtMs, message.createdAtMs),
+      dividerFullyVisible: !clippedDividers.current.has(message.id),
+    });
+    setTopDay(current => current === label ? current : label);
   }, []);
+  const onViewableItemsChanged = useCallback<NonNullable<OnViewableItemsChanged<ChatMessageRecord>>>((info) => {
+    const id = info.viewableItems[0]?.item.id ?? null;
+    if (id === topMessageId.current) return;
+    topMessageId.current = id;
+    // A jump can carry a divider from below the pane to above it with no
+    // threshold crossed, so the new top row's divider is observed afresh. Its
+    // first entry says which side of the top edge it is on.
+    const divider = id === null ? undefined : dividers.current.get(id);
+    if (divider && dividerObserver.current) {
+      dividerObserver.current.unobserve(divider);
+      dividerObserver.current.observe(divider);
+    }
+    updateTopDay();
+  }, [updateTopDay]);
+  // Rows mount and unmount as Legend virtualizes, so each divider joins and
+  // leaves the observer through its ref.
+  const observeDivider = useCallback((divider: HTMLElement | null) => {
+    if (!divider) return;
+    const id = divider.dataset.dayDivider!;
+    dividers.current.set(id, divider);
+    dividerObserver.current?.observe(divider);
+    return () => {
+      if (dividers.current.get(id) === divider) dividers.current.delete(id);
+      dividerObserver.current?.unobserve(divider);
+      clippedDividers.current.delete(id);
+    };
+  }, []);
+  const listShown = !props.loading && props.messages.length > 0;
+  useEffect(() => {
+    const scroller = listShown ? list.current?.getScrollableNode() : null;
+    if (!scroller || typeof IntersectionObserver === "undefined") return;
+    // Thresholds 0 and 1 report a divider leaving full view or leaving the pane.
+    const observer = new IntersectionObserver((entries) => {
+      let changed = false;
+      for (const entry of entries) {
+        const id = (entry.target as HTMLElement).dataset.dayDivider!;
+        // Crossing or above the top edge.
+        const clipped = entry.rootBounds !== null && entry.boundingClientRect.top < entry.rootBounds.top;
+        if (clipped === clippedDividers.current.has(id)) continue;
+        changed = true;
+        if (clipped) clippedDividers.current.add(id);
+        else clippedDividers.current.delete(id);
+      }
+      if (changed) updateTopDay();
+    }, { root: scroller, threshold: [0, 1] });
+    dividerObserver.current = observer;
+    for (const divider of dividers.current.values()) observer.observe(divider);
+    return () => {
+      observer.disconnect();
+      dividerObserver.current = null;
+      clippedDividers.current.clear();
+      // A list shown again reports its top row afresh.
+      topMessageId.current = null;
+      setTopDay(null);
+    };
+  }, [listShown, updateTopDay]);
+  useEffect(updateTopDay, [props.messages, updateTopDay]);
 
   const messageKey = useCallback((node: Node | null) => {
     const element = node instanceof Element ? node : node?.parentElement;
@@ -683,6 +762,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         {newDay && anchor === "end" ? (
           <span
             data-testid={`${props.testIdPrefix}-day`}
+            data-day-divider={message.id}
+            ref={observeDivider}
             className={`${sizes.divider} mb-1.5 mt-2.5 flex items-center gap-3 text-[12px] font-medium text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line`}
           >
             {formatChatDay(message.createdAtMs)}
@@ -797,7 +878,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         </AgentColorScope>
       </li>
     );
-  }, [props, candidates, reactionsByMessage, density, anchor]);
+  }, [props, candidates, reactionsByMessage, density, anchor, observeDivider]);
   if (props.loading || props.messages.length === 0) {
     return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-2 ${anchor === "end" ? "justify-end" : ""}`}>
       {props.loading ? (
