@@ -492,16 +492,22 @@ describe("Links for an open conversation", () => {
     );
   });
 
-  it("files a failed read in Notices with Try again, and a read that lands clears it", async () => {
-    const error = new Error("disk is busy");
+  // The row says only what failed. Its notice says that first, then why
+  // when the error says.
+  it.each([
+    ["a known reason", new Error("Error [EBUSY]: EBUSY: resource busy or locked"),
+      "dohc could not load the links. Another program is using this file or folder."],
+    ["its own words", new Error("The disk is busy."), "dohc could not load the links. The disk is busy."],
+    ["no words", new Error(""), "dohc could not load the links."],
+  ])("files a failed read with %s in Notices with Try again, and a read that lands clears it", async (_why, error, message) => {
     bridgeMock.chatLinks.mockRejectedValueOnce(error).mockResolvedValueOnce(linksPage([mention("data/funnel.csv", NOVA, 1)]));
     publish("workspace-a", GENERAL, conversation({}));
     render(<Rail />);
     const failed = await screen.findByTestId("about-conversation-links-failed");
-    expect(failed.textContent).toBe("Try again");
+    expect(failed.textContent).toBe("dohc could not load the links.Try again");
     expect(notices.report).toHaveBeenCalledExactlyOnceWith({
       identity: "about-conversation-links:wire-general",
-      message: expect.stringContaining("disk is busy"),
+      message,
       cause: error,
       retry: expect.any(Function),
     });

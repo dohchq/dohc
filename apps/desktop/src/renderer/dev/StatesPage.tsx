@@ -2919,7 +2919,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 2), partial: true }} />
           </AboutPanelSpecimen>
         </Specimen>
-        <Specimen label="loading, a failed read with its words in Notices, then a conversation dohc does not list">
+        <Specimen label="loading, a failed read, then a conversation dohc does not list">
           <AboutPanelSpecimen>
             <ConversationLinks view={{ status: "loading" }} />
             <ConversationLinks view={{ status: "failed" }} />

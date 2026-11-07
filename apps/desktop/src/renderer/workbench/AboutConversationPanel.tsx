@@ -1,7 +1,7 @@
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { Link2Off } from "lucide-react";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ipcErrorMessage } from "../ipcError";
+import { withErrorWords } from "../../ipc/errorWords";
 import { RetryRow } from "../ui/controls";
 import { Ref } from "../ui/Ref";
 import { SkeletonLines } from "../ui/SkeletonRows";
@@ -84,7 +84,8 @@ export type ConversationLinksView =
   | { status: "unlisted" }
   | { status: "ready"; files: MentionedFile[]; more: boolean; building: boolean; partial: boolean };
 
-const LINKS_FAILED = "dohc could not load the files this conversation mentions.";
+// The row says the sentence. Its toast adds the error's words when it has any.
+const LINKS_FAILED = "dohc could not load the links.";
 
 const authorKey = (author: Author) => `${author.kind}\0${author.presentation.group}\0${author.displayName}`;
 
@@ -119,7 +120,7 @@ function AboutConversationLinks(props: {
   const retry = useRef(() => {});
   const onError = useCallback((error: unknown) => {
     setFailed(key);
-    notices.report({ identity, message: ipcErrorMessage(error, LINKS_FAILED), cause: error, retry: () => retry.current() });
+    notices.report({ identity, message: withErrorWords(LINKS_FAILED, error), cause: error, retry: () => retry.current() });
   }, [identity, key, notices]);
   const { pages, status, load, loadMore } = useChatLinks({ workspaceId, channelWireId, onError });
   const read = useCallback(() => {
@@ -204,7 +205,7 @@ export function AboutConversationLinksView(props: {
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
       ) : view.status === "failed" ? (
-        <RetryRow testId="about-conversation-links-failed" onRetry={props.onRetry} />
+        <RetryRow testId="about-conversation-links-failed" onRetry={props.onRetry}>{LINKS_FAILED}</RetryRow>
       ) : view.status === "unlisted" ? (
         <AboutNote testId="about-conversation-links-unlisted" icon={Link2Off}>
           dohc does not list links in this conversation yet.
