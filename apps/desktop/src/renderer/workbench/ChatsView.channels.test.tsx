@@ -229,7 +229,7 @@ describe("ChatsView channels", () => {
     await screen.findByTestId("chats-new-channel-error");
     await user.click(screen.getByTestId("chats-new-channel-cancel"));
 
-    expect(onError).toHaveBeenCalledExactlyOnceWith(taken.message, taken, expect.any(Function), {
+    expect(onError).toHaveBeenCalledExactlyOnceWith(taken.message, taken, expect.any(Function), undefined, {
       title: `dohc couldn't create #${name}`, identity: `group-name-taken:${slug}`,
     });
   });
