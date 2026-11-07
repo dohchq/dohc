@@ -118,12 +118,12 @@ describe("chat runner process", () => {
   it("uses the packaged runtime on Linux x64 and refuses to start without it", async () => {
     const { root, calls, spawn } = await runnerFixture("linux", true, "x64");
     vi.stubEnv("PATH", process.execPath);
-    expect(() => spawn("agent")).toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+    await expect(spawn("agent")).rejects.toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
     expect(calls).toHaveLength(0);
     mkdirSync(join(root, "resources", "app-compiler"), { recursive: true });
     writeFileSync(join(root, "resources", "app-compiler", "node"), "runtime", { mode: 0o755 });
     vi.stubEnv("PATH", "");
-    spawn("agent");
+    await spawn("agent");
     expect(calls).toHaveLength(1);
     expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "bundled", available: true });
   });
