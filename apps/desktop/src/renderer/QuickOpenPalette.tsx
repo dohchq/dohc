@@ -13,6 +13,13 @@ export function QuickOpenPalette(props: {
   files: readonly { path: string }[];
   recent: readonly string[];
   pinned: readonly string[];
+  // Empty-state facts. "No files to open" is only true once a listing has
+  // committed: before that the array is merely its initial value, and a
+  // failed walk leaves it empty for real. The create hint only names New
+  // file when it is available to this viewer.
+  listingReady: boolean;
+  listingFailed: boolean;
+  canCreateFile: boolean;
   onOpenPath: (path: string) => void;
   onClose: () => void;
 }) {
@@ -55,6 +62,15 @@ export function QuickOpenPalette(props: {
       toggleShortcut="quick-open"
       placeholder="Go to…"
       ariaLabel="File"
+      emptyText={(query) => {
+        if (query !== "") return `No files match "${query}". Try a shorter search.`;
+        if (!props.listingReady) {
+          return props.listingFailed ? "Files are not listed yet." : "Loading files…";
+        }
+        return props.canCreateFile
+          ? "No files to open yet. Create one with New file."
+          : "No files to open";
+      }}
       commands={commands}
       rank={rank}
       onClose={props.onClose}

@@ -24,6 +24,9 @@ function palette(overrides: {
   files?: readonly { path: string }[];
   recent?: readonly string[];
   pinned?: readonly string[];
+  listingReady?: boolean;
+  listingFailed?: boolean;
+  canCreateFile?: boolean;
   onOpenPath?: (path: string) => void;
   onClose?: () => void;
 } = {}) {
@@ -32,6 +35,9 @@ function palette(overrides: {
       files={overrides.files ?? files}
       recent={overrides.recent ?? recent}
       pinned={overrides.pinned ?? pinned}
+      listingReady={overrides.listingReady ?? true}
+      listingFailed={overrides.listingFailed ?? false}
+      canCreateFile={overrides.canCreateFile ?? true}
       onOpenPath={overrides.onOpenPath ?? onOpenPath}
       onClose={overrides.onClose ?? onClose}
     />
@@ -106,4 +112,35 @@ it("rebuilds derived file data when each ranking input identity changes", () => 
     palette({ files: changedFiles, recent: changedRecent, pinned: [...pinned] }),
   );
   expect(prepareQuickOpenPaths).toHaveBeenCalledTimes(4);
+});
+
+it("says no file matches a dead query, not that no command does", () => {
+  render(palette());
+  fireEvent.change(screen.getByRole("textbox", { name: "File" }), {
+    target: { value: "zzz" },
+  });
+  expect(screen.getByText('No files match "zzz". Try a shorter search.')).toBeTruthy();
+  expect(screen.queryByText("No matching commands")).toBeNull();
+});
+
+it("names the create step on a committed empty listing", () => {
+  render(palette({ files: [], recent: [], pinned: [] }));
+  expect(screen.getByText("No files to open yet. Create one with New file.")).toBeTruthy();
+});
+
+it("keeps the bare empty line when New file is not available", () => {
+  render(palette({ files: [], recent: [], pinned: [], canCreateFile: false }));
+  expect(screen.getByText("No files to open")).toBeTruthy();
+});
+
+it("does not claim no files while the first listing is still in flight", () => {
+  render(palette({ files: [], recent: [], pinned: [], listingReady: false }));
+  expect(screen.getByText("Loading files…")).toBeTruthy();
+  expect(screen.queryByText("No files to open")).toBeNull();
+});
+
+it("does not claim the workspace is empty when the listing failed", () => {
+  render(palette({ files: [], recent: [], pinned: [], listingReady: false, listingFailed: true }));
+  expect(screen.getByText("Files are not listed yet.")).toBeTruthy();
+  expect(screen.queryByText("No files to open")).toBeNull();
 });

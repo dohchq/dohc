@@ -900,6 +900,11 @@ export function ProductDemo() {
               files={documents}
               recent={recentPaths}
               pinned={[]}
+              // Demo data is static, so the listing is committed by
+              // construction, and the demo does offer New file.
+              listingReady
+              listingFailed={false}
+              canCreateFile
               onOpenPath={openDocument}
               onClose={() => setPalette(null)}
             />

@@ -20,6 +20,9 @@ export function CommandPalette(props: {
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
+  // Empty-state line for a query with no matches; a function receives the
+  // current query. Default palettes keep the commands wording.
+  emptyText?: string | ((query: string) => string);
   toggleShortcut?: "command-palette" | "quick-open";
   // Optional ranking seam: Quick Open passes its prepared path
   // ranker. Default palettes keep the simple substring filter.
@@ -136,7 +139,9 @@ export function CommandPalette(props: {
           className="m-0 max-h-72 list-none overflow-y-auto p-1"
         >
           {matches.length === 0 ? (
-            <li className="px-3 py-2.5 text-xs text-subtle">No matching commands</li>
+            <li className="px-3 py-2.5 text-xs text-subtle">
+              {typeof props.emptyText === "function" ? props.emptyText(query) : props.emptyText ?? "No matching commands"}
+            </li>
           ) : (
             matches.map((command, index) => (
               <li key={command.id} role="option" aria-selected={index === selected}>
