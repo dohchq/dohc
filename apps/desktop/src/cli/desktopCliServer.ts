@@ -54,8 +54,7 @@ import type { createVersionRounds } from "../versionRounds";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
-import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
-import { UNNAMED_AGENT_ID } from "@dohc/workspace-contracts/actor-identity";
+import { UNNAMED_AGENT_ID, VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
   const { depth = 0, onBehalfOf } = origin.attribution;

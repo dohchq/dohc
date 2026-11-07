@@ -375,7 +375,7 @@ describe("personal agent hues", () => {
 
 
 it("matches dispatch's unnamed run and CLI reply claims on the current base", async () => {
-  const { UNNAMED_AGENT_ID } = await import("@dohc/workspace-contracts/actor-identity");
+  const { UNNAMED_AGENT_ID } = await import("@dohc/workspace-contracts/engine");
   expect(UNNAMED_AGENT_ID).toBe("dohc-mcp");
   const key = serializeActorKey(deriveLocalActor({ identity, workspaceId: "w", author: { kind: "agent" },
     displayName: "Agent", origin: "cli" }).key);

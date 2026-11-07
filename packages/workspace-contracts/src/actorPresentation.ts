@@ -1,4 +1,5 @@
-import { UNNAMED_AGENT_ID, canonicalClaimedName } from "./actorIdentity";
+import { canonicalClaimedName } from "./actorIdentity";
+import { UNNAMED_AGENT_ID } from "./engine";
 // Frozen relay slots. Olive belongs to the agent default.
 export const ACTOR_HUES = ["rust", "amber", "teal", "blue", "indigo", "plum", "rose"] as const;
 
