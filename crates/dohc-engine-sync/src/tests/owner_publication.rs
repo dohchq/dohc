@@ -562,6 +562,243 @@ fn workspace_push_reports_and_resumes_an_accepted_prefix_limited_by_proof_budget
     assert_eq!(sent, [0, 1, 2]);
 }
 
+/// The relay's log as it answers a resent row: it keeps its maximum, skips
+/// rows it already holds, and refuses every settlement proof a push carries.
+struct RelayLog {
+    inner: FakeRelay,
+    max: Mutex<i64>,
+}
+
+macro_rules! delegate {
+    ($method:ident, $request:ty, $response:ty) => {
+        fn $method(&self, request: $request) -> Result<$response, RelayError> {
+            self.inner.$method(request)
+        }
+    };
+}
+
+impl RelayTransport for RelayLog {
+    fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let mut max = self.max.lock().unwrap();
+        let held = *max;
+        let mut response = self.inner.push(req.clone())?;
+        response.skipped = req.ops.iter().filter(|op| op.origin_seq <= held).count();
+        response.inserted = req.ops.len() - response.skipped;
+        response.current_max_origin_seq = req.ops.last().map_or(held, |op| op.origin_seq.max(held));
+        response.settlement_refusals = req
+            .ops
+            .iter()
+            .filter(|op| op.payload.get("settlementReference").is_some())
+            .map(|op| SettlementPublicationRefusal {
+                origin_id: req.origin_id.clone(),
+                origin_seq: op.origin_seq,
+                moment_id: op.payload["momentId"].as_str().unwrap().into(),
+                settlement_id: op.payload["settlementReference"]["record"]["settlementId"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                reason: "authorship-mismatch".into(),
+            })
+            .collect();
+        *max = response.current_max_origin_seq;
+        Ok(response)
+    }
+    delegate!(pull, PullRequest, PullResponse);
+    delegate!(
+        lookup_log_coordinate,
+        LogCoordinateRequest,
+        LogCoordinateResponse
+    );
+    delegate!(probe, ProbeRequest, ProbeResponse);
+    delegate!(claim_workspace, ClaimRequest, ClaimResponse);
+    delegate!(rotate_epoch, EpochRequest, EpochResponse);
+    delegate!(blobs_have, BlobHaveRequest, BlobHaveResponse);
+    delegate!(upload_blob, BlobUploadRequest, ());
+    delegate!(
+        download_blobs,
+        BlobDownloadBatchRequest,
+        BlobDownloadBatchResponse
+    );
+    delegate!(upload_key_envelope, KeyEnvelopeRequest, KeyEnvelopeResponse);
+    delegate!(
+        download_key_envelope,
+        KeyEnvelopeDownloadRequest,
+        KeyEnvelopeDownloadResponse
+    );
+    delegate!(
+        shared_channel_pull,
+        SharedChannelRequest,
+        SharedChannelResponse
+    );
+    delegate!(share_log_push, ShareLogPushRequest, PushResponse);
+    delegate!(share_view_pull, ShareViewRequest, ShareViewResponse);
+    delegate!(share_blob, ShareBlobRequest, BlobDownloadResponse);
+    delegate!(share_blob_upload, ShareBlobUploadRequest, ());
+    delegate!(
+        share_proposal_submit,
+        ShareProposalSubmitRequest,
+        ShareProposalSubmitResponse
+    );
+    delegate!(
+        share_collection_write,
+        ShareCollectionWriteRequest,
+        ShareCollectionWriteResponse
+    );
+}
+
+/// A push answer that never arrived can leave the relay holding rows past a
+/// later, shorter page. The relay answers refusals only for rows a push
+/// carries, so the cursor must not pass a refusable save until a push that
+/// carries it is answered.
+#[test]
+fn a_shorter_page_after_a_lost_answer_resends_the_rest_for_their_refusals() {
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    for sequence in 0..2 {
+        let op = candidate(&mut store, &observed, &checkpoint, sequence);
+        journal_local_replication_op(
+            &mut store,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "ydoc.update",
+            &op.payload,
+            10 + sequence,
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "doc.md".into(),
+                text: "accepted work".into(),
+                moment_id: "moment".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 12,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            crate::journal_moment_append_in_tx(tx, "ws", "moment")
+        })
+        .unwrap();
+    let save = list_replication_ops(&store, "ws", "local", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.payload["momentId"] == "moment")
+        .unwrap();
+    let mut proved = save.payload.clone();
+    proved.as_object_mut().unwrap().remove("authors");
+    proved["settlementReference"] = json!({"formatVersion":1,"recordDigest":"test","record":{"settlementId":"settlement","momentId":"moment","binding":{"workspaceId":"ws"}}});
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id='local' AND origin_seq=?2",
+            params![proved.to_string(), save.origin_seq]).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    let rollback_waits = |store: &mut EngineStore| {
+        let TxnOutcome::Committed(guard) = store
+            .write_with(&NoFaults, |tx| {
+                Ok::<_, SyncError>(crate::rollback_waits_for_publication_in_tx(
+                    tx, "ws", "moment",
+                ))
+            })
+            .unwrap()
+        else {
+            panic!("no injected crash");
+        };
+        matches!(
+            guard,
+            Err(dohc_engine_domain::DomainError::RollbackWaitsForSync)
+        )
+    };
+
+    let client = RelaySyncClient::new(RelayLog {
+        inner: FakeRelay::default(),
+        max: Mutex::new(-1),
+    });
+    let lost = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    assert_eq!(
+        client
+            .push_workspace(
+                &mut store,
+                "ws",
+                lost.as_ref(),
+                &crate::NoLiveLeases,
+                13,
+                8 * 1024 * 1024,
+            )
+            .unwrap(),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    );
+    let pushes = || client.transport().inner.pushed_requests();
+    assert!(
+        pushes()
+            .iter()
+            .flat_map(|push| &push.ops)
+            .any(|op| op.origin_seq == save.origin_seq),
+        "the relay stored the save, and its answer never arrived"
+    );
+    let sent = pushes().len();
+
+    // The proof budget ends this page before the save.
+    let SyncPassOutcome::Complete { has_more, .. } = client
+        .push_workspace(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            14,
+            checkpoint.len() * 2,
+        )
+        .unwrap()
+    else {
+        panic!("push did not complete");
+    };
+    assert!(has_more);
+    assert!(
+        pushes()[sent..]
+            .iter()
+            .flat_map(|push| &push.ops)
+            .all(|op| op.origin_seq < save.origin_seq)
+    );
+    assert!(
+        read_pushed_seq(&store, "ws", "local").unwrap() < save.origin_seq,
+        "the cursor passed a save whose refusal never arrived"
+    );
+    assert!(rollback_waits(&mut store));
+
+    let outcome = client
+        .push_workspace(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &crate::NoLiveLeases,
+            15,
+            checkpoint.len() * 2,
+        )
+        .unwrap();
+    assert!(matches!(outcome, SyncPassOutcome::Complete { .. }));
+    assert!(read_pushed_seq(&store, "ws", "local").unwrap() >= save.origin_seq);
+    let fallback = list_replication_ops(&store, "ws", "local", save.origin_seq, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| op.payload["attributionUnavailable"]["settlementId"] == "settlement")
+        .expect("the authorless fallback is journaled");
+    assert_eq!(fallback.payload["momentId"], "moment");
+    assert!(fallback.payload.get("settlementReference").is_none());
+    assert!(!rollback_waits(&mut store));
+}
+
 #[test]
 fn first_accepted_operation_over_budget_returns_configuration_error() {
     let (_dir, mut store, observed, checkpoint) = fixture();
