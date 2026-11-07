@@ -129,6 +129,12 @@ import {
 import { makeBlockExitPlugin } from "./blockExit";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
+import {
+  collaborationLoadError,
+  currentCollaborationExtensionsLoad,
+  loadCollaborationExtensions,
+  type CollaborationExtensions,
+} from "./collaborationExtensions";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import {
   FLASH_CLASS,
@@ -206,48 +212,6 @@ export type MarkdownEditorProps = {
   pendingUndo?: MarkdownEditorPendingUndo;
   onPendingUndoConsumed?: (token: number) => void;
 };
-
-type CollaborationExtension = typeof import("@tiptap/extension-collaboration").Collaboration;
-type CollaborationCaretExtension =
-  typeof import("@tiptap/extension-collaboration-caret").CollaborationCaret;
-type YTiptap = typeof import("@tiptap/y-tiptap");
-
-// Both extensions bind to the same ydoc/awareness pair and are only ever
-// used together, so they load as one lazy bundle — a caller with an
-// `awareness` never waits on a second dynamic import, and a caller without
-// one still pays for exactly the bytes it did before (CollaborationCaret is
-// tiny, and it's simply never configured into the extensions array below).
-type CollaborationExtensions = {
-  Collaboration: CollaborationExtension;
-  CollaborationCaret: CollaborationCaretExtension;
-  yTiptap: YTiptap;
-};
-
-let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
-
-function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
-  collaborationExtensionsPromise ??= Promise.all([
-    import("@tiptap/extension-collaboration"),
-    import("@tiptap/extension-collaboration-caret"),
-    import("@tiptap/y-tiptap"),
-  ]).then(([collaboration, collaborationCaret, yTiptap]) => ({
-    Collaboration: collaboration.Collaboration,
-    CollaborationCaret: collaborationCaret.CollaborationCaret,
-    yTiptap,
-  }));
-  return collaborationExtensionsPromise;
-}
-
-type CollaborationExtensionsLoad =
-  | { status: "loading" }
-  | { status: "ready"; extensions: CollaborationExtensions }
-  | { status: "failed"; error: Error };
-
-function collaborationLoadError(error: unknown): Error {
-  return error instanceof Error
-    ? error
-    : new Error("Collaboration extensions failed to load", { cause: error });
-}
 
 type MarkdownEditorInnerProps = MarkdownEditorProps & {
   collaborationExtensions: CollaborationExtensions | null;
@@ -1340,18 +1304,16 @@ const MarkdownEditorCollabLoader = forwardRef<
   MarkdownEditorHandle,
   MarkdownEditorProps
 >(function MarkdownEditorCollabLoader(props, ref) {
-  const [load, setLoad] = useState<CollaborationExtensionsLoad>({
-    status: "loading",
-  });
+  const [load, setLoad] = useState(currentCollaborationExtensionsLoad);
 
   useAsyncResponseEffect(
-    loadCollaborationExtensions,
+    () => (load.status === "loading" ? loadCollaborationExtensions() : null),
     {
       onSuccess: (extensions) => setLoad({ status: "ready", extensions }),
       onError: (error) =>
         setLoad({ status: "failed", error: collaborationLoadError(error) }),
     },
-    [],
+    [load.status],
   );
 
   if (load.status === "failed") throw load.error;
