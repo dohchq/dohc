@@ -1829,6 +1829,14 @@ type ListEngineMomentsUpdatingResult = z.infer<
 // and the folder that holds them.
 export const WorkspacePolicyPath = z.enum(WORKSPACE_POLICY_PATHS);
 export type WorkspacePolicyPath = z.infer<typeof WorkspacePolicyPath>;
+// The two rules files, which a person can open to fix. Main maps each to its
+// file in the workspace's own .dohc folder; no other path opens.
+export const WorkspacePolicyFile = WorkspacePolicyPath.exclude([".dohc"]);
+export type WorkspacePolicyFile = z.infer<typeof WorkspacePolicyFile>;
+export const OpenWorkspacePolicyFilePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  file: WorkspacePolicyFile,
+}).strict();
 
 // History hides everything while those rules cannot be read. `unreadable`
 // names what to fix; `policyErrors` say why, for Copy details only.

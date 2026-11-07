@@ -268,5 +268,6 @@
   "capture.history.retry",
   "dataset.change.ask",
   "window.old.read",
-  "window.old.go"
+  "window.old.go",
+  "history.rules.file.open"
 ]

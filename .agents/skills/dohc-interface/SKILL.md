@@ -20,6 +20,7 @@ Use words only for the person's own content and for facts a picture cannot show,
 
 To test a surface, hide every word that is not the person's own content.
 If the purpose, state, or next click disappears, show it with an icon, position, shape, or color.
+Who can reach the work is a fact a picture can't show. A share row says it in words: `sam@ridge.co can edit`, `1 person can edit, 2 can view`, `Anyone with the link can view`.
 
 | Instead of | Show |
 | --- | --- |
@@ -272,7 +273,8 @@ The after also drops the sentence about unsaved changes, because saving first is
 - If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself, except a dialog's own action, as above.
-- For a list or section whose read failed, show `RetryRow`.
+- If a list could not load, say so in its place in one line, with Try again. Pass the line as `RetryRow`'s children.
+- Keep the cause and Copy details in the toast and the Notices row, not in the list.
 
 ## Controls
 
@@ -308,6 +310,8 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | `bg-match`, `text-match` | Find-match highlight only |
 | `text-success`, `text-warning`, `text-danger` | State only |
 
+A surface or list whose read failed, so it shows nothing, takes danger. When some of its sources didn't load beside others that did, what's missing takes warning. Work dohc is holding or has paused takes warning where it waits, such as History paused in History's pane. The notice that reports the failure behind it is an error, so it takes danger. What the person's own rules or a list's limit leave out, such as a file History no longer tracks, takes the plain mark. A list's limit goes in a `bg-panel-2` band above its rows, never in a row, and its whole sentence shows: how many the list includes, and how to see the rest. An item that is broken, such as an automation dohc can't read, takes danger wherever it sits.
+
 ### Type
 
 | Role | Classes |
@@ -327,6 +331,8 @@ Never uppercase a label.
 
 Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
 `PathLine` in `ui/PathLine.tsx` draws it.
+When a row is too narrow for a whole name, cut the name in the middle and keep its extension: `product-pl….md`. When two rows in one list have the same name, show the folder before it: `plans/notes.md`.
+When a line holds a name beside other words, such as who made a change, the other words give way first, each down to a 48px floor, and the name keeps its room longest.
 
 When the title bar is crowded, Go to… and the Restricted Mode pill give way first. Each narrows to its icon and keeps its words as its tooltip and accessible name.
 The Alpha pill stays. The workspace and version names keep at least three letters and an ellipsis, with the full name in the tooltip.
@@ -414,6 +420,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
 - Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
+- If a row's name is content, such as a share's file, draw the name in `text-ink`. If the share ended or was removed, keep its name `text-muted`.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
 - Focus shows only while the person moves with the keyboard: Tab, Shift+Tab, the arrows, Home, End, Page Up, Page Down, and F6.
 - `keyboardNavigation.ts` sets `data-keyboard-nav` on the root for those keys. A pointer press or any other key clears it.

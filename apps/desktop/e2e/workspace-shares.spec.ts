@@ -253,7 +253,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const row = page.locator(`[data-testid="sharing-granted-row"][data-share-id="${shareId}"]`);
     await expect(row).toBeVisible();
     await expect(row).toContainText("plan.md");
-    await expect(row).toContainText("docs/");
+    await expect(row.getByTestId("sharing-row-who")).toHaveText(`${RECIPIENT_EMAIL} can view`);
     // Ending asks before it ends: the menu opens the confirm.
     await row.hover();
     await row.getByRole("button", { name: "Share actions" }).click();
@@ -261,7 +261,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(RECIPIENT_EMAIL);
     await confirm.getByTestId("sharing-end").click();
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("ended");
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
 
     // Revocation is live: the recipient's next fetch returns 404 with the
     // owner-removed explanation (#1438).

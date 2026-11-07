@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronUp, FileArchive, FileText, Lock } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
-import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
+import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult, WorkspacePolicyFile } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
 import { momentDiffSides } from "./momentDiffSides";
@@ -77,6 +77,7 @@ export function EngineMomentDiffPage({
   readOnly = false,
   onBeforeRestore,
   onOpenFile,
+  onOpenRulesFile,
   onPathResolved,
   registerActiveUndo,
   onRestored,
@@ -99,6 +100,8 @@ export function EngineMomentDiffPage({
   // edit lands between the drain and the lineage change.
   onBeforeRestore: () => Promise<() => void>;
   onOpenFile: (path: string) => void;
+  // Opens a rules file that keeps this change hidden, to fix it.
+  onOpenRulesFile: (file: WorkspacePolicyFile) => void;
   // The tab's title names the change's path, or nothing once History's rules
   // hide the change.
   onPathResolved: (momentId: string, path: string | null) => void;
@@ -409,6 +412,7 @@ export function EngineMomentDiffPage({
       <HistoryHiddenState
         testId="engine-diff-hidden"
         result={state.result}
+        onOpenFile={onOpenRulesFile}
         onRetry={readAgain}
       />
     );
@@ -417,6 +421,7 @@ export function EngineMomentDiffPage({
     return (
       <HistoryUntrackedState
         testId="engine-diff-untracked"
+        onOpenFile={onOpenRulesFile}
         onRetry={readAgain}
       />
     );
