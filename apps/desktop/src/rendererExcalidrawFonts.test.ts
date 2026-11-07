@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   excalidrawFontAssets,
   excalidrawFontsSource,
+  withoutExcalidrawCdnFallback,
 } from "../electron.vite.config";
 import { excalidrawAssetPath } from "./renderer/excalidrawFonts";
 
@@ -31,6 +32,14 @@ describe("Excalidraw fonts in the renderer", () => {
   it("still reads the asset path the renderer sets", async () => {
     // An upgrade that renames the global brings back the CDN requests.
     expect(await excalidrawBundle()).toContain("window.EXCALIDRAW_ASSET_PATH");
+  });
+
+  it("drops the CDN Excalidraw adds after the asset path", async () => {
+    const bundle = await excalidrawBundle();
+    expect(bundle).toContain("https://esm.sh/");
+    expect(withoutExcalidrawCdnFallback(bundle)).not.toMatch(/\.push\(new URL\([^()]*ASSETS_FALLBACK_URL\)\)/u);
+    // An upgrade that moves the fallback fails the build instead of bringing the CDN back.
+    expect(() => withoutExcalidrawCdnFallback("urls.push(new URL(path, base));")).toThrow();
   });
 
   it("ships every font file Excalidraw asks for", async () => {

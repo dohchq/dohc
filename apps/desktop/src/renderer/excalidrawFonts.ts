@@ -4,10 +4,10 @@ declare global {
   }
 }
 
-// Excalidraw fetches its fonts from window.EXCALIDRAW_ASSET_PATH, and from a
-// CDN when that is unset. The renderer's content security policy blocks the
-// CDN, so the renderer build ships the installed package's fonts in this
-// folder. electron.vite.config.ts copies them there.
+// Excalidraw fetches its fonts from window.EXCALIDRAW_ASSET_PATH, then from a
+// CDN. The renderer's content security policy blocks the CDN, so the renderer
+// build ships the installed package's fonts in this folder and drops the CDN.
+// electron.vite.config.ts does both.
 export const EXCALIDRAW_ASSET_FOLDER = "excalidraw/";
 
 export function excalidrawAssetPath(documentUrl: string): string {
