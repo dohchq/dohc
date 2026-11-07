@@ -49,14 +49,17 @@ export function resolveAppDatasetCapability(value: unknown, approvedRevision: Da
 
 /**
  * Adds what each operation does, from the revision the capability names, for Review app to show.
+ * Only generated operation code does what its kind and fields declare. Custom code shows as an action, by its label.
  * Keep the result out of candidates and digests. verifyAppDatasetCapability refuses it.
  */
-export function displayAppDatasetCapability(capability: AppDatasetCapability, approved: DatasetRevision): AppDatasetCapability {
+export function displayAppDatasetCapability(capability: AppDatasetCapability, approved: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
   if (capability.datasetId !== approved.datasetId || capability.revision !== approved.revision || capability.revisionSha256 !== approved.revisionSha256) fail();
+  const generated = hasGeneratedDatasetRevision(approved, lookup);
   const shown = { ...capability, operations: capability.operations.map(operation => {
     const declared = approved.definition.operations.find(candidate => candidate.operationId === operation.operationId);
     const table = approved.definition.tables.find(candidate => candidate.tableId === declared?.tableId);
     if (!declared || !table) fail();
+    if (!generated) return { ...operation, display: { kind: "action" as const, label: declared.label, fields: [] } };
     // A generated form may write fewer of a create's fields.
     const fieldIds = capability.createFields?.find(entry => entry.operationId === operation.operationId)?.fieldIds ?? declared.fieldIds;
     return { ...operation, display: { kind: declared.kind, label: declared.label, fields: table.fields.filter(field => fieldIds.includes(field.fieldId)).map(field => field.name) } };

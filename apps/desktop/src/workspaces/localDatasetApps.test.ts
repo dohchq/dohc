@@ -118,7 +118,8 @@ describe("local approved dataset apps", () => {
     if (!row || !("datasetCapability" in row)) throw new Error("Expected Dataset app.");
     expect(row).toMatchObject({ active: true, approved: true });
     const shown = row.datasetCapability as AppDatasetCapability;
-    expect(shown.operations.map(operation => operation.display)).toEqual([{ kind: "create", label: "Submit", fields: ["Name", "Receipt"] }]);
+    // The fixture adds its own fileRead to the generated code, so dohc can't vouch for Submit's fields and shows it by its label.
+    expect(shown.operations.map(operation => operation.display)).toEqual([{ kind: "action", label: "Submit", fields: [] }]);
     expect({ ...shown, operations: shown.operations.map(({ display: _, ...operation }) => operation) }).toEqual(stored);
     expect(await f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).toMatchObject({ replayed: false });
     expect(await f.host.apps.activate(f.app, new AbortController().signal)).toEqual(f.published);

@@ -134,6 +134,8 @@ describe("dataset publication binding", () => {
 
   it("shows what each operation does beside the capability, and keeps it out of what an approval verifies", () => {
     const approved = revision();
+    approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
+    approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
     const capability = resolveAppDatasetCapability(binding(approved), approved);
     const shown = displayAppDatasetCapability(capability, approved);
     expect(shown.operations.map(operation => operation.display)).toEqual([
@@ -152,6 +154,16 @@ describe("dataset publication binding", () => {
     expect(displayAppDatasetCapability(narrowed, approved).operations[0]!.display).toEqual({ kind: "create", label: "Submit", fields: [] });
   });
 
+  it("shows custom operation code by each operation's label, because it may do more than it declares", () => {
+    const approved = revision();
+    const shown = displayAppDatasetCapability(resolveAppDatasetCapability(binding(approved), approved), approved);
+    expect(shown.operations.map(operation => operation.display)).toEqual([
+      { kind: "action", label: "Submit", fields: [] },
+      { kind: "action", label: "View responses", fields: [] },
+      { kind: "action", label: "Delete response", fields: [] },
+    ]);
+  });
+
   it("drops only the field names when the words would pass the capability's byte bound", () => {
     const approved = revision();
     const table = approved.definition.tables[0]!;
@@ -165,7 +177,7 @@ describe("dataset publication binding", () => {
     ];
     const capability = parseAppDatasetCapability({ ...binding(approved), name: approved.definition.name,
       operations: approved.definition.operations.map(({ operationId, name, access, readOnly }) => ({ operationId, name, access, readOnly })) });
-    const shown = displayAppDatasetCapability(capability, approved);
+    const shown = displayAppDatasetCapability(capability, approved, () => true);
     // A delete and an action still say what they do.
     expect(shown.operations.map(operation => operation.display)).toEqual([
       ...Array.from({ length: 20 }, (_, n) => ({ kind: "read", label: `Read ${n}`, fields: [] })),
