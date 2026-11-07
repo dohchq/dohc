@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { useRef, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MENU_SEPARATOR, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
+import { MENU_SEPARATOR, MENU_SHORTCUT, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
 import { Overlay } from "../Overlay";
 
 function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; children?: ReactNode }) {
@@ -259,7 +259,9 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(forget);
     // The current row keeps the selected fill after focus leaves it.
     expect(current.className.split(" ")).toContain("bg-selected");
+    expect(current.className.split(" ")).toContain("font-medium");
     expect(forget.className.split(" ")).not.toContain("bg-selected");
+    expect(forget.className.split(" ")).not.toContain("font-medium");
   });
 
   it("adds the keyboard's row line only beside a current or checked row", async () => {
@@ -297,7 +299,36 @@ describe("Menu", () => {
     await user.keyboard("{ArrowUp}");
     expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Main" }));
     expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("font-medium");
     expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("font-medium");
+  });
+
+  // Inside the selected fill, styles.css's bg-selected utility shows subtle
+  // text in muted (tokens.test checks the rule). The hint must sit inside it.
+  it("keeps a shortcut hint inside the selected fill of the focused and the checked row", async () => {
+    const user = userEvent.setup();
+    const hinted = (label: string, keys: string) => (
+      <>
+        {label}
+        <span className={MENU_SHORTCUT}>{keys}</span>
+      </>
+    );
+    render(
+      <Harness
+        items={[
+          { id: "main", label: hinted("Main", "Ctrl 1"), onSelect: vi.fn(), checked: false },
+          { id: "draft", label: hinted("Draft", "Ctrl 2"), onSelect: vi.fn(), checked: true },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    await user.keyboard("{ArrowUp}");
+    const rowOf = (keys: string) => screen.getByText(keys).closest("[role='menuitemradio']")!;
+    expect(screen.getByText("Ctrl 1").className.split(" ")).toContain("text-subtle");
+    expect(document.activeElement).toBe(rowOf("Ctrl 1"));
+    expect(rowOf("Ctrl 1").className.split(" ")).toContain("focus:bg-selected");
+    expect(rowOf("Ctrl 2").className.split(" ")).toContain("bg-selected");
   });
 
   // Opened with the mouse, a menu on its first row showed two active-looking

@@ -417,7 +417,7 @@ const TWO_LINES = `grid h-12 w-full min-w-0 grid-cols-[18px_minmax(0,1fr)] conte
 const WHEN = "col-span-2 min-w-0 truncate text-[13px] font-medium leading-5 tabular-nums text-ink";
 const LINE_TWO = "flex min-w-0 items-center gap-2 text-[12px] leading-4 text-muted";
 const ONE_LINE = `flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row`;
-const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
+const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink font-medium" : "text-muted hover:bg-hover hover:text-ink");
 const countFormat = new Intl.NumberFormat();
 
 // A count of what has loaded: "3,029", or "49+" read as "49 or more" while

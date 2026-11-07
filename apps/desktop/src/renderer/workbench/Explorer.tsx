@@ -1928,7 +1928,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             // button sits on top at the right.
                             className={`group relative mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                               active
-                                ? "bg-selected text-ink"
+                                ? "bg-selected text-ink font-medium"
                                 : "text-muted hover:bg-hover hover:text-ink"
                             }`}
                           >

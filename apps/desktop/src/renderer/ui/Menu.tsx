@@ -89,13 +89,13 @@ type Place = { left: number; maxHeight: number; top?: number; bottom?: number; a
 /** The list's frame. The owner adds its position and width. */
 export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border-line bg-panel p-1";
 /**
- * One row. The list-row ladder: hover 7%, and 11% for the current or checked
+ * One row. The list-row ladder: hover 7%, and 14% for the current or checked
  * row whatever has focus. A disabled row dims its icon and label, not the
  * row, so its fill and any second line keep their strength.
  */
 export const MENU_ROW =
   "flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75";
-export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink", danger: "text-danger" };
+export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink font-medium", danger: "text-danger" };
 /**
  * The active option of a list whose focus stays on its frame, with
  * aria-activedescendant naming the option: the selected fill, whether the

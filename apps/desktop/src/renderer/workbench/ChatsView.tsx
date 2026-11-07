@@ -447,7 +447,7 @@ function NavRow(props: {
       onClick={props.onClick}
       {...props.data}
       className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
-        props.active ? "bg-selected" : "hover:bg-hover"
+        props.active ? "bg-selected font-medium" : "hover:bg-hover"
       } ${props.className ?? ""}`}
     >
       {props.icon}

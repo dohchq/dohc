@@ -36,7 +36,7 @@ export function SettingsNav(props: {
       onClick={() => props.onSelect(section.id)}
       className={`flex h-7 w-full shrink-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
         props.activeSection === section.id
-          ? "bg-selected text-ink"
+          ? "bg-selected text-ink font-medium"
           : "text-muted hover:bg-hover hover:text-ink"
       }`}
     >
