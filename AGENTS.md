@@ -77,7 +77,7 @@ Agents now write apps and changes that no person reads line by line. A person mu
 - Make invalid states impossible to express. An app cannot request data its owner did not expose; a rule that tells it not to is not enough.
 - Keep capabilities composable. Changing sharing, apps, or chat must not require changing how the others store their state.
 
-### Design intent
+### A note from Ice
 
 We are building something ambitious. Put that ambition into what the product lets people do, not into unnecessary machinery. Question conventional product boundaries when they hold us back, then build the smallest system that makes the correct behavior obvious.
 
