@@ -498,6 +498,7 @@ export function OrphanedDraftNotices(props: {
                 and the decode runs at the click. */}
             <CopyButton
               testId="orphaned-draft-copy"
+              label="Copy edits"
               getText={() => restoreRecoveryDraftText(draft.text)}
             />
             {/* Deleting the only copy needs the explicit confirm step (#579
