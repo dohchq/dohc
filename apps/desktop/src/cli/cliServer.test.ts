@@ -4621,15 +4621,19 @@ describe("CLI socket server", () => {
     const chat = await store.startChannelThread({
       authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: { kind: "human", displayName: "Sam" }, body: "Draft the agenda",
     });
+    // The run dohc dispatched for Sam's message, so the store knows it.
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (claim?.run.triggerMessageId !== chat.message.id) throw new Error("Expected a run for the message");
+    const { runId } = claim.run;
     const getRunRecord = vi.spyOn(dispatchStore, "getRunRecord").mockRejectedValueOnce(new Error("store closed"));
-    holdRun("run_1");
+    holdRun(runId);
     const replied = await invoke("reply", {
-      cwd: workspaceRoot, actor: "agent", thread: cliThreadId(chat.thread.id), attachments: [], needsDecision: false, body: "Done.", runId: "run_1",
+      cwd: workspaceRoot, actor: "agent", thread: cliThreadId(chat.thread.id), attachments: [], needsDecision: false, body: "Done.", runId,
     });
     getRunRecord.mockRestore();
     expect(replied.parentMessageId).toBeUndefined();
     expect(errors.map((error) => (error as Error).message)).toEqual([
-      "Could not find the thread for an agent reply, so it posts to the conversation. runId=run_1",
+      `Could not find the thread for an agent reply, so it posts to the conversation. runId=${runId}`,
     ]);
   });
 
