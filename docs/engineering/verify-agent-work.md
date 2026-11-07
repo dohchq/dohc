@@ -92,7 +92,7 @@ The launcher stops only the app it started, when the app quits or when someone p
 If startup recovery relaunches the app, the launcher cannot track the replacement process. Quit that preview through its tray menu before starting another.
 
 This separates data. It is not an OS sandbox: the app runs as the current user, and a folder the person chooses is a real folder.
-Agents do not see the person's home configuration files. Credentials in environment variables and Windows Credential Manager can still reach them.
+The launcher redirects `HOME` and `USERPROFILE` and removes explicit agent configuration paths. Agents can still use configuration from the operating system account, environment credentials, or Windows Credential Manager.
 Open only a new folder or a copy of a workspace. Opening a workspace used by installed dohc can migrate its engine store and prevent the installed build from opening it.
 Build previews only from branches in this repository. Never build one from a fork's code on a host that holds credentials.
 The person deletes the delivery folder when they finish. That removes only its contents. Workspaces opened elsewhere and their engine stores remain there.

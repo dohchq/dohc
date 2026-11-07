@@ -147,6 +147,34 @@ test("the launcher starts the app isolated, then stops only the process it start
   }
 });
 
+test("the launcher finishes when the app exits but a descendant keeps its output pipes open", { skip: process.platform !== "win32", timeout: 10_000 }, async (t) => {
+  const { root } = await delivery(t);
+  const record = join(root, "descendant.pid");
+  const script = join(root, "descendant.cjs");
+  writeFileSync(script, 'require("node:fs").writeFileSync(process.argv[2], String(process.pid)); setTimeout(() => {}, 5000);');
+  let descendantPid;
+  const started = Date.now();
+  try {
+    const result = await launchPreview(root, { log: () => {}, spawnApp: (_executable, _args, options) => {
+      const child = spawn(process.env.ComSpec, ["/d", "/q"], { ...options, stdio: ["pipe", "pipe", "pipe"] });
+      child.stdin.end(`@echo off\r\nstart "" /b "${process.execPath}" "${script}" "${record}"\r\nexit\r\n`);
+      return child;
+    } });
+    assert.equal(result.code, 0);
+    assert.ok(Date.now() - started < 3_000, "The launcher must not wait for the descendant's five-second exit.");
+    await until(() => existsSync(record));
+    descendantPid = Number(readFileSync(record, "utf8"));
+    assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
+    process.kill(descendantPid, 0);
+    assert.equal(existsSync(previewPaths(root).session), false);
+  } finally {
+    if (descendantPid) {
+      try { process.kill(descendantPid); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+  }
+});
+
 test("cancelling while the package is being checked never starts the app", async (t) => {
   const { root } = await delivery(t);
   const controller = new AbortController();

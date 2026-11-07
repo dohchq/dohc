@@ -168,6 +168,11 @@ export async function launchPreview(deliveryDir, { spawnApp = defaultSpawn, sign
     signal?.throwIfAborted();
     child = spawnApp(executable, previewArgs(paths), { cwd: paths.data, env: previewEnvironment(env, paths, feed.url),
       stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
+    // Descendants can keep inherited output pipes open after the app exits.
+    child.once("exit", () => setTimeout(() => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }, 500).unref());
     exited = new Promise((done) => {
       child.once("close", (code, exitSignal) => done({ code, signal: exitSignal }));
       child.once("error", (error) => done({ error: error.message }));
