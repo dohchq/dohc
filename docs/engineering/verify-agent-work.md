@@ -88,8 +88,9 @@ Start only with `Try it.cmd`, which uses the Node runtime inside the package. Op
 The launcher reads nothing from the checkout. It refuses to start the app if any package file differs from the manifest, or if the smoke did not pass.
 The app gets its own profile, home, `APPDATA`, and `LOCALAPPDATA` in the folder's `data` subfolder. The launcher removes `DOHC_*` and agent configuration variables, and passes `--dohc-isolated-test`, so the app leaves the installed app's link handler and recent documents alone.
 The launcher also serves an update feed on `127.0.0.1` for as long as it runs. The feed offers version 0.0.0 with no files, so the preview never downloads or installs an update.
-The launcher stops only the app it started, when the app quits or when someone presses Ctrl+C.
-If startup recovery relaunches the app, the launcher cannot track the replacement process. Quit that preview through its tray menu before starting another.
+Close all preview windows to quit. If it stays in the tray, use Quit dohc there. The app checks for unsaved work.
+The launcher does not force the app or engine to stop. Ctrl+C leaves an open preview running.
+If startup recovery relaunches the app, the launcher cannot track the replacement process. Close that preview's windows before starting another. If it stays in the tray, use Quit dohc there.
 
 This separates data. It is not an OS sandbox: the app runs as the current user, and a folder the person chooses is a real folder.
 The launcher redirects `HOME` and `USERPROFILE` and removes explicit agent configuration paths. Agents can still use configuration from the operating system account, environment credentials, or Windows Credential Manager.

@@ -122,10 +122,14 @@ fetch(process.env.DOHC_UPDATE_URL + "/latest.yml").then(r => r.text()).then(feed
   console.log("fixture-running");
   writeFileSync(record, JSON.stringify({ args: process.argv.slice(2, -1), env: process.env, feed }));
 });
+process.on("message", message => {
+  if (message === "ping") process.send("pong");
+  if (message === "quit") process.exit(0);
+});
 setInterval(() => {}, 1000);
 `;
 
-test("the launcher starts the app isolated, then stops only the process it started", async (t) => {
+test("the launcher keeps the app open after cancellation until it quits itself", { timeout: 10_000 }, async (t) => {
   const { root } = await delivery(t);
   const script = join(root, "fake-app.cjs"), record = join(root, "record.json");
   writeFileSync(script, fakeApp);
@@ -136,7 +140,9 @@ test("the launcher starts the app isolated, then stops only the process it start
   const running = launchPreview(root, { signal: controller.signal, log: () => {}, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DOHC_TEST_HOME: "x" },
     spawnApp: (executable, args, options) => {
       assert.equal(executable, join(root, "app", "dohc.exe"));
-      spawned = spawn(process.execPath, [script, ...args, record], options);
+      spawned = spawn(process.execPath, [script, ...args, record], {
+        ...options, windowsHide: true, stdio: [...options.stdio, "ipc"],
+      });
       return spawned;
     } });
   try {
@@ -153,19 +159,67 @@ test("the launcher starts the app isolated, then stops only the process it start
     assert.equal(seen.env.USERPROFILE, paths.home);
     assert.equal(seen.env.DOHC_TEST_HOME, undefined);
     controller.abort();
+    const reply = new Promise((resolve, reject) => {
+      spawned.once("message", resolve);
+      spawned.send("ping", error => { if (error) reject(error); });
+    });
+    assert.equal(await reply, "pong", "The app must still be able to protect unsaved work.");
+    assert.equal(spawned.exitCode, null);
+    spawned.send("quit");
     const result = await running;
-    assert.equal(spawned.exitCode !== null || spawned.signalCode !== null, true);
+    assert.equal(result.code, 0);
     assert.equal(bystander.exitCode, null, "an unrelated process keeps running");
     assert.equal(existsSync(paths.session), false);
     assert.equal(result.feedRequests.length, 1);
     await assert.rejects(fetch(session.feed), "the feed stops with the launcher");
   } finally {
-    controller.abort();
+    if (spawned?.exitCode === null && spawned.signalCode === null) spawned.kill();
     await running;
   }
 });
 
-test("the launcher finishes when the app exits but a descendant keeps its output pipes open", { skip: process.platform !== "win32", timeout: 10_000 }, async (t) => {
+test("the app can still write its log after the launcher closes", { timeout: 10_000 }, async (t) => {
+  const { root } = await delivery(t);
+  const record = join(root, "app.json");
+  const script = join(root, "app.cjs");
+  writeFileSync(script, `
+    const { createServer } = require("node:http");
+    const { writeFileSync } = require("node:fs");
+    const server = createServer((request, response) => {
+      console.log("app log after launcher exit");
+      response.end("running");
+      if (request.url === "/quit") server.close(() => process.exit(0));
+    });
+    server.listen(0, "127.0.0.1", () => writeFileSync(process.argv[2], JSON.stringify({ pid: process.pid, port: server.address().port })));
+  `);
+  const driver = join(root, "driver.mjs");
+  writeFileSync(driver, `
+    import { spawn } from "node:child_process";
+    import { launchPreview } from ${JSON.stringify(new URL("./preview-launch.mjs", import.meta.url).href)};
+    await launchPreview(${JSON.stringify(root)}, { log: () => {}, spawnApp: (_executable, _args, options) =>
+      spawn(process.execPath, [${JSON.stringify(script)}, ${JSON.stringify(record)}], options) });
+  `);
+  const launcher = spawn(process.execPath, [driver], { stdio: "ignore", windowsHide: true });
+  let app;
+  try {
+    await until(() => existsSync(record));
+    app = JSON.parse(readFileSync(record, "utf8"));
+    const session = JSON.parse(readFileSync(previewPaths(root).session, "utf8"));
+    const closed = new Promise(resolve => launcher.once("close", resolve));
+    launcher.kill();
+    await closed;
+    assert.equal(await (await fetch(`http://127.0.0.1:${app.port}`)).text(), "running");
+    assert.match(readFileSync(session.log, "utf8"), /app log after launcher exit/u);
+    await fetch(`http://127.0.0.1:${app.port}/quit`);
+    await until(() => { try { process.kill(app.pid, 0); return false; } catch (error) { if (error.code === "ESRCH") return true; throw error; } });
+    app = undefined;
+  } finally {
+    if (launcher.exitCode === null && launcher.signalCode === null) launcher.kill();
+    if (app) { try { process.kill(app.pid); } catch (error) { if (error.code !== "ESRCH") throw error; } }
+  }
+});
+
+test("the launcher finishes when the app exits but a descendant keeps its log open", { skip: process.platform !== "win32", timeout: 10_000 }, async (t) => {
   const { root } = await delivery(t);
   const record = join(root, "descendant.pid");
   const script = join(root, "descendant.cjs");
@@ -174,7 +228,9 @@ test("the launcher finishes when the app exits but a descendant keeps its output
   const started = Date.now();
   try {
     const result = await launchPreview(root, { log: () => {}, spawnApp: (_executable, _args, options) => {
-      const child = spawn(process.env.ComSpec, ["/d", "/q"], { ...options, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(process.env.ComSpec, ["/d", "/q"], {
+        ...options, windowsHide: true, stdio: ["pipe", options.stdio[1], options.stdio[2]],
+      });
       child.stdin.end(`@echo off\r\nstart "" /b "${process.execPath}" "${script}" "${record}"\r\nexit\r\n`);
       return child;
     } });
@@ -216,19 +272,27 @@ test("an already cancelled launch never starts the app", async (t) => {
   }), { name: "AbortError" });
 });
 
-test("cancellation between spawning and registering shutdown still stops the owned app", { timeout: 5_000 }, async (t) => {
+test("cancellation after spawn leaves the app's quit decision with the app", { timeout: 5_000 }, async (t) => {
   const { root } = await delivery(t);
   const controller = new AbortController();
   let child;
   t.after(() => child?.kill());
-  const result = await launchPreview(root, { signal: controller.signal, log: () => {},
+  const running = launchPreview(root, { signal: controller.signal, log: () => {},
     spawnApp: (_executable, _args, options) => {
-      child = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 1500)"], options);
+      child = spawn(process.execPath, ["-e", 'process.on("message", () => process.exit(0)); process.send("ready"); setInterval(() => {}, 1000);'], {
+        ...options, windowsHide: true, stdio: [...options.stdio, "ipc"],
+      });
       controller.abort();
       return child;
     } });
-  assert.ok(child.exitCode !== null || child.signalCode !== null);
-  assert.notEqual(result.code, 0, "Cancellation must stop the app before its normal exit.");
+  await until(() => child !== undefined);
+  await new Promise((resolve, reject) => {
+    child.once("message", resolve);
+    child.once("exit", () => reject(new Error("The launcher stopped the app before it could decide to quit.")));
+  });
+  child.send("quit");
+  const result = await running;
+  assert.equal(result.code, 0);
   assert.equal(result.session.appPid, child.pid);
   assert.equal(existsSync(previewPaths(root).session), false);
 });

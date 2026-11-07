@@ -11,9 +11,9 @@
 // installed app's. It is not an OS sandbox: the app still runs as the current
 // user and can open any file that user can.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,24 +125,6 @@ function alive(pid) {
   catch (error) { return error.code === "EPERM"; }
 }
 
-// Stops the app this launcher started, with its descendants, and nothing else.
-export async function stopOwnedApp(child, exited, graceMs = 5_000) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  if (process.platform === "win32") {
-    // A process without a window cannot be asked to close, so taskkill fails at once.
-    const asked = spawnSync("taskkill", ["/PID", String(child.pid), "/T"], { windowsHide: true, stdio: "ignore" }).status === 0;
-    const timer = new Promise((done) => setTimeout(done, asked ? graceMs : 0).unref());
-    if (await Promise.race([exited.then(() => true), timer.then(() => false)])) return;
-    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-  } else {
-    child.kill("SIGTERM");
-    const timer = new Promise((done) => setTimeout(done, graceMs).unref());
-    if (await Promise.race([exited.then(() => true), timer.then(() => false)])) return;
-    child.kill("SIGKILL");
-  }
-  await exited;
-}
-
 const defaultSpawn = (executable, args, options) => spawn(executable, args, options);
 
 export async function launchPreview(deliveryDir, { spawnApp = defaultSpawn, signal, log = console.log, env = process.env } = {}) {
@@ -162,39 +144,35 @@ export async function launchPreview(deliveryDir, { spawnApp = defaultSpawn, sign
   const logPath = join(paths.logs, `${startedAt.replaceAll(":", "-")}.log`);
   let child;
   let exited;
-  let output;
-  let logError;
+  let logDescriptor;
+  let remindQuit;
   try {
     signal?.throwIfAborted();
+    logDescriptor = openSync(logPath, "a");
+    // The app keeps its own console and log handles if the launcher closes.
     child = spawnApp(executable, previewArgs(paths), { cwd: paths.data, env: previewEnvironment(env, paths, feed.url),
-      stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
-    // Descendants can keep inherited output pipes open after the app exits.
-    child.once("exit", () => setTimeout(() => {
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-    }, 500).unref());
+      stdio: ["ignore", logDescriptor, logDescriptor], detached: true, windowsHide: true });
+    closeSync(logDescriptor);
+    logDescriptor = undefined;
     exited = new Promise((done) => {
       child.once("close", (code, exitSignal) => done({ code, signal: exitSignal }));
       child.once("error", (error) => done({ error: error.message }));
     });
-    const stop = () => stopOwnedApp(child, exited);
-    output = createWriteStream(logPath);
-    output.on("error", (error) => { logError = error; void stop(); });
-    for (const stream of [child.stdout, child.stderr]) stream?.pipe(output, { end: false });
     const session = { launcherPid: process.pid, appPid: child.pid, startedAt, feed: feed.url, packageTreeSha256: tree.sha256, log: logPath };
     writeFileSync(paths.session, JSON.stringify(session, null, 2) + "\n");
     log(`Started ${describe(manifest)} as PID ${child.pid}. Its data is in ${paths.data}.`);
-    log("Quit dohc to end the preview, or press Ctrl+C here to close it.");
-    signal?.addEventListener("abort", stop, { once: true });
-    if (signal?.aborted) void stop();
+    log("Close the preview's windows to quit it. If it stays in the tray, use Quit dohc there.");
+    remindQuit = () => log("The preview stays open to protect unsaved work. Close its windows, or use Quit dohc if it has a tray icon.");
+    signal?.addEventListener("abort", remindQuit, { once: true });
+    if (signal?.aborted) remindQuit();
     const result = await exited;
-    signal?.removeEventListener("abort", stop);
-    await new Promise((done) => { if (output.destroyed) done(); else output.end(done); });
-    if (logError) throw logError;
     return { ...result, session, feedRequests: feed.requests };
   } finally {
-    if (child && exited && child.exitCode === null && child.signalCode === null) await stopOwnedApp(child, exited);
-    output?.destroy();
+    if (logDescriptor !== undefined) closeSync(logDescriptor);
+    if (remindQuit) signal?.removeEventListener("abort", remindQuit);
+    if (child && child.exitCode === null && child.signalCode === null) {
+      log(`The preview (PID ${child.pid}) is still running. Close its windows, or use Quit dohc if it has a tray icon.`);
+    }
     await feed.close();
     rmSync(paths.session, { force: true });
   }
