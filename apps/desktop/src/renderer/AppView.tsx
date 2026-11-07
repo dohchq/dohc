@@ -46,6 +46,12 @@ function subscribeTheme(onChange: () => void): () => void {
   return () => observer.disconnect();
 }
 
+// Focus is on the page, or on the focused editor group's own area.
+function focusWentNowhere(): boolean {
+  const active = document.activeElement;
+  return !active || active === document.body || active.matches('[data-focus-surface="editor"][data-active]');
+}
+
 type ViewState =
   | { status: "checking" }
   // `ended`: this view had opened the app, so its approval ended since.
@@ -268,16 +274,18 @@ export function useAppView(options: {
     wasVisible.current = options.visible;
     // Focus that moved elsewhere before the app finished opening stays there.
     if (!options.focused) { wantsFocus.current = false; return; }
-    const active = document.activeElement;
-    const nowhere = !active || active === document.body || active.matches('[data-focus-surface="editor"][data-active]');
-    if (!switched && !nowhere) return;
+    if (!switched && !focusWentNowhere()) return;
     wantsFocus.current = true;
     if (switched) { tryFocus(); return; }
     // A press on the group's blank area makes it the focused one before the browser focuses that area, and focus
-    // stays where the person pressed.
+    // stays where the person pressed. Focus that something put back, such as a closing palette, stays there too.
     const press = () => { wantsFocus.current = false; };
     document.addEventListener("mousedown", press, { capture: true, once: true });
-    const later = setTimeout(() => { document.removeEventListener("mousedown", press, true); tryFocus(); });
+    const later = setTimeout(() => {
+      document.removeEventListener("mousedown", press, true);
+      if (focusWentNowhere()) tryFocus();
+      else wantsFocus.current = false;
+    });
     return () => { clearTimeout(later); document.removeEventListener("mousedown", press, true); };
   }, [options.visible, options.focused, tryFocus]);
   // A click on the app's tab, or Enter or Space on it, puts focus in the app, also when the tab was already shown.

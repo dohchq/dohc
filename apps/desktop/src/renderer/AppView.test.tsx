@@ -451,6 +451,21 @@ describe("an owner app in its tab", () => {
       await handled();
       expect(guest.focus).not.toHaveBeenCalled();
     });
+
+    it("leaves focus where a closing palette put it back", async () => {
+      const control = document.body.appendChild(document.createElement("button"));
+      try {
+        const view = render(<Page visible focused={false} />);
+        await openedView();
+        // The palette closes with the other group, so focus falls to the page before the palette puts it back.
+        view.rerender(<Page visible focused />);
+        control.focus();
+        await handled();
+        expect(guest.focus).not.toHaveBeenCalled();
+      } finally {
+        control.remove();
+      }
+    });
   });
 
   it("leaves focus where it went if the tab lost focus before the app opened", async () => {
