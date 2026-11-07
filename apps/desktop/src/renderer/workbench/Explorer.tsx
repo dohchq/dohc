@@ -17,6 +17,7 @@ import {
   FolderPlus,
   FolderOpen,
   Laptop,
+  ListX,
   RefreshCw,
   TriangleAlert,
   X,
@@ -25,6 +26,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -55,7 +57,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import type { ExplorerApps } from "./AppsSection";
 import { ExplorerHome } from "./ExplorerHome";
-import type { DataCollection } from "./explorerHomeModel";
+import { pageTitle, type DataCollection } from "./explorerHomeModel";
 import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { useRequestSequence } from "../useRequestSequence";
@@ -267,6 +269,12 @@ function resolveTypedPath(value: string, contextDir: string): string {
 export function editorTitle(path: string, label?: string): string {
   const tab = parseTab(path);
   return TAB_KINDS[tab.kind].explorerTitle(tab, label);
+}
+
+// Home names a page by its title, as its Pages section does.
+function homeEditorTitle(path: string, label?: string): string {
+  const page = parseTab(path).kind === "file" && fileKindForPath(path).displayKind === "markdown";
+  return page ? pageTitle(path) : editorTitle(path, label);
 }
 
 function SectionActionButton(props: {
@@ -561,6 +569,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // Changes whenever Open editors may change height, so the rows below it
   // are measured again. A second group adds headings with no new tab.
   const openEditorsLayout = `${openEditorsExpanded} ${openEditorsHeight} ${openEditorCount} ${props.editorGroups.length}`;
+  // The line Open editors shows with nothing open, which its toggle reads.
+  const openEditorsEmptyId = useId();
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
   // fires with a stale closure — without this latch the edit would commit
@@ -1808,6 +1818,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               type="button"
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
+              aria-describedby={openEditorsExpanded && openEditorCount === 0 ? openEditorsEmptyId : undefined}
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
               className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
@@ -1838,7 +1849,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 disabled={openEditorCount === 0}
                 onClick={props.onCloseAllTabs}
               >
-                <X size={13} aria-hidden />
+                <ListX size={13} aria-hidden />
               </SectionActionButton>
             </div>
           </header>
@@ -1885,7 +1896,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                         const dirty =
                           props.dirtyPaths.has(tab.path) ||
                           props.recoveryPaths.has(tab.path);
-                        const title = editorTitle(
+                        const title = (home ? homeEditorTitle : editorTitle)(
                           tab.path,
                           props.tabLabels?.get(tab.path),
                         );
@@ -1951,9 +1962,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 ))}
               </ul>
             ) : (
-              <div className="flex h-7 items-center px-3 text-[11px] text-subtle">
-                No open editors
-              </div>
+              <p id={openEditorsEmptyId} data-testid="open-editors-empty" className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                No files open.
+              </p>
             )
           ) : null}
           {openEditorsExpanded && openEditorCount > 0 ? (

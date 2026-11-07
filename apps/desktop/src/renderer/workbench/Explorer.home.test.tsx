@@ -178,6 +178,9 @@ describe("Explorer Home", () => {
 
     const openEditors = section("Open editors");
     expect(within(openEditors).getAllByTestId("open-editor-row").map((row) => row.dataset.path)).toEqual(["notes.md", "budget.csv"]);
+    // A page shows its title, as Pages does, and another file its name.
+    expect(within(openEditors).getByRole("button", { name: "notes" }).title).toBe("notes.md");
+    expect(within(openEditors).getByRole("button", { name: "Close notes" })).toBeTruthy();
     expect(within(openEditors).getByRole("separator", { name: "Resize open editors" })).toBeTruthy();
     await user.click(within(openEditors).getByRole("button", { name: "budget.csv" }));
     expect(onActivateTab).toHaveBeenCalledWith("group-1", "budget.csv");
@@ -196,6 +199,8 @@ describe("Explorer Home", () => {
     const sections = [...screen.getByTestId("file-tree").querySelectorAll(":scope > section")];
     expect(sections.map((element) => element.getAttribute("aria-label"))).toEqual(["Open editors", "Files"]);
     expect(screen.queryByTestId("explorer-home")).toBeNull();
+    // Files names an open page by its file name, as its tree does.
+    expect(within(section("Open editors")).getByRole("button", { name: "notes.md" })).toBeTruthy();
   });
 
   it("draws no Pinned section with nothing in it, and always draws Open editors and Pages with its +", async () => {
@@ -206,7 +211,9 @@ describe("Explorer Home", () => {
       editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
     })} />);
 
-    expect(within(section("Open editors")).getByText("No open editors")).toBeTruthy();
+    // Its line is the toggle's description, as Pages' line is.
+    const empty = within(section("Open editors")).getByText("No files open.");
+    expect(screen.getByTestId("open-editors-toggle").getAttribute("aria-describedby")).toBe(empty.id);
     expect(screen.queryByRole("region", { name: "Pinned" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
