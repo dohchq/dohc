@@ -271,15 +271,17 @@ describe("an agent's posts through its link", () => {
     expect(ownerLog(f)).toHaveLength(before);
   });
 
-  it("refuses an agent's post when its link principal belongs to another link", async () => {
+  it("keeps an agent's link principal on the link it signed in with", async () => {
     const f = await fixture();
     const agent = await connect(f, "read-write");
     await ok(await post(f, agent));
+    const principalId = lastPrincipal(f);
     const other = await createLink(f, "read-write");
-    updateDatabase(f, "UPDATE sync_relay_link_principals SET grant_id = ? WHERE principal_id = ?", other.grantId, lastPrincipal(f));
-    const before = ownerLog(f).length;
-    await expectRefused(await post(f, agent, { idempotencyKey: "post-2" }));
-    expect(ownerLog(f)).toHaveLength(before);
+    // The connection's key on its principal and link forbids the move.
+    expect(() => updateDatabase(f, "UPDATE sync_relay_link_principals SET grant_id = ? WHERE principal_id = ?", other.grantId, principalId))
+      .toThrow(/FOREIGN KEY constraint failed/);
+    await ok(await post(f, agent, { idempotencyKey: "post-2" }));
+    expect(lastPrincipal(f)).toBe(principalId);
   });
 });
 
@@ -310,8 +312,9 @@ describe("a stored post as a reader sees it", () => {
 describe("which links may post and wait", () => {
   it("lets a link on a share without chat neither post nor wait", async () => {
     const f = await fixture();
-    const files = await createShare(f.h, OWNER, workspaceId, { recipientUserId: MEMBER, paths: ["docs"] });
-    const agent = await connect(f, "view", await createLink(f, "view", files));
+    // An Edit link, which may write, so the refusal is for having no chat.
+    const files = await createShare(f.h, OWNER, workspaceId, { recipientUserId: MEMBER, paths: ["docs"], access: "edit" });
+    const agent = await connect(f, "edit", await createLink(f, "edit", files));
     // The agent is signed in on its link.
     expect(await ok(await internal(f, "agent-introspect", { accessToken: agent.accessToken }))).toMatchObject({ connectionId: agent.connectionId });
     const before = ownerLog(f).length;
@@ -418,7 +421,10 @@ describe("an agent waiting for messages", () => {
 
     const storage = reopenTestStorage(path);
     const upgraded: Fixture = {
-      ...f, storage, h: testHandler(storage, { ...released, discussionActivity: f.activity, nowMs: () => f.clock.value }),
+      // A new handler counts grant ids from the start, so it names its own.
+      ...f, storage, h: testHandler(storage, {
+        ...released, discussionActivity: f.activity, nowMs: () => f.clock.value, newGrantId: () => "grant-upgraded",
+      }),
     };
     const check = inspectDatabase(path, { readOnly: true });
     try {
