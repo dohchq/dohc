@@ -77,7 +77,7 @@ Agents now write apps and changes that no person reads line by line. A person mu
 - Make invalid states impossible to express. An app cannot request data its owner did not expose; a rule that tells it not to is not enough.
 - Keep capabilities composable. Changing sharing, apps, or chat must not require changing how the others store their state.
 
-### A note from Ice
+### Design intent
 
 We are building something ambitious. Put that ambition into what the product lets people do, not into unnecessary machinery. Question conventional product boundaries when they hold us back, then build the smallest system that makes the correct behavior obvious.
 
@@ -213,10 +213,12 @@ Run the smallest check that proves the change.
 
 ## Pull requests and merging
 
-Blacksmith stays off until Ice enables the repository variable `BLACKSMITH_ENABLED`.
+Use the [PR template](.github/pull_request_template.md) for the problem, resulting behavior, and verification evidence. Include screenshots or a recording when they help a reviewer assess a visible change. State any unverified behavior.
+
+Blacksmith stays off until a maintainer enables the repository variable `BLACKSMITH_ENABLED`.
 While off, run PR verification locally. Manual GitHub checks use GitHub-hosted `ubuntu-24.04` runners.
 When enabled, ready PRs from this repository use Blacksmith.
-Never check out, install, build, or test fork PR code on the shared Windows host, the shared Mac, or any machine with Ice's credentials. Ask Ice how to verify it.
+Never check out, install, build, or test fork PR code on the shared Windows host, the shared Mac, or any machine with maintainer credentials. Ask a maintainer how to verify it.
 Use passing cloud evidence instead of repeating full gates locally when it covers the change.
 Before changing CI activation, read [the Blacksmith setup procedure](docs/engineering/enable-blacksmith.md).
 Keep required contract, caller, and test changes together.
