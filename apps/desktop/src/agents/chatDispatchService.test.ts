@@ -79,7 +79,6 @@ interface SpawnCall {
 }
 
 class FakeRunnerProcess implements RunnerProcess {
-  readonly rawChild = undefined;
   // What the dispatch delivered on stdin. The prompt travels here rather than
   // in argv, so this is where a test must look to prove it was sent at all.
   stdinText: string | null = null;
@@ -90,10 +89,6 @@ class FakeRunnerProcess implements RunnerProcess {
   private readonly errorListeners: Array<(error: Error) => void> = [];
 
   constructor(readonly pid: number | undefined) {}
-
-  writeStdin(text: string): void {
-    this.stdinText = text;
-  }
 
   hasExited(): boolean {
     return this.exited;
@@ -234,6 +229,7 @@ function fakeRunner() {
   let nextPid = 4_100;
   const spawnRunner: SpawnRunner = (command, args, spawnOptions) => {
     const process = new FakeRunnerProcess(nextPid);
+    process.stdinText = spawnOptions.input;
     nextPid += 1;
     spawnCalls.push({
       command,
