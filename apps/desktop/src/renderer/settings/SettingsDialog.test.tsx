@@ -826,7 +826,8 @@ describe("SettingsDialog", () => {
     const row = await screen.findByTestId("settings-row-editor-size");
     const larger = within(row).getByRole("button", { name: "Larger editor text" });
     const controls = larger.closest("div.rounded-md")!.parentElement!;
-    const slots = () => [...controls.children].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
+    // Reset's place is the row item just before the controls.
+    const slots = () => [controls.previousElementSibling!, controls].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
     // Unchanged, the row keeps Reset's place left of the stepper, so nothing moves or wraps when it appears.
     expect(slots()).toEqual(["SPAN:hidden.24", "DIV.control"]);
     expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
