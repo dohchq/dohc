@@ -35,9 +35,10 @@ it("requires an agent name and saves it alongside the selected tool and owner", 
   await userEvent.click(await screen.findByRole("button", { name: "Codex" }));
   const codex = screen.getByRole("button", { name: "Codex" });
   expect(codex.getAttribute("aria-pressed")).toBe("true");
-  expect(codex.querySelector("svg.lucide-check")).toBeTruthy();
+  // The accent check marks the chosen tool; a signed-in tool's green check is its readiness.
+  expect(codex.querySelector("svg.lucide-check.text-accent")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Claude Code" }).getAttribute("aria-pressed")).toBe("false");
-  expect(document.querySelectorAll("svg.lucide-check")).toHaveLength(1);
+  expect(document.querySelectorAll("svg.lucide-check.text-accent")).toHaveLength(1);
   expect(screen.getByTestId("chats-add-agent-submit").hasAttribute("disabled")).toBe(true);
   await userEvent.type(screen.getByLabelText("Agent name"), "Nova");
   expect(screen.getByTestId("chats-add-agent-preview").textContent).toBe("Posts as Nova");
