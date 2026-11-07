@@ -4029,6 +4029,7 @@ export function DesktopWorkspaceShell(props: {
     showSuccessNotice,
     reportShellFailure,
     clearIdentity,
+    clearKind,
   );
 
   // Reveal-then-create: the inline editbox lives in the explorer's Files

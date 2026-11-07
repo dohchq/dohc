@@ -291,6 +291,37 @@ describe("refreshing shares added to this workspace", () => {
     });
   });
 
+  // The refused share's row is the toast, so no summary repeats it.
+  it("answers a refresh the person starts with the refused share's row alone", async () => {
+    const words =
+      "dohc did not update alex because it could not read " +
+      "shared-with-me/alex/.dohc/local/share-refresh/share-collision-record.json. " +
+      "It keeps a refresh from replacing your own files.";
+    const bridge = makeBridge(Promise.resolve(null));
+    const refresh = vi.fn(() => Promise.resolve<RefreshShareMountsResult>({
+      results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" }],
+    }));
+    Object.assign(bridge, { refreshShareMounts: refresh });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareMounts: [{ shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" }],
+    });
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(words);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const row = within(await screen.findByTestId("notice-center")).getByText(words, { exact: false })
+      .closest<HTMLElement>("[data-notice-row]")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(words);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getAllByText(words, { exact: false })).toHaveLength(1);
+    expect(notices.textContent).not.toContain("could not refresh");
+  });
+
   it("says a share's record was set aside when its refresh stops because the session expired", async () => {
     const setAside =
       "dohc could not read its record of your files with the same path as a file in alex. " +
