@@ -211,7 +211,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   launchPreview(process.argv[2] ?? dirname(fileURLToPath(import.meta.url)), { signal: controller.signal })
     .then((result) => {
       console.log(`The preview ended (${result.error ?? `exit ${result.code ?? result.signal}`}).`);
-      if (result.error) process.exitCode = 1;
+      if (result.error || result.signal || (result.code ?? 0) !== 0) process.exitCode = 1;
     })
     .catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

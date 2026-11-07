@@ -195,7 +195,7 @@ async function main(options) {
       "--package-commit", source.commit, "--output", smokeOutput, "--label", "candidate",
       "--runs", "1", "--idle-seconds", "1", "--keystrokes", "5", "--switches", "1"];
     manifest.smoke = { status: "failed", command: ["node", ...smokeArgs].join(" "), result: "evidence/smoke/result.json" };
-    try { await run(process.execPath, smokeArgs, { env, log: join(evidence, "smoke.log") }); }
+    try { await run(process.execPath, smokeArgs, { env, log: join(evidence, "smoke.log"), timeoutMs: 15 * 60_000 }); }
     finally {
       const resultPath = join(smokeOutput, "result.json");
       if (existsSync(resultPath)) manifest.smoke.resultSha256 = await fileSha256(resultPath);

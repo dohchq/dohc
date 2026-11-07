@@ -65,6 +65,24 @@ test("the launcher refuses a package whose smoke did not pass", async (t) => {
   await assert.rejects(verifyDelivery(root), /smoke is failed/u);
 });
 
+test("the launcher command reports an abnormal app exit as a failure", { skip: process.platform !== "win32" }, async (t) => {
+  const { root, app, manifest } = await delivery(t);
+  // Node rejects the app's Electron flags and exits nonzero without opening a window.
+  copyFileSync(process.execPath, join(app, "dohc.exe"));
+  const tree = await hashTree(app);
+  Object.assign(manifest.package, { files: tree.files, treeSha256: tree.sha256 });
+  manifest.smoke.packageTreeSha256 = tree.sha256;
+  writeFileSync(join(root, "manifest.json"), JSON.stringify(manifest));
+  copyFileSync(new URL("./preview-launch.mjs", import.meta.url), join(root, "launch.mjs"));
+  const result = spawnSync(process.execPath, [join(root, "launch.mjs")], {
+    cwd: root, encoding: "utf8", windowsHide: true, timeout: 10_000,
+  });
+  assert.equal(result.error, undefined, result.stderr);
+  assert.match(result.stdout, /The preview ended \(exit [1-9]\d*\)/u);
+  assert.notEqual(result.status, 0, "Try it.cmd must keep the failure message visible.");
+  assert.equal(existsSync(previewPaths(root).session), false);
+});
+
 test("the manifest must name a full commit and an executable inside the package", async (t) => {
   const { root, manifest } = await delivery(t);
   for (const change of [{ source: { commit: "abc123" } }, { package: { ...manifest.package, executable: "../evil.exe" } },
