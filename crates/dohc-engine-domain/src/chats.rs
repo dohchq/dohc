@@ -8242,7 +8242,10 @@ mod replicated_origin_tests {
             assert!(author(kind, "m", false, "connection-1").is_err(), "{kind}");
         }
         for connection in ["", " connection-1", "connection\u{7}"] {
-            assert!(author("link", "link-message:m", true, connection).is_err(), "{connection:?}");
+            assert!(
+                author("link", "link-message:m", true, connection).is_err(),
+                "{connection:?}"
+            );
         }
     }
 }
