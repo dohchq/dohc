@@ -142,29 +142,60 @@ const sourceCheckFailed = "dohc could not check whether this app's source change
 
 /** What a capability lets the app do, each item marked when the approval did not already allow it. */
 type Reach = { text: string; added: boolean };
-type Access = { key: string; name: string; path?: string; reads: Reach[]; changes: Reach[]; adds: boolean };
+/** One line under Reads or Changes. A document Collection's fields share one line. Each Collection operation has its own. */
+type Line = { key: string; prefix?: string; items: Reach[] };
+type Access = { key: string; name: string; path?: string; reads: Line[]; changes: Line[] };
 
 /** An approval of an app that reaches no workspace data has no capability. */
 const approvedCapabilities = (row: LocalPublication): Capability[] =>
   "datasetCapability" in row ? [row.datasetCapability] : "collectionCapability" in row ? [row.collectionCapability] : [];
 
+const addsRecords = "Adds records with ";
+
+/** dohc's words for an operation, from the kind it enforces. Only an action uses the app's words, its label. */
+function operationWords({ display }: AppDatasetCapability["operations"][number]): string {
+  // This device no longer has the revision the approval names.
+  if (!display) return "Records";
+  const fields = display.fields.join(", ");
+  switch (display.kind) {
+    case "read": return fields || "Records";
+    case "create": return fields ? `${addsRecords}${fields}` : "Adds records";
+    case "edit": return fields ? `Edits ${fields}` : "Edits records";
+    case "delete": return "Deletes records";
+    case "action": return `Runs "${display.label}"`;
+  }
+}
+
 /** `approved` is what the person approved earlier, or null on a first review, which marks nothing new. */
 function accessOf(capability: Capability, approved: readonly Capability[] | null): Access {
   if (capability.kind === "dataset") {
     const same = approved?.find((value): value is AppDatasetCapability => value.kind === "dataset" && value.datasetId === capability.datasetId);
-    const item = (operation: AppDatasetCapability["operations"][number]) => ({ text: operation.name, added: approved !== null && !same?.operationIds.includes(operation.operationId) });
-    return { key: capability.datasetId, name: capability.name, adds: false,
-      reads: capability.operations.filter(operation => operation.readOnly).map(item), changes: capability.operations.filter(operation => !operation.readOnly).map(item) };
+    // Operations with the same words share one line, marked New if any of them is new.
+    // An action's words are only its label, and two actions with one label can do different things, so each keeps its own line.
+    const lines = (operations: AppDatasetCapability["operations"]) => {
+      const byWords = new Map<string, Reach & { key: string }>();
+      for (const operation of operations) {
+        const text = operationWords(operation), added = approved !== null && !same?.operationIds.includes(operation.operationId);
+        const group = operation.display?.kind === "action" ? `action ${operation.operationId}` : `words ${text}`;
+        const seen = byWords.get(group);
+        if (seen) seen.added ||= added;
+        else byWords.set(group, { key: operation.operationId, text, added });
+      }
+      return [...byWords.values()].map(({ key, ...item }): Line => ({ key, items: [item] }));
+    };
+    return { key: capability.datasetId, name: capability.name,
+      reads: lines(capability.operations.filter(operation => operation.readOnly)), changes: lines(capability.operations.filter(operation => !operation.readOnly)) };
   }
   const same = approved?.find((value): value is AppCollectionCapability => value.kind !== "dataset" && value.collectionPath === capability.collectionPath);
-  const item = (fields: readonly string[] | undefined) => (field: string) => ({ text: field, added: approved !== null && !fields?.includes(field) });
-  return { key: capability.collectionPath, name: capability.collectionPath.split("/").pop() || capability.collectionPath, path: capability.collectionPath, adds: true,
-    reads: capability.readFields.map(item(same?.readFields)), changes: capability.allowedFields.map(item(same?.allowedFields)) };
+  const items = (fields: readonly string[], allowed: readonly string[] | undefined) => fields.map(field => ({ text: field, added: approved !== null && !allowed?.includes(field) }));
+  return { key: capability.collectionPath, name: capability.collectionPath.split("/").pop() || capability.collectionPath, path: capability.collectionPath,
+    reads: capability.readFields.length ? [{ key: "fields", items: items(capability.readFields, same?.readFields) }] : [],
+    changes: capability.allowedFields.length ? [{ key: "fields", prefix: addsRecords, items: items(capability.allowedFields, same?.allowedFields) }] : [] };
 }
 
-function Reaches({ items, prefix }: { items: Reach[]; prefix?: string }) {
-  return <dd className="m-0 min-w-0 break-words text-ink">{prefix}{items.map((item, index) => <span key={item.text}>{index ? ", " : ""}{item.text}
-    {item.added ? <span className="ml-1 inline-block"><Pill tone="warning">New</Pill></span> : null}</span>)}</dd>;
+function Reaches({ lines }: { lines: Line[] }) {
+  return <dd className="m-0 min-w-0 break-words text-ink">{lines.map(line => <div key={line.key}>{line.prefix}{line.items.map((item, index) => <span key={item.text}>{index ? ", " : ""}{item.text}
+    {item.added ? <span className="ml-1 inline-block"><Pill tone="warning">New</Pill></span> : null}</span>)}</div>)}</dd>;
 }
 
 function AccessRows({ access }: { access: Access }) {
@@ -172,9 +203,9 @@ function AccessRows({ access }: { access: Access }) {
     <Table2 size={14} aria-hidden className="text-muted" />
     <span className="truncate text-[13px] font-medium text-ink" title={access.path}>{access.name}</span>
     <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
-      {access.reads.length ? <><dt className="flex items-center gap-2 text-muted"><Eye size={12} aria-hidden />Reads</dt><Reaches items={access.reads} /></> : null}
-      {access.changes.length ? <><dt className="flex items-center gap-2 text-muted"><Pencil size={12} aria-hidden />Changes</dt>
-        <Reaches items={access.changes} prefix={access.adds ? "Adds records with " : undefined} /></> : null}
+      {/* Each label sits on its first line. */}
+      {access.reads.length ? <><dt className="flex items-center gap-2 self-start text-muted"><Eye size={12} aria-hidden />Reads</dt><Reaches lines={access.reads} /></> : null}
+      {access.changes.length ? <><dt className="flex items-center gap-2 self-start text-muted"><Pencil size={12} aria-hidden />Changes</dt><Reaches lines={access.changes} /></> : null}
     </dl>
   </div>;
 }

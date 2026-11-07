@@ -119,10 +119,20 @@ export interface AppDatasetBinding {
   /** Owner-approved reads for this app's link audience, including their exact fields. */
   linkReads?: Array<{ operationId: string; fieldIds: string[] }>;
 }
+/**
+ * What Review app says an operation does, read from the approved revision: its kind, its label,
+ * and the names of the fields it reads or writes. Hosts add it only to what they show.
+ * Candidates, digests, and approvals never hold it.
+ */
+export interface AppDatasetOperationDisplay {
+  kind: DatasetOperationKind;
+  label: string;
+  fields: string[];
+}
 /** Public dispatch metadata, derived from the approved revision rather than app source. */
 export interface AppDatasetCapability extends AppDatasetBinding {
   name: string;
-  operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly"> & { fields?: Array<{ fieldId: string; name: string }> }>;
+  operations: Array<Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly"> & { fields?: Array<{ fieldId: string; name: string }>; display?: AppDatasetOperationDisplay }>;
 }
 /** Grant-filtered metadata for Collection controls and agent discovery. */
 export interface DatasetDescription {
@@ -439,20 +449,26 @@ function parseBindingFields(row: Record<string, unknown>): Omit<AppDatasetBindin
   }
   return result;
 }
+function operationDisplay(value: unknown): AppDatasetOperationDisplay {
+  const row = record(value, ["kind", "label", "fields"]);
+  if (!operationKinds.has(row.kind as DatasetOperationKind)) fail();
+  return { kind: row.kind as DatasetOperationKind, label: text(row.label), fields: boundedArray(row.fields, DATASET_MAX_FIELDS).map(value => text(value)) };
+}
 /** Parse transport metadata. The host must verify it against its approved catalog. */
 export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
   const row = record(parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES), ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations", "name"], ["createFields", "linkReads"]);
   const { operations: values, name, ...reference } = row;
   const binding = parseDatasetBindingReference(reference);
   const operations = boundedArray(values, DATASET_MAX_OPERATIONS, 1).map(value => {
-    const item = record(value, ["operationId", "name", "access", "readOnly"], ["fields"]);
+    const item = record(value, ["operationId", "name", "access", "readOnly"], ["fields", "display"]);
     const name = text(item.name, 64);
     if (!operationNames.test(name) || name.split(".").some(part => forbidden.has(part)) || !["link", "helper", "owner"].includes(item.access as string)) fail();
     const fields = item.fields === undefined ? undefined : boundedArray(item.fields, DATASET_MAX_FIELDS).map(value => {
       const field = record(value, ["fieldId", "name"]);
       return { fieldId: uuid(field.fieldId), name: text(field.name) };
     });
-    return { operationId: uuid(item.operationId), name, access: item.access as DatasetOperation["access"], readOnly: boolean(item.readOnly), ...(fields ? { fields } : {}) };
+    const display = item.display === undefined ? undefined : operationDisplay(item.display);
+    return { operationId: uuid(item.operationId), name, access: item.access as DatasetOperation["access"], readOnly: boolean(item.readOnly), ...(fields ? { fields } : {}), ...(display ? { display } : {}) };
   }).sort((a, b) => a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0);
   unique(operations.map(operation => operation.operationId));
   unique(operations.map(operation => operation.name));

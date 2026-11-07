@@ -2,7 +2,7 @@ import { generateDatasetOperations } from "./datasetOperations";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { datasetBaseFolder, datasetRevisionsPreserveAccess, DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, datasetRevisionDigestContent, parseDatasetDefinition, parseDatasetDescription, parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, describeApprovedDataset, type AppDatasetBinding, type DatasetColumnField, type DatasetDefinition, type DatasetField, type DatasetRevision } from "./dataset";
-import { effectiveDatasetOperations, hasGeneratedDatasetRevision, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
+import { displayAppDatasetCapability, effectiveDatasetOperations, hasGeneratedDatasetRevision, parseDatasetBinding, resolveAppDatasetCapability, verifyAppDatasetCapability } from "./datasetAuthorization";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -130,6 +130,59 @@ describe("dataset publication binding", () => {
     expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
     requested.operationIds.push(id(7));
     expect(capability.operationIds).toEqual([id(5), id(6)]);
+  });
+
+  it("shows what each operation does beside the capability, and keeps it out of what an approval verifies", () => {
+    const approved = revision();
+    const capability = resolveAppDatasetCapability(binding(approved), approved);
+    const shown = displayAppDatasetCapability(capability, approved, true);
+    expect(shown.operations.map(operation => operation.display)).toEqual([
+      { kind: "create", label: "Submit", fields: ["Name"] },
+      { kind: "read", label: "View responses", fields: ["Record ID", "Name"] },
+      { kind: "delete", label: "Delete response", fields: [] },
+    ]);
+    expect(parseAppDatasetCapability(shown)).toEqual(shown);
+    // A capability approved before Review app showed these words still verifies, unchanged. One that carries them does not.
+    expect(capability.operations.some(operation => "display" in operation)).toBe(false);
+    expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
+    expect(() => verifyAppDatasetCapability(shown, approved)).toThrow();
+    expect(() => displayAppDatasetCapability(capability, { ...approved, revision: 2 }, true)).toThrow();
+    // A generated form's narrower create shows only the fields it writes.
+    const narrowed = resolveAppDatasetCapability({ ...binding(approved), createFields: [{ operationId: id(5), fieldIds: [] }] }, approved);
+    expect(displayAppDatasetCapability(narrowed, approved, true).operations[0]!.display).toEqual({ kind: "create", label: "Submit", fields: [] });
+  });
+
+  it("shows custom code by each operation's label, because it may do more than it declares", () => {
+    const approved = revision();
+    const shown = displayAppDatasetCapability(resolveAppDatasetCapability(binding(approved), approved), approved, false);
+    expect(shown.operations.map(operation => operation.display)).toEqual([
+      { kind: "action", label: "Submit", fields: [] },
+      { kind: "action", label: "View responses", fields: [] },
+      { kind: "action", label: "Delete response", fields: [] },
+    ]);
+  });
+
+  it("drops only the field names when the words would pass the capability's byte bound", () => {
+    const approved = revision();
+    const table = approved.definition.tables[0]!;
+    // 128 fields with 128-byte names, each read by 20 operations, is about 330 KB of words.
+    table.fields = Array.from({ length: 128 }, (_, n): DatasetField => ({ fieldId: id(100 + n), name: `${String(n).padStart(3, "0")}${"x".repeat(125)}`, sqlColumn: `c${n}`, type: "text", required: false, unique: false }));
+    approved.definition.operations = [
+      ...Array.from({ length: 20 }, (_, n) => ({ operationId: id(300 + n), name: `read${n}`, label: `Read ${n}`, tableId: table.tableId,
+        kind: "read" as const, access: "helper" as const, readOnly: true, fieldIds: table.fields.map(field => field.fieldId) })),
+      { operationId: id(320), name: "remove", label: "Remove response", tableId: table.tableId, kind: "delete" as const, access: "helper" as const, readOnly: false, fieldIds: [] },
+      { operationId: id(321), name: "archive", label: "Archive responses", tableId: table.tableId, kind: "action" as const, access: "owner" as const, readOnly: false, fieldIds: [] },
+    ];
+    const capability = parseAppDatasetCapability({ ...binding(approved), name: approved.definition.name,
+      operations: approved.definition.operations.map(({ operationId, name, access, readOnly }) => ({ operationId, name, access, readOnly })) });
+    const shown = displayAppDatasetCapability(capability, approved, true);
+    // A delete and an action still say what they do.
+    expect(shown.operations.map(operation => operation.display)).toEqual([
+      ...Array.from({ length: 20 }, (_, n) => ({ kind: "read", label: `Read ${n}`, fields: [] })),
+      { kind: "delete", label: "Remove response", fields: [] },
+      { kind: "action", label: "Archive responses", fields: [] },
+    ]);
+    expect({ ...shown, operations: shown.operations.map(({ display: _, ...operation }) => operation) }).toEqual(capability);
   });
 
   it.each(["source", "schemaSql", "operations", "dataPath"])("refuses %s supplied by a consumer binding", key => {
