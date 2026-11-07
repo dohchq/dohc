@@ -163,6 +163,8 @@ A secondary step that comes before the decision, such as `Save recovery file fir
 Name the primary with the title's verb: `Merge into Main`.
 Use `DangerButton` when the action deletes something or loses work.
 Never label a button `OK`, `Yes`, or `Confirm`.
+The safe choice reads **Cancel** when it cancels the action the person chose, such as Remove from list.
+It reads **Go back** only on a warning about leaving typing or drawing changes that dohc has not kept, because it returns the person to that work: `Quit without your typing?`.
 
 ### Focus and keys
 
@@ -193,6 +195,15 @@ Never label a button `OK`, `Yes`, or `Confirm`.
 - Give the field `aria-invalid`, and point its `aria-describedby` at the error.
 - Do not disable the primary to show that a field is empty or wrong. Pressing it shows the errors and focuses the first one.
 - A disabled control says why, beside it or on its second line.
+
+### Message boxes from main
+
+Main asks some questions in the system's message box, such as before a quit loses typing.
+
+- Show it with `showMessageBox` from `window/messageBox.ts`. It titles the box `dohc` and gives it push buttons, where Windows would draw command links.
+- List the action first and the safe choice last: `Quit anyway`, `Go back`. Windows shows them in that order, and macOS reverses it.
+- When the action loses work, make the safe choice the default and Escape's answer.
+- Windows draws the box light in both themes. Leave it as the system draws it.
 
 ### Words in dialogs and explanations
 
