@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatChannelRecord } from "../../ipc/bridgeContract";
+import { GROUP_NAME_TAKEN_ERROR } from "../../ipc/errorWords";
 import {
   ChatsView,
   channel,
@@ -138,29 +139,99 @@ describe("ChatsView channels", () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
-  it("reports a taken name as the new reason when Try again fails", async () => {
+  it("offers Open when Try again finds the group name taken and opens that group", async () => {
     const user = userEvent.setup();
-    const onError = vi.fn();
+    const onError = vi.fn<Parameters<typeof ChatsView>[0]["onError"]>();
     const taken = new Error("A group with that name already exists.");
+    taken.name = GROUP_NAME_TAKEN_ERROR;
+    const existing = channel({ id: "channel-9", name: "Launch team", slug: "launch-team" });
     bridgeMock.createChatChannel
       .mockRejectedValueOnce(new Error("The workspace engine is not running."))
       .mockRejectedValueOnce(taken);
     renderView(vi.fn(), onError);
 
     await user.click(await screen.findByTestId("chats-new-channel"));
-    await user.type(screen.getByTestId("chats-new-channel-name"), "launch");
+    await user.type(screen.getByTestId("chats-new-channel-name"), "Launch_team");
     await user.click(screen.getByTestId("chats-new-channel-submit"));
     await screen.findByTestId("chats-new-channel-error");
     await user.click(screen.getByTestId("chats-new-channel-cancel"));
 
-    const retry = onError.mock.calls[0]?.[2] as () => void;
-    act(() => retry());
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel(), existing], fileThreads: [] });
+    act(() => onError.mock.calls[0]?.[2]?.());
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
     expect(onError).toHaveBeenLastCalledWith(
       "A group with that name already exists.",
       taken,
-      expect.any(Function),
+      undefined,
+      undefined,
+      {
+        title: "dohc couldn't create #Launch_team",
+        identity: "group-name-taken:launch-team",
+        action: expect.objectContaining({ label: "Open", run: expect.any(Function), ends: true }),
+      },
     );
+    act(() => onError.mock.calls[1]?.[4]?.action?.run());
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("Launch team");
+    expect(bridgeMock.listChannelThreads).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", channelId: existing.id });
+    expect(bridgeMock.createChatChannel).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers Open after closing a taken-name failure and opens the group through the navigator", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn<Parameters<typeof ChatsView>[0]["onError"]>();
+    const onOpenInTab = vi.fn();
+    const existing = channel({ id: "channel-9", name: "launch", slug: "launch" });
+    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
+    bridgeMock.createChatChannel.mockRejectedValue(taken);
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [existing], fileThreads: [] });
+    renderView(vi.fn(), onError, { variant: "panel", onOpenInTab });
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    await screen.findByTestId("chats-new-channel-error");
+    expect(onError).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    expect(onError.mock.calls[0]?.[2]).toBeUndefined();
+    expect(onError.mock.calls[0]?.[4]).toMatchObject({ title: "dohc couldn't create #launch", identity: "group-name-taken:launch", action: { label: "Open" } });
+    act(() => onError.mock.calls[0]?.[4]?.action?.run());
+    expect(onOpenInTab).toHaveBeenCalledExactlyOnceWith({ level: "channel", channel: existing });
+    expect(bridgeMock.createChatChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["My agent", "My agent helper"])("keeps Try again without Open for the reserved name %s", async (name) => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
+    const slug = name.toLowerCase().replaceAll(" ", "-");
+    bridgeMock.createChatChannel.mockRejectedValue(taken);
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name, slug, kind: "agent" })], fileThreads: [] });
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), `${name}{Enter}`);
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    expect(onError).toHaveBeenCalledExactlyOnceWith(taken.message, taken, expect.any(Function), {
+      title: `dohc couldn't create #${name}`, identity: `group-name-taken:${slug}`,
+    });
+  });
+
+  it("keeps Try again when only the error words say the name is taken", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const cause = new Error("A group with that name already exists.");
+    bridgeMock.createChatChannel.mockRejectedValue(cause);
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name: "launch", slug: "launch" })], fileThreads: [] });
+    renderView(vi.fn(), onError);
+
+    await user.click(await screen.findByTestId("chats-new-channel"));
+    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
+    await screen.findByTestId("chats-new-channel-error");
+    await user.click(screen.getByTestId("chats-new-channel-cancel"));
+
+    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function));
   });
 
   it("reports nothing when a retry creates the group", async () => {

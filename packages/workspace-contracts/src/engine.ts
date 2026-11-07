@@ -849,6 +849,8 @@ export interface ChannelThreadSummary {
     bodySnippet: string;
     automation?: ChatMessageAutomation;
     authorReported?: ChatReportedAgent;
+    // The agent that wrote the message in one of its runs. Provenance only.
+    authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
   };
@@ -886,6 +888,7 @@ interface ChatStreamPost {
 export interface ChatStreamItem {
   position: ChatStreamPosition;
   message: ChatMessage;
+  decision?: Omit<ChatDecisionRecord, "workspaceId">;
   reactions: ChatReaction[];
   // Set for, and only for, a post.
   post?: ChatStreamPost;
@@ -1530,7 +1533,7 @@ export interface AgentDispatchStore {
   }): boolean;
   claimNextPending(
     workspaceId: WorkspaceId,
-    options?: { command?: string; logPath?: string },
+    options: { agentId: string; command?: string; logPath?: string },
   ): AgentDispatchClaim | null;
   // Fails one agent's pending requests in the thread.
   failPendingForThread(input: {

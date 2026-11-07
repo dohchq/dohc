@@ -412,6 +412,12 @@ export function isAgentIdTaken(error: unknown): boolean {
   return parse(error).name === AGENT_ID_TAKEN_ERROR;
 }
 
+export const GROUP_NAME_TAKEN_ERROR = "GroupNameTakenError";
+
+export function isGroupNameTaken(error: unknown): boolean {
+  return parse(error).name === GROUP_NAME_TAKEN_ERROR;
+}
+
 /** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
 export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
   const { name, code, retryAfterMs, message } = parse(error);

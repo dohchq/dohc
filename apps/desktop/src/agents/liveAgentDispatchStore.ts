@@ -106,7 +106,7 @@ export function createLiveAgentDispatchStore(
     workspaceId: string,
     claimOptions: Parameters<
       AwaitableAgentDispatchStore["claimNextPending"]
-    >[1] = {},
+    >[1],
     unresolvedOnly = false,
   ): Promise<AgentDispatchClaim | null> => {
     assertWorkspaceId(workspaceId);
@@ -143,9 +143,9 @@ export function createLiveAgentDispatchStore(
   const store: AwaitableAgentDispatchStore = {
     recordTrigger: async (input) =>
       await invoke(async (adapter) => await adapter.recordTrigger(input)),
-    claimNextPending: async (workspaceId, claimOptions = {}) =>
+    claimNextPending: async (workspaceId, claimOptions) =>
       await claimPending(workspaceId, claimOptions),
-    resolveUncertainClaim: async (workspaceId, claimOptions = {}) =>
+    resolveUncertainClaim: async (workspaceId, claimOptions) =>
       await claimPending(workspaceId, claimOptions, true),
     failPendingForThread: async (input) => {
       assertWorkspaceId(input.workspaceId);

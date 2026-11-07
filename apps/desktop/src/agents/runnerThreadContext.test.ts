@@ -133,7 +133,7 @@ describe("buildRunnerThreadContext", () => {
       askingMessageId: "msg_1",
     })).resolves.toBe(renderShowMarkdown(cliShowFixture));
     await dispatchStore.store.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "th_1", triggerMessageId: "msg_1", agentId: "default" });
-    const claim = await dispatchStore.store.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.store.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!claim) throw new Error("Expected run");
     await dispatchStore.store.completeRun({ runId: claim.run.runId, exitCode: 0 });
     await dispatchStore.store.markFailureHandled(claim.run.runId);

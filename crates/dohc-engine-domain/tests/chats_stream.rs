@@ -2,9 +2,9 @@
 //! posts and conversation messages in a single order.
 
 use dohc_engine_domain::{
-    AGENT_REPLY_EXCERPT_CHARS, ChatActorKind, ChatChannelKind, ChatThreadLane, LinkedChatStore,
-    NoFaults, SendMessage, StartChannelThread, StreamAgentRequest, StreamAgentRequestState,
-    StreamPage, StreamPosition,
+    AGENT_REPLY_EXCERPT_CHARS, ChatActorKind, ChatChannelKind, ChatDecisionState, ChatThreadLane,
+    LinkedChatStore, NoFaults, ResolveDecision, SendMessage, StartChannelThread, StreamAgentRequest,
+    StreamAgentRequestState, StreamPage, StreamPosition,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -117,6 +117,78 @@ fn ids(page: &StreamPage) -> Vec<String> {
         .iter()
         .map(|item| item.message.message_id.clone())
         .collect()
+}
+
+#[test]
+fn a_mixed_page_reports_only_each_items_own_decision() {
+    let (_scratch, mut store) = store();
+    group(&mut store);
+    for (thread, message, lane, at) in [
+        ("open-post", "open-root", ChatThreadLane::Posts, 10),
+        ("resolved-post", "resolved-root", ChatThreadLane::Posts, 20),
+        ("plain-post", "plain-root", ChatThreadLane::Posts, 30),
+        ("chat", "chat-poll", ChatThreadLane::Chat, 40),
+    ] {
+        let mut input = start_input("group", thread, message, lane, at);
+        if message != "plain-root" {
+            input.needs_decision = true;
+            input.options = vec!["Train".to_owned(), "Bus".to_owned()];
+        }
+        LinkedChatStore::new(&mut store)
+            .start_channel_thread(&input, &NO_FAULTS)
+            .expect("start");
+    }
+    let mut reply = reply_input("plain-post", "reply-poll", 50);
+    reply.parent_message_id = Some("plain-root".to_owned());
+    reply.needs_decision = true;
+    reply.options = vec!["Yes".to_owned(), "No".to_owned()];
+    send(&mut store, reply);
+    send(&mut store, reply_input("resolved-post", "answer", 60));
+    LinkedChatStore::new(&mut store)
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: WS.to_owned(),
+                thread_id: "resolved-post".to_owned(),
+                message_id: "resolved-root".to_owned(),
+                resolved_by_message_id: "answer".to_owned(),
+                chosen_option: Some("Train".to_owned()),
+                now_ms: 61,
+                request_id: "resolve-root".to_owned(),
+            },
+            &NO_FAULTS,
+        )
+        .expect("resolve");
+
+    let stream = page(&mut store, None, 10);
+    assert_eq!(
+        ids(&stream),
+        ["open-root", "resolved-root", "plain-root", "chat-poll"]
+    );
+    for index in [0, 3] {
+        let decision = stream.items[index].decision.as_ref().expect("open poll");
+        assert_eq!(decision.message_id, stream.items[index].message.message_id);
+        assert_eq!(decision.state, ChatDecisionState::Open);
+        assert_eq!(decision.options, ["Train", "Bus"]);
+        assert_eq!(decision.chosen_option, None);
+    }
+    let resolved = stream.items[1].decision.as_ref().expect("resolved poll");
+    assert_eq!(resolved.state, ChatDecisionState::Resolved);
+    assert_eq!(resolved.options, ["Train", "Bus"]);
+    assert_eq!(resolved.chosen_option.as_deref(), Some("Train"));
+    assert_eq!(resolved.resolved_by_message_id.as_deref(), Some("answer"));
+    let resolved_post = stream.items[1].post.as_ref().expect("post");
+    assert_eq!(resolved_post.open_decision_count, 0);
+    assert_eq!(stream.items[2].decision, None);
+    let plain_post = stream.items[2].post.as_ref().expect("post");
+    assert_eq!(plain_post.open_decision_count, 1);
+
+    let newest = page(&mut store, None, 1);
+    assert_eq!(ids(&newest), ["chat-poll"]);
+    assert!(newest.items[0].decision.is_some());
+    let older = page(&mut store, Some(&newest.items[0].position), 2);
+    assert_eq!(ids(&older), ["resolved-root", "plain-root"]);
+    assert_eq!(older.items[0].decision, stream.items[1].decision);
+    assert_eq!(older.items[1].decision, None);
 }
 
 #[test]
@@ -748,7 +820,7 @@ fn a_message_that_names_two_agents_shows_each_agents_own_request() {
         },
     );
     let claim = LinkedChatStore::new(&mut store)
-        .claim_next_pending(WS, "run-1", "agent", None, 12, &NO_FAULTS)
+        .claim_next_pending(WS, "default", "run-1", "agent", None, 12, &NO_FAULTS)
         .expect("claim")
         .expect("a request to claim");
     let other = if claim.run.agent_id == "default" {

@@ -11,7 +11,7 @@ import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
 import {
@@ -19,6 +19,7 @@ import {
   cliTransportResponseSchema,
   parseCliResult,
   type CliRequest,
+  type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliTransportResponse,
   type CliVerb,
@@ -3053,6 +3054,80 @@ describe("CLI socket server", () => {
     expect(mine?.author.kind).toBe("human");
   });
 
+  it("posts, replies, and reacts as the agent while a run dohc started holds the slot, whatever actor the caller names", async () => {
+    if (!store) throw new Error("Store is not available");
+    dispatchedRun = "codex";
+    const posted = await post({ actor: "human", title: "Trip", body: "Publish the trip app." });
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.",
+      attachments: [], needsDecision: false,
+    });
+    await invoke("react", { cwd: workspaceRoot, actor: "human", message: posted.messageId, emoji: "👍" });
+    const threadId = `thread-${posted.threadId.slice("th_".length)}`;
+    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId });
+    expect(messages.map((message) => message.author.kind)).toEqual(["agent", "agent"]);
+    const reactions = await store.listReactions({ workspaceId: WORKSPACE_ID, threadId });
+    expect(reactions.map((reaction) => reaction.author.kind)).toEqual(["agent"]);
+
+    // A name the caller gives doesn't move the run's messages off its agent.
+    const named = await invoke("post", {
+      cwd: workspaceRoot, actor: "agent", agent: "Client", group: "general", title: "Named",
+      attachments: [], needsDecision: false, body: "Posted under another name.",
+    });
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", agent: "Client", thread: named.threadId, body: "Replied under another name.",
+      attachments: [], needsDecision: false,
+    });
+    const credited = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${named.threadId.slice("th_".length)}` });
+    expect(credited.map((message) => [message.authorAgentId, message.author.displayName])).toEqual([["codex", "Nova"], ["codex", "Nova"]]);
+
+    // Once the run lets go of the slot, the person's posts are theirs.
+    dispatchedRun = null;
+    const own = await post({ actor: "human", title: "Mine", body: "My own post." });
+    const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${own.threadId.slice("th_".length)}` });
+    expect(mine?.author.kind).toBe("human");
+  });
+
+  it("refuses a live run's MCP post in another workspace", async () => {
+    serverOptions.agentRunWorkspace = (runId) => runId === "run_live" ? WORKSPACE_ID : undefined;
+    const nestedRoot = join(workspaceRoot, "notes");
+    await mkdir(nestedRoot);
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
+    const opened = calls.openWorkspace;
+    // The agent names no run; the server it calls names the run it works for.
+    const ctx: ToolContext = { root: nestedRoot, home: stateDir, runId: "run_live", request: (value) => invoke(value.verb, value.args) };
+    await expect(startGroupChat(ctx, { group: "general", body: "Publish the trip app." })).resolves.toEqual({
+      ok: false, reason: expect.stringContaining("Agent runs cannot write in another workspace."),
+    });
+    expect(calls.openWorkspace).toBe(opened);
+  });
+
+  it("posts as the agent of a run dohc started after it ends, only in its own workspace", async () => {
+    if (!store) throw new Error("Store is not available");
+    // The run has let go of the slot; main still knows the workspace of the
+    // id it gave the run.
+    dispatchedRun = null;
+    serverOptions.agentRunWorkspace = (runId) => runId === "run_finished" ? WORKSPACE_ID : undefined;
+    const late = await post({ actor: "human", title: "Late", body: "Published the trip app.", runId: "run_finished" });
+    const [message] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${late.threadId.slice("th_".length)}` });
+    expect(message?.author.kind).toBe("agent");
+
+    // A run id dohc never gave out leaves the caller's actor as it is.
+    const unknown = await post({ actor: "human", title: "Mine", body: "My own post.", runId: "run_never_issued" });
+    const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${unknown.threadId.slice("th_".length)}` });
+    expect(mine?.author.kind).toBe("human");
+
+    const nestedRoot = join(workspaceRoot, "notes");
+    await mkdir(nestedRoot);
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
+    const opened = calls.openWorkspace;
+    await expect(invoke("post", {
+      cwd: nestedRoot, actor: "human", runId: "run_finished", group: "general",
+      attachments: [], needsDecision: false, body: "Published the trip app.",
+    })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    expect(calls.openWorkspace).toBe(opened);
+  });
+
   it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
     const posted = await post({ actor: "human", title: "Test", body: "Check." });
     serverOptions.agentRunWorkspace = (runId) => runId === "run_live" ? WORKSPACE_ID : undefined;
@@ -4286,6 +4361,81 @@ describe("CLI socket server", () => {
       .rejects.toThrow("--before and --limit page a group's stream");
   });
 
+  it("shows each stream item's own poll in CLI text, JSON, and MCP without decision reads", async () => {
+    if (!store) throw new Error("Store is not available");
+    const group = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Travel", kind: "channel", type: "both" });
+    const author = { kind: "human" as const, displayName: "Sam" };
+    const options = ["Train", "Bus"];
+    const post = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "posts",
+      author, body: "How do we travel?", needsDecision: true, options,
+    });
+    const plain = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "posts",
+      author, body: "Travel notes",
+    });
+    await store.sendMessage({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: plain.thread.id,
+      parentMessageId: plain.message.id, author, body: "Where do we stay?",
+      needsDecision: true, options: ["Hotel", "Tent"],
+    });
+    const chat = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: group.id, lane: "chat",
+      author, body: "How do we return?", needsDecision: true, options,
+    });
+    const request = (input: CliRequestWithoutToken) => invokeAny(input.verb, input.args);
+
+    for (const state of ["open", "resolved"] as const) {
+      if (state === "resolved") {
+        for (const poll of [post, chat]) {
+          await invoke("reply", {
+            cwd: workspaceRoot, actor: "human", thread: poll.thread.id, to: poll.message.id,
+            resolve: poll.message.id, choose: "Train", attachments: [], needsDecision: false, body: "Take the train.",
+          });
+        }
+      }
+      const decisions = vi.spyOn(store, "listThreadDecisions");
+      const streams = vi.spyOn(store, "listGroupStream");
+      try {
+        const shown = await invokeAny("show", { cwd: workspaceRoot, actor: "human", target: group.slug, peek: true });
+        if (!("stream" in shown)) throw new Error("expected a stream");
+        const read = await invokeAny("chat", { cwd: workspaceRoot, actor: "agent", group: group.slug });
+        if (!read.ok || !("stream" in read)) throw new Error("expected a stream");
+        for (const poll of [post, chat]) {
+          expect(shown.stream.items.find((item) => item.message.id === cliMessageId(poll.message.id))?.message).toMatchObject({
+            decisionState: state, decisionOptions: options,
+            ...(state === "resolved" ? { decisionChosenOption: "Train" } : {}),
+          });
+          expect(read.stream.items.find((item) => item.message.id === poll.message.id)?.message).toMatchObject({
+            needsDecision: true, decisionState: state, options,
+            ...(state === "resolved" ? { chosenOption: "Train", resolvedByMessageId: expect.any(String) } : {}),
+          });
+        }
+        const plainCli = shown.stream.items.find((item) => item.message.id === cliMessageId(plain.message.id));
+        expect(plainCli?.message.decisionState).toBeUndefined();
+        expect(plainCli?.message.decisionOptions).toBeUndefined();
+        expect(plainCli?.post?.openDecisionCount).toBe(1);
+        expect(read.stream.items.find((item) => item.message.id === plain.message.id)?.message).toMatchObject({ needsDecision: false });
+
+        const text = await executeCli({ argv: ["chat", "show", group.slug, "--peek"], cwd: workspaceRoot, env: {}, request });
+        expect(text.exitCode, text.stderr).toBe(0);
+        for (const question of [post.message.body, chat.message.body]) {
+          expect(text.stdout).toContain(`needs-decision(${state})`);
+          expect(text.stdout).toContain(`${question}\n${state === "resolved" ? "- [x] Train" : "- [ ] Train"}\n- [ ] Bus`);
+        }
+        expect(text.stdout).not.toContain("- [ ] Hotel");
+        const json = await executeCli({ argv: ["chat", "show", group.slug, "--peek", "--json"], cwd: workspaceRoot, env: {}, request });
+        expect(json.exitCode, json.stderr).toBe(0);
+        expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 3, ...shown });
+        expect(streams).toHaveBeenCalledTimes(4);
+        expect(decisions).not.toHaveBeenCalled();
+      } finally {
+        streams.mockRestore();
+        decisions.mockRestore();
+      }
+    }
+  });
+
   it("answers a thread reply in that thread, unless the agent names another message", async () => {
     if (!store) throw new Error("Store is not available");
     const nova = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
@@ -4295,7 +4445,7 @@ describe("CLI socket server", () => {
       ...(input.runId ? { runId: input.runId } : {}), ...(input.to ? { to: input.to } : {}),
     });
     const claimFor = async (messageId: string) => {
-      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
       if (claim?.run.triggerMessageId !== messageId) throw new Error(`Expected a run for ${messageId}`);
       return claim;
     };
@@ -4376,7 +4526,7 @@ describe("CLI socket server", () => {
     expect(await show()).toMatchObject({ dispatch: { paused: null, lastRun: null }, messages: before.messages });
     expect(await chat()).toMatchObject({ ok: true, dispatch: { paused: null, lastRun: null } });
     await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger", agentId: "default" });
-    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!claim) throw new Error("Expected run");
     expect((await show()).dispatch.lastRun).toEqual({ state: "running", failureReason: null, exitCode: null });
     await dispatchStore.failRun({ runId: claim.run.runId, reason: "runner failed to start", exitCode: 7 });
@@ -4385,7 +4535,7 @@ describe("CLI socket server", () => {
     expect(await chat()).toMatchObject({ ok: true, dispatch });
     expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
     await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: "thread-dispatch", triggerMessageId: "trigger-2", agentId: "default" });
-    const next = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const next = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!next) throw new Error("Expected next run");
     await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
     expect((await show()).dispatch.lastRun).toEqual({ state: "completed", failureReason: null, exitCode: 0 });
@@ -4405,6 +4555,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for CLI linkage.");
@@ -4482,6 +4633,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for retry linkage.");
@@ -4525,6 +4677,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for recovery linkage.");
@@ -4576,7 +4729,7 @@ describe("CLI socket server", () => {
       threadId: "thread-restart_recovery",
       agentId: "default",
     });
-    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!claim) throw new Error("Expected a dispatch run.");
     const originalDispatch = dispatchStore;
     const pending: string[] = [];
@@ -4667,7 +4820,7 @@ describe("CLI socket server", () => {
       threadId: "thread-mixed_restore",
       agentId: "default",
     });
-    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!claim) throw new Error("Expected a run for mixed restore.");
     const unavailable = {
       workspaceId: "workspace-not-registered",
@@ -4766,7 +4919,7 @@ describe("CLI socket server", () => {
         threadId: `thread-bounded_${suffix}`,
         agentId: "default",
       });
-      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
       if (!claim) throw new Error("Expected a bounded-queue run.");
       await dispatchStore.failRun({
         runId: claim.run.runId,
@@ -4816,7 +4969,7 @@ describe("CLI socket server", () => {
       threadId: "thread-foreground_budget",
       agentId: "default",
     });
-    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!claim) throw new Error("Expected a dispatch run.");
     const deadlines: number[] = [];
     context = {
@@ -4860,6 +5013,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for failed linkage.");
@@ -4907,6 +5061,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for terminal linkage.");
@@ -4956,6 +5111,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for terminal recovery.");
@@ -5018,6 +5174,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for transient refusal.");
@@ -5070,6 +5227,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for plain-error linkage.");
@@ -5110,6 +5268,7 @@ describe("CLI socket server", () => {
       agentId: "default",
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, {
+      agentId: "default",
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for deadline linkage.");
@@ -5526,7 +5685,7 @@ describe("CLI socket server", () => {
 
     // A dispatched run sees its own agent's unread work: its chat, and each
     // message elsewhere that asked it.
-    const codexRun = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    const codexRun = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "codex" });
     if (codexRun?.run.agentId !== "codex") throw new Error("Expected Codex's run");
     dispatchedRun = "codex";
     dispatchedRunId = codexRun.run.runId;
@@ -5594,7 +5753,7 @@ describe("CLI socket server", () => {
     const asks = async () =>
       (await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map((mention) => mention.messageId);
     const startRun = async (agentId: string) => {
-      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+      const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId });
       if (claim?.run.agentId !== agentId) throw new Error(`Expected ${agentId}'s run`);
       dispatchedRun = agentId;
       dispatchedRunId = claim.run.runId;

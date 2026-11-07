@@ -68,6 +68,7 @@ function stubBridge(overrides: Record<string, unknown> = {}): void {
     typingRecovery: async () => ({failures: []}),
     onExitRound: () => () => undefined,
     onWindowFullScreen: () => () => undefined,
+    onWindowFocused: () => () => undefined,
     answerExitRound: async () => undefined,
     holdQuit: async () => undefined,
     resumeQuit: async () => undefined,

@@ -407,7 +407,7 @@ export function AgentList(props: {
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onClearError, onNotice } = props;
   const paused = useChatDispatchPaused((cause) =>
-    onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
+    onError?.(withErrorWords("dohc could not read whether agent replies are paused.", cause), cause));
   const [checking, setChecking] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   // A check's answer belongs to the workspace that asked for it.
@@ -612,7 +612,7 @@ export function AgentList(props: {
 
   const setPaused = (next: boolean) => {
     void bridge().setChatDispatchPaused({ paused: next }).catch((cause: unknown) => onError?.(
-      withErrorWords(next ? "dohc could not pause agent dispatch." : "dohc could not resume agent dispatch.", cause),
+      withErrorWords(next ? "dohc could not pause agent replies." : "dohc could not resume agent replies.", cause),
       cause,
     ));
   };

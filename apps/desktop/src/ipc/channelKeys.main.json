@@ -248,6 +248,7 @@
   "userSettingsChanged",
   "versionRound",
   "versionRoundAnswer",
+  "windowFocused",
   "windowFullScreen",
   "withdrawShareChanges",
   "workspaceActivated",
