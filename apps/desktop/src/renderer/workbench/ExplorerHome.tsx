@@ -15,7 +15,7 @@ import {
 } from "react";
 import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { RetryRow } from "../ui/controls";
-import { isDeleteKey } from "../ui/keys";
+import { isContextMenuKey, isDeleteKey } from "../ui/keys";
 import { Menu, type MenuItem } from "../ui/Menu";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { AppMarks } from "./AppsSection";
@@ -58,7 +58,8 @@ export interface ExplorerHomeProps {
   // The file or folder the Explorer is renaming, and its name field.
   editingPath: string | null;
   renderEditRow: (depth: number) => ReactNode;
-  onMenu: (kind: "file" | "folder", path: string) => void;
+  // Opens the row's menu at the pointer.
+  onMenu: (kind: "file" | "folder", path: string, at: { x: number; y: number }) => void;
   onRename: (path: string, isFolder: boolean) => void;
   onDelete: (paths: string[]) => void;
   // Switches to Files, with this path selected when it has one.
@@ -407,7 +408,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     event.preventDefault();
     event.stopPropagation();
     setFocusedKey(row.key);
-    if (row.menu) live.current.props.onMenu(row.menu.kind, row.menu.path);
+    if (!row.menu) return;
+    rowRefs.current.get(row.key)?.focus({ preventScroll: true });
+    live.current.props.onMenu(row.menu.kind, row.menu.path, { x: event.clientX, y: event.clientY });
   }, []);
   // A rename shows its name field in the row it started from, or else the
   // first row for that path.
@@ -682,7 +685,8 @@ const HomeRow = memo(function HomeRow(props: {
       : "text-muted hover:bg-hover hover:text-ink";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
-  const [fixMenuOpen, setFixMenuOpen] = useState(false);
+  // How the menu of a Collection that can't open was opened, while it is open.
+  const [fixMenu, setFixMenu] = useState<"pointer" | "keyboard" | null>(null);
   const rowButton = useRef<HTMLButtonElement | null>(null);
   const rowBox = useRef<HTMLDivElement | null>(null);
   const dragPath = drag && path ? path : null;
@@ -705,6 +709,9 @@ const HomeRow = memo(function HomeRow(props: {
           data-home-key={row.key}
           data-testid={props.testId ?? "home-row"}
           data-path={path}
+          data-menu-kind={row.menu?.kind}
+          // The Explorer leaves the Menu key and Shift+F10 to a row with its own menu.
+          data-own-menu={row.fix ? "" : undefined}
           data-root={app?.root}
           data-section={row.section}
           aria-current={active ? "page" : undefined}
@@ -718,11 +725,18 @@ const HomeRow = memo(function HomeRow(props: {
             props.onFocus(row.key);
           }}
           onClick={() => props.onClick(row)}
+          onKeyDown={row.fix ? (event) => {
+            if (!isContextMenuKey(event)) return;
+            event.preventDefault();
+            setReached(true);
+            setFixMenu("keyboard");
+          } : undefined}
           onContextMenu={(event) => {
             props.onContextMenu(row, event);
             if (!row.fix) return;
             setReached(true);
-            setFixMenuOpen(true);
+            // The browser's own event after the Menu key keeps the keyboard's open.
+            setFixMenu((current) => current ?? "pointer");
           }}
           onDragStart={dragPath !== null ? (event) => drag!.start(dragPath, event) : undefined}
           onDragOver={dragPath !== null ? (event) => drag!.over(dragPath, event) : undefined}
@@ -788,12 +802,13 @@ const HomeRow = memo(function HomeRow(props: {
               <Menu
                 label={`More actions for ${row.label}`}
                 items={[{ id: "show-in-files", label: "Show in Files", testId: "home-row-show-in-files", onSelect: () => props.onClick(row) }]}
-                open={fixMenuOpen}
+                open={fixMenu !== null}
+                fromKeyboard={fixMenu === "keyboard"}
                 // Under the cause line, so the list never covers what it acts on.
                 anchor={cause ? rowBox : undefined}
                 // Focus goes back to the row, where Home's arrows and Enter work, not to the •••.
                 onOpenChange={(open) => {
-                  setFixMenuOpen(open);
+                  setFixMenu(open ? "pointer" : null);
                   if (!open) rowButton.current?.focus();
                 }}
                 trigger={(trigger) => (

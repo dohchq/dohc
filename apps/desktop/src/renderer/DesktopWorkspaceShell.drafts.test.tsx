@@ -2029,7 +2029,6 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(row);
     await user.keyboard("{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
 
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
@@ -2068,7 +2067,6 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(docs);
     await user.keyboard("{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     await waitFor(() =>
       expect(bridge.writeWorkspaceText.mock.calls[0]?.[0].relativePath).toBe("a.md"),
     );
@@ -2225,7 +2223,6 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(row);
     await user.keyboard("{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(1));
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
@@ -2444,7 +2441,6 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(row);
     await user.keyboard("{Delete}");
-    await user.click(await screen.findByTestId("confirm-delete"));
     await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(1));
 
     await user.click(editorA);

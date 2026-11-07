@@ -202,17 +202,15 @@ test("grant side: share a file by email from the explorer, copy the code, and en
       env: {
         DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
         DOHC_TEST_SYNC_BACKOFF_MS: "250",
-        // The native context menu cannot be driven by Playwright; the test
-        // seam resolves the next invoke to "Share…".
-        DOHC_TEST_EXPLORER_MENU_CHOICE: "share",
       },
     });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Right-click the file → (seamed) "Share…" → the share dialog.
+    // Right-click the file → "Share…" → the share dialog.
     await revealExplorerPath(page, "docs/plan.md");
     await explorerRow(page, "docs/plan.md").click({ button: "right" });
+    await page.getByTestId("explorer-menu-item-share").click();
     const dialog = page.getByTestId("share-dialog");
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText("docs/plan.md");
@@ -346,7 +344,6 @@ confidentialTest.describe("View link lifecycle", () => {
         env: {
           DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
           DOHC_TEST_SYNC_BACKOFF_MS: "250",
-          DOHC_TEST_EXPLORER_MENU_CHOICE: "share",
         },
       });
       const page = desktop.page;
@@ -390,6 +387,7 @@ confidentialTest.describe("View link lifecycle", () => {
 
       await revealExplorerPath(page, "docs/shared.md");
       await explorerRow(page, "docs/shared.md").click({ button: "right" });
+      await page.getByTestId("explorer-menu-item-share").click();
       let dialog = page.getByTestId("share-dialog");
       await expect(dialog).toBeVisible();
       await expect(dialog).toContainText("docs/shared.md");
@@ -536,6 +534,7 @@ confidentialTest.describe("View link lifecycle", () => {
       await dialog.getByRole("button", { name: "Close" }).click();
       await expect(dialog).not.toBeVisible();
       await explorerRow(page, "docs/shared.md").click({ button: "right" });
+      await page.getByTestId("explorer-menu-item-share").click();
       dialog = page.getByTestId("share-dialog");
       await expect(dialog).toBeVisible();
       await dialog.getByRole("radio", { name: "Anyone with the link" }).click();

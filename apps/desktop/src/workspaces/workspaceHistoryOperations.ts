@@ -4,9 +4,9 @@ import { LIVE_PAGE_TRY_AGAIN_BODY, livePageUndoTitle, type LivePageUndone } from
 import { lstat, readdir } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { posix, join } from "node:path";
-import type { HistoryCursor, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, type HistoryCursor, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
-import { HistoryOperationId, type HistoryOperationReadResult } from "@dohc/workspace-contracts/history-operation";
+import { HistoryOperationId, type HistoryOperationReadResult, type UndoRefusal } from "@dohc/workspace-contracts/history-operation";
 import type { z } from "zod";
 import { validateUserMaterializePath, validateUserWritePath } from "@dohc/workspace-core";
 import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
@@ -43,6 +43,22 @@ function writable(operation: Operation): void {
 }
 const absent = (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT";
 const failure = (error: unknown, action: "read" | "undo") => ({ ok: false as const, reason: error instanceof Error && !["SyntaxError", "TypeError", "ZodError", "ParseError", "RangeError"].includes(error.name) && !("syscall" in error) ? error.message : `dohc could not ${action} this operation. Check the workspace, then try again.` });
+// The engine refuses an Undo as "domain error: Undo refused: <reason>: <path>".
+const occupiedOldPath = /^domain error: Undo refused: old path occupied(?: on disk)?: (.+)$/su;
+function engineRefusal(error: DaemonRefusalError): z.infer<typeof UndoRefusal> {
+  const occupied = occupiedOldPath.exec(error.message);
+  return occupied ? { code: "old-path-occupied", path: occupied[1]! } : { code: "unexplained" };
+}
+// The engine refused an Undo because this computer owns `path` live.
+class LivePageUndoError extends Error {
+  constructor(message: string, readonly path: string, cause: unknown) {
+    super(message, { cause });
+  }
+}
+function undoRefusal(error: unknown): z.infer<typeof UndoRefusal> {
+  if (error instanceof LivePageUndoError) return { code: "live-page-owned", path: error.path };
+  return error instanceof DaemonRefusalError ? engineRefusal(error) : { code: "unexplained" };
+}
 async function agentFloor(rootPath: string, walkLiveDirectories = true): Promise<Floor> {
   const policy = await readWorkspaceEnginePolicy(rootPath);
   if (policy.errors.length) throw new Error("dohc could not read the workspace file policy. Fix the reported policy errors.");
@@ -226,7 +242,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
         catch (error) {
           // The engine refuses while this computer owns the page live.
           if (undone && error instanceof Error && error.message === "live-page-owned") {
-            throw new Error(`${livePageUndoTitle(undone.path, undone.change)}\n${LIVE_PAGE_TRY_AGAIN_BODY}`, { cause: error });
+            throw new LivePageUndoError(`${livePageUndoTitle(undone.path, undone.change)}\n${LIVE_PAGE_TRY_AGAIN_BODY}`, undone.path, error);
           }
           const refusal = linkUndoRefusal(error);
           // These reasons name the operation; the other Undo refusals name workspace paths.
@@ -261,7 +277,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
   } catch (error) {
     // Refuse through the authority wrapper before its final currentness check.
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
-    return failure(error, "undo");
+    return { ...failure(error, "undo"), refusal: undoRefusal(error) };
   } finally {
     release?.();
     if (release && !operation.signal.aborted && options.history.rewriteHistoryLinks) {

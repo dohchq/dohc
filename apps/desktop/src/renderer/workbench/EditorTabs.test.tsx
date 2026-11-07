@@ -513,7 +513,9 @@ describe("EditorTabs strip scrolling", () => {
   it("marks the overflow menu's active row apart from the current tab's row", async () => {
     const user = userEvent.setup();
     renderTabs("b.md");
-    await user.click(screen.getByTestId("tabs-overflow"));
+    // Opened from the keyboard, which marks the first row at once.
+    screen.getByTestId("tabs-overflow").focus();
+    await user.keyboard("{Enter}");
     const active = screen.getByRole("menuitem", { name: "a.md" });
     const current = screen.getByRole("menuitem", { name: "b.md" });
     expect(document.activeElement).toBe(active);

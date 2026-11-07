@@ -350,6 +350,27 @@ describe("active file sharing", () => {
     expect(within(dialog).getByText("a.md")).toBeTruthy();
   });
 
+  // main offers the Explorer's Share… on a workspace that does not sync, and
+  // the dialog says how to set up sync.
+  it("opens the same dialog from the Explorer menu's Share… on a workspace that does not sync", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false,
+    }));
+    bridge.readExplorerMenu.mockResolvedValue([{ kind: "item", label: "Share…", id: "share" }]);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const row = (await screen.findAllByTestId("tree-row")).find((candidate) => candidate.dataset.path === "a.md");
+    if (!row) throw new Error("a.md row missing");
+    fireEvent.contextMenu(row);
+    await user.click(await screen.findByTestId("explorer-menu-item-share"));
+
+    const dialog = await screen.findByTestId("share-dialog");
+    expect(within(dialog).getByText("a.md")).toBeTruthy();
+    expect((await within(dialog).findByTestId("share-setup")).dataset.reason).toBe("not-synced");
+  });
+
   // The palette hides Share… whenever the toolbar draws no Share file.
   it.each<[string, Workspace | undefined, string[]]>([
     ["no editor shows a file", undefined, []],

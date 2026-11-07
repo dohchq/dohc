@@ -70,6 +70,7 @@ function Harness(props: HarnessProps) {
     recentFiles: [],
     files: [{ path: "client-portal/index.html", kind: "file" }, { path: "docs/index.html", kind: "file" }],
     folders: ["client-portal", "docs"],
+    listingRequest: 0,
     editorGroups: [{ id: "group-1", tabs: activeTab ? [{ path: activeTab }] : [], activeTab, size: 1 }],
     activeEditorGroup: "group-1",
     dirtyPaths: new Set(),
@@ -105,8 +106,9 @@ function Harness(props: HarnessProps) {
     onRefreshShareMounts: noop,
     onUnmountShare: noop,
     onShare: noop,
-    onRefresh: noop,
+    onRefresh: () => 0,
     onError: noop,
+    onNotice: noop,
     onNewCollection: noop,
   };
   return <Explorer {...explorer} />;

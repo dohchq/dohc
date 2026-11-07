@@ -163,7 +163,7 @@ Changes the workspace, so a shared view does not offer it.
 
 - `operationId`: `string`. Required.
 
-Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
+Returns `{ ok: false, reason, refusal: { code: "old-path-occupied", path } | { code: "live-page-owned", path } | { code: "unexplained" } } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
 
 ### `dohc_list_versions`
 

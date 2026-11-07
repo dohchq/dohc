@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type { ExplorerMenuEntry, SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { ExplorerApps } from "./AppsSection";
 import { Explorer, type ExplorerProps } from "./Explorer";
 import { OTHER_FILES_SHOWN, RECENT_SHOWN } from "./explorerHomeModel";
@@ -67,6 +67,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
       file("photos/tram.png"),
     ],
     folders: ["Plans", "Plans/Old", "trip", "guests", "tasks", "photos", "empty"],
+    listingRequest: 0,
     editorGroups: [{ id: "group-1", tabs: [{ path: "notes.md" }], activeTab: "notes.md", size: 1 }],
     activeEditorGroup: "group-1",
     dirtyPaths: new Set(),
@@ -98,8 +99,9 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onRefreshShareMounts: vi.fn(),
     onUnmountShare: vi.fn(),
     onShare: vi.fn(),
-    onRefresh: vi.fn(),
+    onRefresh: vi.fn(() => 1),
     onError: vi.fn(),
+    onNotice: vi.fn(),
     onNewCollection: vi.fn(),
     ...overrides,
   };
@@ -115,10 +117,20 @@ function rowLabels(name: string): string[] {
     .map((element) => element.querySelector(".truncate")?.textContent ?? element.textContent ?? "");
 }
 
-const showExplorerMenu = vi.fn(async (_input: unknown) => null);
+const RENAME: ExplorerMenuEntry = { kind: "item", label: "Rename", id: "rename" };
+const DELETE: ExplorerMenuEntry = { kind: "item", label: "Delete", id: "delete" };
+
+const bridge = {
+  readExplorerMenu: vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [RENAME, DELETE]),
+  deleteWorkspacePath: vi.fn(async (_input: unknown) => ({
+    trashed: true,
+    operationId: "dohc-operation:22222222-2222-4222-8222-222222222222",
+    undo: { available: true as const },
+  })),
+};
 
 beforeEach(() => {
-  vi.stubGlobal("dohcDesktop", { showExplorerMenu });
+  vi.stubGlobal("dohcDesktop", bridge);
 });
 
 afterEach(() => {
@@ -285,10 +297,44 @@ describe("Explorer Home", () => {
     render(<Explorer {...explorerProps({ apps: apps({ pinnedApps: ["trip"] }) })} />);
 
     fireEvent.contextMenu(within(section("Pages")).getByRole("button", { name: "notes" }));
-    expect(showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "notes.md", kind: "file", pinned: false });
+    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "notes.md", kind: "file", pinned: false });
+    await screen.findByRole("menu", { name: "notes.md" });
     await userEvent.hover(within(section("Apps")).getByTestId("sites-row"));
     fireEvent.click(within(section("Apps")).getByRole("button", { name: "More actions for Trip" }));
-    expect(showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "trip", kind: "folder", pinned: true });
+    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "trip", kind: "folder", pinned: true });
+    await screen.findByRole("menu", { name: "trip" });
+  });
+
+  it("opens a row's menu under it from the Menu key, once, and gives focus back on Escape", async () => {
+    const user = userEvent.setup();
+    render(<Explorer {...explorerProps()} />);
+    const target = within(section("Pages")).getByRole("button", { name: "notes" });
+    vi.spyOn(target, "getBoundingClientRect").mockReturnValue(new DOMRect(10, 100, 200, 28));
+    target.focus();
+    fireEvent.keyDown(target, { key: "ContextMenu" });
+    const menu = await screen.findByRole("menu", { name: "notes.md" });
+    expect(menu.style.top).toBe("128px");
+    expect(bridge.readExplorerMenu).toHaveBeenCalledWith({ workspaceId: "workspace-1", path: "notes.md", kind: "file", pinned: false });
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
+    // The browser's own contextmenu event for the key opens no second menu.
+    fireEvent.contextMenu(target);
+    await act(async () => {});
+    expect(bridge.readExplorerMenu).toHaveBeenCalledOnce();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(target));
+  });
+
+  it("deletes from a row's menu without asking, with Undo on its notice", async () => {
+    const user = userEvent.setup();
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    fireEvent.contextMenu(within(section("Pages")).getByRole("button", { name: "notes" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" }));
+    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted notes.md", expect.any(Function)));
   });
 
   it("switches to Files to reveal a path", () => {

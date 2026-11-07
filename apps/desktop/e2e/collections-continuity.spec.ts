@@ -75,7 +75,6 @@ test("a collection saves edits, follows its folder rename, and closes on deletio
     await explorerRow(page, "jobs").click();
     await expect(renamedTab).toHaveCount(1);
     await explorerRow(page, "jobs").press("Delete");
-    await page.getByTestId("confirm-delete").click();
     await expect(explorerRow(page, "jobs")).toHaveCount(0);
     await expect(renamedTab).toHaveCount(0);
   } finally {
