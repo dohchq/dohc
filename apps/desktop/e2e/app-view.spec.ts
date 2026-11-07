@@ -357,10 +357,9 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     const typed = "lisbon";
     await pressApp(page, electronApp, guestId, "#focus");
     await expect.poll(() => inFrame(electronApp, guestId, "document.activeElement?.id")).toBe("focus");
-    await electronApp.evaluate(({ webContents }, input) => {
-      const guest = webContents.fromId(input.id)!;
-      for (const keyCode of input.text) guest.sendInputEvent({ type: "char", keyCode });
-    }, { id: guestId, text: typed });
+    // Keys go through the window, as a keyboard's do. The app runs in a child frame with its own process, and the
+    // guest's sendInputEvent reaches only the guest's top frame.
+    await page.keyboard.type(typed);
     await expect.poll(() => inFrame(electronApp, guestId, "document.getElementById('focus').value")).toBe(typed);
     await clickApp(electronApp, guestId, "#counter");
     await clickApp(electronApp, guestId, "#counter");
@@ -381,18 +380,12 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await ready(page);
 
     // Tab follows the screen with the app beside the note. Keys pressed in the app reach only the app.
-    const appKey = (key: "Tab" | "Shift+Tab") => electronApp.evaluate(({ webContents }, input) => {
-      const guest = webContents.fromId(input.id)!;
-      const modifiers = input.key === "Shift+Tab" ? ["shift" as const] : [];
-      guest.sendInputEvent({ type: "keyDown", keyCode: "Tab", modifiers });
-      guest.sendInputEvent({ type: "keyUp", keyCode: "Tab", modifiers });
-    }, { id: guestId, key });
     const appControls = "[...document.querySelectorAll('a[href], button:not([disabled]), input:not([disabled])')]";
     const divider = page.getByRole("separator", { name: "Resize editor groups" });
     // Shift+Tab out of the app's first control reaches its page's toolbar.
     await pressApp(page, electronApp, guestId, "#focus");
     await inFrame(electronApp, guestId, `${appControls}[0].focus(); true`);
-    await appKey("Shift+Tab");
+    await page.keyboard.press("Shift+Tab");
     await expect.poll(() => page.evaluate(() => {
       const focused = document.activeElement;
       return !!focused?.closest("[data-app-group-id]") && focused.localName !== "webview" && !focused.matches("[data-app-stop]");
@@ -402,7 +395,7 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await page.keyboard.press("Shift+Tab");
     await expect.poll(() => inFrame(electronApp, guestId, `document.activeElement === ${appControls}.at(-1)`)).toBe(true);
     // Tab out of the app's last control reaches the divider.
-    await appKey("Tab");
+    await page.keyboard.press("Tab");
     await expect(divider).toBeFocused();
 
     await dragTabTo(page, leftGroup.getByTestId(appTab), rightGroup);
