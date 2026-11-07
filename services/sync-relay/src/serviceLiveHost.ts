@@ -762,6 +762,7 @@ export async function startServiceLiveHost(options: {
       const lost = authorityLost(row);
       // As after a restart, a moved document keeps its queues without settling its old binding.
       // Retirements still finish through their own path, including those waiting for a recovery copy.
+      // A moved or removed document with live authority keeps its edits without settling its old path.
       // With no file history, the engine must still answer the ordinary unload.
       if (!lost && storage.objectIdAtPathInVersion({workspaceId: row.target.workspaceId, versionId: "main", path: row.target.path}) !== row.objectId &&
         storage.objectMoment({workspaceId: row.target.workspaceId, objectId: row.objectId, versionId: "main"}) !== null) {

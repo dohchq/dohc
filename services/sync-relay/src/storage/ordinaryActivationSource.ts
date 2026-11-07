@@ -62,29 +62,48 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   let charged=baselineBytes.length;
   const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
-  const rows=metadata.flatMap(row=>{
+  // Prove each move backward from the current path, without skipping a step.
+  let provedPath=source.currentPath,latestMove:number|null=null,latestWrite:number|null=null;
+  let latestWriteBlobSha256:string|null=null,latestWriteByteLength:number|null=null;
+  const objectRow=storage.db.prepare("SELECT 1 FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=? AND version_id=?");
+  const priorObjectRow=storage.db.prepare("SELECT blob_sha256,byte_length FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<? ORDER BY relay_seq DESC LIMIT 1");
+  const currentFileRow=storage.db.prepare("SELECT blob_sha256,state_relay_seq FROM sync_relay_current_files WHERE workspace_id=? AND version_id=? AND path=?");
+  const rows=[...metadata].reverse().flatMap(row=>{
     requireValue(integer(row.relay_seq)&&integer(row.origin_seq)&&typeof row.origin_id==="string"&&row.origin_id.length>0,"Ordinary activation coordinate is damaged.");
     const stored=storage.db.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,row.relay_seq);
     requireValue(stored&&typeof stored.payload_json==="string","Ordinary activation history is unavailable.");
     const payload=JSON.parse(stored.payload_json) as Record<string,unknown>;
     if(row.op_kind==="moment.append"){
       requireValue(payload.versionId===document.mainVersionId&&payload.objectId===document.objectId&&
-        payload.path===source.currentPath&&payload.operation==="write"&&payload.payloadAfterPath===source.currentPath&&
         payload.payloadAfterContentKind==="text"&&typeof payload.momentId==="string"&&payload.momentId.length>0&&
         typeof payload.payloadAfterBlobSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.payloadAfterBlobSha256)&&
         integer(payload.payloadAfterByteLength)&&payload.payloadAfterByteLength<=2_097_152,
         "Ordinary activation history replaced the live document.");
+      if(payload.operation==="rename"){
+        requireValue(payload.path===provedPath&&payload.payloadAfterPath===provedPath&&
+          typeof payload.payloadBeforePath==="string"&&payload.payloadBeforePath.length>0&&payload.payloadBeforeContentKind==="text"&&
+          payload.payloadBeforeBlobSha256===payload.payloadAfterBlobSha256,
+          "Ordinary activation history replaced the live document.");
+        provedPath=payload.payloadBeforePath;
+        latestMove??=Number(row.relay_seq);
+      }else{
+        requireValue(payload.operation==="write"&&payload.path===source.currentPath&&payload.payloadAfterPath===source.currentPath&&
+          provedPath===source.currentPath,"Ordinary activation history replaced the live document.");
+        if(latestWrite===null&&objectRow.get(document.workspaceId,document.objectId,row.relay_seq,document.mainVersionId)){
+          latestWrite=Number(row.relay_seq);latestWriteBlobSha256=payload.payloadAfterBlobSha256;latestWriteByteLength=payload.payloadAfterByteLength;
+        }
+      }
       return [];
     }
     requireValue(row.op_kind==="ydoc.update","Ordinary activation history replaced the live document.");
-    requireValue(payload.versionId===document.mainVersionId&&payload.objectId===document.objectId&&payload.path===source.currentPath&&
+    requireValue(payload.versionId===document.mainVersionId&&payload.objectId===document.objectId&&payload.path===source.currentPath&&provedPath===source.currentPath&&
       payload.contentKind==="richdoc"&&payload.lineageClaimId===document.lineageClaimId&&typeof payload.isBaseState==="boolean"&&
       typeof payload.updateBlobSha256==="string"&&/^[0-9a-f]{64}$/.test(payload.updateBlobSha256),"Ordinary activation history differs from the captured lineage.");
     const blob=storage.db.prepare("SELECT byte_length,length(content) AS actual_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(document.workspaceId,payload.updateBlobSha256);
     requireValue(blob&&integer(blob.byte_length)&&blob.byte_length===blob.actual_length,"Ordinary activation bytes are unavailable.");
     charge(Number(blob.byte_length));
     return [{relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,ordinary:row.relay_admission===null,payload,byteLength:Number(blob.byte_length)}];
-  });
+  }).reverse();
   requireValue(rows.length>0,"Ordinary activation base history is unavailable.");
   const first=rows[0]!;
   requireValue(first.relay_seq===source.baseRelaySeq&&first.origin_id===source.baseOriginId&&first.origin_seq===source.baseOriginSeq&&
@@ -101,6 +120,7 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
     WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
   const moment=found?{...found}:null;
   const echoes=moment?.path===source.currentPath&&moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
+  requireValue(latestMove===null||(moment!==null&&Number(moment.relay_seq)>=latestMove),"Ordinary activation found a later ordinary file moment with a divergent projection.");
   let from:number|null=null,artifact:number|null=null,settled:OrdinaryActivationHistory["settled"]=null;
   if(!(moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&echoes)){
     // A receiver-generated source names an ordinarily admitted Y.Doc row; a departed row counts as history, never as a source.
@@ -111,7 +131,18 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
     if(index>=0)anchor=rows[index]!.relay_seq;
     else{const proved=provedSettlementSource(storage,{source,document,charge});anchor=proved.relaySeq;settled={state:proved.state,stateSha256:proved.stateSha256};}
     from=index>=0?index:history.filter(row=>row.relay_seq<anchor).length-1;
-    if(moment&&Number(moment.relay_seq)>anchor&&!echoes)artifact=Number(moment.relay_seq);
+    // A returned document keeps the text it had before moving.
+    if(moment&&Number(moment.relay_seq)===latestMove&&latestWrite===null){
+      const prior=priorObjectRow.get(document.workspaceId,document.objectId,document.mainVersionId,source.baseRelaySeq);
+      requireValue(prior&&prior.blob_sha256===moment.blob_sha256&&prior.byte_length===moment.byte_length,"Ordinary activation found a later ordinary file moment with a divergent projection.");
+    }
+    if(moment&&Number(moment.relay_seq)===latestMove&&latestWrite!==null)requireValue(latestWriteBlobSha256===moment.blob_sha256&&latestWriteByteLength===moment.byte_length,"Ordinary activation found a later ordinary file moment with a divergent projection.");
+    const latest=moment&&Number(moment.relay_seq)===latestMove?latestWrite:moment?Number(moment.relay_seq):null;
+    if(latest!==null&&latest>anchor&&!echoes)artifact=latest;
+  }
+  if(latestMove!==null&&moment){
+    const current=currentFileRow.get(document.workspaceId,document.mainVersionId,source.currentPath);
+    requireValue(current&&current.blob_sha256===moment.blob_sha256&&integer(current.state_relay_seq)&&current.state_relay_seq<=source.committedCursor,"Ordinary activation found a later ordinary file moment with a divergent projection.");
   }
   // Behind a later artifact, validation keeps the projection each of this document's writes followed, to tell folded echoes.
   const wanted=artifact===null?[]:[...new Set(metadata.filter(row=>row.op_kind==="moment.append"&&Number(row.relay_seq)<artifact)
@@ -213,7 +244,7 @@ const examined=(row:Record<string,unknown>)=>{
  * name, whose origin's nearest preceding Y.Doc row of this document, chosen
  * before any filter, is ordinarily admitted history of the captured lineage,
  * and which nothing replaced from that row through the cut. The history check
- * already refused this document's moves, deletes, unclaimed rows and other
+ * already refused moves that change text, broken path chains, unclaimed rows and other
  * bases across the cut; a losing lineage's rows break nothing.
  */
 function sameLineageArtifact(storage:StorageContext,proof:ArtifactProof,relaySeq:number):boolean{
@@ -254,7 +285,8 @@ function artifactStands(storage:StorageContext,proof:ArtifactProof,relaySeq:numb
       json_extract(payload_json,'$.payloadAfterBlobSha256') AS after_sha256,json_extract(payload_json,'$.payloadAfterByteLength') AS after_byte_length,
       CASE WHEN op_kind=? THEN origin_id=? AND relay_seq<? AND json_extract(payload_json,'$.opKind')='ydoc.update'
         WHEN COALESCE(json_extract(settlement_admission_json,'$.status'),'')='refused' OR json_extract(payload_json,'$.versionId') IS NOT ? THEN 0
-        WHEN json_extract(payload_json,'$.objectId') IS ? THEN CASE WHEN op_kind='moment.append' AND relay_seq>? AND relay_seq<? THEN 2 ELSE 0 END
+        WHEN json_extract(payload_json,'$.objectId') IS ? THEN CASE WHEN op_kind='moment.append' AND json_extract(payload_json,'$.operation') IS NOT 'rename'
+          AND relay_seq>? AND relay_seq<? THEN 2 ELSE 0 END
         ELSE ? IN (json_extract(payload_json,'$.path'),json_extract(payload_json,'$.payloadAfterPath'),json_extract(payload_json,'$.payloadBeforePath'),
           json_extract(payload_json,'$.beforePath')) OR json_extract(payload_json,'$.beforeObjectId')=? END AS replaced
     FROM sync_relay_log INDEXED BY idx_sync_relay_log_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=? ORDER BY relay_seq`);
