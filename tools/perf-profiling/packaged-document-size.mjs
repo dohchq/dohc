@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import { sha256 } from './document-size-fixtures.mjs';
-import { aggregateByKind } from './packaged-surfaces.mjs';
+import { aggregateByKind, showExplorer } from './packaged-surfaces.mjs';
 
 // Serialized into the renderer. Both milestones use the same trusted tree click.
 export function observeDocumentOpen({ name, marker, timeoutMs = 120000 }) {
@@ -233,6 +233,7 @@ export async function measurePackagedDocument({
       )
     : null;
   try {
+    await showExplorer(page, 'files');
     await page.evaluate(() => {
       delete window.__documentReplacementNodes;
     });
