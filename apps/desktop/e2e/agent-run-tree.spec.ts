@@ -77,6 +77,7 @@ for (const launch of ["npm shim", "direct"] as const) {
   test(`killing dohc outright ends the whole run (${launch})`, async () => {
     const temp = await createTempWorkspace();
     let desktop: LaunchedDesktopApp | null = null;
+    let launcher: number | undefined;
     let tree: number[] = [];
     let engines: number[] = [];
     try {
@@ -86,7 +87,7 @@ for (const launch of ["npm shim", "direct"] as const) {
       expect(tree.filter(alive)).toEqual(tree);
 
       // dohc's main process, not Playwright's launcher, and without /T.
-      const launcher = desktop.app.process().pid!;
+      launcher = desktop.app.process().pid!;
       engines = await engineDaemonPids(launcher);
       const mainPid = await desktop.app.evaluate(() => process.pid);
       await hardKillPid(mainPid);
@@ -96,7 +97,8 @@ for (const launch of ["npm shim", "direct"] as const) {
       // leaves the run's processes too.
       for (const pid of [...tree, ...engines].filter(alive)) await hardKillPid(pid);
       if (desktop) {
-        await hardKillAppTree(desktop.app.process().pid!);
+        // After the kill, Playwright no longer has the process.
+        await hardKillAppTree(launcher ?? desktop.app.process().pid!);
         await desktop.close().catch(() => undefined);
       }
       await cleanupDesktopWorkspace(null, temp);
