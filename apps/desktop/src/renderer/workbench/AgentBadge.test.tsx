@@ -74,7 +74,7 @@ describe("agent badge", () => {
     expect(badge.parentElement!.className).toContain("text-agent");
     expect(badge.parentElement!.className).not.toContain("hue");
     fireEvent.focus(badge);
-    const text = screen.getByRole("tooltip").textContent ?? "";
+    const text = screen.getByRole("tooltip", { hidden: true }).textContent ?? "";
     expect(text).toContain("Claude Code");
     expect(text).not.toContain("Owned by");
     expect(text).not.toContain("Owner name unavailable");
