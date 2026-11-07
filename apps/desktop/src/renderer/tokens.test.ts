@@ -116,6 +116,11 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "agent", bg: "bg", min: 4.5 },
     { fg: "agent", bg: "panel", min: 4.5 },
     { fg: "agent", bg: "panel2", min: 4.5 },
+    // State text (a strip, a pill, a failed row) sits on every surface
+    // too. Light warning on panel-2 was 4.37:1.
+    ...(["success", "warning", "danger"] as const).flatMap((fg) =>
+      SURFACES.map((bg) => ({ fg, bg, min: 4.5 })),
+    ),
     // subtle is decorative (kbd hints, timestamps): 3.0 is the bar — on
     // every surface it actually sits on, not just bg (count pills and
     // section headers render text-subtle on panel-2).
