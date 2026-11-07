@@ -33,6 +33,7 @@ import { ownPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar, useAgentInk } from "../workbench/ChatAvatar";
 import { AgentDetails } from "./AgentDetails";
 import { SwitchControl } from "./SettingRow";
+import { ToolReadiness, type ReadinessTone } from "./ToolReadiness";
 
 export type AgentListRow =
   | { kind: "agent"; agent: Agent }
@@ -125,7 +126,7 @@ type CheckState = { status: "replied"; seconds: number } | { status: "failed" };
 const ROW = "border-b border-line last:border-b-0";
 const ROW_LINE = "flex items-center gap-3 py-4";
 const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
-const TILE_LINE = "mt-0.5 flex items-center gap-1 text-[12px]";
+const TILE_LINE = "mt-0.5 text-[12px]";
 const BUTTON_ICON = "inline-flex shrink-0 items-center gap-1.5";
 // Holds the place of a control the row does not have, so every row's controls line up.
 const switchSpace = <span aria-hidden className="h-5 w-9 shrink-0" />;
@@ -336,11 +337,11 @@ function toolTileState(tool: "claude" | "codex", tools: AgentToolsResult | null)
   return found.auth === "signed-out" ? { status: "sign-in" } : { status: "ready", executable: found.executable };
 }
 
-const TILE_STATE: Record<ToolTileState["status"], { text: string; className: string }> = {
-  ready: { text: "Ready", className: "text-success" },
-  "sign-in": { text: "Sign in first", className: "text-warning" },
-  update: { text: "Update first", className: "text-warning" },
-  "not-found": { text: "Not found", className: "text-muted" },
+const TILE_STATE: Record<ToolTileState["status"], { text: string; tone: ReadinessTone }> = {
+  ready: { text: "Ready", tone: "ready" },
+  "sign-in": { text: "Sign in first", tone: "blocked" },
+  update: { text: "Update first", tone: "blocked" },
+  "not-found": { text: "Not found", tone: "unknown" },
 };
 
 function AddTile(props: { title: string; state: ReactNode; disabled: boolean; hint?: string; onAdd: () => void }) {
@@ -701,13 +702,11 @@ export function AgentList(props: {
                 disabled={found?.status !== "ready" || adding || checking !== null}
                 hint={found?.status === "update" ? `Update ${name} to use it here.` : undefined}
                 state={found ? (
-                  <span className={`${TILE_LINE} ${TILE_STATE[found.status].className}`}>
-                    {found.status === "ready" ? <Check size={12} aria-hidden /> : null}{TILE_STATE[found.status].text}
-                  </span>
+                  <ToolReadiness tone={TILE_STATE[found.status].tone} className={TILE_LINE}>{TILE_STATE[found.status].text}</ToolReadiness>
                 ) : detection === "failed" ? (
-                  <span className={`${TILE_LINE} text-muted`}>Couldn't check</span>
+                  <span className={`${TILE_LINE} block text-muted`}>Couldn't check</span>
                 ) : (
-                  <span className={`${TILE_LINE} text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
+                  <span className={`${TILE_LINE} flex text-muted`}><LoaderCircle size={12} aria-label={`Looking for ${name}`} className="animate-spin" /></span>
                 )}
                 onAdd={() => {
                   if (found?.status === "ready") {
