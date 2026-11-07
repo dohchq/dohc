@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_TOOLS, supportsAgentProfile, type AgentLaunchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
+import { AGENT_TOOLS, CLAUDE_MIN_VERSION, supportsAgentProfile, type AgentLaunchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { useRequestSequence } from "../useRequestSequence";
@@ -55,7 +55,7 @@ export function AgentToolPicker(props: {
           <span className="block text-[11px] text-muted">{detected?.auth === "signed-in" ? "Signed in" : detected?.auth === "signed-out" ? "Signed out" : detected?.auth === "credentials-found" ? "Credentials found · sign-in unknown" : "Sign-in unknown"}</span>
           {detected?.executable ? <span className="mt-1 block break-all font-mono text-[11px] text-muted">{detected.executable}</span> : null}
           {!supported ? <span className="mt-1 block text-[11px] text-muted">No launch profile yet</span> : null}
-          {tool.id === "claude" && detected?.probe === "detected" && !compatible ? <span className="mt-1 block text-[11px] text-muted">Update Claude Code to 2.1.259 or later to use this profile.</span> : null}
+          {tool.id === "claude" && detected?.probe === "detected" && !compatible ? <span className="mt-1 block text-[11px] text-muted">Update Claude Code to {CLAUDE_MIN_VERSION} or later to use this profile.</span> : null}
         </button>;
       })}
     </div>

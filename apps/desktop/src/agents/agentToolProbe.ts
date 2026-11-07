@@ -47,6 +47,11 @@ export function agentExecutableCandidates(tool: AgentToolId, deps: Pick<AgentPro
   return [...new Set(candidates)];
 }
 
+// The version a tool's --version printed, never its free-form output.
+export function parseToolVersion(stdout: string): string | null {
+  return /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/u.exec(stdout)?.[0] ?? null;
+}
+
 export function parseAgentAuth(tool: AgentToolId, output: ProbeOutput): AgentToolDetection["auth"] {
   if (tool === "claude") {
     try {
@@ -100,8 +105,7 @@ export async function probeAgentTools(deps: AgentProbeDependencies): Promise<Age
     try {
       const version = await deps.run(executable, ["--version"], deps.signal);
       if (version.exitCode !== 0) return result;
-      // Return the version only, never a tool's free-form diagnostic output.
-      result.version = /\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/u.exec(version.stdout)?.[0] ?? null;
+      result.version = parseToolVersion(version.stdout);
       if (!result.version) return result;
       result.probe = "detected";
       if (tool.authArgs && !deps.signal.aborted) result.auth = parseAgentAuth(tool.id, await deps.run(executable, tool.authArgs, deps.signal));
