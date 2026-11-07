@@ -22,50 +22,54 @@ const canvas = vi.hoisted(() => ({
   props: null as null | Record<string, unknown>,
   autoHydrate: false,
   hydrateInvocations: vi.fn(),
+  assetPathAtLoad: undefined as string | undefined,
 }));
 
-vi.mock("./ExcalidrawCanvas", () => ({
-  default: (props: ExcalidrawCanvasProps) => {
-    canvas.props = props as unknown as Record<string, unknown>;
-    useEffect(() => {
-      if (!canvas.autoHydrate || !props.sceneDoc || !props.hydrateAssets) return;
-      canvas.hydrateInvocations(props.hydrateAssets);
-      void props.hydrateAssets();
-    }, [props.hydrateAssets, props.sceneDoc]);
-    return (
-      <div
-        data-testid="mock-excalidraw-canvas"
-        data-read-only={String(props.readOnly)}
-        data-source={props.document.source ?? ""}
-        data-files={Object.keys(props.document.files).join(",")}
-        data-scene-doc={String(props.sceneDoc !== undefined)}
-        data-presence-topic={props.presence?.topic ?? ""}
-        data-scene-elements={
-          props.sceneDoc ? String(foldScene(props.sceneDoc).elements.length) : ""
-        }
-      >
-        <button
-          type="button"
-          data-testid="mock-drawing-change"
-          onClick={() =>
-            props.onChange?.(
-              JSON.stringify({
-                type: "excalidraw",
-                version: 2,
-                source: "dohc-test",
-                elements: [{ id: "changed", type: "rectangle" }],
-                appState: {},
-                files: {},
-              }),
-            )
+vi.mock("./ExcalidrawCanvas", () => {
+  canvas.assetPathAtLoad = window.EXCALIDRAW_ASSET_PATH ?? "unset";
+  return {
+    default: (props: ExcalidrawCanvasProps) => {
+      canvas.props = props as unknown as Record<string, unknown>;
+      useEffect(() => {
+        if (!canvas.autoHydrate || !props.sceneDoc || !props.hydrateAssets) return;
+        canvas.hydrateInvocations(props.hydrateAssets);
+        void props.hydrateAssets();
+      }, [props.hydrateAssets, props.sceneDoc]);
+      return (
+        <div
+          data-testid="mock-excalidraw-canvas"
+          data-read-only={String(props.readOnly)}
+          data-source={props.document.source ?? ""}
+          data-files={Object.keys(props.document.files).join(",")}
+          data-scene-doc={String(props.sceneDoc !== undefined)}
+          data-presence-topic={props.presence?.topic ?? ""}
+          data-scene-elements={
+            props.sceneDoc ? String(foldScene(props.sceneDoc).elements.length) : ""
           }
         >
-          Change drawing
-        </button>
-      </div>
-    );
-  },
-}));
+          <button
+            type="button"
+            data-testid="mock-drawing-change"
+            onClick={() =>
+              props.onChange?.(
+                JSON.stringify({
+                  type: "excalidraw",
+                  version: 2,
+                  source: "dohc-test",
+                  elements: [{ id: "changed", type: "rectangle" }],
+                  appState: {},
+                  files: {},
+                }),
+              )
+            }
+          >
+            Change drawing
+          </button>
+        </div>
+      );
+    },
+  };
+});
 
 import { FileInspector } from "./FileInspector";
 import { REPLACED_HISTORY_DRAFT_NOTICE } from "./fileInspectorUi";
@@ -289,6 +293,19 @@ describe("FileInspector Excalidraw view", () => {
     await screen.findByTestId("mock-excalidraw-canvas");
     expect((canvas.props as unknown as ExcalidrawCanvasProps).autoFocus).toBe(
       false,
+    );
+  });
+
+  it("points Excalidraw at the app's own fonts before the drawing code loads", async () => {
+    vi.stubGlobal("dohcDesktop", bridgeFor());
+    render(
+      <FileInspector workspaceId="ws-1" path="plans/architecture.excalidraw" />,
+    );
+
+    await screen.findByTestId("mock-excalidraw-canvas");
+    // Unset, Excalidraw fetches every font from a CDN the renderer blocks.
+    expect(canvas.assetPathAtLoad).toBe(
+      new URL("excalidraw/", window.location.href).href,
     );
   });
 
