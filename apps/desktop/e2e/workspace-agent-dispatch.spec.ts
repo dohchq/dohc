@@ -408,6 +408,7 @@ test("failed agent checks stay readable above Settings and remain in Notices", a
       await expect(settings).toBeVisible();
       if (process.env.UI_AUDIT_SHOT_DIR) {
         await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
+        await waitForVisibleAnimations(page);
         await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `runner-test-error-${theme}.png`) });
       }
     }
