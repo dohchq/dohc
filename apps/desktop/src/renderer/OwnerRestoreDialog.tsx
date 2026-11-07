@@ -70,11 +70,14 @@ function ChangeList({label, events, emails}: {label: string; events: OwnerRestor
         const {authority, receipt, receivedAtMs} = metadata.accepted;
         const agent = metadata.authorSnapshot?.find(entry => entry.kind === "agent");
         // A guest gives both the name and the id, so either shows only when nothing in it hides or reorders text.
-        const agentName = shownAgentName(agent?.agentName) ?? shownAgentName(agent?.agentId) ?? "Agent";
+        // A connected agent's id is dohc's, not a name it gave.
+        const given = shownAgentName(agent?.agentName) ?? (isConnectedAgentId(agent?.agentId) ? undefined : shownAgentName(agent?.agentId));
+        const agentName = given ?? "Agent";
         return <li key={receipt.deliveryId}>
           {author(authority, emails)}
           {agent ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
             presentation={isConnectedAgentId(agent.agentId) ? {...neutralPresentation, connected: true} : undefined}
+            named={given !== undefined}
             author={{authorDisplayName: agentName, authorOwnerDisplayName: author(authority, emails)}} />
             <span className="min-w-0 break-all text-agent">{agentName}</span></span> : null}
           <span> · {time(receivedAtMs)}</span>

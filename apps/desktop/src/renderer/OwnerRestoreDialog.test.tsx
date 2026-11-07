@@ -339,8 +339,10 @@ it("marks the agent the owner's change declared beside the authenticated owner",
 });
 it("marks a connected agent's change with the plug, and a guest's agent as the guest's", async () => {
   const f = fixture(), original = f.call.getMockImplementation()!, base = reviewFixture();
-  // The second change is a guest's, by an agent whose id reverses the text after it. The third is a connected agent's.
-  const changes = [null, {authority: reader, agent: {kind: "agent", agentId: `trip${String.fromCodePoint(0x202e)}agent`, onBehalfOf: "reader", depth: 0}},
+  // The first change is a connected agent's that gave no name. The second is a guest's, by an agent whose id
+  // reverses the text after it. The third is a connected agent's that calls itself Claude.
+  const changes = [{authority: owner, agent: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local-person", depth: 0}},
+    {authority: reader, agent: {kind: "agent", agentId: `trip${String.fromCodePoint(0x202e)}agent`, onBehalfOf: "reader", depth: 0}},
     {authority: owner, agent: {kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "local-person", depth: 0}}];
   const review = {...base, acceptedEvents: base.acceptedEvents.map((event, index) => {
     const change = changes[index];
@@ -350,12 +352,20 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   render(<OwnerRestoreDialog {...f.props} />); await openStop();
   fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
   const badges = screen.getAllByTestId("owner-restore-change-agent-badge");
-  const plugged = badges.find(badge => badge.getAttribute("aria-label") === "connected agent")!;
+  const shownName = (badge: HTMLElement) => badge.parentElement!.nextElementSibling!.textContent;
+  const connected = badges.filter(badge => badge.getAttribute("aria-label") === "connected agent");
+  const plugged = connected.find(badge => shownName(badge) === "Claude")!;
+  const unnamed = connected.find(badge => badge !== plugged)!;
   const run = badges.find(badge => badge.getAttribute("aria-label") === "agent")!;
   fireEvent.focus(plugged);
   expect(screen.getByRole("tooltip").textContent).toContain("Claude (as reported)");
   expect(screen.getByRole("tooltip").textContent).toContain("Connected agent");
   fireEvent.blur(plugged);
+  // An agent that gave no name shows as "Agent", not by dohc's id for it, and nothing marks it as reported.
+  expect(shownName(unnamed)).toBe("Agent");
+  fireEvent.focus(unnamed);
+  expect(screen.getByRole("tooltip").textContent).toBe("AgentConnected agent");
+  fireEvent.blur(unnamed);
   fireEvent.focus(run);
   expect(screen.getByRole("tooltip").textContent).toContain("Owned by Account reader");
   // Neither the card nor the row shows the id.

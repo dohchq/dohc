@@ -8,6 +8,7 @@ import { settingsWithAgent } from "../../testing/agentSettings";
 const mine = { group: "agent-mine", hue: null, self: true } as const;
 const theirs = { group: "agent-theirs", hue: null, self: false } as const;
 const ada = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } };
+const REPORTED = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
 
 function tooltipFor(author: { authorDisplayName: string; authorOwnerDisplayName?: string; authorAgentId?: string }, presentation: typeof mine | typeof theirs, settings = settingsWithAgent({ name: "Nova", launch: { command: "local-tool --private-path" } }, ada)) {
   render(<AgentSettingsProvider settings={settings}>
@@ -105,31 +106,41 @@ describe("agent badge", () => {
     expect(screen.getByRole("tooltip").textContent).not.toContain("(as reported)");
   });
 
-  it("says \"(as reported)\" once on a connected agent's card: on its reported line, else on its name", () => {
+  it("says \"(as reported)\" once on a connected agent's card: on its reported line, else on a name it gave", () => {
     const connected = { group: "agent-connected", hue: null, self: true, connected: true } as const;
-    const card = (authorReported?: { product: string; version: string; model: string }) => {
-      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Scout", ...(authorReported ? { authorReported } : {}) }} presentation={connected} />);
+    const card = (authorDisplayName: string, authorReported?: typeof REPORTED, named?: boolean) => {
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName, ...(authorReported ? { authorReported } : {}) }}
+        presentation={connected} {...(named === undefined ? {} : { named })} />);
       fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
       const text = screen.getByRole("tooltip").textContent;
       cleanup();
       return text;
     };
-    expect(card({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" })).toBe("ScoutConnected agentClaude Code 2.1 · Claude Opus 5.5 (as reported)");
-    expect(card()).toBe("Scout (as reported)Connected agent");
+    expect(card("Scout", REPORTED)).toBe("ScoutConnected agentClaude Code 2.1 · Claude Opus 5.5 (as reported)");
+    expect(card("Scout")).toBe("Scout (as reported)Connected agent");
+    // dohc shows "Agent" for an agent that gave no name, so the agent reported none.
+    expect(card("Agent")).toBe("AgentConnected agent");
+    // Where the caller knows the agent gave "Agent" itself, it did report it.
+    expect(card("Agent", undefined, true)).toBe("Agent (as reported)Connected agent");
   });
 
   it("marks a share's agent post with the plug, and a card that claims no kind", () => {
     // A share serves no run id, so its agent posts could be a run's or a connected agent's.
     const share = { group: "agent-share", hue: null, self: false, connected: "unknown" } as const;
-    for (const name of ["Scout", "Agent"]) {
-      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: name, authorOwnerDisplayName: "Ada" }} presentation={share} />);
+    const card = (authorDisplayName: string, authorReported?: typeof REPORTED) => {
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName, authorOwnerDisplayName: "Ada", ...(authorReported ? { authorReported } : {}) }} presentation={share} />);
       const badge = screen.getByTestId("chats-post-agent-badge");
       expect(badge.getAttribute("aria-label")).toBe("agent");
       expect(badge.querySelector(".lucide-plug")).not.toBeNull();
       fireEvent.focus(badge);
-      // No second line: neither "Connected agent" nor an owner.
-      expect(screen.getByRole("tooltip").textContent).toBe(`${name} (as reported)`);
+      const text = screen.getByRole("tooltip").textContent;
       cleanup();
-    }
+      return text;
+    };
+    // No second line: neither "Connected agent" nor an owner. "(as reported)"
+    // goes once, and not on the "Agent" dohc shows for an agent that gave no name.
+    expect(card("Scout")).toBe("Scout (as reported)");
+    expect(card("Agent")).toBe("Agent");
+    expect(card("Scout", REPORTED)).toBe("ScoutClaude Code 2.1 · Claude Opus 5.5 (as reported)");
   });
 });
