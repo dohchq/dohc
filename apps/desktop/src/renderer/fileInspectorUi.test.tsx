@@ -325,7 +325,7 @@ describe("OrphanedDraftNotices", () => {
     render(<OrphanedDraftNotices workspaceId="ws-1" path="refused.md" replacedDraftIds={[refused]} />);
     const row = await screen.findByTestId("orphaned-draft-notice");
     expect(row.textContent).not.toContain(REPLACED_HISTORY_DRAFT_NOTICE);
-    expect(row.textContent).toContain("Copy your text to keep it.");
+    expect(row.textContent).toContain("Copy your edits to keep them.");
     // The set-aside edits are the person's own, so the copy says what it copies.
     expect(within(row).getByRole("button", { name: "Copy edits" })).toBeTruthy();
   });

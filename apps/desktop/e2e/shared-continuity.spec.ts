@@ -911,7 +911,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         await expect(document).not.toContainText("Typed after the share ended.");
         const notice = page.getByTestId("orphaned-draft-notice");
         await expect(notice).toHaveCount(1);
-        await expect(notice).toContainText("This document became read-only. Copy your text to keep it.");
+        await expect(notice).toContainText("This document became read-only. Copy your edits to keep them.");
         await expect.poll(async () => {
           drafts = await storedDrafts(page, newRecipientWorkspaceId);
           return drafts.length === 1 && drafts[0]!.refined;

@@ -743,7 +743,7 @@ export const FileInspector = memo(function FileInspector(
           : engine.permanentFailureWhileEditing
             ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
           : engine.readOnlyWhileEditing
-            ? "This document became read-only before your edit saved. Copy your text to keep it."
+            ? "This document became read-only before your edit saved. Copy your edits to keep them."
             : undefined
       }
       replacedDraftIds={engine.replacedDraftIds}
