@@ -9,7 +9,8 @@ import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { forwardAppCollection } from "./appCollectionProxy";
 import { forwardAppBackend } from "./appBackendProxy";
 import {LINK_REFUSALS, linkRefusalBody} from "@dohc/security-contract/link-refusal";
-import {opaqueLinkRefusal as refusal} from "./linkRefusal";
+import {opaqueLinkRefusal} from "./linkRefusal";
+import {SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const PUBLICATION = /^[a-f0-9]{64}$/;
@@ -35,6 +36,11 @@ const PAGE_STYLE = ":root{color-scheme:light dark;--bg:#faf9f5;--ink:#1c1b18;--m
   "[data-state=running]{background:Canvas}";
 /** Lucide's circle-alert, shown once the session stops. */
 const STOPPED_MARK = `<svg id="mark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>`;
+const PAGE_HEAD = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Shared app</title><style>${PAGE_STYLE}</style></head>`;
+const SESSION_ENDED = "This app session ended. Reopen the share link.";
+/** What a reload shows once its session has ended: the launch page's stopped state, with no script. It names nothing about the app or the share. */
+const stoppedPage = (status: 404 | 410, words: string) => new Response(`${PAGE_HEAD}<body data-state="stopped"><main id="message">${STOPPED_MARK}<p id="status" role="status">${words}</p></main></body></html>`,
+  {status, headers: {...headers, "x-robots-tag": SHARE_WEB_SECURITY_HEADERS["x-robots-tag"], "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}});
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
@@ -78,7 +84,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       catch { throw new RelayUnavailable(); }
     }
     const capability = await material.currentCapability();
-    if (!capability) return refusal();
+    if (!capability) return opaqueLinkRefusal();
     const send = (token: string) => {
       const headers = new Headers(request.headers);
       headers.set("authorization", `LinkCapability ${token}`);
@@ -151,6 +157,9 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       const statusRequest = url.pathname === "/status" && appHost(host);
       const collectionRequest = ["/collection", "/backend"].includes(url.pathname) && appHost(host);
       const bootstrapRequest = url.pathname === "/bootstrap" && appHost(host);
+      // A browser navigating to /bootstrap, such as a reload after the session ended, gets the stopped page. Other callers keep the JSON refusal.
+      const navigation = bootstrapRequest && request.headers.get("sec-fetch-mode") === "navigate";
+      const refusal = () => navigation ? stoppedPage(404, SESSION_ENDED) : opaqueLinkRefusal();
       if ((request.method !== "POST" && !(bootstrapRequest && request.method === "GET")) || url.search || request.signal.aborted) return refusal();
       const summaryRequest = url.pathname === "/api/apps/summary";
       const issue = host === viewerHost && (url.pathname === "/api/apps/launch" || summaryRequest);
@@ -240,10 +249,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           if (launches.get(host) !== launch) {launch.staged = undefined; stagedSlots.delete(launch); return refusal();}
           if (launch.expires <= now()) { launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host); return refusal(); }
           const proof = token(); launch.cookieHash = hash(cookie); launch.proofHash = hash(proof); if (request.method === "POST") launch.expires = now() + SESSION_MS;
-          const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';const lifetime=new AbortController();(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal}).then(r=>{if(r.status===410)gone();return r;}),lifetime.signal);const stop=()=>{stopped=true;lifetime.abort();frame.remove();document.body.dataset.state='stopped';document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const gone=()=>{stop();document.getElementById('status').textContent=${JSON.stringify(LINK_REFUSALS.app_collection_missing.error)};};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(r.status===410){gone();return;}if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.body.dataset.state='running';document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(r.status===410){gone();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',stop,{once:true});})();`;
+          const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox';frame.style='display:block;border:0;width:100%;height:100vh';const lifetime=new AbortController();(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal}).then(r=>{if(r.status===410)gone();return r;}),lifetime.signal);const stop=()=>{stopped=true;lifetime.abort();frame.remove();document.body.dataset.state='stopped';document.getElementById('status').textContent=${JSON.stringify(SESSION_ENDED)};};const gone=()=>{stop();document.getElementById('status').textContent=${JSON.stringify(LINK_REFUSALS.app_collection_missing.error)};};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(r.status===410){gone();return;}if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.body.dataset.state='running';document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(r.status===410){gone();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',stop,{once:true});})();`;
           const source = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
           const csp = `default-src 'none'; script-src ${source} ${doc.scriptSources.join(" ")}; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
-          return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Shared app</title><style>${PAGE_STYLE}</style></head><body data-state="opening"><main id="message">${STOPPED_MARK}<p id="status" role="status">Opening app</p></main><script>${script}</script></body></html>`,
+          return new Response(`${PAGE_HEAD}<body data-state="opening"><main id="message">${STOPPED_MARK}<p id="status" role="status">Opening app</p></main><script>${script}</script></body></html>`,
             { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": csp, "cross-origin-opener-policy": "same-origin", "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()", "set-cookie": `${COOKIE}=${cookie}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.max(1, Math.ceil((launch.expires - now()) / 1000))}` } });
         }
         const cookies = (request.headers.get("cookie") ?? "").split(";").map(v => v.trim()).filter(v => v.startsWith(`${COOKIE}=`));
@@ -265,8 +274,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       } catch (error) {
         const launch = launches.get(host);
         if (error instanceof RelayRateLimited) return rateLimited();
-        if (error instanceof CollectionMissing) return url.pathname === "/bootstrap"
-          ? new Response(LINK_REFUSALS.app_collection_missing.error, {status: 410, headers: {...headers, "content-type": "text/plain; charset=utf-8"}})
+        if (error instanceof CollectionMissing) return navigation ? stoppedPage(410, LINK_REFUSALS.app_collection_missing.error)
           : Response.json(linkRefusalBody("app_collection_missing"), {status: 410, headers});
         return (namedIssue || (launch && namedMaterial(launch.material))) && error instanceof RelayUnavailable ? unavailable() : refusal();
       } finally {

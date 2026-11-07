@@ -96,8 +96,12 @@ it("gives a signed-in person a missing Collection's words on Open app, in an ope
   const status = await app.call("/status");
   expect(status.status).toBe(410); expect(await status.json()).toEqual(linkRefusalBody("app_collection_missing"));
   expect(app.html).toContain("if(r.status===410){gone();return;}");
-  const reload = await f.handler.handle(new Request(`${app.origin}/bootstrap`, { headers: { host: new URL(app.origin).host, cookie: app.cookie } }));
-  expect(reload.status).toBe(410); expect(await reload.text()).toBe(LINK_REFUSALS.app_collection_missing.error);
+  const reload = (extra: Record<string, string> = {}) => f.handler.handle(new Request(`${app.origin}/bootstrap`, { headers: { host: new URL(app.origin).host, cookie: app.cookie, ...extra } }));
+  const page = await reload({ "sec-fetch-mode": "navigate" });
+  expect(page.status).toBe(410); expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  expect(await page.text()).toContain(`<p id="status" role="status">${LINK_REFUSALS.app_collection_missing.error}</p>`);
+  const fetched = await reload();
+  expect(fetched.status).toBe(410); expect(await fetched.json()).toEqual(linkRefusalBody("app_collection_missing"));
   const issued = await f.issue();
   expect(issued.status).toBe(410); expect(await issued.json()).toEqual(linkRefusalBody("app_collection_missing"));
 });
@@ -119,6 +123,6 @@ it("names an authorized named app without issuing a launch or exposing labels to
 it("gives a signed-in launch the same opening and stopped page, with no workspace, app or account details", async () => {
   const { html } = await fixture().open();
   expect(html).toContain('<body data-state="opening"><main id="message"><svg id="mark"');
-  expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent='This app session ended. Reopen the share link.';");
+  expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent=\"This app session ended. Reopen the share link.\";");
   for (const detail of [workspaceId, publicationId, "Trip planner", "owner-session", "relay.example.org"]) expect(html).not.toContain(detail);
 });
