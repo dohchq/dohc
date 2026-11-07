@@ -13,7 +13,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSyn
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { sourceFingerprint, withBuildBudget } from "./build.mjs";
+import { sourceFingerprint } from "./build.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { MANIFEST_SCHEMA, fileSha256, hashTree } from "./preview-launch.mjs";
 
@@ -23,7 +23,9 @@ export const CRITICAL_FILES = {
   executable: "dohc.exe",
   asar: "resources/app.asar",
   engine: "resources/workspace-engine/dohc-workspace-engine.exe",
+  runtime: "resources/app-compiler/node.exe",
 };
+export const TRY_IT_COMMAND = '@echo off\r\n"%~dp0app\\resources\\app-compiler\\node.exe" "%~dp0launch.mjs"\r\nif errorlevel 1 pause\r\n';
 const usage = "Usage: pnpm qa:preview --commit <full SHA> --base <ref> [--pr <number>] [--output <new folder>]";
 
 export function parseArgs(argv) {
@@ -66,6 +68,15 @@ export function packagingEnvironment(source) {
   return { ...env, CSC_IDENTITY_AUTO_DISCOVERY: "false" };
 }
 
+// The engine entry point owns admission. Keep its configured slot and disk floor.
+export function engineBuildEnvironment(source) {
+  const env = packagingEnvironment(source);
+  for (const name of ["DOHC_BUILD_SLOT_ROOT", "DOHC_GATE_DISK_FLOOR_GB"]) {
+    if (source[name] !== undefined) env[name] = source[name];
+  }
+  return env;
+}
+
 // The smoke must have finished against these exact package files.
 export function checkSmoke(result, critical) {
   const problems = [];
@@ -81,14 +92,14 @@ export function tryItText({ output, manifestSha256, manifest }) {
   return [
     `Try ${change} at ${manifest.source.commit}:`,
     `  Open "${join(output, "Try it.cmd")}"`,
-    `  or run: node "${join(output, "launch.mjs")}"`,
     "",
-    "It runs beside your installed dohc with its own profile, home folder and data,",
-    `kept in ${join(output, "data")}. It never offers or installs an update.`,
+    "Start only with Try it.cmd. Opening app\\dohc.exe directly uses the installed app's profile and link handler.",
+    `The launcher keeps its profile and home in ${join(output, "data")}, and offers no product updates.`,
+    "Open only a new folder or a copy of a workspace. Opening a workspace used by installed dohc can upgrade it so that build cannot open it.",
     `Package: ${manifest.package.files} files, ${manifest.package.treeSha256}`,
     `Manifest: ${manifestSha256}`,
     `Signing: ${manifest.signing.status}. Smoke: ${manifest.smoke.status}.`,
-    "Delete the folder when you are done. The installed app's data is not touched.",
+    "Deleting this folder removes only what is inside it. Workspaces opened elsewhere stay there.",
   ].join("\n");
 }
 
@@ -156,8 +167,8 @@ async function main(options) {
     const env = packagingEnvironment(process.env);
     await step("install", ...pnpm(["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"]), env);
     await step("desktop", ...pnpm(["--filter", "@dohc/desktop", "build"]), env);
-    await withBuildBudget((budget) => step("engine", process.execPath,
-      [join(repoRoot, "apps/desktop/scripts/build-workspace-engine.mjs")], packagingEnvironment(budget)));
+    await step("engine", process.execPath,
+      [join(repoRoot, "apps/desktop/scripts/build-workspace-engine.mjs")], engineBuildEnvironment(process.env));
     await step("package", ...pnpm(["--filter", "@dohc/desktop", "exec", "electron-builder", "--dir", "--publish", "never"]), env);
     requirePinnedSource(repoRoot, options.commit);
     const after = fingerprints();
@@ -172,7 +183,7 @@ async function main(options) {
     manifest.signing = signingStatus(await authenticode(packageDir));
     copyFileSync(launcherSource, join(options.output, "launch.mjs"));
     manifest.launcher = { file: "launch.mjs", sha256: await fileSha256(join(options.output, "launch.mjs")) };
-    writeFileSync(join(options.output, "Try it.cmd"), "@echo off\r\nnode \"%~dp0launch.mjs\"\r\nif errorlevel 1 pause\r\n");
+    writeFileSync(join(options.output, "Try it.cmd"), TRY_IT_COMMAND);
     manifest.status = "smoking";
     manifest.smoke = { status: "running" };
     save();

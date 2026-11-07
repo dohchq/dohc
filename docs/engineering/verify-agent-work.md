@@ -84,15 +84,18 @@ The delivery folder holds:
 - `launch.mjs` and `Try it.cmd`, which start the preview.
 - `evidence`, with the build logs and the smoke's `result.json`.
 
+Start only with `Try it.cmd`, which uses the Node runtime inside the package. Opening `app/dohc.exe` directly uses the installed app's profile and link handler.
 The launcher reads nothing from the checkout. It refuses to start the app if any package file differs from the manifest, or if the smoke did not pass.
 The app gets its own profile, home, `APPDATA`, and `LOCALAPPDATA` in the folder's `data` subfolder. The launcher removes `DOHC_*` and agent configuration variables, and passes `--dohc-isolated-test`, so the app leaves the installed app's link handler and recent documents alone.
 The launcher also serves an update feed on `127.0.0.1` for as long as it runs. The feed offers version 0.0.0 with no files, so the preview never downloads or installs an update.
 The launcher stops only the app it started, when the app quits or when someone presses Ctrl+C.
+If startup recovery relaunches the app, the launcher cannot track the replacement process. Quit that preview through its tray menu before starting another.
 
 This separates data. It is not an OS sandbox: the app runs as the current user, and a folder the person chooses is a real folder.
-Agents that the preview finds on `PATH` start without the person's sign-ins, because the preview has its own home.
+Agents do not see the person's home configuration files. Credentials in environment variables and Windows Credential Manager can still reach them.
+Open only a new folder or a copy of a workspace. Opening a workspace used by installed dohc can migrate its engine store and prevent the installed build from opening it.
 Build previews only from branches in this repository. Never build one from a fork's code on a host that holds credentials.
-The person deletes the delivery folder when they finish. That removes the preview and its data.
+The person deletes the delivery folder when they finish. That removes only its contents. Workspaces opened elsewhere and their engine stores remain there.
 
 ## Verify a pull request
 

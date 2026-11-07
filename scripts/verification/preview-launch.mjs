@@ -13,7 +13,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,7 @@ export const MANIFEST_SCHEMA = 1;
 // files, so the updater finds nothing to download.
 export const NO_UPDATE_FEED = "version: 0.0.0\nfiles: []\npath: unavailable.exe\nsha512: AA==\nreleaseDate: 2020-01-01T00:00:00.000Z\n";
 // Settings that would point the preview at the installed app's data, the
-// tester's agent sign-ins, or a different runtime mode.
+// tester's file-based agent configuration, or a different runtime mode.
 const DROPPED = new Set(["ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
   "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "HOMEDRIVE", "HOMEPATH"]);
 
@@ -126,7 +126,7 @@ function alive(pid) {
 }
 
 // Stops the app this launcher started, with its descendants, and nothing else.
-export async function stopOwnedApp(child, exited, graceMs = 15_000) {
+export async function stopOwnedApp(child, exited, graceMs = 5_000) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32") {
     // A process without a window cannot be asked to close, so taskkill fails at once.
@@ -146,6 +146,7 @@ export async function stopOwnedApp(child, exited, graceMs = 15_000) {
 const defaultSpawn = (executable, args, options) => spawn(executable, args, options);
 
 export async function launchPreview(deliveryDir, { spawnApp = defaultSpawn, signal, log = console.log, env = process.env } = {}) {
+  signal?.throwIfAborted();
   deliveryDir = resolve(deliveryDir);
   const manifest = readManifest(deliveryDir);
   log(`Checking the preview package for ${describe(manifest)}...`);
@@ -154,34 +155,41 @@ export async function launchPreview(deliveryDir, { spawnApp = defaultSpawn, sign
   for (const path of [paths.profile, paths.appData, paths.localAppData, paths.logs]) mkdirSync(path, { recursive: true });
   if (existsSync(paths.session)) {
     const previous = JSON.parse(readFileSync(paths.session, "utf8"));
-    if (alive(previous.launcherPid)) throw new Error(`This preview is already running (launcher PID ${previous.launcherPid}, app PID ${previous.appPid}).`);
+    if (alive(previous.launcherPid)) throw new Error(`This preview is already running (launcher PID ${previous.launcherPid}, app PID ${previous.appPid}). If no preview is running, delete data\\session.json and try again.`);
   }
   const feed = await startNoUpdateFeed();
   const startedAt = new Date().toISOString();
   const logPath = join(paths.logs, `${startedAt.replaceAll(":", "-")}.log`);
   let child;
   let exited;
+  let output;
+  let logError;
   try {
+    signal?.throwIfAborted();
     child = spawnApp(executable, previewArgs(paths), { cwd: paths.data, env: previewEnvironment(env, paths, feed.url),
       stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
     exited = new Promise((done) => {
-      child.once("exit", (code, exitSignal) => done({ code, signal: exitSignal }));
+      child.once("close", (code, exitSignal) => done({ code, signal: exitSignal }));
       child.once("error", (error) => done({ error: error.message }));
     });
-    let output = "";
-    for (const stream of [child.stdout, child.stderr]) stream?.on("data", (chunk) => { output += chunk; });
+    const stop = () => stopOwnedApp(child, exited);
+    output = createWriteStream(logPath);
+    output.on("error", (error) => { logError = error; void stop(); });
+    for (const stream of [child.stdout, child.stderr]) stream?.pipe(output, { end: false });
     const session = { launcherPid: process.pid, appPid: child.pid, startedAt, feed: feed.url, packageTreeSha256: tree.sha256, log: logPath };
     writeFileSync(paths.session, JSON.stringify(session, null, 2) + "\n");
     log(`Started ${describe(manifest)} as PID ${child.pid}. Its data is in ${paths.data}.`);
     log("Quit dohc to end the preview, or press Ctrl+C here to close it.");
-    const stop = () => stopOwnedApp(child, exited);
     signal?.addEventListener("abort", stop, { once: true });
+    if (signal?.aborted) void stop();
     const result = await exited;
     signal?.removeEventListener("abort", stop);
-    writeFileSync(logPath, output);
+    await new Promise((done) => { if (output.destroyed) done(); else output.end(done); });
+    if (logError) throw logError;
     return { ...result, session, feedRequests: feed.requests };
   } finally {
     if (child && exited && child.exitCode === null && child.signalCode === null) await stopOwnedApp(child, exited);
+    output?.destroy();
     await feed.close();
     rmSync(paths.session, { force: true });
   }

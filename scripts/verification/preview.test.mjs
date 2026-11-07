@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { MANIFEST_SCHEMA, NO_UPDATE_FEED, hashTree, launchPreview, previewArgs, previewEnvironment, previewPaths,
   readManifest, startNoUpdateFeed, verifyDelivery } from "./preview-launch.mjs";
-import { checkSmoke, packagingEnvironment, parseArgs, requirePinnedSource, signingStatus } from "./preview.mjs";
+import { checkSmoke, engineBuildEnvironment, packagingEnvironment, parseArgs, requirePinnedSource, signingStatus, TRY_IT_COMMAND } from "./preview.mjs";
+import { resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 
 const sha = "a".repeat(40);
 const scratch = (t) => {
@@ -14,6 +15,14 @@ const scratch = (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 };
+
+async function until(predicate) {
+  const deadline = Date.now() + 5_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("The fake app did not produce its evidence.");
+    await new Promise((done) => setTimeout(done, 20));
+  }
+}
 
 // A delivery folder whose "app" is a script the test runs with Node.
 async function delivery(t, { smoke = "passed" } = {}) {
@@ -65,7 +74,7 @@ test("the manifest must name a full commit and an executable inside the package"
   }
 });
 
-test("the preview's environment keeps it away from the installed app's data and agent sign-ins", () => {
+test("the preview's environment separates the installed app's data and agent configuration files", () => {
   const paths = previewPaths("C:\\previews\\one");
   const env = previewEnvironment({ PATH: "bin", HOME: "C:\\Users\\me", USERPROFILE: "C:\\Users\\me", APPDATA: "C:\\Users\\me\\AppData\\Roaming",
     LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local", HOMEDRIVE: "C:", HOMEPATH: "\\Users\\me", DOHC_TEST_HOME: "x", dohc_update_url: "https://example.com",
@@ -92,6 +101,7 @@ const fakeApp = `
 const { writeFileSync } = require("node:fs");
 const [record] = process.argv.slice(-1);
 fetch(process.env.DOHC_UPDATE_URL + "/latest.yml").then(r => r.text()).then(feed => {
+  console.log("fixture-running");
   writeFileSync(record, JSON.stringify({ args: process.argv.slice(2, -1), env: process.env, feed }));
 });
 setInterval(() => {}, 1000);
@@ -111,24 +121,85 @@ test("the launcher starts the app isolated, then stops only the process it start
       spawned = spawn(process.execPath, [script, ...args, record], options);
       return spawned;
     } });
-  while (!existsSync(record)) await new Promise((done) => setTimeout(done, 20));
-  const paths = previewPaths(root);
-  const session = JSON.parse(readFileSync(paths.session, "utf8"));
-  assert.equal(session.appPid, spawned.pid);
-  assert.equal(session.launcherPid, process.pid);
-  await assert.rejects(launchPreview(root, { log: () => {} }), /already running/u);
-  const seen = JSON.parse(readFileSync(record, "utf8"));
-  assert.deepEqual(seen.args, previewArgs(paths));
-  assert.equal(seen.feed, NO_UPDATE_FEED);
-  assert.equal(seen.env.USERPROFILE, paths.home);
-  assert.equal(seen.env.DOHC_TEST_HOME, undefined);
+  try {
+    await until(() => existsSync(record));
+    const paths = previewPaths(root);
+    const session = JSON.parse(readFileSync(paths.session, "utf8"));
+    assert.equal(session.appPid, spawned.pid);
+    assert.equal(session.launcherPid, process.pid);
+    await until(() => existsSync(session.log) && readFileSync(session.log, "utf8").includes("fixture-running"));
+    await assert.rejects(launchPreview(root, { log: () => {} }), /already running/u);
+    const seen = JSON.parse(readFileSync(record, "utf8"));
+    assert.deepEqual(seen.args, previewArgs(paths));
+    assert.equal(seen.feed, NO_UPDATE_FEED);
+    assert.equal(seen.env.USERPROFILE, paths.home);
+    assert.equal(seen.env.DOHC_TEST_HOME, undefined);
+    controller.abort();
+    const result = await running;
+    assert.equal(spawned.exitCode !== null || spawned.signalCode !== null, true);
+    assert.equal(bystander.exitCode, null, "an unrelated process keeps running");
+    assert.equal(existsSync(paths.session), false);
+    assert.equal(result.feedRequests.length, 1);
+    await assert.rejects(fetch(session.feed), "the feed stops with the launcher");
+  } finally {
+    controller.abort();
+    await running;
+  }
+});
+
+test("cancelling while the package is being checked never starts the app", async (t) => {
+  const { root } = await delivery(t);
+  const controller = new AbortController();
+  let spawned = false;
+  await assert.rejects(launchPreview(root, {
+    signal: controller.signal,
+    log: () => queueMicrotask(() => controller.abort()),
+    spawnApp: () => { spawned = true; throw new Error("Unexpected app launch"); },
+  }), { name: "AbortError" });
+  assert.equal(spawned, false);
+  assert.equal(existsSync(previewPaths(root).session), false);
+});
+
+test("an already cancelled launch never starts the app", async (t) => {
+  const { root } = await delivery(t);
+  const controller = new AbortController();
   controller.abort();
-  const result = await running;
-  assert.equal(spawned.exitCode !== null || spawned.signalCode !== null, true);
-  assert.equal(bystander.exitCode, null, "an unrelated process keeps running");
-  assert.equal(existsSync(paths.session), false);
-  assert.equal(result.feedRequests.length, 1);
-  await assert.rejects(fetch(session.feed), "the feed stops with the launcher");
+  await assert.rejects(launchPreview(root, {
+    signal: controller.signal,
+    spawnApp: () => { throw new Error("Unexpected app launch"); },
+  }), { name: "AbortError" });
+});
+
+test("cancellation between spawning and registering shutdown still stops the owned app", { timeout: 5_000 }, async (t) => {
+  const { root } = await delivery(t);
+  const controller = new AbortController();
+  let child;
+  t.after(() => child?.kill());
+  const result = await launchPreview(root, { signal: controller.signal, log: () => {},
+    spawnApp: (_executable, _args, options) => {
+      child = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 1500)"], options);
+      controller.abort();
+      return child;
+    } });
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
+  assert.notEqual(result.code, 0, "Cancellation must stop the app before its normal exit.");
+  assert.equal(result.session.appPid, child.pid);
+  assert.equal(existsSync(previewPaths(root).session), false);
+});
+
+test("Try it.cmd uses the delivered runtime when Node is absent from PATH", { skip: process.platform !== "win32" }, (t) => {
+  const root = scratch(t);
+  const runtime = join(root, "app/resources/app-compiler/node.exe");
+  mkdirSync(join(root, "app/resources/app-compiler"), { recursive: true });
+  copyFileSync(process.execPath, runtime);
+  writeFileSync(join(root, "Try it.cmd"), TRY_IT_COMMAND);
+  writeFileSync(join(root, "launch.mjs"), `import { writeFileSync } from "node:fs"; writeFileSync("launched.json", JSON.stringify({ runtime: process.execPath }));`);
+  const result = spawnSync(process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe", ["/d", "/q"], {
+    cwd: root, env: { ...process.env, PATH: "" }, input: 'call ".\\Try it.cmd"\r\nexit\r\n',
+    encoding: "utf8", windowsHide: true, timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(join(root, "launched.json"), "utf8")).runtime.toLowerCase(), runtime.toLowerCase());
 });
 
 test("builder options require a full commit and a base", () => {
@@ -162,6 +233,16 @@ test("the builder packages only a clean checkout at the named commit", (t) => {
 test("packaging never sees a signing identity, telemetry key or build override", () => {
   assert.deepEqual(packagingEnvironment({ PATH: "bin", WIN_CSC_LINK: "x", CSC_LINK: "x", csc_key_password: "x", APPLE_ID: "x",
     DOHC_POSTHOG_KEY: "x", VITE_FLAG: "x", NODE_OPTIONS: "x", NODE_ENV: "development" }), { PATH: "bin", CSC_IDENTITY_AUTO_DISCOVERY: "false" });
+});
+
+test("the engine's own admission receives the configured shared slot root and disk floor", () => {
+  const env = engineBuildEnvironment({ DOHC_BUILD_SLOT_ROOT: "C:\\preview-budget", DOHC_GATE_DISK_FLOOR_GB: "71",
+    DOHC_TEST_ENGINE_BINARY: "wrong.exe", CSC_LINK: "signing-key", CI: "0" });
+  const budget = resolveBuildBudget(env, { platform: "win32", cores: 16 });
+  assert.equal(budget.root, "C:\\preview-budget");
+  assert.equal(budget.diskFloorGb, 71);
+  assert.equal(env.DOHC_TEST_ENGINE_BINARY, undefined);
+  assert.equal(env.CSC_LINK, undefined);
 });
 
 test("signing status comes from dohc's own binaries, not a vendor's", () => {
