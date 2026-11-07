@@ -70,8 +70,7 @@ export const AgentId = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/, "A
 export const AgentSettings = z.object({
   name: PreferredNameForIpc,
   hue: z.enum(AGENT_HUES),
-  // How dohc starts the agent. Without one dohc never starts it, and its name
-  // and hue still mark what it posts from outside dohc.
+  // How dohc starts the agent. Without one, dohc never starts it.
   launch: AgentLaunch.optional(),
   changesFiles: z.boolean().default(true),
   // Pause and Resume. dohc starts only an enabled agent.
