@@ -176,6 +176,13 @@ async function locateCliEndpoint(options: CliClientOptions = {}): Promise<CliEnd
   };
 }
 
+// A process dohc started for an agent run proves it with the run's secret. A
+// malformed one is left out, so the request is no run's.
+function runSecretOf(options: CliClientOptions): { runSecret?: string } {
+  const secret = (options.env ?? process.env).DOHC_RUN_SECRET;
+  return secret !== undefined && /^[a-f0-9]{64}$/u.test(secret) ? { runSecret: secret } : {};
+}
+
 async function readToken(path: string): Promise<string> {
   let text: string;
   try {
@@ -269,7 +276,7 @@ export async function sendCliRequest<Verb extends CliVerb>(
     const endpoint = endpoints[index]!;
     try {
       const token = await readToken(endpoint.tokenPath);
-      const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, door: requestWithoutToken.door ?? "cli", token });
+      const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, door: requestWithoutToken.door ?? "cli", token, ...runSecretOf(options) });
       const rawResponse = await (options.transport ?? ((path: string, line: string, timeout: number | undefined) => readResponseLine(request.verb, path, line, timeout, options.signal)))(
         endpoint.socketPath,
         JSON.stringify(request),

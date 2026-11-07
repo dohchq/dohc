@@ -188,6 +188,8 @@ function replyServerArguments(input: {
     `mcp_servers.dohc.args=[${args.map(tomlString).join(",")}]`,
     `mcp_servers.dohc.cwd=${tomlString(input.cliBin)}`,
     "mcp_servers.dohc.required=true",
+    // Codex passes an MCP server only the variables it names.
+    "mcp_servers.dohc.env_vars=['DOHC_RUN_SECRET']",
     "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
     "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
   ].flatMap((entry) => ["--config", entry]);
@@ -273,6 +275,7 @@ export function createChatRunnerProcess(
     cliBin: string;
     threadId?: string;
     runId: string;
+    runSecret: string;
     profile?: AgentLaunchProfile;
   }): NodeJS.ProcessEnv {
     const { cliBin } = input;
@@ -282,6 +285,9 @@ export function createChatRunnerProcess(
       DOHC_CHAT_THREAD: input.threadId,
       DOHC_CHAT_ACTOR: "agent",
       DOHC_RUN_ID: input.runId,
+      // Proves a request comes from this run. dohc keeps it in memory and
+      // forgets it when the run ends.
+      DOHC_RUN_SECRET: input.runSecret,
       DOHC_STATE_DIR: options.stateDir(),
       PATH: runnerSearchPath(cliBin, process.env.PATH, platform, skipAppAliases),
       ...(process.env.Path
@@ -302,6 +308,7 @@ export function createChatRunnerProcess(
     command: string;
     profile?: AgentLaunchProfile;
     prompt: string;
+    runSecret: string;
     // Throws unless the runner may still start, such as when the workspace
     // lost its trust. Nothing awaits between it and spawn.
     assertMayStart: () => void;
@@ -346,6 +353,7 @@ export function createChatRunnerProcess(
       cliBin,
       threadId: input.threadId,
       runId: input.runId,
+      runSecret: input.runSecret,
       profile: input.profile,
     });
     // An npm-installed Codex starts behind cmd.exe, which can't carry double quotes.

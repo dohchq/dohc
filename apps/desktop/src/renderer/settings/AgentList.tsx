@@ -498,7 +498,7 @@ export function AgentList(props: {
       if (result.ok) onClearError?.(identity);
       // The toast names the agent and checks it again; why, and its log, go in the details.
       else if (await stillListed(agent.id)) {
-        onError?.(`${agent.name} didn't reply to the check.`, undefined, () => check(agent), [
+        onError?.(result.unconfirmed ? `${agent.name} replied as Agent.` : `${agent.name} didn't reply to the check.`, undefined, () => check(agent), [
           ["Cause", result.detail],
           ...(result.logPath ? [["Log", result.logPath] as const] : []),
         ], identity);

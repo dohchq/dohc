@@ -2783,6 +2783,7 @@ const activity = {
     workspaceId: string,
     run: ActiveAgentRun,
     expectedRootPath?: string,
+    secret?: string,
   ) =>
     workspaceAuthorities.withAuthority(workspaceId, (lease) =>
       workspaceActivity.claimAgentRun(
@@ -2790,6 +2791,7 @@ const activity = {
         lease.state.activity,
         run,
         expectedRootPath,
+        secret,
       ),
     ),
   clearAgentRun: (
@@ -2819,6 +2821,10 @@ const activity = {
   dispatchedRunId: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedRunId(lease.state.activity),
+    ),
+  dispatchedRunSecret: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.dispatchedRunSecret(lease.state.activity),
     ),
   agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
     withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
@@ -3621,8 +3627,10 @@ const chatDispatchService = createChatDispatchService({
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       const workspaceId = workspace.workspaceId;
       if (run) {
-      if (!(await activity.claimAgentRun(workspaceId, { ...run, onBehalfOf: localUserId() },
-            lease.binding.canonicalRootPath,
+      // The secret goes to the run's slot only, never to capture or the engine.
+      const { secret, ...attribution } = run;
+      if (!(await activity.claimAgentRun(workspaceId, { ...attribution, onBehalfOf: localUserId() },
+            lease.binding.canonicalRootPath, secret,
           ))) {
         throw new Error("Another agent run is already active in this workspace.");
       }

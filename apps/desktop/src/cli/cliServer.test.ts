@@ -108,6 +108,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const WORKSPACE_ID = "workspace-cli-server";
+// The secret dohc gives the process of the run it dispatched.
+const RUN_SECRET = "b".repeat(64);
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
 
 type ArgsFor<Verb extends CliVerb> = Extract<CliRequest, { verb: Verb }>["args"];
@@ -261,6 +263,9 @@ describe("CLI socket server", () => {
   let dispatchedRun: string | null;
   // The engine's id for that run, when a test claimed one.
   let dispatchedRunId: string | null;
+  // The run secret each request carries: the run's, unless a test sends none
+  // or another. With no run dispatched it proves nothing.
+  let callerRunSecret: string | undefined;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -290,6 +295,7 @@ describe("CLI socket server", () => {
       protocolVersion: CLI_PROTOCOL_VERSION,
       verb,
       args,
+      ...(callerRunSecret === undefined ? {} : { runSecret: callerRunSecret }),
     });
     if (!response.ok) throw new Error(response.error);
     expect(response.ok).toBe(true);
@@ -325,6 +331,13 @@ describe("CLI socket server", () => {
       needsDecision: input.needsDecision ?? false,
       body: input.body,
     });
+  }
+
+  // The run dohc dispatched holds the fixture workspace's slot, and the test
+  // caller is its process.
+  function holdRun(runId: string, agentId = "default"): void {
+    dispatchedRun = agentId;
+    dispatchedRunId = runId;
   }
 
   beforeEach(async () => {
@@ -479,6 +492,7 @@ describe("CLI socket server", () => {
     agentRunDepth = 0;
     dispatchedRun = null;
     dispatchedRunId = null;
+    callerRunSecret = RUN_SECRET;
     serverOptions = {
       localPersonId: () => "person-local",
       stateDir,
@@ -518,7 +532,8 @@ describe("CLI socket server", () => {
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
       dispatchedAgent: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRun : null),
       dispatchedRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRunId : null),
-      agentRunWorkspace: () => undefined,
+      dispatchedRunSecret: (workspaceId) => (workspaceId === WORKSPACE_ID && dispatchedRun !== null ? RUN_SECRET : null),
+      agentRunWorkspace: (runId) => (dispatchedRun !== null && runId === dispatchedRunId ? WORKSPACE_ID : undefined),
       async onWrite() {
         calls.writes += 1;
       },
@@ -3053,10 +3068,28 @@ describe("CLI socket server", () => {
 
   it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
     const posted = await post({ actor: "human", title: "Test", body: "Check." });
-    serverOptions.agentRunWorkspace = (runId) => runId === "run_live" ? WORKSPACE_ID : undefined;
+    const lastAuthor = async () =>
+      (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice(3)}` })).at(-1)?.author.kind;
+    holdRun("run_live", "codex");
     const args = { cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.", attachments: [], needsDecision: false, runId: "run_live" } as const;
+    // Without the run's secret, or with another, the run id is only a claim.
+    for (const secret of [undefined, "c".repeat(64)]) {
+      callerRunSecret = secret;
+      await invoke("reply", { ...args, attachments: [] });
+      expect(await lastAuthor()).toBe("human");
+    }
+    // An answer never repeats the secret a request carried: the run's, another,
+    // or a malformed one, whether the request worked or failed.
+    for (const secret of [RUN_SECRET, "c".repeat(64), "C".repeat(64)]) {
+      for (const thread of [posted.threadId, "th_missing"]) {
+        const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "reply", args: { ...args, thread }, runSecret: secret });
+        expect(response.ok).toBe(thread === posted.threadId && secret !== "C".repeat(64));
+        expect(JSON.stringify(response)).not.toContain(secret);
+      }
+    }
+    callerRunSecret = RUN_SECRET;
     await invoke("reply", { ...args, attachments: [] });
-    expect((await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice(3)}` })).at(-1)?.author.kind).toBe("agent");
+    expect(await lastAuthor()).toBe("agent");
     const nestedRoot = join(workspaceRoot, "notes");
     await mkdir(nestedRoot);
     serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
@@ -3098,6 +3131,16 @@ describe("CLI socket server", () => {
       expect(during.file).toMatchObject({ kind: "agent", claimedName: "codex" });
       expect(during.reply).toEqual(during.file);
     }
+
+    // A caller in the workspace without the run's secret, or with another, is
+    // not the run.
+    for (const secret of [undefined, "c".repeat(64)]) {
+      callerRunSecret = secret;
+      const other = await writeAndReply("Codex");
+      expect(other.file).toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
+      expect(other.reply).toEqual(other.file);
+    }
+    callerRunSecret = RUN_SECRET;
 
     // Outside a run, both are the unnamed agent's, and the reply shows the name given.
     dispatchedRun = null;
@@ -4307,6 +4350,7 @@ describe("CLI socket server", () => {
       authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: sam, body: "Draft the agenda",
     });
     const opening = await claimFor(chat.message.id);
+    holdRun(opening.run.runId);
     expect((await reply({ thread: chat.thread.id, runId: opening.run.runId })).parentMessageId).toBeUndefined();
     await dispatchStore.completeRun({ runId: opening.run.runId, exitCode: 0 });
 
@@ -4314,11 +4358,10 @@ describe("CLI socket server", () => {
       authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: chat.thread.id, parentMessageId: chat.message.id, author: sam, body: "Add a break?",
     });
     const claim = await claimFor(asked.id);
+    holdRun(claim.run.runId);
     expect((await reply({ thread: chat.thread.id, runId: claim.run.runId })).parentMessageId).toBe(cliMessageId(chat.message.id));
-    dispatchedRunId = claim.run.runId;
     expect((await reply({ thread: chat.thread.id })).parentMessageId).toBe(cliMessageId(chat.message.id));
     expect((await reply({ thread: chat.thread.id, to: asked.id })).parentMessageId).toBe(cliMessageId(asked.id));
-    dispatchedRunId = null;
     await dispatchStore.completeRun({ runId: claim.run.runId, exitCode: 0 });
 
     // A post's comments stay top-level.
@@ -4331,6 +4374,7 @@ describe("CLI socket server", () => {
     });
     await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: posted.thread.id, triggerMessageId: comment.id, agentId: "default" });
     const postClaim = await claimFor(comment.id);
+    holdRun(postClaim.run.runId);
     expect((await reply({ thread: posted.thread.id, runId: postClaim.run.runId })).parentMessageId).toBeUndefined();
     expect(errors).toEqual([]);
   });
@@ -4341,14 +4385,19 @@ describe("CLI socket server", () => {
     const chat = await store.startChannelThread({
       authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: { kind: "human", displayName: "Sam" }, body: "Draft the agenda",
     });
+    // The run dohc dispatched for Sam's message, so the store knows it.
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (claim?.run.triggerMessageId !== chat.message.id) throw new Error("Expected a run for the message");
+    const { runId } = claim.run;
     const getRunRecord = vi.spyOn(dispatchStore, "getRunRecord").mockRejectedValueOnce(new Error("store closed"));
+    holdRun(runId);
     const replied = await invoke("reply", {
-      cwd: workspaceRoot, actor: "agent", thread: cliThreadId(chat.thread.id), attachments: [], needsDecision: false, body: "Done.", runId: "run_1",
+      cwd: workspaceRoot, actor: "agent", thread: cliThreadId(chat.thread.id), attachments: [], needsDecision: false, body: "Done.", runId,
     });
     getRunRecord.mockRestore();
     expect(replied.parentMessageId).toBeUndefined();
     expect(errors.map((error) => (error as Error).message)).toEqual([
-      "Could not find the thread for an agent reply, so it posts to the conversation. runId=run_1",
+      `Could not find the thread for an agent reply, so it posts to the conversation. runId=${runId}`,
     ]);
   });
 
@@ -4412,6 +4461,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for CLI linkage.");
+    holdRun(claim.run.runId);
 
     const opened = await post({
       actor: "agent",
@@ -4428,12 +4478,15 @@ describe("CLI socket server", () => {
       needsDecision: false,
       body: "Final report",
     });
+    // A person's terminal has no run secret, so its run id is only a claim.
+    callerRunSecret = undefined;
     const human = await post({
       actor: "human",
       runId: claim.run.runId,
       title: "Human terminal write",
       body: "Must not be linked",
     });
+    callerRunSecret = RUN_SECRET;
     const unknown = await post({
       actor: "agent",
       runId: "run_unknown",
@@ -4477,6 +4530,34 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([]);
   });
 
+  it("posts a run's reply that arrives without its secret as the unnamed agent's, unlinked", async () => {
+    if (!store) throw new Error("Store is not available");
+    await seedDispatchThread("thread-dispatch");
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-dispatch_trigger",
+      threadId: "thread-dispatch",
+      agentId: "default",
+    });
+    const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
+    if (!claim) throw new Error("Expected a dispatch run.");
+    const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
+    holdRun(claim.run.runId);
+    // The run's MCP server got no secret: Claude Code with
+    // CLAUDE_CODE_MCP_ALLOWLIST_ENV set, or a provider that drops it.
+    callerRunSecret = undefined;
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2.", runId: claim.run.runId }, "Claude");
+    if (!reply.ok) throw new Error(reply.reason);
+    const message = (await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice("th_".length)}` }))
+      .find((row) => row.id === reply.messageId);
+    if (!message?.authorActorKey) throw new Error("Expected the reply.");
+    expect(parseActorKey(message.authorActorKey)).toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
+    expect(message.author.displayName).toBe("Claude");
+    expect(await dispatchStore.listRunMessages(WORKSPACE_ID, claim.run.runId)).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
   it("retries transient run-message provenance failures until the link persists", async () => {
     await seedDispatchThread("thread-retry");
     await dispatchStore.recordTrigger({
@@ -4489,6 +4570,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for retry linkage.");
+    holdRun(claim.run.runId);
     let attempts = 0;
     const originalDispatch = dispatchStore;
     context = {
@@ -4532,6 +4614,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for recovery linkage.");
+    holdRun(claim.run.runId);
     let attempts = 0;
     const pending: string[] = [];
     const settled: string[] = [];
@@ -4582,6 +4665,7 @@ describe("CLI socket server", () => {
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
+    holdRun(claim.run.runId);
     const originalDispatch = dispatchStore;
     const pending: string[] = [];
     const settled: string[] = [];
@@ -4779,12 +4863,14 @@ describe("CLI socket server", () => {
       runIds.push(claim.run.runId);
     }
 
+    holdRun(runIds[0]!);
     const first = await post({
       actor: "agent",
       runId: runIds[0],
       title: "First bounded recovery",
       body: "This occupies the one queue slot.",
     });
+    holdRun(runIds[1]!);
     const second = await post({
       actor: "agent",
       runId: runIds[1],
@@ -4822,6 +4908,7 @@ describe("CLI socket server", () => {
     });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected a dispatch run.");
+    holdRun(claim.run.runId);
     const deadlines: number[] = [];
     context = {
       ...context,
@@ -4867,6 +4954,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for failed linkage.");
+    holdRun(claim.run.runId);
     let attempts = 0;
     const originalDispatch = dispatchStore;
     context = {
@@ -4914,6 +5002,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for terminal linkage.");
+    holdRun(claim.run.runId);
     let attempts = 0;
     const queued: string[] = [];
     const originalDispatch = dispatchStore;
@@ -4963,6 +5052,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for terminal recovery.");
+    holdRun(claim.run.runId);
     let attempts = 0;
     const settled: string[] = [];
     const abandoned: string[] = [];
@@ -5025,6 +5115,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for transient refusal.");
+    holdRun(claim.run.runId);
     let attempts = 0;
     const originalDispatch = dispatchStore;
     context = {
@@ -5077,6 +5168,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for plain-error linkage.");
+    holdRun(claim.run.runId);
     let attempts = 0;
     const originalDispatch = dispatchStore;
     context = {
@@ -5117,6 +5209,7 @@ describe("CLI socket server", () => {
       command: "claude -p",
     });
     if (!claim) throw new Error("Expected a dispatch run for deadline linkage.");
+    holdRun(claim.run.runId);
     const lookupDeadlines: Array<number | undefined> = [];
     const linkDeadlines: Array<number | undefined> = [];
     const originalDispatch = dispatchStore;
