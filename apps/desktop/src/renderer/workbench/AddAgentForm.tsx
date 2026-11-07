@@ -55,9 +55,9 @@ export function AddAgentForm(props: {
   const [saving, setSaving] = useState(false);
   const [check, setCheck] = useState<CheckState>({ status: "idle" });
   // While the body scrolls, the title and actions sit in bands with a rule.
-  // The bands come and go only while the body cannot scroll, so its scrollTop
-  // stays 0 and its content moves by the padding change alone. They need
-  // about 40px more than they free, so they do not flicker at the edge.
+  // The bands keep the dialog's 20px inset, so the title, fields and actions
+  // stay where they were and only the rules come in. They come and go only
+  // while the body cannot scroll, so its scrollTop stays 0.
   const bodyRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [scrolls, setScrolls] = useState(false);
@@ -161,7 +161,7 @@ export function AddAgentForm(props: {
         data-scrolls={scrolls ? "" : undefined}
         className={`dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel ${scrolls ? "" : "gap-4 p-5"} ${DIALOG_HEIGHT_CLASS}`}
       >
-        <div data-testid="chats-add-agent-header" className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-6 py-4" : ""}`}>
+        <div data-testid="chats-add-agent-header" className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-5 pb-4 pt-5" : ""}`}>
           <ChatAvatar presentation={ownAgentPresentation} name={preview} kind="agent" size="strip" />
           <h3 id="chats-add-agent-title" className="m-0 text-base font-semibold text-ink">
             Add an agent
@@ -172,7 +172,7 @@ export function AddAgentForm(props: {
         <div
           ref={bodyRef}
           data-testid="chats-add-agent-body"
-          className={`min-h-0 overflow-y-auto [&_:focus-visible]:-outline-offset-2 ${scrolls ? "p-6" : "-mx-5 -my-1 px-5 py-1"}`}
+          className={`min-h-0 overflow-y-auto [&_:focus-visible]:-outline-offset-2 ${scrolls ? "px-5 py-4" : "-mx-5 -my-1 px-5 py-1"}`}
         >
         <div ref={contentRef} className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
@@ -192,7 +192,7 @@ export function AddAgentForm(props: {
           </p>
         </div>
 
-        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy}
+        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} usingCommand={command.trim().length > 0} disabled={busy}
           onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
         <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
           <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
@@ -223,7 +223,7 @@ export function AddAgentForm(props: {
         </div>
         </div>
 
-        <div data-testid="chats-add-agent-footer" className={`flex flex-col gap-4 ${scrolls ? "border-t border-line px-6 py-4" : ""}`}>
+        <div data-testid="chats-add-agent-footer" className={`flex flex-col gap-4 ${scrolls ? "border-t border-line px-5 pb-5 pt-4" : ""}`}>
         {error ? (
           <p data-testid="chats-add-agent-error" role="alert" className="m-0 text-[11px] text-danger">
             {error}

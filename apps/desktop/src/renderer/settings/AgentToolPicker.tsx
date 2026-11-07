@@ -16,6 +16,8 @@ function WrappedPath(props: { path: string }) {
 export function AgentToolPicker(props: {
   workspaceId: string;
   profile?: AgentLaunchProfile;
+  // A runner command is set and no tool is chosen, so the agent runs that.
+  usingCommand?: boolean;
   disabled: boolean;
   onChange(profile: AgentLaunchProfile): void;
   onError(message: string, cause?: unknown): void;
@@ -76,7 +78,7 @@ export function AgentToolPicker(props: {
       <dt>Permissions</dt><dd className="m-0">{AGENT_TOOLS.find((tool) => tool.id === props.profile?.tool)?.permissions}</dd>
       <dt>Prompt</dt><dd className="m-0">Conversation through stdin</dd>
       <dt>MCP</dt><dd className="m-0">dohc adds its own server for replies.</dd>
-    </dl> : null}
+    </dl> : props.usingCommand ? <p data-testid="agent-tool-using-command" className="m-0 text-[11px] text-muted">Using your runner command.</p> : null}
     <p className="m-0 text-[11px] text-muted">Detection does not test replies. Use Check to test a reply through dohc.</p>
   </div>;
 }

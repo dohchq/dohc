@@ -83,9 +83,12 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
     await shoot(page, "agent-tool-cards");
-    // The dialog keeps its top when a pick adds the profile under the cards.
+    // The dialog keeps its top, and its fields their left edge, when a pick
+    // adds the profile under the cards.
     const dialogTop = async () => (await page.getByTestId("chats-add-agent").boundingBox())?.y;
+    const nameLeft = async () => (await page.getByTestId("chats-add-agent-agent-name").boundingBox())?.x;
     const topBeforePick = await dialogTop();
+    const leftBeforePick = await nameLeft();
     for (const tool of ["Claude Code", "Codex"]) {
       const card = page.getByRole("button", { name: tool, exact: true });
       await expect(card).toBeEnabled();
@@ -93,6 +96,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
       await expect(page.getByText("Conversation through stdin")).toBeVisible();
       await expect(card).toBeFocused();
       expect(await dialogTop()).toBe(topBeforePick);
+      expect(await nameLeft()).toBe(leftBeforePick);
       await shoot(page, `agent-profile-${tool.toLowerCase().replaceAll(" ", "-")}`);
     }
     await page.getByText("Advanced", { exact: true }).click();
@@ -100,6 +104,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
       .getByTestId("chats-add-agent-command")
       .fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
     await expect(page.getByTestId("chats-add-agent-preview")).toContainText("Nova");
+    await expect(page.getByTestId("agent-tool-using-command")).toHaveText("Using your runner command.");
     // The tallest state, shot with its body scrolling between the title and
     // actions bands. A window tall enough to hold it all is shortened for
     // this shot only.
@@ -123,6 +128,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
         expect(rule).toEqual({ width: "1px", style: "solid" });
       }
       expect(await dialogTop()).toBe(topBeforePick);
+      expect(await nameLeft()).toBe(leftBeforePick);
       await shoot(page, "add-agent-form");
     } finally {
       await page.setViewportSize(viewport);
