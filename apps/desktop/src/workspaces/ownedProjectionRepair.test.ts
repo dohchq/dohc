@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
+import { sharedViewRefusal } from "../testing/sharedViewRefusal.fixture";
 import type {
   ShareViewFiles,
   ShareViewFilesTarget,
@@ -156,12 +157,14 @@ describe("createOwnedProjectionRepairer", () => {
   });
 
   it("passes a refusal from repair through unchanged", async () => {
-    const harness = owner({ repair: damagedRecord });
-    await expect(ensureCurrent(harness.files, "dohc-damaged-repair")).rejects.toBe(damagedRecord);
-    expect(harness.projectionStatus).toHaveBeenCalledOnce();
-    const refusal = new Error("store unavailable");
+    const refusal = await sharedViewRefusal();
+    const harness = owner();
     harness.reconcile.mockRejectedValue(refusal);
-    await expect(ensureCurrent(harness.files, "dohc-unavailable-repair")).rejects.toBe(refusal);
+    await expect(ensureCurrent(harness.files, "dohc-refused-repair")).rejects.toBe(refusal);
+    expect(harness.projectionStatus).toHaveBeenCalledOnce();
+    const failure = new Error("store unavailable");
+    harness.reconcile.mockRejectedValue(failure);
+    await expect(ensureCurrent(harness.files, "dohc-unavailable-repair")).rejects.toBe(failure);
   });
 
   it("waits for the workspace's exclusive lease before repairing", async () => {

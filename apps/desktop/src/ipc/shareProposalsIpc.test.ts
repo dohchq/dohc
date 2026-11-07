@@ -14,6 +14,7 @@ import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOper
 import { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 import { deferred } from "../testing/deferred";
+import { sharedViewRefusal } from "../testing/sharedViewRefusal.fixture";
 
 const credentials: CloudCredentials = {
   serverUrl: "https://account.example.test", relayUrl: "https://relay.example.test",
@@ -453,7 +454,7 @@ describe("registered share proposal handlers", () => {
 
   it("refuses unsafe reconciliation and reports a raced withdrawal honestly", async () => {
     const h = await harness(); h.recipient();
-    const refusal = new Error("record unreadable");
+    const refusal = await sharedViewRefusal();
     h.reconcile.mockRejectedValue(refusal);
     await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toBe(refusal);
     h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [{ path: "docs/file", reason: "unreadable" }] });
