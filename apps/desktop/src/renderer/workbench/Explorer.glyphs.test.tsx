@@ -243,6 +243,7 @@ describe("Explorer kind glyphs", () => {
           collection={false}
           app={false}
           selected
+          picked
           active={false}
           tabbable={false}
           dropPreview={{ kind: "blocked", role: "target" }}

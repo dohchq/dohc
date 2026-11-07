@@ -219,9 +219,9 @@ function draftFileKind(value: string, renameFrom: string): FileKindRecord {
 // Every Explorer row draws its glyph at the drawing's 15px.
 const GLYPH_SIZE = 15;
 
-// The glyph is ink on a row with the selected fill and subtle elsewhere.
-function glyphTone(selected: boolean): string {
-  return selected ? "text-ink" : "text-subtle";
+// The glyph is ink on an active or picked row and subtle elsewhere.
+function glyphTone(marked: boolean): string {
+  return marked ? "text-ink" : "text-subtle";
 }
 
 type DropPreview = {
@@ -331,7 +331,11 @@ export const TreeRow = memo(function TreeRow(props: {
   // Main recognizes this folder as an app: the row draws the app glyph in
   // the folder glyph's place, and says so as data-app.
   app: boolean;
+  // In the selection, for aria-selected.
   selected: boolean;
+  // In a selection an action would act on that is not just the open file.
+  picked: boolean;
+  // The active editor's file.
   active: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
@@ -348,7 +352,7 @@ export const TreeRow = memo(function TreeRow(props: {
 }) {
   const { row } = props;
   // A drop preview colors the whole row, glyph included.
-  const glyphClass = props.dropPreview ? "" : glyphTone(props.selected || props.active);
+  const glyphClass = props.dropPreview ? "" : glyphTone(props.picked || props.active);
   const dropClass =
     props.dropPreview?.kind === "blocked"
       ? props.dropPreview.role === "target"
@@ -386,24 +390,21 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // One selected fill and a weight (VS Code list semantics): the
-        // ACTIVE-tab row and selected-not-active rows share the selected
-        // fill (Delete/drag act on the whole selection), and the active row
-        // alone is medium weight so it still reads inside a multi-selection
-        // once the tree loses focus. An attenuated fill for the
-        // selected-not-active rows sat between hover and selected, too close
-        // to either to read. The keyboard-focused row draws the row's 1px
-        // accent line inside its own rounded box, so the tree's scroller
-        // cannot clip it on a row scrolled to an edge. The drag drop-target is a filled tint with a solid bar (list.drop-
-        // Background style).
+        // The open file's row is active: the selected fill and medium weight.
+        // Picked rows, the ones Delete and drag would act on when they are
+        // not just the open file, take the text-selection tint instead. An
+        // open file among them keeps its weight. The keyboard-focused row
+        // draws the 1px accent line inside its own rounded box, so the
+        // tree's scroller cannot clip it on a row scrolled to an edge. The
+        // drop target is a filled tint with a solid bar.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
             ? dropClass
-            : props.active
-              ? "bg-selected font-medium text-ink"
-              : props.selected
-                ? "bg-selected text-ink"
+            : props.picked
+              ? `bg-(--dohc-selection) text-ink${props.active ? " font-medium" : ""}`
+              : props.active
+                ? "bg-selected font-medium text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
         }`}
       >
@@ -1066,6 +1067,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setAnchorPath(null);
     setFocusedPath(null);
   }
+
+  // A selection that is only the open file goes when another editor becomes
+  // active, so the tree marks nothing for a page it does not list. A
+  // selection made on purpose, of other rows, stays.
+  const [selectionTab, setSelectionTab] = useState(activeTab);
+  if (selectionTab !== activeTab) {
+    setSelectionTab(activeTab);
+    if (selectionTab !== null && selection.size === 1 && selection.has(selectionTab)) {
+      setSelection(new Set());
+    }
+  }
+  const selectionIsOpenFile = activeTab !== null && selection.size === 1 && selection.has(activeTab);
 
   // Home's Show in Files asks for a reveal of its own; the shell's comes in
   // revealPaths. Either one switches to Files first.
@@ -1735,6 +1748,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
           app={row.isFolder && (props.appFolders?.has(row.fullPath) ?? false)}
           selected={selection.has(row.fullPath)}
+          picked={!selectionIsOpenFile && selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
           dropPreview={dropPreviewFor(row.fullPath)}
