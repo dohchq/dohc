@@ -26,8 +26,8 @@ function mount(conflictPages: unknown[] = []) {
 
 it("keeps a row that waits on decisions until a review or merge dialog closes with none of its files waiting", async () => {
   const f = mount([{ conflicts: [waiting], nextAfterConflictId: null }]);
-  act(() => f.result.current.merges.report({ identity: IDENTITY, tone: "warning", title: "Merged Draft into Main",
-    message: "2 files to decide.", decideFrom: "draft" }));
+  act(() => f.result.current.merges.report({ identity: IDENTITY, tone: "warning", title: "Merging Draft into Main needs a decision",
+    message: "2 files have two copies.", decideFrom: "draft" }));
   expect(f.row()).toMatchObject({ noDismiss: true, action: { label: "Decide what to keep" } });
   act(() => f.result.current.shell.runShellErrorAction(f.row()!.id));
   expect(f.openConflictReview).toHaveBeenCalledOnce();

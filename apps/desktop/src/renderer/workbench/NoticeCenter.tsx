@@ -563,8 +563,11 @@ function toneClass(tone: Notice["tone"]): string {
 // Beside a Try again button, a message drops a closing "Try again." sentence,
 // so the notice says it once. A longer ending, such as "Try again later.",
 // or a sentence that ends in it, such as "then choose Try again.", stays.
-function besideTryAgain(message: string): string {
-  return message.replace(/([.!?])\s+Try again\.\s*$/, "$1");
+// While Try again waits, its reason says when, so a closing "Try again in a
+// moment." goes too, and a message that was only that sentence goes whole.
+function besideTryAgain(message: string, blocked: boolean): string {
+  const once = message.replace(/([.!?])\s+Try again\.\s*$/, "$1");
+  return blocked ? once.replace(/(^|[.!?])\s*Try again in a moment\.\s*$/, "$1") : once;
 }
 
 // The toast for the newest workspace error, or the notice that something
@@ -598,7 +601,7 @@ export function WorkspaceErrorToast(props: {
       Try again
     </button>
   ) : null;
-  const message = retry ? besideTryAgain(error.message) : error.message;
+  const message = retry ? besideTryAgain(error.message, error.retryBlocked !== undefined) : error.message;
   useEffect(() => {
     if (!fades || held || !onHide) return;
     const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
@@ -1254,7 +1257,7 @@ export function NoticeCenter(props: {
             ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
           }]
         : [];
-      const message = retry.length ? besideTryAgain(error.message) : error.message;
+      const message = retry.length ? besideTryAgain(error.message, error.retryBlocked !== undefined) : error.message;
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",

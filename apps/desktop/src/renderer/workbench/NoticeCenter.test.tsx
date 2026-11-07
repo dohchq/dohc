@@ -1027,6 +1027,43 @@ describe("notice center", () => {
     expect(onRetryWorkspaceError).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Try again in a moment.", null],
+    ["dohc is busy. Try again in a moment.", "dohc is busy."],
+  ])("drops \"Try again in a moment.\" while Try again waits on the open merge: %s", async (message, body) => {
+    const user = userEvent.setup();
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-4", title: "dohc could not merge Draft into Main", message,
+        details: "Error: busy", atMs: 1_000, canRetry: true, retryBlocked: "Close the open merge first.", seen: false,
+      }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    const says = (place: HTMLElement) => {
+      expect(place.textContent).not.toContain("Try again in a moment.");
+      if (body) expect(within(place).getByText(body)).toBeTruthy();
+      expect(within(place).getByText("Close the open merge first.")).toBeTruthy();
+    };
+    says(screen.getByTestId("workspace-shell-error"));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    says(screen.getByTestId("notice-shell-error-4"));
+  });
+
+  it("keeps \"Try again in a moment.\" when Try again can run", () => {
+    renderNotices({
+      workspaceErrors: [{
+        id: "shell-error-4", title: "dohc could not merge Draft into Main", message: "dohc is busy. Try again in a moment.",
+        details: "Error: busy", atMs: 1_000, canRetry: true, seen: false,
+      }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("dohc is busy. Try again in a moment.");
+  });
+
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
     renderNotices({
       syncStatus: {
