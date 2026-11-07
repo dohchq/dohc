@@ -110,7 +110,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath">;
   dialog: Pick<Dialog, "showErrorBox">;
-  process: { env: NodeJS.ProcessEnv; resourcesPath?: string };
+  process: { env: NodeJS.ProcessEnv; resourcesPath?: string; platform: NodeJS.Platform };
   createRustEngineDaemon: typeof createRustEngineDaemonImplementation;
   defaultEngineBinaryPath: typeof defaultEngineBinaryPathImplementation;
   isQuitting(): boolean;
@@ -683,6 +683,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         readerConfig: installedReaderConfig(dependencies.resourcesBasePath()),
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         startupSmoke: startupSmoke.promise,
+        // On Linux, Ctrl+C or a stop sent to dohc's process group reaches dohc
+        // only. dohc quits and stops the engine at the end of its quit.
+        ownProcessGroup: process.platform === "linux",
         ...testEngineRestartOverrides(),
         command: defaultEngineBinaryPath({
           isPackaged: app.isPackaged,
