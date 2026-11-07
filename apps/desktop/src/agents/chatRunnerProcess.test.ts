@@ -652,9 +652,10 @@ describe("Windows run owner", () => {
         ...(agentOwner ? { agentOwner } : {}),
       }, reportError);
       const logPath = join(root, "logs", `run-${agentOwner ? "broken" : "none"}.log`);
-      expect(() => runner.spawnConfiguredRunner({
-        rootPath: root, runId: "run-1", logPath, command: `"${process.execPath}"`, prompt: "", assertMayStart: () => undefined,
-      })).toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+      await expect(runner.spawnConfiguredRunner({
+        rootPath: root, runId: "run-1", agentName: "Nova", logPath, command: `"${process.execPath}"`, dohcTools: "reply",
+        prompt: "", assertMayStart: () => undefined,
+      })).rejects.toThrow("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
       expect(readFileSync(logPath, "utf8")).toContain("Reinstall dohc");
       expect(reportError.mock.calls).toEqual(agentOwner ? [[missing]] : []);
     }
