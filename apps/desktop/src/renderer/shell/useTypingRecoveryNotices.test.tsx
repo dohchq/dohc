@@ -124,7 +124,7 @@ it.each(["copy","discard"] as const)("reports a failed %s with the matching word
 
 it.each(["replayed", "covered"] as const)("names the file after a %s decision and keeps its action live after readiness changes",async outcome=>{
  const input=options();state.read.mockResolvedValue({failures:[refused]});const hook=renderHook(props=>useTypingRecoveryNotices(props),{initialProps:input});await waitFor(()=>expect(input.reportShellFailure).toHaveBeenCalledOnce());const row=input.reportShellFailure.mock.calls[0]![0];
- state.read.mockResolvedValue({failures:[],outcome,momentId:null});act(()=>row.action.run());await waitFor(()=>expect(input.showSuccessNotice).toHaveBeenCalledWith('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:expect.any(Function)}));expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
+ state.read.mockResolvedValue({failures:[],outcome,momentId:null});act(()=>row.action.run());await waitFor(()=>expect(input.showSuccessNotice).toHaveBeenCalledWith('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:expect.any(Function)},{to:"history"}));expect(input.clearIdentity).toHaveBeenCalledWith("typing-import:one");
  expect(input.reportShellFailure).toHaveBeenCalledOnce();
  hook.rerender({...input,ready:false});
  expect(input.showSuccessNotice.mock.calls[0]![3].run).toBe(input.openHistory);

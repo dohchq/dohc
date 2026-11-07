@@ -250,6 +250,11 @@ The after also drops the sentence about unsaved changes, because saving first is
 - Where Restricted Mode holds something back, show its band at the top of the pane or card it holds back. Disable the controls that would start it, with the band's words as their reason.
 - Closing a toast keeps its row. Dismissing the row removes it.
 - A row in Notices stays unread until the pointer or keyboard focus reaches it, or the person presses **Mark all read**. Taking the row's own step, such as Open note, also reads it. Reading a row closes its toast and keeps the row.
+- A Notices row opens what it is about. A click, Enter or Space on the row goes where its Open or Review action goes, and reads the row. A row whose actions only change state, such as **Try again**, opens where the problem is, or nowhere. Opening a row never retries, sends, installs or deletes.
+- A row with nowhere to go has no pointer, hover fill, role or Tab stop. Arrow keys still reach it, so the keyboard can read and dismiss it.
+- A row's own actions and icon controls do only what they name, and never also open the row.
+- When what a row is about is gone, its text becomes `dohc could not find this chat.` or `dohc could not find this file.`, and the row stops opening, with no toast and no navigation.
+- On a row that opens, **Show more** expands clipped text, and a click on the text opens the row.
 - A held change or refused save whose row is still unread shows its toast again each time dohc starts. Reading its row stops that.
 - F6 moves focus to the first worded action, such as **Try again**, on the toast that appeared last. With no worded action, it lands on **Details**, and with neither, on the toast.
 - A row has a dismiss × only when dismissing it acknowledges something that is over. A row about something still wrong, such as **History paused** or **Server disconnected**, has no × and stays until it ends.
@@ -410,6 +415,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-2 rounded-md
 - So a click, a dialog's first focus, and a shortcut such as Ctrl+P show no focus. Escape, Delete and Backspace leave the mark as it was, so closing or removing the focused thing from the keyboard still shows where focus went.
 - A confirm dialog's buttons show the ring whenever Chromium's `:focus-visible` matches, so a dialog opened from the keyboard shows where Enter acts at once. Opened with the pointer, it shows the ring after the first Tab or arrow, as everywhere else.
 - Give a row `dohc-focus-row`: the hover fill and a 1px accent line inside its edge. A selected row keeps its fill and adds the line.
+- A row that opens one thing puts a button on its title, stretched over the row with `dohc-row-open`. The whole row then takes the `dohc-focus-row` mark and hover fill as one target, and the row's own controls sit above the stretch.
 - Every other control wears the global halo, a 2px accent outline, 60% in light and 50% in dark, that follows its radius. Text fields keep their border and underline.
 - Inside a scroller, draw a control's halo inset with `focus-visible:-outline-offset-2`. The row's line is already inset.
 - To show keyboard focus another way, such as a fill or a layer, add the `keyboard:` variant before `focus-visible:`. Never draw a mark under a bare `focus-visible:`, except a confirm dialog's buttons, above.
@@ -453,6 +459,7 @@ A question's status is words and an icon, never a pill. An open question without
 - Real movement, such as expanding or sliding: 120 to 180ms ease-out. Panels take 220 to 280ms. No bounce.
 - Floating surfaces enter with `dohc-pop-in`. Nothing else animates on mount.
 - Reduced motion is handled globally. Never write an inline `animation` that bypasses it.
+- Landing on what a person asked to see, such as a heading from the outline or a message from Notices, washes it once with `dohc-target-flash` after the scroll settles, and moves focus to it. With reduced motion, the wash shows and clears without fading.
 
 ### Hard rules
 

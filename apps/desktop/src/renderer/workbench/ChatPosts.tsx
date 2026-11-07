@@ -601,7 +601,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           continues ? "" : "mt-4 first:mt-0"
         } ${
           flashMessageId === comment.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "dohc-target-flash"
             : ""
         }`}
       >
@@ -810,7 +810,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         data-author-kind={openingMessage.authorKind}
         className={`group relative flex gap-2.5 px-2 transition-shadow ${
           flashMessageId === openingMessage.id
-            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            ? "dohc-target-flash"
             : ""
         }`}
       >

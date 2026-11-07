@@ -1285,7 +1285,7 @@ describe("engine markdown source view", () => {
     "---\ntitle: Plan\n---\n\n# Plan\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
 
   function flashedBlockText(): string | undefined {
-    return document.querySelector(".dohc-outline-target-flash")?.textContent ?? undefined;
+    return document.querySelector(".dohc-target-flash")?.textContent ?? undefined;
   }
 
   it("lands an engine-backed search jump on the block holding the line", async () => {
@@ -1823,7 +1823,7 @@ describe("engine markdown source view", () => {
       function (this: HTMLElement) {
         revealedTargets.push({
           connected: this.isConnected,
-          flashed: this.classList.contains("dohc-outline-target-flash"),
+          flashed: this.classList.contains("dohc-target-flash"),
           text: this.textContent,
         });
       },

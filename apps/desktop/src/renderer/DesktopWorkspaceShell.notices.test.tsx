@@ -13,7 +13,7 @@ import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { HistoryStillPausedError, ipcWireError, PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { OwnerLiveDocumentsResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
 import { useSentNotices, type SentNotices } from "./shell/useSentNotices";
-import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
+import type { NoticeTarget } from "./shell/noticeTarget";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
@@ -1881,7 +1881,7 @@ describe("notices sent to you", () => {
 
   function renderWithNotices(
     bridge: ReturnType<typeof makeBridge>,
-    extra: { sentNotices?: SentNotices; openOnReady?: OpenOnSwitch; onSwitchWorkspace?: (workspace: Workspace, open?: OpenOnSwitch) => void; workspace?: Workspace },
+    extra: { sentNotices?: SentNotices; openOnReady?: NoticeTarget; onSwitchWorkspace?: (workspace: Workspace, open?: NoticeTarget) => void; workspace?: Workspace },
     workspaces: Workspace[] = [extra.workspace ?? WORKSPACE],
   ) {
     vi.stubGlobal("dohcDesktop", bridge);
@@ -1987,6 +1987,30 @@ describe("notices sent to you", () => {
     expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
   });
 
+  it("opens a mention's file from its row, reads it and closes Notices", async () => {
+    const user = userEvent.setup();
+    const notices = sentNotices([MENTION]);
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: notices });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
+    await screen.findByTestId("tab-b.md");
+    expect(notices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "mention:1" }]);
+    await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
+  });
+
+  it("says in place that a mention's file is gone, opening nothing", async () => {
+    const user = userEvent.setup();
+    const gone: NoticeRow = { ...MENTION, target: { path: "gone.md" } };
+    renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: sentNotices([gone]) });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("sent-notice-mention:1-open-row"));
+    const row = screen.getByTestId("sent-notice-mention:1");
+    expect(await within(row).findByText("dohc could not find this file.")).toBeTruthy();
+    expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("sent-notice-mention:1-open-row")).toBeNull();
+  });
+
   it("keeps a read held change read, with no toast, when dohc starts again", async () => {
     const user = userEvent.setup();
     renderWithNotices(makeBridge(Promise.resolve(null)), { sentNotices: sentNotices([{ ...HELD, readAtMs: 6_000 }]) });
@@ -2048,7 +2072,7 @@ describe("notices sent to you", () => {
     const row = await screen.findByTestId("sent-notice-mention:1");
     expect(row.textContent).toContain("Japan");
     await user.click(within(row).getByRole("button", { name: "Open" }));
-    expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, "Japan/day-1.md");
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(trip, { to: "file", path: "Japan/day-1.md" });
   });
 
   const FAILED = (id: string, claimId: string): NoticeRow => ({
@@ -2105,7 +2129,7 @@ describe("notices sent to you", () => {
   });
 
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
-    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: "b.md" });
+    renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: { to: "file", path: "b.md" } });
     await screen.findByTestId("tab-b.md");
   });
 
@@ -2124,7 +2148,7 @@ describe("notices sent to you", () => {
   it("opens Chats at a Group invitation, with its Join focused, once the workspace it switched to is ready", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     Object.assign(bridge, { listChatChannelShares: vi.fn(async () => INVITATION_LISTING) });
-    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
+    renderWithNotices(bridge, { openOnReady: { to: "chats-invitation", shareId: "share-1", inputs: inputCount() } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
     const join = await screen.findByTestId("chats-join-shared");
     await waitFor(() => expect(document.activeElement).toBe(join));
@@ -2149,7 +2173,7 @@ describe("notices sent to you", () => {
     // person has moved on.
     const listed = deferred<typeof INVITATION_LISTING>();
     Object.assign(bridge, { listChatChannelShares: vi.fn(() => listed.promise) });
-    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: inputCount() } } });
+    renderWithNotices(bridge, { openOnReady: { to: "chats-invitation", shareId: "share-1", inputs: inputCount() } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
     await moveOn(user, bridge);
     listed.resolve(INVITATION_LISTING);
@@ -2166,7 +2190,7 @@ describe("notices sent to you", () => {
     Object.assign(bridge, { listChatChannelShares: vi.fn(async () => INVITATION_LISTING) });
     const pressed = inputCount();
     await user.keyboard("a");
-    renderWithNotices(bridge, { openOnReady: { chatsInvitation: { shareId: "share-1", inputs: pressed } } });
+    renderWithNotices(bridge, { openOnReady: { to: "chats-invitation", shareId: "share-1", inputs: pressed } });
     await waitFor(() => expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page"));
     const join = await screen.findByTestId("chats-join-shared");
     expect(join.getAttribute("data-invitation")).toBe("share-1");
@@ -2220,7 +2244,7 @@ describe("notices sent to you", () => {
     const user = userEvent.setup();
     const bridge = withRuns(makeBridge(Promise.resolve(null)));
     bridge.findAutomationCollection.mockRejectedValueOnce(new Error("The workspace engine is not running."));
-    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    renderWithNotices(bridge, { openOnReady: { to: "automation-controls", automation: "collection:tasks#first" } as const });
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc could not open this automation.");
     await user.click(within(toast).getByRole("button", { name: "Try again" }));
@@ -2238,7 +2262,7 @@ describe("notices sent to you", () => {
       valid: true, automationId: "collection:tasks#first", automation, definitionHash: "0123456789abcdef", cannotRun: null,
       reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
     }] });
-    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    renderWithNotices(bridge, { openOnReady: { to: "automation-controls", automation: "collection:tasks#first" } as const });
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
     const toggle = within(await screen.findByTestId("automation-first", undefined, { timeout: 15_000 })).getByRole("switch");
     await waitFor(() => expect(document.activeElement).toBe(toggle));
@@ -2249,7 +2273,7 @@ describe("notices sent to you", () => {
   it("opens a switched-off automation's switch next to the saved tabs once they apply", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = withRuns(makeBridge(stored.promise));
-    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    renderWithNotices(bridge, { openOnReady: { to: "automation-controls", automation: "collection:tasks#first" } as const });
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     await act(async () => undefined);
     expect(bridge.findAutomationCollection).not.toHaveBeenCalled();
@@ -2265,7 +2289,7 @@ describe("notices sent to you", () => {
 
   describe("through an Edit share view", () => {
     const EDIT_VIEW: Workspace = { ...WORKSPACE, shareView: { shareId: "share-1", granterEmail: "owner@dohc.test", access: "edit" } };
-    const SWITCHED_OFF = { automationControls: "collection:object-tasks#first", sharedFile: "tasks/automations.yaml" };
+    const SWITCHED_OFF = { to: "automation-controls", automation: "collection:object-tasks#first", sharedFile: "tasks/automations.yaml" } as const;
     const automation = {
       id: "first", name: "Stamp the date", enabled: false, when: { kind: "record-added" as const, table: null }, if: null,
       do: [{ kind: "set" as const, values: [{ field: "Done", value: { kind: "literal" as const, value: true } }], records: null, operation: null }],
@@ -2387,7 +2411,7 @@ describe("notices sent to you", () => {
       const start = await screen.findByTestId("open-share-start");
       await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
       await user.click(start);
-      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, "Trips/Japan/report.md"));
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, { to: "file", path: "Trips/Japan/report.md" }));
     });
 
     it("opens it as its own workspace on a switched-off automation's switch", async () => {
@@ -2404,7 +2428,7 @@ describe("notices sent to you", () => {
       await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
       await user.click(start);
       await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, {
-        automationControls: "collection:object-tasks#stamp", sharedFile: "Trips/tasks/automations.yaml",
+        to: "automation-controls", automation: "collection:object-tasks#stamp", sharedFile: "Trips/tasks/automations.yaml",
       }));
     });
   });
