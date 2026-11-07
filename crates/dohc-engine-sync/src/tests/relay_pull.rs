@@ -63,6 +63,9 @@ fn open_document_pull_fixture(later: i64, live: bool) -> (i64, i64, u128) {
             (
                 start,
                 PullResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
+                    reference_has_more: false,
                     ops: chunk.to_vec(),
                     next_cursor: cursor,
                     has_more: cursor < total as i64,
@@ -913,6 +916,9 @@ fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![op],
             next_cursor: 1,
             has_more: false,
@@ -1310,6 +1316,9 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
         let relay = PagedRelay::new([(
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: Vec::new(),
                 next_cursor: 0,
                 has_more: false,
@@ -1427,6 +1436,9 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 "page-peer",
                 0,
@@ -1599,6 +1611,9 @@ pub(super) fn empty_base_repair_relay() -> PagedRelay {
     PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: Vec::new(),
             next_cursor: 0,
             has_more: false,
@@ -1643,6 +1658,9 @@ fn page_base_repair(repeat_coordinate: bool) {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops,
             next_cursor: if repeat_coordinate { 20 } else { 10 },
             has_more: false,
@@ -1704,6 +1722,9 @@ fn base_repair_publication_blocked_pull_matches_main() {
         let mut relay = PagedRelay::new([(
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![divergent.clone()],
                 next_cursor: 120,
                 has_more: false,
@@ -1886,6 +1907,9 @@ fn base_repair_crash_commit_survives_empty_publication_push_and_later_lower_base
         (
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![owner, own_echo.clone()],
                 next_cursor: 100,
                 has_more: true,
@@ -1894,6 +1918,9 @@ fn base_repair_crash_commit_survives_empty_publication_push_and_later_lower_base
         (
             100,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![peer],
                 next_cursor: 140,
                 has_more: false,
@@ -1934,6 +1961,9 @@ fn base_repair_crash_commit_survives_empty_publication_push_and_later_lower_base
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![divergent],
             next_cursor: 120,
             has_more: false,
@@ -1987,6 +2017,9 @@ fn proven_minimum_allows_divergent_pull(origin: &str) {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![divergent],
             next_cursor: 120,
             has_more: false,
@@ -2406,6 +2439,9 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
             push_budget_limit: None,
             pushes: Mutex::new(Vec::new()),
             pull: Mutex::new(Some(PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![envelope(
                     origin_id,
                     0,
@@ -2419,6 +2455,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
                 next_cursor: 1,
                 has_more: false,
             })),
+            ..Default::default()
         });
 
         assert_eq!(
@@ -2559,10 +2596,14 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![remote],
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     };
     let client = RelaySyncClient::new(fake);
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
@@ -2754,10 +2795,14 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![peer_delete, later],
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let first = client
@@ -3008,10 +3053,14 @@ fn pull_rejects_op_for_foreign_workspace() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![foreign],
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     };
     let client = RelaySyncClient::new(fake);
     assert!(matches!(
@@ -3071,6 +3120,9 @@ fn relay_pull_refuses_reserved_case_variants() {
         let mut relay = PagedRelay::new([(
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op],
                 next_cursor: 1,
                 has_more: false,
@@ -3154,6 +3206,9 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![op],
             next_cursor: 1,
             has_more: false,
@@ -3350,6 +3405,9 @@ fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![tampered],
             next_cursor: 2,
             has_more: false,
@@ -3489,6 +3547,9 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         (
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: first_page,
                 next_cursor: i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor"),
                 has_more: true,
@@ -3497,6 +3558,9 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         (
             i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS).expect("cursor"),
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![second_page],
                 next_cursor: i64::try_from(crate::model::MAX_PULL_OPS_PER_PASS + 1)
                     .expect("cursor"),
@@ -3632,6 +3696,9 @@ fn assert_join_pull_conflicts_offline_edits(sparse: bool, edit_between_batches: 
                 (
                     seq,
                     PullResponse {
+                        work_references: Vec::new(),
+                        next_reference_after: None,
+                        reference_has_more: false,
                         ops: vec![padding(seq)],
                         next_cursor: seq + 1,
                         has_more: true,
@@ -3643,6 +3710,9 @@ fn assert_join_pull_conflicts_offline_edits(sparse: bool, edit_between_batches: 
         vec![(
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: (0..boundary).map(padding).collect(),
                 next_cursor: boundary,
                 has_more: true,
@@ -3668,6 +3738,9 @@ fn assert_join_pull_conflicts_offline_edits(sparse: bool, edit_between_batches: 
     pages.push((
         boundary,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 "document-peer",
                 0,
@@ -3880,6 +3953,9 @@ fn assert_page_ceiling_retains_bootstrap_state(creator: bool) {
         pages.push((
             cursor,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![envelope(
                     &format!("unrelated-{cursor}"),
                     0,
@@ -3896,6 +3972,9 @@ fn assert_page_ceiling_retains_bootstrap_state(creator: bool) {
     pages.push((
         resume_cursor,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 &format!("unrelated-{resume_cursor}"),
                 0,
@@ -4076,6 +4155,9 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 "peer",
                 0,
@@ -4099,6 +4181,7 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let pull = client
@@ -4252,6 +4335,9 @@ fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![op],
             next_cursor: 1,
             has_more: false,
@@ -4345,6 +4431,9 @@ fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![op],
             next_cursor: 1,
             has_more: false,
@@ -4434,6 +4523,9 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
     let client = RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![normal, missing],
             next_cursor: 2,
             has_more: false,
@@ -4508,6 +4600,9 @@ fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![text, binary],
             next_cursor: 2,
             has_more: false,
@@ -4579,6 +4674,9 @@ fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
     let client = RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![op],
             next_cursor: 1,
             has_more: false,
@@ -4654,6 +4752,9 @@ fn relay_multi_page_pull_reports_conflicts_opened() {
         (
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![normal],
                 next_cursor: 1,
                 has_more: true,
@@ -4662,6 +4763,9 @@ fn relay_multi_page_pull_reports_conflicts_opened() {
         (
             1,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![conflict],
                 next_cursor: 2,
                 has_more: false,
@@ -4766,10 +4870,14 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![local, divergent],
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let outcome = client
@@ -4887,10 +4995,14 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![refused, later],
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(
@@ -4981,10 +5093,14 @@ fn pull_keeps_a_genuine_origin_gap_hard() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![gap],
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(
@@ -5088,10 +5204,14 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![parent, child, same_origin_later, later],
             next_cursor: 4,
             has_more: false,
         })),
+        ..Default::default()
     });
     let leases = FirstLeaseCheckLive(AtomicUsize::new(0));
 
@@ -5209,10 +5329,14 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![base, later],
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(
@@ -5284,6 +5408,9 @@ fn committed_pull_cursor_retains_persisted_refusals() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 "cursor-clear-refusal-peer",
                 0,
@@ -5299,6 +5426,7 @@ fn committed_pull_cursor_retains_persisted_refusals() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let outcome = client
@@ -5393,6 +5521,9 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 "first-report-peer",
                 0,
@@ -5408,6 +5539,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
     let first = first_client
         .pull_chat_workspace(
@@ -5502,6 +5634,9 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 "second-report-peer",
                 0,
@@ -5517,6 +5652,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let second = second_client
         .pull_chat_workspace(
@@ -5864,6 +6000,9 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![envelope(
                 "reason-peer",
                 0,
@@ -5879,6 +6018,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
             next_cursor: 1,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     let outcome = client
@@ -5946,6 +6086,9 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![
                 first,
                 divergent,
@@ -5954,6 +6097,7 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
             next_cursor: 3,
             has_more: false,
         })),
+        ..Default::default()
     });
 
     assert!(matches!(
@@ -6180,6 +6324,9 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![op],
             next_cursor: 1,
             has_more: false,
@@ -6284,6 +6431,9 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![steal],
             next_cursor: 1,
             has_more: false,
@@ -6592,6 +6742,9 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
         (
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: page,
                 next_cursor: 500,
                 has_more: true,
@@ -6600,6 +6753,9 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
         (
             500,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![later],
                 next_cursor: 501,
                 has_more: false,
@@ -6608,6 +6764,9 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
         (
             501,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: Vec::new(),
                 next_cursor: 501,
                 has_more: false,
@@ -7059,6 +7218,9 @@ fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
         (
             seq - 1,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![op],
                 next_cursor: seq,
                 has_more: false,
@@ -7179,6 +7341,9 @@ fn refused_live_audit_below_ack_does_not_stall_an_uncommitted_pull_replay() {
         Some(json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]));
     let client = RelaySyncClient::new(FakeRelay {
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![audit.clone()],
             next_cursor: 1,
             has_more: false,
@@ -7208,6 +7373,9 @@ fn refused_live_audit_below_ack_does_not_stall_an_uncommitted_pull_replay() {
     later.relay_seq = Some(2);
     let replay = RelaySyncClient::new(FakeRelay {
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![audit, later],
             next_cursor: 2,
             has_more: false,
@@ -7398,6 +7566,9 @@ fn relay_pull_puts_a_renames_delete_before_its_write() {
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![write, rename],
             next_cursor: 2,
             has_more: false,
@@ -7428,4 +7599,119 @@ fn relay_pull_puts_a_renames_delete_before_its_write() {
         .map(|change| (change.operation, change.path.as_str()))
         .collect();
     assert_eq!(page, [("delete", "notes.md"), ("write", "Notes.md")]);
+}
+
+#[test]
+fn owner_pull_learns_one_mapping_page_and_keeps_its_tail_after_reopen() {
+    use dohc_engine_domain::work_references::{
+        WorkReferenceResolution, resolve_work_reference, work_reference_page_after,
+    };
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let mapping = serde_json::from_value(json!({"reference":"R".repeat(43),"createdAtMs":1,
+        "target":{"kind":"transactionalCollection","datasetId":"00000000-0000-4000-8000-000000000001","tableId":"00000000-0000-4000-8000-000000000002"}})).unwrap();
+    let client = RelaySyncClient::new(PagedRelay::new([
+        (
+            0,
+            PullResponse {
+                work_references: vec![mapping],
+                next_reference_after: Some("7".into()),
+                reference_has_more: false,
+                ops: vec![envelope(
+                    "peer",
+                    0,
+                    "chat.channel.create",
+                    json!({"channelId":"c","wireId":"w","name":"Team","slug":"team","kind":"channel","createdAtMs":1}),
+                )],
+                next_cursor: 1,
+                has_more: true,
+            },
+        ),
+        (
+            1,
+            PullResponse {
+                work_references: vec![],
+                next_reference_after: None,
+                reference_has_more: false,
+                ops: vec![envelope(
+                    "peer",
+                    1,
+                    "chat.thread.create",
+                    json!({"threadId":"t","channelWireId":"w","title":"Plans","createdAtMs":2}),
+                )],
+                next_cursor: 2,
+                has_more: false,
+            },
+        ),
+        (
+            2,
+            PullResponse {
+                work_references: vec![],
+                next_reference_after: Some("7".into()),
+                reference_has_more: false,
+                ops: vec![],
+                next_cursor: 2,
+                has_more: false,
+            },
+        ),
+    ]));
+    let result = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut Default::default(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3,
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        has_more,
+        pending_cursor: Some(cursor),
+        ..
+    } = result
+    else {
+        panic!("{result:?}");
+    };
+    assert!(!has_more);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, &NoLiveLeases, 3)
+        .unwrap();
+    assert!(matches!(
+        resolve_work_reference(&engine, "ws", &"R".repeat(43)).unwrap(),
+        WorkReferenceResolution::Found { .. }
+    ));
+    assert_eq!(
+        *client.transport().reference_pulls.lock().unwrap(),
+        vec![(None, true), (None, false)]
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 4).unwrap();
+    assert_eq!(
+        work_reference_page_after(&engine, "ws", "owner")
+            .unwrap()
+            .as_deref(),
+        Some("7")
+    );
+    let result = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut Default::default(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            5,
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        SyncPassOutcome::Complete {
+            has_more: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        client.transport().reference_pulls.lock().unwrap().last(),
+        Some(&(Some("7".into()), true))
+    );
 }

@@ -14,7 +14,7 @@ const Reference = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/));
 const SafeInt = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(-Number.MAX_SAFE_INTEGER), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
 const Versioned = { versionId: NonEmpty, objectId: NonEmpty } as const;
 const Target = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("message"), messageId: NonEmpty, threadId: NonEmpty, channelId: Schema.NullOr(NonEmpty) }),
+  Schema.Struct({ kind: Schema.Literal("message"), messageId: NonEmpty, threadId: NonEmpty, channelId: Schema.optionalKey(Schema.NullOr(NonEmpty)) }),
   Schema.Struct({ kind: Schema.Literals(["file", "app", "documentCollection"]), ...Versioned }),
   Schema.Struct({ kind: Schema.Literal("documentRecord"), versionId: NonEmpty, recordId: NonEmpty }),
   Schema.Struct({ kind: Schema.Literal("transactionalCollection"), datasetId: NonEmpty, tableId: NonEmpty }),
@@ -39,3 +39,7 @@ export type MadeWorkReference = typeof Made.Type;
 export type WorkReferenceResolution = typeof Resolution.Type;
 export const decodeMadeWorkReference = Schema.decodeUnknownSync(Made);
 export const decodeWorkReferenceResolution = Schema.decodeUnknownSync(Resolution);
+export const decodeWorkTarget = Schema.decodeUnknownSync(Target, {onExcessProperty: "error"});
+const Mapping = Schema.Struct({reference: Reference, target: Target, createdAtMs: SafeInt});
+export type WorkReferenceMapping = typeof Mapping.Type;
+export const decodeWorkReferenceMapping = Schema.decodeUnknownSync(Mapping, {onExcessProperty: "error"});

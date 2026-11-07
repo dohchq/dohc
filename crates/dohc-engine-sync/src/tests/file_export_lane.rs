@@ -865,6 +865,9 @@ fn lane_recovery_copies_unpushed_export_and_next_preimage_follows_it() {
     let recovery = RelaySyncClient::new(PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: shared.clone(),
             next_cursor: 1,
             has_more: false,
@@ -1461,6 +1464,7 @@ impl RelayTransport for RecordingRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
+            registered_references: Vec::new(),
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
             redundant_recoveries: Vec::new(),
@@ -1983,6 +1987,9 @@ fn lane_open_recipient_retains_pending_pull_across_restart_and_local_edits_survi
         (
             0,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: vec![exports(&source)[1].clone()],
                 next_cursor: 2,
                 has_more: false,
@@ -1991,6 +1998,9 @@ fn lane_open_recipient_retains_pending_pull_across_restart_and_local_edits_survi
         (
             2,
             PullResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
                 ops: Vec::new(),
                 next_cursor: 2,
                 has_more: false,

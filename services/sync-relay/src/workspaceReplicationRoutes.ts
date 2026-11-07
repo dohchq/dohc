@@ -1,4 +1,5 @@
 import { jsonResponse } from "@dohc/service-http";
+import {decodeWorkReferenceMapping} from "@dohc/workspace-engine-client/daemon";
 import {
   DiscussionActivityCapacityError,
   ownerLogWaitGroup,
@@ -49,6 +50,8 @@ export function createWorkspaceReplicationRoutes(
     | "verifyWorkspaceIdentity"
     | "getEpochLogFloor"
     | "workspaceIsOwnedBy"
+    | "listWorkReferences"
+    | "prepareWorkReferenceRegistration"
   >,
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
@@ -148,12 +151,21 @@ export function createWorkspaceReplicationRoutes(
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost !== undefined});
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, accountNames);
+      const workReferences = input.workReferences === undefined ? [] : input.workReferences;
+      if (!Array.isArray(workReferences) || workReferences.length > 128 || route.serviceHost && workReferences.length) throw notFound();
+      if (workReferences.length && !storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+      let references;
+      try { references = workReferences.map(row => decodeWorkReferenceMapping(row)); } catch { throw notFound(); }
       await route.serviceHost?.screen(originId, ops);
       await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
+      const datasetAccess = route.serviceHost ? undefined : await storage.prepareWorkReferenceRegistration({
+        workspaceId: route.workspaceId, userId: actor.userId, references,
+      });
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,
         ops,
+        ...(route.serviceHost ? {} : {workReferences: {userId: actor.userId, references, datasetAccess}}),
         ...(route.serviceHost ? {admit: route.serviceHost.admit, confirm: route.serviceHost.confirm} : {classifyRedundantRecoveries: true}),
         // Identity claim/verification rides the append's BEGIN IMMEDIATE
         // transaction. A gap/conflict/quota/blob failure later in append
@@ -181,6 +193,7 @@ export function createWorkspaceReplicationRoutes(
         inserted: result.inserted,
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
+        ...(input.workReferences === undefined ? {} : {registeredReferences: result.registeredReferences ?? []}),
         ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
         ...(result.redundantRecoveries ? {redundantRecoveries: result.redundantRecoveries} : {}),
         ...(refusals.length ? {refusals} : {}),
@@ -217,8 +230,12 @@ export function createWorkspaceReplicationRoutes(
         sinceRelaySeq: since,
         limit,
       });
+      const mappings = url.searchParams.get("includeReferences") === "false" ? {references: [], nextAfter: null, hasMore: false} : await storage.listWorkReferences({workspaceId: route.workspaceId, reader: {kind: "user", userId: actor.userId},
+        after: url.searchParams.get("referenceAfter") || undefined});
+      guard();
       const response = jsonResponse({
         ok: true,
+        ...(mappings.references.length || mappings.nextAfter ? {workReferences: mappings.references, nextReferenceAfter: mappings.nextAfter, referenceHasMore: mappings.hasMore} : {}),
         ops: page.rows.map(servedLogOp),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the

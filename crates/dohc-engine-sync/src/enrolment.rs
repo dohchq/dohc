@@ -2302,6 +2302,9 @@ mod tests {
         .expect("peer receives the base before opening its editor");
         let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             next_cursor: ops.len() as i64,
             ops,
             has_more: false,
@@ -2345,6 +2348,9 @@ mod tests {
         let ops =
             crate::list_replication_ops(&source, "ws", "local", -1, 100).expect("exported ops");
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             next_cursor: ops.len() as i64,
             ops: ops.into_iter().skip(1).collect(),
             has_more: false,
@@ -2378,6 +2384,9 @@ mod tests {
             .expect("deferred file moment");
         assert_eq!(pending, 0, "an already projected artifact is history only");
         *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             next_cursor: 2,
             ops: Vec::new(),
             has_more: false,

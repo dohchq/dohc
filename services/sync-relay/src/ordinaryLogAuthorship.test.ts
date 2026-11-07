@@ -250,7 +250,7 @@ describe("ordinary admitted authorship", () => {
     const storage = await testStorage();
     const row = {workspaceId: "workspace", originId: "device", originSeq: 0, opKind: "workspace.init",
       payloadJson: "{}", recordedAtMs: 1, relaySeq: 1, admittedAuthorSnapshot: snapshot};
-    const queries = createShareReadQueries({...storage, fetchLogPage: () => ({rows: [row], nextCursor: 1, hasMore: false})}, 500);
+    const queries = createShareReadQueries({...storage, fetchLogPage: () => ({rows: [row], nextCursor: 1, hasMore: false}), indexReceivedWorkTargets: () => {}}, 500);
     for (const audience of ["authenticated", "accountless"] as const) {
       const page = queries.filteredLogPage("workspace", "share", {paths: ["doc.md"], versionId: null, access: "view"}, 0, 10, audience);
       expect(page.ops).toHaveLength(1);
