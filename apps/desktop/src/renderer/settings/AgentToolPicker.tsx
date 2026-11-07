@@ -1,9 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { AGENT_TOOLS, supportsAgentProfile, type AgentLaunchProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { useRequestSequence } from "../useRequestSequence";
 import { SecondaryButton } from "../ui/controls";
+import { PathLine, pathPieces } from "../ui/PathLine";
+
+// A whole path that wraps only between folders. Each folder is one box, so a
+// space or hyphen inside it is no break; it wraps inside only when wider than the line.
+function WrappedPath(props: { path: string }) {
+  return <>{pathPieces(props.path).map((piece, index) => <Fragment key={index}><span className="inline-block max-w-full">{piece}</span><wbr /></Fragment>)}</>;
+}
 
 export function AgentToolPicker(props: {
   workspaceId: string;
@@ -53,15 +60,15 @@ export function AgentToolPicker(props: {
           <span className="block text-[13px] font-medium text-ink">{tool.name}</span>
           <span className="block text-[11px] text-muted">{loading ? "Detecting…" : !result ? "Not checked" : detected?.probe === "detected" ? `Detected · ${detected.version}` : detected?.executable ? "Version probe failed" : "Not found"}</span>
           <span className="block text-[11px] text-muted">{detected?.auth === "signed-in" ? "Signed in" : detected?.auth === "signed-out" ? "Signed out" : detected?.auth === "credentials-found" ? "Credentials found · sign-in unknown" : "Sign-in unknown"}</span>
-          {detected?.executable ? <span className="mt-1 block break-all font-mono text-[11px] text-muted">{detected.executable}</span> : null}
+          {detected?.executable ? <span title={detected.executable} className="mt-1 flex min-w-0"><PathLine path={detected.executable} className="font-mono text-[11px] text-muted" /></span> : null}
           {!supported ? <span className="mt-1 block text-[11px] text-muted">No launch profile yet</span> : null}
           {tool.id === "claude" && detected?.probe === "detected" && !compatible ? <span className="mt-1 block text-[11px] text-muted">Update Claude Code to 2.1.259 or later to use this profile.</span> : null}
         </button>;
       })}
     </div>
     {props.profile ? <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] text-muted">
-      <dt>Executable</dt><dd className="m-0 break-all font-mono">{props.profile.executable}</dd>
-      <dt>Working directory</dt><dd className="m-0 break-all font-mono">{result?.workingDirectory ?? "Current workspace"}</dd>
+      <dt>Executable</dt><dd className="m-0 min-w-0 select-text wrap-break-word font-mono"><WrappedPath path={props.profile.executable} /></dd>
+      <dt>Working directory</dt><dd className="m-0 min-w-0 select-text wrap-break-word font-mono"><WrappedPath path={result?.workingDirectory ?? "Current workspace"} /></dd>
       <dt>Permissions</dt><dd className="m-0">{AGENT_TOOLS.find((tool) => tool.id === props.profile?.tool)?.permissions}</dd>
       <dt>Prompt</dt><dd className="m-0">Conversation through stdin</dd>
       <dt>MCP</dt><dd className="m-0">dohc adds its own server for replies.</dd>
