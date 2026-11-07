@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -41,6 +42,21 @@ describe("read-only reason on the text and CSV chips", () => {
   const SHARE = "This document is shared with you to read.";
   const TOO_LARGE = "This file is too large to edit in dohc.";
 
+  it.each([false, true])("describes why the Markdown toggle is disabled, truncated: %s", async (truncated) => {
+    bridgeMock.readWorkspaceText.mockResolvedValue(truncated
+      ? { text: "# Plan\n", truncated: true, contentHash: null }
+      : { text: "# Plan\n", truncated: false, contentHash: TEST_CONTENT_HASH });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="plan.md" readOnly={!truncated} />);
+    const toggle = await screen.findByRole("button", { name: "Edit", description: truncated ? TOO_LARGE : SHARE });
+    expect(toggle.getAttribute("title")).toBe(truncated ? TOO_LARGE : SHARE);
+    toggle.focus();
+    await user.keyboard("{Enter} ");
+    await user.click(toggle);
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   // No header repeats the file above the page (its tab names it); the chip
   // says its state.
   for (const [path, testId] of [
@@ -68,7 +84,7 @@ describe("read-only reason on the text and CSV chips", () => {
       render(<FileInspector workspaceId="ws-1" path={path} />);
       const chip = await screen.findByTestId(testId);
       expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
-      expect(chip.textContent).toBe("Read-only");
+      expect(chip.textContent).toBe("Too large to edit");
       expect(chip.getAttribute("title")).toBe(TOO_LARGE);
       expect(chip.dataset.state).toBe("saved");
     });

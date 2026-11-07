@@ -26,10 +26,10 @@ import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
 // shrink. `status` (a save state that needs the person, a slow open's
 // "Opening…") sits left of them and gives way first, before the tab names:
 // its words can change width without moving a control, and in a narrow pane
-// it ends in an ellipsis. A status with nothing visible, such as a calm save
+// a state mark shows only its mark. A status with nothing visible, such as a calm save
 // state or a quick open kept for screen readers, draws no box, so loading,
-// ready and failed views take the same width. Outside an editor group, as on the states page, they draw
-// in a row of their own.
+// ready and failed views take the same width. Outside an editor group, they
+// draw in a row of their own.
 //
 // `onRun` is for an app's entry file: Run opens the app's local preview. It
 // stands left of Share, so when it arrives nothing right of it moves.
@@ -86,6 +86,8 @@ export function ViewActions(props: {
   return slot ? createPortal(content, slot) : null;
 }
 
+export const LOSSY_NOTE_TITLE = "This note has parts dohc can't show.";
+
 export const OPENING_TITLE = "You can edit this document when it finishes opening.";
 
 // The wait before a slow open says so, the same wait as the loading lines'
@@ -136,10 +138,14 @@ export function DocumentControls(props: {
         type="button"
         data-testid={toggle.testId}
         aria-pressed={toggle.pressed}
-        disabled={toggle.disabled}
+        disabled={toggle.disabled && !toggle.title}
+        aria-disabled={toggle.disabled && !!toggle.title || undefined}
         title={toggle.title}
-        onClick={toggle.onClick}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        onClick={() => {
+          if (toggle.disabled) return;
+          toggle.onClick?.();
+        }}
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
       >
         {toggle.label}
       </button>
@@ -291,6 +297,24 @@ export function ReadOnlyPropertiesFlag(props: {
   );
 }
 
+export function LossyNoteNoticeView(props: { held?: boolean; children: ReactNode }) {
+  return (
+    <div
+      data-testid="lossy-note-notice"
+      role="status"
+      className={`flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] ${props.held ? "text-warning" : "text-muted"}`}
+    >
+      <span className="flex min-w-0 items-center gap-1">
+        <Lock aria-hidden size={12} className="shrink-0" />
+        {props.held
+          ? "dohc held a change, because saving it would rewrite parts it can't show."
+          : LOSSY_NOTE_TITLE}
+      </span>
+      <span className="flex shrink-0 items-center gap-3">{props.children}</span>
+    </div>
+  );
+}
+
 // A lossy note (CONTEXT.md) opens read-only. The way forward is the system's
 // app for the file, which edits it without dohc's editor.
 export function LossyNoteNotice(props: {
@@ -332,18 +356,8 @@ export function LossyNoteNotice(props: {
     : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
     : "dohc could not confirm that History can restore the original.";
   return (
-    <div
-      data-testid="lossy-note-notice"
-      role="status"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
-    >
-      <span className="flex min-w-0 items-center gap-1">
-        <Lock aria-hidden size={12} className="shrink-0" />
-        {props.held
-          ? "dohc held a change to this note. Saving it would also change parts dohc can't show."
-          : "dohc can't edit this note yet without changing parts it can't show."}
-      </span>
-      <span className="flex shrink-0 items-center gap-3">
+    <>
+      <LossyNoteNoticeView held={props.held}>
         <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
         {props.onEditAnyway ? (
           <button
@@ -353,12 +367,12 @@ export function LossyNoteNotice(props: {
               setOpened((count) => count + 1);
               setConfirming(true);
             }}
-            className="whitespace-nowrap text-subtle hover:text-ink"
+            className="whitespace-nowrap text-muted hover:text-ink"
           >
             Edit anyway
           </button>
         ) : null}
-      </span>
+      </LossyNoteNoticeView>
       {confirming && props.onEditAnyway ? (
         <ConfirmDialog
           title="Edit this note anyway?"
@@ -379,7 +393,7 @@ export function LossyNoteNotice(props: {
           </p>
         </ConfirmDialog>
       ) : null}
-    </div>
+    </>
   );
 }
 

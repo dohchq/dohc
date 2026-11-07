@@ -170,14 +170,14 @@ describe("CSV view actions", () => {
   });
 
   it.each([
-    ["read-only", { readOnly: true }, "This document is shared with you to read."],
-    ["too large", { truncated: true }, "This file is too large to edit in dohc."],
-  ])("shows a %s table with its mark, without add controls, and with Import disabled", (_, lock, title) => {
+    ["read-only", { readOnly: true }, "This document is shared with you to read.", "Read-only"],
+    ["too large", { truncated: true }, "This file is too large to edit in dohc.", "Too large to edit"],
+  ])("shows a %s table with its mark, without add controls, and with Import disabled", (_, lock, title, label) => {
     render(<CsvView {...csvFile("ws-1", "data.csv", "name\nAda")} {...lock} onOpenPath={vi.fn()} />);
 
     const state = screen.getByTestId("csv-save-state");
     expect(state.className).not.toContain("sr-only");
-    expect(state.textContent).toBe("Read-only");
+    expect(state.textContent).toBe(label);
     expect(state.title).toBe(title);
     expect(screen.queryByTestId("csv-add-row")).toBeNull();
     expect(screen.queryByTestId("csv-add-column")).toBeNull();

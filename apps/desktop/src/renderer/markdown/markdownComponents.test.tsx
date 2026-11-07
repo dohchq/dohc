@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IncrementalMarkdownDocument } from "./IncrementalMarkdownDocument";
 import { MARKDOWN_COMPONENTS } from "./markdownComponents";
@@ -8,6 +9,7 @@ vi.mock("../bridge", () => ({ bridge: vi.fn() }));
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 const TABLE = [
@@ -176,5 +178,66 @@ describe("read table row heights", () => {
     expect(view.container.textContent).not.toContain("dohc:table");
     view.rerender(<IncrementalMarkdownDocument body={body("2:120")} components={MARKDOWN_COMPONENTS} />);
     expect(rowHeights(view.container)).toEqual(["", "", "120px"]);
+  });
+});
+
+describe("MARKDOWN_COMPONENTS code blocks", () => {
+  const TS_BLOCK = "```typescript\nconst a = 1;\nconst b = `two`;\n```";
+
+  it("names a known language and offers Copy code", () => {
+    const view = renderMarkdown(TS_BLOCK);
+
+    const toolbar = view.container.querySelector(".dohc-code-block-toolbar")!;
+    expect(toolbar.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe("TypeScript");
+    expect(within(toolbar as HTMLElement).getByRole("button", { name: "Copy code" })).toBeTruthy();
+  });
+
+  it("shows no language for a plain block", () => {
+    const view = renderMarkdown("```\nplain words\n```");
+
+    expect(view.container.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe("");
+    expect(view.getByRole("button", { name: "Copy code" })).toBeTruthy();
+  });
+
+  it("shows an unknown language by its own name", () => {
+    const view = renderMarkdown("```elixir\nIO.puts(1)\n```");
+
+    expect(view.container.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe("elixir");
+  });
+
+  it("puts the toolbar just before its pre, where the editor's widget sits", async () => {
+    // Over the incremental threshold, so the blocks render in several chunks.
+    const filler = `${"padding paragraph ".repeat(60)}\n\n`.repeat(40);
+    const view = renderMarkdown(`${TS_BLOCK}\n\n${filler}${"```\nlast\n```"}`);
+
+    // The last block arrives with the idle backfill, in a later chunk.
+    await waitFor(() => expect(view.container.querySelectorAll("pre")).toHaveLength(2));
+    const pres = [...view.container.querySelectorAll("pre")];
+    for (const pre of pres) {
+      expect(pre.parentElement).toBe(view.container);
+      expect(pre.previousElementSibling?.className).toBe("dohc-code-block-toolbar");
+    }
+  });
+
+  it("copies the block's text", async () => {
+    userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const view = renderMarkdown(TS_BLOCK);
+
+    await act(async () => view.getByRole("button", { name: "Copy code" }).click());
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("const a = 1;\nconst b = `two`;");
+  });
+
+  it("reaches Copy code with Tab and copies with Enter or Space", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const view = renderMarkdown(TS_BLOCK);
+
+    await user.tab();
+    expect(document.activeElement).toBe(view.getByRole("button", { name: "Copy code" }));
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(writeText).toHaveBeenLastCalledWith("const a = 1;\nconst b = `two`;");
   });
 });

@@ -623,7 +623,7 @@ describe("shared view editing", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
-    return toggle.hasAttribute("disabled");
+    return toggle.hasAttribute("disabled") || toggle.getAttribute("aria-disabled") === "true";
   }
 
   for (const shareView of [
@@ -691,6 +691,7 @@ describe("shared view editing", () => {
     const toggle = await screen.findByTestId("markdown-edit-toggle");
     await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     expect(toggle.hasAttribute("disabled")).toBe(false);
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
       "Chats are read-only in this shared view.",
     );

@@ -109,6 +109,9 @@ describe("WCAG AA contrast, both modes", () => {
   }> = [
     { fg: "ink", bg: "bg", min: 4.5 },
     { fg: "muted", bg: "bg", min: 4.5 },
+    // A menu's hints and empty line sit on its panel. On an active row,
+    // the state-fill test below covers them.
+    { fg: "muted", bg: "panel", min: 4.5 },
     { fg: "ink", bg: "panel", min: 4.5 },
     { fg: "ink", bg: "panel2", min: 4.5 },
     // Olive is text (an agent's name) on every surface a chat or history

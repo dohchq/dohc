@@ -81,12 +81,13 @@ describe("StateMark", () => {
   });
 
   it("keeps the stored state when a different row is shown", () => {
-    // A disabled editor over a saved draft: the chip reads "Read-only" but
+    // A disabled editor over a saved draft: the chip says why, but
     // the shell still sees the draft's own state.
     render(<StateMark testId="mark" state="saved" shown="too-large" />);
     const chip = screen.getByTestId("mark");
     expect(chip.getAttribute("data-state")).toBe("saved");
-    expect(chip.textContent).toBe("Read-only");
+    expect(chip.textContent).toBe("Too large to edit");
+    expect(SAVE_STATE["too-large"].mark).toBe("held");
     expect(chip.getAttribute("title")).toBe("This file is too large to edit in dohc.");
   });
 
@@ -95,9 +96,17 @@ describe("StateMark", () => {
     expect(screen.getByTestId("mark").getAttribute("title")).toBe("The disk is full.");
   });
 
+  it.each(KEYS)("keeps the %s label text and title", (key) => {
+    render(<StateMark testId="mark" state={key} shown={key} truncate />);
+    const chip = screen.getByTestId("mark");
+    expect(chip.contains(screen.getByText(SAVE_STATE[key].label))).toBe(true);
+    expect(chip.textContent).toBe(SAVE_STATE[key].label);
+    expect(chip.title).toBe(SAVE_STATE[key].title ?? "");
+  });
+
   // jsdom lays nothing out, so this reads the rules that size the header: a
-  // narrow window cuts the chip's label, never Try again.
-  it("keeps Try again whole in a narrow header and cuts the chip's label instead", () => {
+  // narrow row hides the chip's words, never Try again.
+  it("keeps Try again whole beside a state mark", () => {
     const { container } = render(
       <ViewActions status={<StateMark testId="mark" truncate state="read-only" shown="read-only-transition" onRetry={() => undefined} />} />,
     );

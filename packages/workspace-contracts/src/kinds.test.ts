@@ -47,6 +47,7 @@ describe("file kind records", () => {
     Text: "file-type",
     Drawing: "pen-tool",
     Image: "image",
+    Audio: "file-headphone",
     Database: "database",
   };
 
@@ -56,7 +57,7 @@ describe("file kind records", () => {
       expect(record.glyphId, record.displayKind).toBe(DRAWING_KINDS[record.name] ?? "file");
     }
     expect(records.filter((record) => !(record.name in DRAWING_KINDS)).map((record) => record.displayKind))
-      .toEqual(["audio", "pdf", "binary"]);
+      .toEqual(["pdf", "binary"]);
     for (const name of Object.keys(DRAWING_KINDS)) {
       expect(records.map((record) => record.name)).toContain(name);
     }
@@ -74,7 +75,7 @@ describe("file kind records", () => {
     ["plan.excalidraw", "Drawing", "pen-tool"],
     ["photo.png", "Image", "image"],
     ["data.sqlite", "Database", "database"],
-    ["memo.mp3", "Audio", "file"],
+    ["memo.mp3", "Audio", "file-headphone"],
     ["paper.pdf", "PDF", "file"],
     ["archive.bin", "File", "file"],
   ])("uses the drawing's name and glyph for %s", (path, name, glyphId) => {
