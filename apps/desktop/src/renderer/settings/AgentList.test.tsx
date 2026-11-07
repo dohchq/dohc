@@ -73,13 +73,42 @@ it("shows each agent with its controls, and an agent you run with no Check and n
   expect(screen.getAllByTestId("agent-row").map((element) => element.dataset.agentId)).toEqual(["default", "codex", "terminal"]);
   const claude = within(row("Claude Code"));
   expect(claude.getByRole("button", { name: "Check" })).toBeTruthy();
-  expect(claude.getByRole("switch", { name: "Turn on Claude Code" }).getAttribute("aria-checked")).toBe("true");
+  expect(claude.getByRole("switch", { name: "Claude Code" }).getAttribute("aria-checked")).toBe("true");
   expect(claude.getByRole("button", { name: "Claude Code actions" })).toBeTruthy();
   const terminal = within(row("Claude in Terminal"));
   expect(terminal.getByText("Through MCP")).toBeTruthy();
   expect(terminal.queryByRole("button", { name: "Check" })).toBeNull();
   expect(terminal.queryByRole("switch")).toBeNull();
   expect(terminal.getByRole("button", { name: "Claude in Terminal actions" })).toBeTruthy();
+});
+
+it("names an agent's switch by the agent, says what a click does, and dims a row that's off", () => {
+  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
+  const { rerender } = renderList({ settings: codexOff });
+  const on = within(row("Claude Code")).getByRole("switch", { name: "Claude Code" });
+  expect(on.getAttribute("aria-checked")).toBe("true");
+  expect(on.title).toBe("Turn off Claude Code");
+  // Read after the name, so it leaves the name out.
+  expect(on.getAttribute("aria-description")).toBe("Turn off");
+  const off = within(row("Codex")).getByRole("switch", { name: "Codex" });
+  expect(off.getAttribute("aria-checked")).toBe("false");
+  expect(off.title).toBe("Turn on Codex");
+  expect(off.getAttribute("aria-description")).toBe("Turn on");
+  // The off row's name and mark go muted; the on row keeps its ink.
+  const name = (agent: string) => within(row(agent)).getByText(agent).closest("button")!;
+  const mark = (agent: string) => row(agent).querySelector(`span[title="${agent}"]`)!;
+  expect(name("Codex").className).toContain("text-muted");
+  expect(name("Codex").className).not.toContain("text-ink");
+  expect(mark("Codex").getAttribute("class")).toContain("opacity-50");
+  expect(name("Claude Code").className).toContain("text-ink");
+  expect(mark("Claude Code").getAttribute("class")).not.toContain("opacity-50");
+
+  rerender({ settings: SETTINGS });
+  const turnedOn = within(row("Codex")).getByRole("switch", { name: "Codex" });
+  expect(turnedOn.getAttribute("aria-checked")).toBe("true");
+  expect(turnedOn.title).toBe("Turn off Codex");
+  expect(name("Codex").className).toContain("text-ink");
+  expect(mark("Codex").getAttribute("class")).not.toContain("opacity-50");
 });
 
 it("keeps an entry dohc could not use in its place, with its problem and a way to the file", async () => {
@@ -564,7 +593,7 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   expect(onError).not.toHaveBeenCalled();
   expect(screen.queryByText("Didn't reply.")).toBeNull();
   // The switch still works.
-  await userEvent.click(within(row("Codex")).getByRole("switch", { name: "Turn on Codex" }));
+  await userEvent.click(within(row("Codex")).getByRole("switch", { name: "Codex" }));
   expect(onSave).toHaveBeenCalledTimes(2);
 });
 
@@ -692,7 +721,7 @@ it("leaves focus alone when trust comes from somewhere else, or the person moved
 
   cleanup();
   const pressed = await pressTrust();
-  const toggle = within(row("Codex")).getByRole("switch", { name: "Turn on Codex" });
+  const toggle = within(row("Codex")).getByRole("switch", { name: "Codex" });
   act(() => toggle.focus());
   pressed.rerender({ trust: { trusted: true, asking: false, onTrust: pressed.onTrust } });
   expect(document.activeElement).toBe(toggle);
