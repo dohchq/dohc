@@ -352,7 +352,7 @@ describe("history page", () => {
     renderShell(bridge);
     await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
-    expect(await screen.findByText("Renamed to b.md")).toBeTruthy();
+    expect((await screen.findByTestId("engine-moment-summary")).textContent).toBe("Renamed to b.md");
     await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
     await user.click(screen.getByTestId("engine-moment-open"));
     expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
