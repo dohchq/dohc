@@ -290,13 +290,13 @@ describe("renderer rows use the full state fills", () => {
     expect(offenders).toEqual([]);
   });
 
-  // bg-selected shows subtle text in muted. A source that paints the selected
-  // fill itself, like Ref's gradient, must do the same.
-  it("shows subtle text in muted wherever a source paints the selected fill itself", () => {
+  // bg-selected shows subtle text in muted. A source that paints a selected
+  // fill itself, like Ref's selection-tint gradient, must do the same.
+  it("shows subtle text in muted wherever a source paints a selected fill itself", () => {
     const root = fileURLToPath(new URL(".", import.meta.url));
     const painters = readdirSync(root, { recursive: true, encoding: "utf8" })
       .filter((name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name))
-      .filter((name) => /var\(--(color|dohc)-selected\)/.test(readFileSync(join(root, name), "utf8")));
+      .filter((name) => /var\(--(color|dohc)-(selected|selection)\)/.test(readFileSync(join(root, name), "utf8")));
     expect(painters.map((name) => name.replace(/\\/g, "/"))).toContain("ui/Ref.tsx");
     for (const name of painters) {
       expect(readFileSync(join(root, name), "utf8"), name).toContain("[--dohc-subtle:var(--dohc-muted)]");
