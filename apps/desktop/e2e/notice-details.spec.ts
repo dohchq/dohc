@@ -4,7 +4,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspace";
 
-// The states page's Details part, drawn by a real browser: a toast and a
+// The states page's notice-details part, drawn by a real browser: a toast and a
 // Notices row with Details closed, open, and open with a report long enough to
 // scroll. Opening one from the keyboard keeps focus on Details, and the next
 // Tab reaches Copy details. With UI_AUDIT_SHOT_DIR set, it saves both themes at
@@ -16,7 +16,7 @@ const BLEED = 16;
 async function shoot(page: Page, part: Locator, name: string) {
   if (!SHOT_DIR) return;
   const box = await part.boundingBox();
-  if (!box) throw new Error("the details part must be on the page");
+  if (!box) throw new Error("the notice-details part must be on the page");
   const x = box.x - BLEED;
   const y = box.y - BLEED;
   await page.screenshot({ scale: "css", clip: { x, y, width: box.width + 2 * BLEED, height: Math.ceil(box.height + 2 * BLEED) }, path: join(SHOT_DIR, `${name}.png`) });
@@ -63,7 +63,7 @@ test("a notice's Details opens its report in place, scrolls a long one, and keep
     await page.setViewportSize({ width: 1440, height: await page.evaluate(() => document.documentElement.scrollHeight) });
 
     for (const theme of ["light", "dark"] as const) {
-      const part = page.getByTestId(`states-${theme}`).locator('[data-part="details"]');
+      const part = page.getByTestId(`states-${theme}`).locator('[data-part="notice-details"]');
       const toasts = part.getByTestId("workspace-shell-error");
       const closedRow = part.getByTestId("notice-details-false");
       await expect(toasts).toHaveCount(3);
