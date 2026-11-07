@@ -24,6 +24,7 @@ import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
+import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 
 export type NoticeAction = {
   label: string;
@@ -502,6 +503,82 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
+// A synced workspace that can't sync on this computer's session. No row
+// blames the server, and none has a dismiss: each stays until sync can run
+// again. A failure's copy holds exactly what its row says. Not connected is
+// a choice, with nothing to report.
+function syncBlockedNotice(input: {
+  id: string;
+  tone: Notice["tone"];
+  title: string;
+  body: string;
+  actions: Array<NoticeAction | null>;
+  Icon: Notice["Icon"];
+}): Notice {
+  const actions = input.actions.filter((action): action is NoticeAction => action !== null);
+  return {
+    id: input.id,
+    tone: input.tone,
+    title: input.title,
+    body: input.body,
+    ...(actions.length > 0 ? { actions } : {}),
+    ...(input.tone === "danger" ? { copyText: `${input.title}\n${input.body}` } : {}),
+    Icon: input.Icon,
+  };
+}
+
+// Nobody is connected. Disconnecting is a choice, so the row is neutral and
+// offers the way back: the same connect flow as Settings' Connect server.
+const NOT_CONNECTED_TITLE = "Not connected to your server";
+export function notConnectedNotice(input: {
+  onConnectServer: (() => void) | undefined;
+}): Notice {
+  return syncBlockedNotice({
+    id: "not-connected",
+    tone: "neutral",
+    title: NOT_CONNECTED_TITLE,
+    body: `${SYNC_NOT_CONNECTED} Your changes stay on this computer.`,
+    actions: [input.onConnectServer ? { label: "Connect server", onClick: input.onConnectServer } : null],
+    Icon: CloudOff,
+  });
+}
+
+// Signed in, but not as the account that syncs this workspace. Try again
+// reads the signed-in account's session again, the same enable Settings runs.
+const ACCOUNT_UNCONFIRMED_TITLE = "Couldn't confirm this workspace's account";
+export function accountUnconfirmedNotice(input: {
+  onTryAgain: (() => void) | undefined;
+  onOpenSyncSettings: (() => void) | undefined;
+}): Notice {
+  return syncBlockedNotice({
+    id: "account-unconfirmed",
+    tone: "danger",
+    title: ACCOUNT_UNCONFIRMED_TITLE,
+    body: `${SYNC_UNCONFIRMED_ACCOUNT} Your changes stay on this computer.`,
+    actions: [
+      input.onTryAgain ? { label: "Try again", onClick: input.onTryAgain } : null,
+      input.onOpenSyncSettings ? { label: "Sync settings", onClick: input.onOpenSyncSettings } : null,
+    ],
+    Icon: AlertTriangle,
+  });
+}
+
+// The server stopped accepting this computer's sign-in. Sign in again
+// renews it at the same server, the same action as Settings' row.
+const SIGN_IN_EXPIRED_TITLE = "Your sign-in expired";
+export function signInExpiredNotice(input: {
+  onSignInAgain: (() => void) | undefined;
+}): Notice {
+  return syncBlockedNotice({
+    id: "sign-in-expired",
+    tone: "danger",
+    title: SIGN_IN_EXPIRED_TITLE,
+    body: `${SYNC_SIGN_IN_EXPIRED} Your changes stay on this computer.`,
+    actions: [input.onSignInAgain ? { label: "Sign in again", onClick: input.onSignInAgain } : null],
+    Icon: AlertTriangle,
+  });
+}
+
 // An oversized unclaimed lineage shares its latest saved file at each push,
 // never its live edits. An open copy elsewhere takes it only after closing.
 type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
@@ -832,6 +909,16 @@ export function NoticeCenter(props: {
   conflictSummaries: string[];
   onOpenHistory: () => void;
   onOpenSettings: () => void;
+  // While nobody is connected: Settings' connect flow.
+  onConnectServer?: () => void;
+  // While the server stopped accepting the sign-in: the same Sign in again
+  // as Settings' row.
+  onSignInAgain?: () => void;
+  // While dohc can't confirm the workspace's account: Try again reads the
+  // account again, the way Settings' Try again does, and Sync settings opens
+  // Settings at the workspace's sync row.
+  onConfirmSyncAccount?: () => void;
+  onOpenSyncSettings?: () => void;
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
@@ -1395,14 +1482,15 @@ export function NoticeCenter(props: {
         } Your changes stay on this computer.`,
         Icon: CloudOff,
       });
-    } else if (state === "cloud-disconnected") {
-      next.push({
-        id: "cloud-disconnected",
-        tone: "warning",
-        title: "Server disconnected",
-        body: "Local work is safe. Reconnect your server when you want sync again.",
-        Icon: CloudOff,
-      });
+    } else if (state === "not-connected") {
+      next.push(notConnectedNotice({ onConnectServer: props.onConnectServer }));
+    } else if (state === "sign-in-expired") {
+      next.push(signInExpiredNotice({ onSignInAgain: props.onSignInAgain }));
+    } else if (state === "account-unconfirmed") {
+      next.push(accountUnconfirmedNotice({
+        onTryAgain: props.onConfirmSyncAccount,
+        onOpenSyncSettings: props.onOpenSyncSettings,
+      }));
     }
 
     for (const pending of props.syncStatus?.ownerAdmissionPending ?? []) {
@@ -1528,6 +1616,10 @@ export function NoticeCenter(props: {
     props.onOpenHistory,
     props.onRefreshShareView,
     props.onOpenSettings,
+    props.onConnectServer,
+    props.onSignInAgain,
+    props.onConfirmSyncAccount,
+    props.onOpenSyncSettings,
     props.onRebuildEngineStore,
     props.onReviewShareChanges,
     props.shareChangeNotices,

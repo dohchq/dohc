@@ -3,7 +3,7 @@ import { Sparkles, TriangleAlert } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
-import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { formatChatTime } from "../time";
@@ -36,6 +36,11 @@ export type CloudSettings = {
   onChanged: () => void;
   // Opens the connect flow.
   onConnect: () => void;
+  // The server stopped accepting this computer's sign-in, which only the
+  // workspace's sync status knows: the saved session still matches.
+  signInExpired?: boolean;
+  // Signs in again to the same server, with no Disconnect first.
+  onSignInAgain?: () => void;
   // The same guard as onChanged applies.
   onError: (error: ConnectionErrorReport) => void;
   // A failure that reaches every workspace, such as Disconnect's. It goes to
@@ -105,8 +110,10 @@ export function CloudSyncSettings(props: {
     ...(status?.syncPause ? { syncPause: status.syncPause } : {}),
   };
   // Sync is on, but nothing syncs. A switch can only read on or off, so the
-  // row offers Try again and Pause sync in its place.
+  // row offers Try again, or Sign in again, and Pause sync in its place.
   const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
+  const expired = sync.workspaceSynced && sync.workspaceSyncConnected && props.cloud.signInExpired === true;
+  const held = unconfirmed || expired;
   // The buttons go when either action works or the account is confirmed on
   // its own. Focus they held moves to the switch that takes their place once
   // it can be used, or to Connect server while signed out, where the switch
@@ -117,12 +124,12 @@ export function CloudSyncSettings(props: {
   const connectButton = useRef<HTMLButtonElement | null>(null);
   const actionHeldFocus = useRef(false);
   useEffect(() => {
-    if (unconfirmed || !actionHeldFocus.current) return;
+    if (held || !actionHeldFocus.current) return;
     const target = syncSwitch.current?.disabled === false ? syncSwitch.current : connectButton.current;
     if (!target) return;
     actionHeldFocus.current = false;
     if (document.activeElement === document.body) target.focus();
-  }, [unconfirmed, syncBusy, status]);
+  }, [held, syncBusy, status]);
   const holdsFocus = {
     onFocus: () => {
       actionHeldFocus.current = true;
@@ -135,13 +142,13 @@ export function CloudSyncSettings(props: {
   // The join handle: one copyable line carrying the workspace id and its
   // relay. Absent when anything it needs is missing.
   const syncCode = useMemo(() => {
-    if (!sync.workspaceSynced || !sync.workspaceSyncConnected || !relayUrl) return null;
+    if (!sync.workspaceSynced || !sync.workspaceSyncConnected || expired || !relayUrl) return null;
     try {
       return buildSyncCode({ workspaceId: props.workspaceId, relayUrl });
     } catch {
       return null;
     }
-  }, [props.workspaceId, relayUrl, sync.workspaceSyncConnected, sync.workspaceSynced]);
+  }, [expired, props.workspaceId, relayUrl, sync.workspaceSyncConnected, sync.workspaceSynced]);
 
   async function enableSync() {
     const request = requests.next();
@@ -297,10 +304,14 @@ export function CloudSyncSettings(props: {
             title="Sync this workspace"
             testId="settings-row-sync-workspace"
             description={
-              unconfirmed ? (
-                <span data-testid="cloud-workspace-relink" className="flex gap-1 text-danger">
+              unconfirmed && !status.connected ? (
+                // Disconnecting is a choice, not a fault: Connect server sits
+                // in the row above.
+                <span data-testid="cloud-workspace-not-connected">{SYNC_NOT_CONNECTED}</span>
+              ) : held ? (
+                <span data-testid={expired ? "cloud-workspace-sign-in-expired" : "cloud-workspace-relink"} className="flex gap-1 text-danger">
                   <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
-                  <span>{SYNC_UNCONFIRMED_ACCOUNT}</span>
+                  <span>{expired ? SYNC_SIGN_IN_EXPIRED : SYNC_UNCONFIRMED_ACCOUNT}</span>
                 </span>
               ) : syncPause || needsServer ? (
                 <>
@@ -316,13 +327,23 @@ export function CloudSyncSettings(props: {
               ) : undefined
             }
           >
-            {unconfirmed ? (
+            {held ? (
               <>
                 {/* Enabling again reads this account's saved session, which
                     resumes sync when it owns the workspace. Another account
                     gets main's reason in a notice, and Disconnect above is
                     the way to the right one. */}
-                {status.connected ? (
+                {expired ? (
+                  // Main stopped this workspace's engine on the refused
+                  // sign-in. A new sign-in rebuilds it; enabling again can't.
+                  <SecondaryButton
+                    data-testid="cloud-sign-in-again"
+                    disabled={syncBusy !== null || !props.cloud.onSignInAgain}
+                    onClick={() => props.cloud.onSignInAgain?.()}
+                  >
+                    Sign in again
+                  </SecondaryButton>
+                ) : status.connected ? (
                   <SecondaryButton
                     data-testid="cloud-relink-workspace"
                     disabled={syncBusy !== null}
@@ -377,7 +398,7 @@ export function CloudSyncSettings(props: {
               onPassphrase={setPassphrase}
               onSubmit={() => {
                 // Try again asked for the passphrase; the form goes once it unlocks.
-                if (unconfirmed) actionHeldFocus.current = true;
+                if (held) actionHeldFocus.current = true;
                 void enableSync();
               }}
             />

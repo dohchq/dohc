@@ -519,6 +519,104 @@ describe("CloudLogin", () => {
     expect(screen.getByTestId("settings-row-account").textContent).toContain("ice@dohc.dev");
   });
 
+  // The server stopped accepting the session here. Signing in again starts
+  // the same sign-in at that server with no Disconnect first, and its
+  // approval reaches the host like any sign-in.
+  it("signs in again to the session's server without disconnecting", async () => {
+    vi.useFakeTimers();
+    const onConnected = vi.fn();
+    bridgeMock.cloudStatus.mockResolvedValue(CONNECTED);
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "complete", email: "ice@dohc.dev" });
+
+    render(<CloudLogin renew handOffSession onConnected={onConnected} />);
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://dohc.example.test" });
+    expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD");
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    expect(screen.queryByTestId("cloud-connected")).toBeNull();
+    expect(onConnected).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.cloudLogout).not.toHaveBeenCalled();
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+  });
+
+  // While signing in again connects, the panel keeps the session's server in
+  // view with its button busy, never the form for another address.
+  it("keeps the session's server in view while signing in again connects", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue(CONNECTED);
+    bridgeMock.cloudLoginStart.mockReturnValueOnce(new Promise(() => {}));
+
+    render(<CloudLogin renew handOffSession />);
+
+    const start = await screen.findByTestId("cloud-renew-start");
+    expect(screen.getByTestId("cloud-renew-server").textContent).toBe("https://dohc.example.test");
+    expect(start.textContent).toBe("Connecting…");
+    expect((start as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+  });
+
+  // A failed or refused renewal stays at the session's server: the panel
+  // offers Sign in again there, never an address to change, and a notice's
+  // Try again starts at the same server.
+  it.each([
+    ["the start fails", () => bridgeMock.cloudLoginStart.mockRejectedValueOnce(new Error("offline")), null],
+    ["the poll fails", () => bridgeMock.cloudLoginPoll.mockRejectedValueOnce(new Error("offline")), null],
+    ["the browser denies it", () => bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "denied" }), "The request was denied in the browser."],
+    ["the code expires", () => bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "expired" }), "The code expired. Start again."],
+  ] as const)("signs in again at the same server after %s", async (_, arrange, refusal) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const onConnectionError = vi.fn();
+    bridgeMock.cloudStatus.mockResolvedValue(CONNECTED);
+    arrange();
+
+    render(<CloudLogin renew handOffSession onConnectionError={onConnectionError} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    const renew = await screen.findByTestId("cloud-renew");
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    expect(within(renew).getByTestId("cloud-renew-server").textContent).toBe("https://dohc.example.test");
+    expect(screen.queryByTestId("cloud-login-refused")?.textContent ?? null).toBe(refusal);
+    for (const [report] of onConnectionError.mock.calls) expect(report.serverUrl).toBe("https://dohc.example.test");
+    fireEvent.click(within(renew).getByTestId("cloud-renew-start"));
+    await waitFor(() => expect(bridgeMock.cloudLoginStart).toHaveBeenCalledTimes(2));
+    for (const [request] of bridgeMock.cloudLoginStart.mock.calls) {
+      expect(request).toEqual({ serverUrl: "https://dohc.example.test" });
+    }
+    expect(bridgeMock.cloudLogout).not.toHaveBeenCalled();
+  });
+
+  // Asking again about the session a renewal made doesn't start another.
+  it("doesn't sign in again when the check after a renewal runs again", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const onConnected = vi.fn();
+    const onConnectionError = vi.fn();
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce(CONNECTED)
+      .mockRejectedValueOnce(new Error("engine unavailable"))
+      .mockResolvedValue(CONNECTED);
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "complete", email: "ice@dohc.dev" });
+
+    render(<CloudLogin renew handOffSession onConnected={onConnected} onConnectionError={onConnectionError} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await waitFor(() => expect(onConnectionError).toHaveBeenCalledTimes(1));
+    act(() => {
+      onConnectionError.mock.calls[0]?.[0].retry();
+    });
+
+    await waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    expect(bridgeMock.cloudLoginStart).toHaveBeenCalledTimes(1);
+  });
+
   // The approval happened in the browser, but only main can say what this
   // machine's session is. A failed refresh is an operational failure, so the
   // panel stops claiming to know and the notice carries the way to ask again.

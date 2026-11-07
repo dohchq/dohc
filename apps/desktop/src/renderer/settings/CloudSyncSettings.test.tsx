@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
 import {
   CloudSyncSettings,
@@ -113,6 +113,12 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("settings-row-account")).toBeNull();
     expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
+    // Disconnecting was a choice: the line names the way back, not a fault.
+    const row = within(screen.getByTestId("settings-row-sync-workspace"));
+    expect(row.getByTestId("cloud-workspace-not-connected").textContent).toBe(SYNC_NOT_CONNECTED);
+    expect(row.queryByTestId("cloud-workspace-relink")).toBeNull();
+    expect(row.queryByText(/confirm/)).toBeNull();
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Pause sync"]);
 
     const pause = screen.getByRole("button", { name: "Pause sync" });
     pause.focus();
@@ -648,7 +654,36 @@ describe("CloudSyncSettings", () => {
     expect(mark.getAttribute("class")).toContain("lucide-triangle-alert");
     expect(mark.getAttribute("aria-hidden")).toBe("true");
     expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Pause sync"]);
+    expect(row.queryByTestId("cloud-workspace-not-connected")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+  });
+
+  // The saved session still matches, but the server stopped accepting it, so
+  // a switch would read on while nothing syncs. Sign in again takes Try
+  // again's place, and enabling again is never asked for.
+  it("shows Sign in again and Pause sync, not the switch, once the sign-in expired", () => {
+    const onSignInAgain = vi.fn();
+    const { rerender } = render(
+      <CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: true, onSignInAgain })} />,
+    );
+
+    const row = within(screen.getByTestId("settings-row-sync-workspace"));
+    expect(row.queryByRole("switch")).toBeNull();
+    const line = row.getByTestId("cloud-workspace-sign-in-expired");
+    expect(line.textContent).toBe(SYNC_SIGN_IN_EXPIRED);
+    expect(line.className).toContain("text-danger");
+    expect(row.queryByText(SYNC_UNCONFIRMED_ACCOUNT)).toBeNull();
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Sign in again", "Pause sync"]);
+    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+    fireEvent.click(row.getByRole("button", { name: "Sign in again" }));
+    expect(onSignInAgain).toHaveBeenCalledOnce();
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+    expect(bridgeMock.cloudStopSync).not.toHaveBeenCalled();
+
+    // A new sign-in rebuilt the engine: the switch reads on again.
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: false, onSignInAgain })} />);
+    expect(screen.queryByTestId("cloud-workspace-sign-in-expired")).toBeNull();
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
   });
 
   // Pause sync is the switch's off. It saves the pause, so neither a restart

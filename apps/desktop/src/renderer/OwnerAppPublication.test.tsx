@@ -1081,13 +1081,17 @@ describe("owner app publication", () => {
       ["the workspace is not synced", () => api.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false }), () => api.cloudStatus],
       // main answers listUnavailable for the relay's not_found 404.
       ["the server does not publish apps here", () => api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? { kind: "listUnavailable" } : local([localRow])(request)), () => api.publishOwnerApp],
-      ["the sync status says the server is disconnected", () => {
-        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
-        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "cloud-disconnected" });
-      }, () => api.getSyncStatus],
       ["the sync status says the server is unreachable", () => {
         api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
         api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "sync-failed", syncFailure: { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 2 } });
+      }, () => api.getSyncStatus],
+      ["sync waits for dohc to update", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "update-required", updateRequired: "app" });
+      }, () => api.getSyncStatus],
+      ["sync waits for the server to update", () => {
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state: "update-required", updateRequired: "server" });
       }, () => api.getSyncStatus],
     ])("hides Share links when %s", async (_, arrange, decider) => {
       const reportError = vi.fn();
@@ -1106,6 +1110,23 @@ describe("owner app publication", () => {
       expect(screen.queryByRole("alert")).toBeNull();
       expect(reportError).not.toHaveBeenCalled();
     });
+
+    // The server isn't the cause when nobody is connected, dohc can't confirm
+    // the account, or the sign-in expired, so Share links says what it
+    // couldn't read instead of leaving it to the title bar.
+    it.each(["not-connected", "account-unconfirmed", "sign-in-expired"] as const)(
+      "keeps Share links with its line while the workspace can't sync (%s)",
+      async (state) => {
+        const reportError = vi.fn();
+        api.publishOwnerApp.mockImplementation(failingList("TypeError: fetch failed"));
+        api.getSyncStatus.mockResolvedValue({ ...syncedStatus, state });
+        renderLocal({ reportError });
+        await openLocal();
+        const line = await screen.findByText(linksLine);
+        expect(screen.getByRole("region", { name: "Share links" }).contains(line)).toBe(true);
+        expect(api.getSyncStatus).toHaveBeenCalledWith({ workspaceId: "ws-trip" });
+      },
+    );
 
     it.each([
       ["a 5xx", "Error: Sharing failed (503)."],
