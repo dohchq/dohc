@@ -151,7 +151,7 @@ export async function launchPreview(deliveryDir, { spawnApp = defaultSpawn, sign
     logDescriptor = openSync(logPath, "a");
     // The app keeps its own console and log handles if the launcher closes.
     child = spawnApp(executable, previewArgs(paths), { cwd: paths.data, env: previewEnvironment(env, paths, feed.url),
-      stdio: ["ignore", logDescriptor, logDescriptor], detached: true, windowsHide: true });
+      stdio: ["ignore", logDescriptor, logDescriptor], detached: true, windowsHide: false });
     closeSync(logDescriptor);
     logDescriptor = undefined;
     exited = new Promise((done) => {

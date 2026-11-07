@@ -140,6 +140,7 @@ test("the launcher keeps the app open after cancellation until it quits itself",
   const running = launchPreview(root, { signal: controller.signal, log: () => {}, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DOHC_TEST_HOME: "x" },
     spawnApp: (executable, args, options) => {
       assert.equal(executable, join(root, "app", "dohc.exe"));
+      assert.equal(options.windowsHide, false, "Windows must show the preview's GUI on its first launch.");
       spawned = spawn(process.execPath, [script, ...args, record], {
         ...options, windowsHide: true, stdio: [...options.stdio, "ipc"],
       });
