@@ -19,14 +19,21 @@ import { recordReceivedShare, recordSynced } from "./syncHistory";
 // userData; in test mode it lives under DOHC_TEST_HOME so E2E runs are
 // hermetic (gated on test env and unpackaged build).
 
-function testHome(): string | null {
+function testFolder(name: "DOHC_TEST_HOME" | "DOHC_TEST_USER_HOME"): string | null {
   return process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged
-    ? (process.env.DOHC_TEST_HOME ?? null)
+    ? (process.env[name] ?? null)
     : null;
 }
 
+function testHome(): string | null {
+  return testFolder("DOHC_TEST_HOME");
+}
+
+// The person's home folder. A test run can name one apart from its test
+// home, so that its default workspace location sits beside dohc's state
+// folder, as a person's does.
 export function effectiveHome(): string {
-  return testHome() ?? homedir();
+  return testFolder("DOHC_TEST_USER_HOME") ?? testHome() ?? homedir();
 }
 
 // Where desktop-level state files live (registry, cloud credentials):

@@ -173,7 +173,7 @@ describe("desktop workspace windows", () => {
       assertTrustedSender: () => undefined,
       app: { isPackaged: true },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-      roots: createWorkspaceRootApproval(() => "C:/home"), effectiveHome: () => "C:/home",
+      roots: createWorkspaceRootApproval(() => "C:/home"), effectiveHome: () => "C:/home", stateDir: () => "C:/home/state",
       workspaceSummaries: () => rows,
       prioritizePreferredWorkspace: (workspaces, event) =>
         f.windows.prioritizePreferredWorkspace(workspaces, event.sender),
@@ -212,11 +212,12 @@ describe("desktop workspace windows", () => {
 
   it("opens the workspace that was open when dohc quit, and the first one when that is gone", async () => {
     const home = await createTestScratch("registry-last-opened-");
+    const stateDir = await createTestScratch("registry-last-opened-state-");
     const registryFile = join(home, "state", "workspaces.json");
     const before = createRegistryStore(registryFile);
     for (const workspaceId of ["personal", "ordinary"]) {
       const { workspace: created } = await createWorkspaceFolder({
-        rootPath: join(home, workspaceId), homeDir: home, kind: "personal",
+        rootPath: join(home, workspaceId), homeDir: home, stateDir, kind: "personal",
         computer: { installId: "install-here", label: "This Mac" }, workspaceId,
       });
       before.register(created);
@@ -589,6 +590,7 @@ describe("desktop window zoom", () => {
 describe("desktop native menus", () => {
   it("refreshes native menu entries from registry writes by the create and attach IPC handlers", async () => {
     const home = await createTestScratch("registry-native-menu-");
+    const state = await createTestScratch("registry-native-menu-state-");
     const registryFile = join(home, "state", "workspaces.json");
     const registry = createRegistryStore(registryFile);
     const workspaceSummaries = () => workspaceSummariesFrom(registry.list());
@@ -600,7 +602,7 @@ describe("desktop native menus", () => {
       assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
       app: { isPackaged: true },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-      roots, effectiveHome: () => home, workspaceSummaries,
+      roots, effectiveHome: () => home, stateDir: () => state, workspaceSummaries,
       prioritizePreferredWorkspace: (rows, event) => f.windows.prioritizePreferredWorkspace(rows, event.sender),
       createWorkspaceFolder, registerPhysicalWorkspace: registry.register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
       trustNewWorkspace: async () => undefined,
@@ -628,7 +630,7 @@ describe("desktop native menus", () => {
 
     const attachedPath = roots.usableRoot(join(root, "Attached Project"));
     const { workspace: attached } = await createWorkspaceFolder({
-      rootPath: attachedPath, homeDir: home, kind: "shared", computer: { installId: "install-here", label: "This Mac" },
+      rootPath: attachedPath, homeDir: home, stateDir: state, kind: "shared", computer: { installId: "install-here", label: "This Mac" },
       workspaceId: "attached-workspace",
     });
     await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).resolves.toEqual(attached);
