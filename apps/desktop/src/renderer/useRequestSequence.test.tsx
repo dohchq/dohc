@@ -18,6 +18,17 @@ describe("request sequences", () => {
     expect(requests.isCurrent(second)).toBe(false);
   });
 
+  it("tells a request its owner cut off from one a newer request replaced", () => {
+    const hook = renderHook(() => useRequestSequence());
+    const requests = hook.result.current;
+    const replaced = requests.next();
+    const newest = requests.next();
+    expect(requests.isCutOff(newest)).toBe(false);
+    hook.unmount();
+    expect(requests.isCutOff(newest)).toBe(true);
+    expect(requests.isCutOff(replaced)).toBe(false);
+  });
+
   it("retires requests when their workspace identity changes", () => {
     const hook = renderHook(({ workspaceId }) => useRequestSequence([workspaceId]), {
       initialProps: { workspaceId: "a" },

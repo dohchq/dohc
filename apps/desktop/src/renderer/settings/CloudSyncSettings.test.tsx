@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import { Overlay } from "../Overlay";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
 import {
   CloudSyncSettings,
@@ -548,6 +549,75 @@ describe("CloudSyncSettings", () => {
     await waitFor(() =>
       expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({ workspaceId: "ws-1", passphrase: "shared passphrase" }),
     );
+  });
+
+  describe("a press outside Settings", () => {
+    const pressBackdrop = () => {
+      const backdrop = document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!;
+      fireEvent.pointerDown(backdrop);
+      fireEvent.click(backdrop);
+    };
+
+    it("stays open while a typed passphrase waits to be used, and says why after Tab to Protect", async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-present" })} />
+        </Overlay>,
+      );
+      await user.click(screen.getByTestId("cloud-protect-secrets"));
+      const input = screen.getByTestId("cloud-sync-passphrase");
+      await user.type(input, "shared passphrase");
+      // Moving to Protect is how a passphrase gets used, so the row says nothing.
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByTestId("cloud-sync-passphrase-submit"));
+      expect(screen.queryByTestId("cloud-sync-hint")).toBeNull();
+
+      await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(input);
+      expect(screen.getByTestId("cloud-sync-hint").textContent).toBe("Press Protect to use this passphrase.");
+    });
+
+    it.each([
+      ["protect", "protected-key-present", "cloud-protect-secrets", "shared passphrase", "Press Protect to use this passphrase."],
+      ["protect", "protected-key-present", "cloud-protect-secrets", "short", "Enter at least 8 characters to protect synced secrets."],
+      ["unlock", "protected-key-missing", "cloud-unlock-secrets", "shared passphrase", "Press Unlock to use this passphrase."],
+    ] as const)("says how to %s with a passphrase left in the field", async (_, secretState, start, typed, words) => {
+      const user = userEvent.setup();
+      render(
+        <Overlay onClose={vi.fn()} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: secretState })} />
+        </Overlay>,
+      );
+      await user.click(screen.getByTestId(start));
+      const input = screen.getByTestId("cloud-sync-passphrase");
+      await user.type(input, typed);
+      await user.click(document.querySelector<HTMLElement>('[data-dohc-modal="true"]')!);
+
+      expect(document.activeElement).toBe(input);
+      expect(screen.getByRole("alert").textContent).toBe(words);
+      await user.type(input, "x");
+      expect(screen.queryByTestId("cloud-sync-hint")).toBeNull();
+    });
+
+    it("closes from an empty passphrase prompt", async () => {
+      bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Passphrase required to protect synced secrets."));
+      const onClose = vi.fn();
+      render(
+        <Overlay onClose={onClose} closeOnBackdrop>
+          <CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, workspaceSecretState: "protected-key-present" })} />
+        </Overlay>,
+      );
+      fireEvent.click(syncSwitch());
+      expect((await screen.findByTestId("cloud-sync-passphrase")).getAttribute("aria-invalid")).toBe("true");
+
+      pressBackdrop();
+
+      expect(onClose).toHaveBeenCalledOnce();
+    });
   });
 
   it("unlocks protected files, then offers to protect them", async () => {
