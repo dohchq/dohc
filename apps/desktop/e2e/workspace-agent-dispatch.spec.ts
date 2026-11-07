@@ -334,7 +334,7 @@ test("a dispatched run's credential stays out of its log, History, and chat", as
       };
     }, { id: workspaceId, threadId: run.threadId });
     // The run wrote as itself, so History credits Nova, not the unnamed agent.
-    await expect.poll(async () => (await read()).moments.find((moment) => moment.path === "notes/run.md")?.authors)
+    await expect.poll(async () => (await read()).moments.find((moment) => moment.path === "notes/run.txt")?.authors)
       .toEqual([expect.objectContaining({ kind: "agent", agentId: "default" })]);
     const { messages, moments } = await read();
     expect(JSON.stringify(messages)).toContain(REPORT);
@@ -343,7 +343,7 @@ test("a dispatched run's credential stays out of its log, History, and chat", as
     const logs = join(temp.homeDir, "run-logs");
     const files = (await readdir(logs, { withFileTypes: true })).filter((entry) => entry.isFile());
     const left = await Promise.all(files.map((entry) => readFile(join(logs, entry.name), "utf8")));
-    expect(left.join("\n")).toContain("notes/run.md");
+    expect(left.join("\n")).toContain("notes/run.txt");
     for (const text of [...left, JSON.stringify(moments), JSON.stringify(messages), await page.locator("body").innerText()]) {
       expect(text).not.toContain(run.secret);
     }

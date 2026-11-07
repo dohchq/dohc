@@ -259,7 +259,7 @@ if (profileTool) {
     // The server offers these tools and nothing else.
     (names) => names.length === 2 && names.includes("dohc_write_file") && names.includes("dohc_reply_to_chat"),
     [
-      { name: "dohc_write_file", arguments: { path: "notes/run.md", content: "Run notes.\n" } },
+      { name: "dohc_write_file", arguments: { path: "notes/run.txt", content: "Run notes.\n" } },
       { name: "dohc_reply_to_chat", arguments: { threadId, runId, body: "done: checked the exports" } },
     ],
     true,
