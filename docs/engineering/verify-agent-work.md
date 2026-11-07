@@ -63,6 +63,37 @@ For native folder-dialog QA, run `pnpm qa:debug -- --native-dialogs`.
 Ask the operator to choose the printed disposable workspace, cancel a second picker, and confirm keyboard focus returns to the app.
 Record the operator's result with the session evidence. The automated picker seam does not prove native-dialog behavior.
 
+## Hand someone a fixed preview
+
+A debug session runs the checkout's changing build. To let a person try one commit beside their installed dohc on Windows, build a fixed preview instead.
+
+1. Commit the change. Check out that commit with no other changes.
+2. Run `pnpm qa:preview --commit <full SHA> --base <target-ref> --pr <number>`.
+3. Send the person the `Try it` text that the command prints at the end.
+
+The command builds the desktop and the release engine, then packages the app with `electron-builder --dir`. Cargo waits for the shared build budget.
+It refuses a checkout at another commit or with uncommitted changes. It checks the source again after packaging.
+It copies the package into a new delivery folder, `~/dohc-previews/<id>` unless you pass `--output`.
+It then runs the release workflow's Windows packaged smoke against that copy: an edit, persistence on disk, and a restart.
+The package is unsigned. The builder removes signing, telemetry, and Vite settings from its environment.
+
+The delivery folder holds:
+
+- `app`, the package.
+- `manifest.json`, with the commit, base, PR, build steps and log hashes, package tree hash, executable, ASAR and engine hashes, signing status, and smoke result.
+- `launch.mjs` and `Try it.cmd`, which start the preview.
+- `evidence`, with the build logs and the smoke's `result.json`.
+
+The launcher reads nothing from the checkout. It refuses to start the app if any package file differs from the manifest, or if the smoke did not pass.
+The app gets its own profile, home, `APPDATA`, and `LOCALAPPDATA` in the folder's `data` subfolder. The launcher removes `DOHC_*` and agent configuration variables, and passes `--dohc-isolated-test`, so the app leaves the installed app's link handler and recent documents alone.
+The launcher also serves an update feed on `127.0.0.1` for as long as it runs. The feed offers version 0.0.0 with no files, so the preview never downloads or installs an update.
+The launcher stops only the app it started, when the app quits or when someone presses Ctrl+C.
+
+This separates data. It is not an OS sandbox: the app runs as the current user, and a folder the person chooses is a real folder.
+Agents that the preview finds on `PATH` start without the person's sign-ins, because the preview has its own home.
+Build previews only from branches in this repository. Never build one from a fork's code on a host that holds credentials.
+The person deletes the delivery folder when they finish. That removes the preview and its data.
+
 ## Verify a pull request
 
 One verification owner records passing evidence for every selected gate in the PR.
