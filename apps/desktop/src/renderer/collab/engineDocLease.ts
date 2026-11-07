@@ -180,6 +180,8 @@ function nextSessionId(): string {
   return `eyd-${Date.now().toString(36)}-${engineDocSessionCounter.toString(36)}`;
 }
 
+const EMPTY_YJS_UPDATE = new Uint8Array([0, 0]);
+
 function makeTransport(
   workspaceId: string,
   path: string,
@@ -189,6 +191,9 @@ function makeTransport(
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
   writesRefused: { current: boolean },
+  // Main reported the path gone. A remote edit after that would change the
+  // text set aside at the deletion, so only its head is kept.
+  documentGone: () => boolean,
   kind: LiveDocumentKind,
   allowLossySourceSha256?: string,
 ): EngineYDocTransport {
@@ -267,7 +272,12 @@ function makeTransport(
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
         if (event.sessionId !== sessionId) return;
-        listener(event.update, event.lineageGeneration, event.head);
+        if (!documentGone()) {
+          listener(event.update, event.lineageGeneration, event.head);
+        } else if (event.head?.sha256 !== undefined) {
+          // A known head alone still arrives, so a check waiting on it settles.
+          listener(EMPTY_YJS_UPDATE, event.lineageGeneration, event.head);
+        }
       });
     },
     onLineageReplacement(listener) {
@@ -443,6 +453,7 @@ function createEngineDocSession(
     sessionId,
     localSeq,
     writesRefused,
+    () => deletionPending,
     documentKind,
     input.allowLossySourceSha256,
   );
@@ -822,7 +833,8 @@ function createEngineDocSession(
   ): void => {
     writesRefused.current = true;
     // The PATH is gone whichever lineage wins: deletion outlives any later
-    // replacement, and a fresh recovery slot re-captures on its first edit.
+    // replacement, and a fresh recovery slot re-captures on the first local
+    // edit. Remote edits stop at the transport once deletion is pending.
     deletionPending = true;
     deletionCause = cause;
     recovery.transition = "deletion";
@@ -1142,8 +1154,8 @@ function createEngineDocSession(
       if (writesRefused.current) {
         if (recovery.snapshotBytes === null && deletionPending) {
           // A replacement installed a fresh recovery slot while the path
-          // stayed deleted. The first edit on the winner starts its own
-          // draft instead of vanishing.
+          // stayed deleted. The first local edit on the winner starts its
+          // own draft instead of vanishing.
           captureDeletion(doc, deletionCause, true);
           return;
         }
