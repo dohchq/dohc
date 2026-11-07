@@ -5617,7 +5617,6 @@ export function DesktopWorkspaceShell(props: {
         mode={wb.explorerMode}
         onModeChange={setExplorerModeInWb}
         listed={fileListingCommit !== null}
-        recentFiles={wb.recentFiles}
         files={files}
         folders={folders}
         editorGroups={wb.editorGroups}

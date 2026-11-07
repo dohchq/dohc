@@ -27,7 +27,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     mode: "files",
     onModeChange: vi.fn(),
     listed: true,
-    recentFiles: [],
     files: [
       { path: "note.md", kind: "file" },
       { path: "other.md", kind: "file" },

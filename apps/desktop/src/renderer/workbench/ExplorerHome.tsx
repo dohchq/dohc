@@ -28,7 +28,6 @@ import {
   pageRows,
   pageTree,
   pinnedRows,
-  recentRows,
   OTHER_FILES_SHOWN,
   type HomeLookup,
   type HomeRowModel,
@@ -56,6 +55,9 @@ export interface ExplorerHomeProps {
   folders: ReadonlySet<string>;
   activePath: string | null;
   scrollerRef: RefObject<HTMLElement | null>;
+  // Changes whenever the Open editors section above Home changes height, so
+  // the Pages window is measured again.
+  aboveLayout: string;
   // The file or folder the Explorer is renaming, and its name field.
   editingPath: string | null;
   renderEditRow: (depth: number) => ReactNode;
@@ -98,7 +100,6 @@ type NavItem = { sectionId: HomeSectionId; row?: HomeRowModel; more?: true };
 
 const SECTION_TEST_IDS: Record<HomeSectionId, string> = {
   pinned: "explorer-pinned",
-  recent: "explorer-recent",
   pages: "explorer-pages",
   collections: "explorer-collections",
   apps: "explorer-apps",
@@ -166,7 +167,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     () => pinnedRows(pinnedApps ?? [], explorer.pinned, lookup),
     [explorer.pinned, lookup, pinnedApps],
   );
-  const recent = useMemo(() => recentRows(explorer.recentFiles, lookup), [explorer.recentFiles, lookup]);
   const collections = useMemo(
     () => collectionRows(dataCollections ?? [], explorer.collectionFolders),
     [dataCollections, explorer.collectionFolders],
@@ -213,7 +213,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const collectionsUnknown = refusal ? undefined : explorer.collectionsUnknown;
   const sections: Section[] = [];
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
-  if (recent.length > 0) sections.push({ id: "recent", label: "Recent", rows: recent });
   if (pages.length > 0 || !explorer.shareView) {
     sections.push({
       id: "pages",
@@ -308,7 +307,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     }
     return { rows, items };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinned, recent, pages, collections, appRows, others, collapsed, sectionsKey]);
+  }, [pinned, pages, collections, appRows, others, collapsed, sectionsKey]);
 
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const tabbableKey = focusedKey && nav.items.has(focusedKey) ? focusedKey : (nav.rows[0]?.fullPath ?? null);
@@ -338,7 +337,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     };
     setRange((current) => (current.start === next.start && current.end === next.end ? current : next));
   }, [pages.length, scrollerRef, windowed]);
-  useLayoutEffect(updateRange, [updateRange, sectionsKey, collapsed]);
+  useLayoutEffect(updateRange, [updateRange, sectionsKey, collapsed, props.aboveLayout]);
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller || !windowed) return;
@@ -507,7 +506,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   }, [appsReveal, appsSettled, appsShown, collapsed, firstAppKey, onAppsRevealed, toggleSection]);
 
   if (!explorer.listed) {
-    return <SkeletonRows layout="list" className="px-3 py-2" label="Loading files..." />;
+    return <SkeletonRows layout="list" className="mt-4 px-3 py-2" label="Loading files..." />;
   }
 
   const renderRow = (row: HomeRowModel): ReactNode => {
@@ -565,7 +564,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   };
 
   return (
-    <div data-testid="explorer-home" onKeyDown={onKeyDown} className="flex flex-col">
+    <div data-testid="explorer-home" onKeyDown={onKeyDown} className="mt-4 flex flex-col">
       {sections.map((section) => {
         const open = !collapsed.has(section.id);
         const sectionKey = `section:${section.id}`;
