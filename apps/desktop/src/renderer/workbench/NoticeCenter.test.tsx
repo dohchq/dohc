@@ -909,7 +909,7 @@ describe("notice center", () => {
     const busy = "dohc could not join. Too many people are connected right now. Try again later.";
     const choose = "dohc could not reach this server. Check the address, then choose Try again.";
     const error = (id: string, message: string, canRetry: boolean, seen: boolean) =>
-      ({ id, message, details: `Error: ${message}`, atMs: 1_000, canRetry, seen });
+      ({ id, message, copy: { report: `Error: ${message}` }, atMs: 1_000, canRetry, seen });
     const shown = (element: HTMLElement) => element.textContent ?? "";
 
     render(<WorkspaceErrorToast error={error("toast", timedOut, true, false)} onRetry={vi.fn()} />);

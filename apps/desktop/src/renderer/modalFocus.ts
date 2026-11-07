@@ -68,10 +68,9 @@ export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | nu
   if (event.key !== "F6") return false;
   // The first toast with a control: its first worded action, or Details when
   // it has no other, else its first control.
-  const toast = [...document.querySelectorAll<HTMLElement>(`${TOASTS_SELECTOR} > *`)].map((element) => {
-    const actions = element.querySelector<HTMLElement>("[data-toast-actions]");
-    return (actions ? modalFocusableElements(actions)[0] : undefined) ?? modalFocusableElements(element)[0];
-  }).find(Boolean);
+  const controls = [...document.querySelectorAll<HTMLElement>(TOASTS_SELECTOR)].flatMap(modalFocusableElements);
+  const first = controls[0]?.closest(`${TOASTS_SELECTOR} > *`);
+  const toast = controls.find((control) => control.closest(`${TOASTS_SELECTOR} > *`) === first && control.closest("[data-toast-actions]")) ?? controls[0];
   if (!toast) return false;
   // Stopped here, so a dialog inside this one, with a handler of its own,
   // does not read the same key as a way back from the toast.

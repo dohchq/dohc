@@ -50,7 +50,7 @@ function Shell(props: { workspaceId?: string; children?: ReactNode }) {
           id: error.id,
           ...(error.title ? { title: error.title } : {}),
           message: error.message,
-          details: errorDetails(error.details ?? []),
+          copy: { report: errorDetails(error.details ?? []) },
           atMs: error.atMs,
           canRetry: error.retry !== null,
           seen: error.seen,
@@ -79,7 +79,7 @@ function ActionNotices() {
         ...(error.title ? { title: error.title } : {}),
         message: error.message,
         // What the shell copies: the words, then the facts.
-        details: errorDetails([["Error", error.message], ["Title", error.title], ...(error.details ?? [])]),
+        copy: { report: errorDetails([["Error", error.message], ["Title", error.title], ...(error.details ?? [])]) },
         atMs: error.atMs,
         canRetry: error.retry !== null,
         ...(error.action ? { actionLabel: error.action.label } : {}),
