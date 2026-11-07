@@ -202,9 +202,15 @@ it("counts a Collection as generated only when dohc generated both its schema an
   expect(hasGeneratedDatasetSources(first.revision, first.schemaSql)).toBe(true);
   // A field dohc adds changes the schema's text but keeps it generated.
   await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Email", type: "text", required: false, unique: false } }));
+  // So does a unique field, which dohc adds as a plain column and a unique index.
+  await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Badge", type: "text", required: false, unique: true } }));
   const added = f.host.approvedArtifacts(id(1));
   expect(added.schemaSql).not.toBe(generateDatasetSchema(added.revision.definition));
   expect(hasGeneratedDatasetSources(added.revision, added.schemaSql)).toBe(true);
+  // A unique key the definition doesn't declare is custom.
+  const email = datasetColumnFields(added.revision.definition.tables[0]!).find(field => field.name === "Email")!.sqlColumn;
+  const keyed = `${added.schemaSql}\nCREATE UNIQUE INDEX "idx_email" ON "people" ("${email}");\n`;
+  expect(hasGeneratedDatasetSources(describeDatasetRevision({ definition: added.revision.definition, revision: 4, schemaSql: keyed, operationSource: added.operationSource }), keyed)).toBe(false);
   // Beside generated operation code, a trigger that deletes every other record on each insert.
   const wipe = `${added.schemaSql}\nCREATE TRIGGER wipe AFTER INSERT ON people BEGIN DELETE FROM people WHERE id <> NEW.id; END;\n`;
   const triggered = describeDatasetRevision({ definition: added.revision.definition, revision: 3, schemaSql: wipe, operationSource: added.operationSource });
@@ -220,6 +226,9 @@ it("adds a unique field as an index and rejects duplicate values through existin
   const field = next.revision.definition.tables[0]!.fields.at(-1)!;
   await f.host.action(call(next.revision, id(6), { values: { [id(4)]: "One", [field.fieldId]: "one@example.com" } }, "one"));
   await expect(f.host.action(call(next.revision, id(6), { values: { [id(4)]: "Two", [field.fieldId]: "one@example.com" } }, "two"))).rejects.toThrow(/already uses/);
+  // The unique index is dohc's own layout, so a later field change isn't refused as custom.
+  const changed = await approve(f, await f.prepare({ kind: "changeField", tableId: id(2), fieldId: id(4), type: "text", required: false }));
+  await expect(f.host.action(call(changed.revision, id(6), { values: { [id(4)]: "Three", [field.fieldId]: "one@example.com" } }, "three"))).rejects.toThrow(/already uses/);
 });
 
 it("refuses changed capture, stale revision and missing required defaults while preserving authored rules", async () => {
