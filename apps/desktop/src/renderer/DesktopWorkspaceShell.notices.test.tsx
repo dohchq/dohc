@@ -2509,7 +2509,8 @@ describe("file transfers", () => {
     expect(toast.textContent).toBe(
       "2 files weren't imported" +
       "CON.md has a name Windows can't use. Rename it, then import it.\n" +
-      "key.txt is a link. Drop the file it leads to.",
+      "key.txt is a link. Drop the file it leads to." +
+      "Details",
     );
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
 
@@ -2536,7 +2537,8 @@ describe("file transfers", () => {
     expect(toast.textContent).toBe(
       "Imported 3 files. 2 weren't imported." +
       ".DS_Store is a file the system makes.\n" +
-      "notes.md couldn't be read. Check that you can open it, then import it again.",
+      "notes.md couldn't be read. Check that you can open it, then import it again." +
+      "Details",
     );
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
   });
