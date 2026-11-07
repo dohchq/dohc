@@ -958,8 +958,8 @@ export function DesktopWorkspaceShell(props: {
   }
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const retryRefusedSharedView = useCallback(() => {
-    if (!workspaceAdmission.superseded) void refreshShareViewRef.current();
-  }, [workspaceAdmission]);
+    void refreshShareViewRef.current();
+  }, []);
   const {
     shellErrors,
     hideShellError,
@@ -1006,7 +1006,7 @@ export function DesktopWorkspaceShell(props: {
     clearIdentity,
     privacySettingsAction,
     keepCollectionsHere,
-  } = useShellError(workspaceId, retryRefusedSharedView);
+  } = useShellError(workspaceId, props.workspace.shareView ? retryRefusedSharedView : undefined);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
@@ -5092,7 +5092,7 @@ export function DesktopWorkspaceShell(props: {
             reportShellFailure({
               message: outcome.errorMessage,
               ...(outcome.errorCause ? { details: [["Cause", outcome.errorCause] as const] } : {}),
-              retry: () => { if (!workspaceAdmission.superseded) void refreshShareViewRef.current(); },
+              retry: retryRefusedSharedView,
               noDismiss: true,
               kind: "share-collision-record",
               identity: SHARE_COLLISION_RECORD_ROW,

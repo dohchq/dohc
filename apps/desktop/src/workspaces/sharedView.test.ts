@@ -8646,24 +8646,24 @@ describe("share-refresh records in .dohc/local", () => {
     }
   });
 
-  it("refuses a refresh when the collision record can't be read after the pull, and keeps it", async () => {
+  it.each(["invalid JSON", "another share"])("shows only the refusal after a pull finds %s", async kind => {
     const view = await collidedView();
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       view.relay.addWrite(view.path, "granter file two");
-      await expect(
-        view.refresh(async (input) => {
-          const pulled = await view.harness.pullFor(view.target)(input);
-          await writeFile(view.collisionRecord, "not json", "utf8");
-          return pulled;
-        }),
-      ).resolves.toMatchObject({
+      const content = kind === "invalid JSON" ? "not json" : JSON.stringify({ shareId: "another-share", paths: [view.path] });
+      const outcome = await view.refresh(async (input) => {
+        const pulled = await view.harness.pullFor(view.target)(input);
+        await writeFile(view.collisionRecord, content, "utf8");
+        return pulled;
+      });
+      expect(outcome).toMatchObject({
         ok: false,
         errorKind: "collision-record",
         errorMessage: UNREADABLE_RECORD_WORDS,
-        errorCause: "Invalid share collision record.",
       });
-      expect(await readFile(view.collisionRecord, "utf8")).toBe("not json");
+      expect(outcome, "A content refusal has no filesystem cause").not.toHaveProperty("errorCause");
+      expect(await readFile(view.collisionRecord, "utf8")).toBe(content);
       expect((await readdir(recordsDir(view.rootDir))).filter((name) => name.includes(".invalid-"))).toEqual([]);
       expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
     } finally {
@@ -8685,7 +8685,7 @@ describe("share-refresh records in .dohc/local", () => {
       try {
         await writeFile(view.collisionRecord, "not json", "utf8");
         const logRequests = view.relay.logRequests;
-        failRenameFromPathOnce = { path: view.collisionRecord, error: new Error("EBUSY: resource busy or locked") };
+        failRenameFromPathOnce = { path: view.collisionRecord, error: Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }) };
 
         await expect(view.refresh(undefined, access)).resolves.toEqual({
           ok: false,

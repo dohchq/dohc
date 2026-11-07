@@ -2,11 +2,13 @@
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useShellError } from "./shell/useShellError";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
+import { sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import { createAutomationButtons } from "./collections/useAutomationButtons";
 import { collectionTabPath } from "./workbench/workbenchState";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
@@ -845,6 +847,65 @@ describe("ended Edit Collection shares", () => {
     expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
     expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "manual" });
     view.unmount();
+  });
+
+  it.each(["no file open", "docs/shared.md open"])("keeps one toast and one row when a background refresh refuses with %s", async openFile => {
+    const user = userEvent.setup();
+    const bridge = collectionBridge();
+    bridge.getWorkspaceUiState.mockResolvedValue(storedStateWithTabs(openFile === "no file open" ? [] : ["docs/shared.md"]));
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] },
+      files: [{ path: "docs/shared.md", kind: "file" }], folders: ["docs"] });
+    const refused = { ok: false as const, probed: true, changedPaths: 0,
+      errorKind: "collision-record" as const, errorMessage: sharedViewRefusalWords };
+    const cause = "EBUSY: resource busy or locked";
+    bridge.refreshSharedView.mockResolvedValueOnce({ ...refused, errorCause: cause }).mockResolvedValue(refused);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, EDIT_SHARE));
+    await screen.findByTestId("workspace-shell-error");
+    if (openFile !== "no file open") await screen.findByTestId("tab-docs/shared.md");
+    await act(async () => undefined);
+    const checkCopy = (text: string) => {
+      const lines = text.split("\n");
+      expect(lines[0], "Copy starts with the refusal").toBe(`Error: ${sharedViewRefusalWords}`);
+      for (const line of lines) {
+        expect(line, "Each copied line is one fact").toMatch(/^[^:]+: .+$/);
+        expect(line, "Copied facts omit the wire code").not.toContain("[share-collision-record]");
+        expect(line, "Copied facts omit the capture class").not.toContain("CapturePartialFailureError");
+      }
+      for (const line of lines.slice(1)) expect(line, "Copied facts do not repeat the refusal").not.toContain(sharedViewRefusalWords);
+      expect(lines.filter(line => line.startsWith("Cause:")), "The background refusal keeps the filesystem cause").toEqual([`Cause: ${cause}`]);
+    };
+    const copyBoth = async () => {
+      expect(screen.getAllByTestId("workspace-shell-error"), "The refusal has one toast").toHaveLength(1);
+      await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy error details" }));
+      const toastCopy = await navigator.clipboard.readText();
+      checkCopy(toastCopy);
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const notices = await screen.findByTestId("notice-center");
+      expect(notices.querySelectorAll("[data-notice-row]"), "The refusal has one Notices row").toHaveLength(1);
+      const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+      expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+      expect(within(row).queryByRole("button", { name: "Details" })).toBeNull();
+      await act(async () => { fireEvent.click(within(row).getByRole("button", { name: /Copy/ })); });
+      const rowCopy = await navigator.clipboard.readText();
+      checkCopy(rowCopy);
+      expect(rowCopy).toBe(toastCopy);
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    };
+    await copyBoth();
+    const before = bridge.refreshSharedView.mock.calls.length;
+    try {
+      expect(screen.getAllByTestId("workspace-shell-error"), "The first toast is still open before the background refresh").toHaveLength(1);
+      act(() => focusAfterMinimum());
+      await waitFor(() => expect(bridge.refreshSharedView.mock.calls.length, "Focus starts a background refresh").toBeGreaterThan(before));
+      await act(async () => undefined);
+      expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
+      await copyBoth();
+    } finally {
+      view.unmount();
+      vi.restoreAllMocks();
+    }
   });
 
   it("shows a persistent background failure on the existing Notice surface after three attempts", async () => {
