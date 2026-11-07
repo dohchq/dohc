@@ -3,7 +3,7 @@ import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
-import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
+import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
@@ -661,7 +661,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     const newDay = !previous || !sameChatDay(previous.createdAtMs, message.createdAtMs);
     // The divider under a thread's parent starts a new run.
     const continues = !(props.dividerAfterFirst && at === 1) && continuesRun(previous, message);
-    const isAgent = message.authorKind === "agent";
+    const isAgent = isAgentAuthor(message);
     const time = formatChatTime(message.createdAtMs);
     const reactions = reactionsByMessage.get(message.id) ?? [];
     const open = props.openMessageId === message.id;
@@ -731,12 +731,12 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 {isAgent ? (
                   // The face marks an agent; hovering it says whose agent.
                   <AgentBadge testIdPrefix={props.testIdPrefix} author={message} presentation={message.presentation}>
-                    <ChatAvatar presentation={message.presentation} name={message.authorDisplayName} kind={message.authorKind} size={sizes.avatar} />
+                    <ChatAvatar presentation={message.presentation} name={message.authorDisplayName} kind={message.authorKind} linkAgent={message.linkAgent === true} size={sizes.avatar} />
                   </AgentBadge>
                 ) : (
                   <ChatAvatar presentation={message.presentation}
                     name={message.authorDisplayName}
-                    kind={message.authorKind}
+                    kind={message.authorKind} linkAgent={message.linkAgent === true}
                     size={sizes.avatar}
                   />
                 )}
@@ -751,7 +751,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                   data-author-kind={message.authorKind}
                   className={`min-w-0 truncate font-semibold text-ink ${sizes.name}`}
                 >
-                  <AgentName kind={message.authorKind} presentation={message.presentation}>
+                  <AgentName kind={message.authorKind} presentation={message.presentation} linkAgent={message.linkAgent === true}>
                     <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                   </AgentName>
                 </span>

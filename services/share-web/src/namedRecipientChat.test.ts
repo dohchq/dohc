@@ -215,11 +215,11 @@ it("passes a link holder's post through as a link post with no account, and refu
   const read = await f.web.handle(request());
   expect(read.status).toBe(200);
   expect((await read.json()).messages[0]).toEqual({relaySeq: expect.any(Number), messageId: "link-message:1", threadId: "thread",
-    authorUserId: null, authorDisplayName: "Sam", authorKind: "link", authorOwnerDisplayName: null, createdAtMs: 5,
+    authorUserId: null, authorDisplayName: "Sam", authorKind: "link", linkAgent: false, authorOwnerDisplayName: null, createdAtMs: 5,
     body: "From a link", bodyTooLarge: false});
 
   const forged = {relaySeq: 9, messageId: "m", threadId: "t", authorUserId: "alice", authorDisplayName: "Sam", authorKind: "link",
-    authorOwnerDisplayName: null, createdAtMs: 5, body: "x", bodyTooLarge: false};
+    linkAgent: false, authorOwnerDisplayName: null, createdAtMs: 5, body: "x", bodyTooLarge: false};
   const web = createNamedRecipientChatClient({relayUrl: "http://relay.test", publicOrigin: origin, exchangeKey, limits,
     fetchRelay: async () => Response.json({shareId: "share", channelWireId: "wire", messages: [forged], nextCursor: 9, olderCursor: null})});
   expect((await web(request())).status).toBe(404);

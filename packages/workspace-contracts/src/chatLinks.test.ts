@@ -19,3 +19,13 @@ it("keeps raw identity in the engine contract and refuses it at every public aut
   expect(ChatLinksPage.safeParse({...page,entries:Array.from({length:101},()=>({...publicEntry,author}))}).success).toBe(false);
   expect(ChatLinksEnginePage.safeParse({...page,entries:[{...entry,author:{...entry.author,authorDisplayName:"a".repeat(65536)}}]}).success).toBe(false);
 });
+it("carries an agent's connection in the engine contract and only its flag in the public one",()=>{
+  const entry={file:{objectId:"o",path:"a.md",folder:""},attachmentId:"a",threadId:"t",messageId:"m",mentionedAtMs:1,
+    author:{authorKind:"link",authorDisplayName:"Helper",linkGrantId:"grant",linkPrincipalId:"principal",agentConnectionId:"connection"}};
+  expect(ChatLinksEnginePage.parse({...page,entries:[entry]})?.entries[0]?.author).toMatchObject({agentConnectionId:"connection"});
+  const {attachmentId:_,...publicEntry}=entry;
+  const author={kind:"link",displayName:"Helper",presentation:{group:"opaque",hue:null,self:false}};
+  expect(ChatLinksPage.safeParse({...page,entries:[{...publicEntry,author:{...author,linkAgent:true}}]}).success).toBe(true);
+  for(const extra of [{linkAgent:false},{agentConnectionId:"connection"}])
+    expect(ChatLinksPage.safeParse({...page,entries:[{...publicEntry,author:{...author,...extra}}]}).success).toBe(false);
+});

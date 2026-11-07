@@ -28,6 +28,8 @@ export interface NamedChatMessage {
   authorUserId: string | null;
   authorDisplayName: string;
   authorKind: "human" | "agent" | "automation" | "link";
+  // A link post an agent wrote through its agent connection: an agent arriving by link.
+  linkAgent: boolean;
   authorOwnerDisplayName: string | null;
   createdAtMs: number;
   body: string | null;
@@ -38,11 +40,12 @@ const linkId = (value: unknown): value is string => typeof value === "string" &&
   value.trim() === value && !/\p{Cc}/u.test(value);
 
 // Only the relay writes a link post, under its principal's origin, with link
-// IDs and nothing account-shaped. Every desktop refuses any other row that
-// names a link, so no reader shows one either.
+// IDs, an agent connection when an agent posted, and nothing account-shaped.
+// Every desktop refuses any other row that names a link, so no reader shows one either.
 function linkProvenanceHolds(p: Record<string, unknown>, originId: string): boolean {
-  if (p.authorKind !== "link") return !Object.hasOwn(p, "linkGrantId") && !Object.hasOwn(p, "linkPrincipalId");
+  if (p.authorKind !== "link") return !["linkGrantId", "linkPrincipalId", "agentConnectionId"].some(key => Object.hasOwn(p, key));
   return linkId(p.linkGrantId) && linkId(p.linkPrincipalId) && originId === linkChatOrigin(p.linkPrincipalId) &&
+    (!Object.hasOwn(p, "agentConnectionId") || linkId(p.agentConnectionId)) &&
     String(p.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX) &&
     !["authorUserId", "authorOwnerDisplayName", "chainDepth"].some(key => Object.hasOwn(p, key));
 }
@@ -57,6 +60,7 @@ export function messageFromOp(op: Record<string, unknown>, originId: string): Na
       !linkProvenanceHolds(p, originId)) return null;
   return {relaySeq: op.relaySeq, messageId: p.messageId, threadId: p.threadId, authorUserId: typeof p.authorUserId === "string" ? p.authorUserId : null,
     authorDisplayName: p.authorDisplayName, authorKind: p.authorKind as NamedChatMessage["authorKind"],
+    linkAgent: Object.hasOwn(p, "agentConnectionId"),
     authorOwnerDisplayName: typeof p.authorOwnerDisplayName === "string" ? p.authorOwnerDisplayName : null,
     createdAtMs: p.createdAtMs, body: p.body, bodyTooLarge: false};
 }

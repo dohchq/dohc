@@ -2048,6 +2048,8 @@ export const ChatMessageRecord = z.object({
   threadId: OPAQUE_ID,
   presentation: ActorPresentation,
   authorKind: CHAT_MESSAGE_AUTHOR_KIND,
+  // A link author that is an agent, signed in with the link.
+  linkAgent: z.literal(true).optional(),
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
   authorUserId: z.string().min(1).max(256).optional(),
@@ -2397,6 +2399,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
       id: OPAQUE_ID,
       presentation: ActorPresentation,
       authorKind: CHAT_MESSAGE_AUTHOR_KIND,
+      linkAgent: z.literal(true).optional(),
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
       authorUserId: z.string().min(1).max(256).optional(),

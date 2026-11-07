@@ -275,11 +275,14 @@ impl ChatActorKind {
 
 /// The share link a link holder posted through: the relay-minted link grant
 /// and link principal. The message's display name is the name the holder
-/// had set when the relay wrote it. A link message names no account.
+/// had set when the relay wrote it. A link message names no account. An
+/// agent that signed in with the link also names its agent connection; the
+/// link principal stays the authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessageLinkAuthor {
     pub grant_id: String,
     pub principal_id: String,
+    pub agent_connection_id: Option<String>,
 }
 
 /// A durable chat channel row.
@@ -1935,14 +1938,18 @@ pub fn replicated_source_origin(origin_id: &str) -> &str {
 /// A replicated message's link provenance. A link message names its grant and
 /// link principal, carries no account, owner, origin or chain depth, stays
 /// within the link body cap, uses the link message id prefix, and comes from
-/// its link principal's relay origin, as the relay writes it. No other message
-/// names a link or uses the prefix. Ids must already be in their stored form.
+/// its link principal's relay origin, as the relay writes it. An agent's link
+/// message also names its agent connection. No other message names a link or
+/// an agent connection, or uses the prefix. Ids must already be in their
+/// stored form.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_replicated_link_author(
     origin_id: &str,
     message_id: &str,
     author_kind: &str,
     grant_id: Option<&str>,
     principal_id: Option<&str>,
+    agent_connection_id: Option<&str>,
     account_fields: bool,
     body: &str,
 ) -> Result<Option<ChatMessageLinkAuthor>, DomainError> {
@@ -1961,10 +1968,15 @@ pub fn validate_replicated_link_author(
         grant_id,
         principal_id,
     ) {
-        (false, None, None) if !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) => Ok(None),
+        (false, None, None)
+            if agent_connection_id.is_none() && !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) =>
+        {
+            Ok(None)
+        }
         (true, Some(grant_id), Some(principal_id))
             if id(grant_id)
                 && id(principal_id)
+                && agent_connection_id.is_none_or(id)
                 && !account_fields
                 && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
                 && message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
@@ -1973,6 +1985,7 @@ pub fn validate_replicated_link_author(
             Ok(Some(ChatMessageLinkAuthor {
                 grant_id: grant_id.to_owned(),
                 principal_id: principal_id.to_owned(),
+                agent_connection_id: agent_connection_id.map(str::to_owned),
             }))
         }
         _ => Err(invalid()),
@@ -3870,7 +3883,7 @@ impl<'a> LinkedChatStore<'a> {
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
                          created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
-                         link_grant_id, link_principal_id, author_agent_id, author_reported \
+                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -4440,7 +4453,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -7694,7 +7707,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -7714,7 +7727,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -7932,6 +7945,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         Ok(reported) => reported,
         Err(error) => return Ok(Err(error)),
     };
+    let agent_connection_id: Option<String> = row.get(19)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
@@ -7939,11 +7953,12 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         }),
         _ => None,
     };
-    // The table pairs both ids with the link kind.
+    // The table pairs both ids with the link kind, and an agent connection only with them.
     let link_author = match (link_grant_id, link_principal_id) {
         (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
             grant_id,
             principal_id,
+            agent_connection_id,
         }),
         _ => None,
     };
@@ -8177,6 +8192,7 @@ mod replicated_origin_tests {
                 "link",
                 Some("grant-1"),
                 Some("p"),
+                None,
                 false,
                 "Hi",
             )
@@ -8184,6 +8200,7 @@ mod replicated_origin_tests {
         let link = ChatMessageLinkAuthor {
             grant_id: "grant-1".to_owned(),
             principal_id: "p".to_owned(),
+            agent_connection_id: None,
         };
         for applies in ["relay:share-link:p", "shared:s:relay:share-link:p"] {
             assert_eq!(author(applies).expect(applies), Some(link.clone()));
@@ -8196,6 +8213,39 @@ mod replicated_origin_tests {
             "origin_1",
         ] {
             assert!(author(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn only_a_link_post_names_an_agent_connection() {
+        let author = |kind: &str, message_id: &str, link: bool, connection: &str| {
+            validate_replicated_link_author(
+                "relay:share-link:p",
+                message_id,
+                kind,
+                link.then_some("grant-1"),
+                link.then_some("p"),
+                Some(connection),
+                false,
+                "Hi",
+            )
+        };
+        assert_eq!(
+            author("link", "link-message:m", true, "connection-1").expect("agent link post"),
+            Some(ChatMessageLinkAuthor {
+                grant_id: "grant-1".to_owned(),
+                principal_id: "p".to_owned(),
+                agent_connection_id: Some("connection-1".to_owned()),
+            })
+        );
+        for kind in ["human", "agent", "automation"] {
+            assert!(author(kind, "m", false, "connection-1").is_err(), "{kind}");
+        }
+        for connection in ["", " connection-1", "connection\u{7}"] {
+            assert!(
+                author("link", "link-message:m", true, connection).is_err(),
+                "{connection:?}"
+            );
         }
     }
 }

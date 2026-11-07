@@ -4036,13 +4036,16 @@ export function ChatsView(props: {
                     >
                       <ChatAvatar presentation={item.message.presentation}
                         name={item.message.authorDisplayName}
-                        kind={item.message.authorKind}
+                        kind={item.message.authorKind} linkAgent={item.message.linkAgent === true}
                         size="row"
                       />
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-1.5 leading-[18px]">
                           <span className="truncate text-[13px] font-semibold text-ink">
-                            <AgentName kind={item.message.authorKind} presentation={item.message.presentation}>
+                            {/* The row is one button, so the agent's badge cannot sit in it; its name says agent. */}
+                            {item.message.authorKind === "link" && item.message.linkAgent === true
+                              ? <span data-testid="chats-feed-link-agent" className="sr-only">agent </span> : null}
+                            <AgentName kind={item.message.authorKind} presentation={item.message.presentation} linkAgent={item.message.linkAgent === true}>
                               {chatAuthorLabel(item.message)}
                             </AgentName>
                           </span>
