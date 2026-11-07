@@ -1,4 +1,4 @@
-import type { MomentAuthor } from "./engine";
+import { UNNAMED_AGENT_ID, type MomentAuthor } from "./engine";
 
 declare const actorKeyBrand: unique symbol;
 type ActorKeyBrand = { readonly [actorKeyBrand]: true };
@@ -84,12 +84,6 @@ type LocalActorClaim =
 function branded<T extends object>(value: T): T & ActorKeyBrand {
   return value as T & ActorKeyBrand;
 }
-
-/**
- * The agent a write names when an agent outside a run dohc dispatched gives
- * no name. A dispatched run's writes name its agent's id instead.
- */
-export const UNNAMED_AGENT_ID = "dohc-mcp";
 
 /** The admitted handshake name is the claim. Settings names are display labels only. */
 export function canonicalClaimedName(handshakeName?: string | null): string {
