@@ -200,7 +200,8 @@ function collisionRecordFailure(
     changedPaths,
     errorMessage: refusal.message,
     errorKind: "collision-record",
-    errorCause: errorMessage(refusal.cause),
+    ...(refusal.cause instanceof Error && "code" in refusal.cause && typeof refusal.cause.code === "string"
+      ? { errorCause: errorMessage(refusal.cause) } : {}),
   };
 }
 

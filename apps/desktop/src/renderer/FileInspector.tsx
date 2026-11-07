@@ -37,7 +37,6 @@ import {
   useSyncExternalStore,
 } from "react";
 import { bridge } from "./bridge";
-import { refusalCode } from "../ipc/errorWords";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { useBoundNoteCheck, useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
@@ -79,10 +78,7 @@ function useTextContent(
   enabled: boolean,
   refreshKey: number,
   localBuffer: SharedLocalDocument,
-  reportError?: ReportButtonError,
 ) {
-  const reportErrorRef = useRef(reportError);
-  reportErrorRef.current = reportError;
   const [conflictRefreshKey, setConflictRefreshKey] = useState(0);
   const refreshAfterConflict = useCallback(() => {
     setConflictRefreshKey((key) => key + 1);
@@ -188,13 +184,10 @@ function useTextContent(
         setError(false);
         setReadSeq((seq) => seq + 1);
       })
-      .catch((error: unknown) => {
+      .catch(() => {
         if (cancelled) return;
         setContent(null);
         setError(true);
-        if (refusalCode(error) === "share-collision-record") {
-          reportErrorRef.current?.("Could not read the file.", error, refreshAfterConflict);
-        }
         // A failed read still answers for request bookkeeping. Switch safety
         // also checks `error` and keeps writes refused until a later success.
         setReadSeq((seq) => seq + 1);
@@ -233,7 +226,6 @@ function useTextContent(
     conflictRefreshKey,
     requestId,
     localBuffer,
-    refreshAfterConflict,
   ]);
   const currentContent =
     content?.loadedWorkspaceId === workspaceId && content.loadedPath === path
@@ -409,7 +401,6 @@ export const FileInspector = memo(function FileInspector(
     isText,
     props.refreshKey ?? 0,
     localBuffer,
-    props.onButtonError,
   );
   const retriedFailedReadBuffer = useRef<SharedLocalDocument | null>(null);
   useEffect(() => {

@@ -192,6 +192,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         const repeated = seen === "repeat" && replaced?.message === message ? replaced : undefined;
         const next: ShellError = {
           ...error,
+          ...(repeated && !error.details ? { details: repeated.details } : {}),
           message,
           id: repeated?.id ?? id,
           atMs: repeated?.atMs ?? atMs,
@@ -331,13 +332,12 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     filedShareCapture.current = null;
   }, [workspaceId]);
 
-  const reportSharedViewRefusal = useCallback((error: unknown, retry: (() => void) | null) => {
-    if (refusalCode(error) !== "share-collision-record") return false;
-    const { words, cause } = readError(error);
+  const reportSharedViewRefusal = useCallback((error: unknown) => {
+    if (!retrySharedView || refusalCode(error) !== "share-collision-record") return false;
+    const { words } = readError(error);
     push({
       message: words ?? UNKNOWN_ERROR_WORDS,
-      ...(cause ? { details: [["Cause", cause]] } : {}),
-      retry: retrySharedView ?? retry,
+      retry: retrySharedView,
       noDismiss: true,
       kind: "share-collision-record",
       identity: "share-collision-record",
@@ -355,8 +355,9 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       // Changes the row of its identity where it stands, with no new toast.
       quiet = false,
     ) => {
-      if (reportSharedViewRefusal(error, retry)) return;
+      if (reportSharedViewRefusal(error)) return;
       const { cause, title, words, canRetry, details: explanation } = readError(error);
+      const sharedFileRefusal = refusalCode(error) === "share-collision-record";
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
       const details: ReadonlyArray<ErrorDetailField> = partial ? [
         ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
@@ -364,11 +365,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         ["Record ID", partial.retry.recordId],
         ["Reason", partial.reason, partial.reason.length],
         ["Next", partial.retry.instruction, partial.retry.instruction.length],
-      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause ? [["Cause", cause] as const] : [])];
+      ] : [...(explanation ? [["Reason", explanation] as const] : []), ...(cause && !sharedFileRefusal ? [["Cause", cause] as const] : [])];
       // The request that ran a Collection's move reports its stop with the toast. One that only waited for it files a row.
       push({
         ...(title ? { title } : {}),
-        message: title && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
+        message: (sharedFileRefusal || title) && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
         ...(partial ? { identity: partial.retry.recordId
           ? `record:${partial.retry.recordId}`
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
@@ -418,10 +419,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       kind?: ShellErrorKind;
       identity?: string;
     }) => {
-      if (reportSharedViewRefusal(failure.cause, failure.retry ?? null) ||
-        reportSharedViewRefusal(failure.message, failure.retry ?? null)) return;
+      if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message)) return;
       const shown = readError(failure.message);
-      const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
+      const sharedFileRefusal = refusalCode(failure.cause) === "share-collision-record" ? readError(failure.cause)
+        : refusalCode(failure.message) === "share-collision-record" ? shown : null;
+      const cause = sharedFileRefusal ? null : failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
       const title = failure.title ?? (isLiveEditingRefusal(failure.cause) ? readError(failure.cause).title : undefined);
       const action = failure.action ??
         (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? privacySettingsAction : undefined);
@@ -432,7 +434,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       push({
         ...(title ? { title } : {}),
         ...(failure.tone ? { tone: failure.tone } : {}),
-        message: shown.words ?? UNKNOWN_ERROR_WORDS,
+        message: sharedFileRefusal?.words ?? shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(failure.command ? { command: failure.command } : {}),
         ...(failure.paths?.length ? { paths: failure.paths } : {}),

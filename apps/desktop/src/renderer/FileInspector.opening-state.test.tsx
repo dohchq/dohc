@@ -35,8 +35,6 @@ import {
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
-import { ipcWireError } from "../ipc/errorWords";
-import { sharedViewRefusal } from "../testing/sharedViewRefusal.fixture";
 
 // These tests need a note past the WYSIWYG limit, not the limit itself. A
 // small limit keeps their notes small, so opening one stays fast on a busy host.
@@ -175,18 +173,6 @@ describe("markdown document opening state", () => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
     await resetOrphanedDraftsAndSettle();
-  });
-
-  it("reports a refused open-file read to the workspace notice", async () => {
-    const bridge = makeHeldOpenBridge();
-    const received = new Error(`Error invoking remote method 'desktop:read-workspace-text': ${String(ipcWireError(await sharedViewRefusal()))}`);
-    bridge.bridgeMock.readWorkspaceText.mockRejectedValue(received);
-    vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
-    const report = vi.fn();
-    render(<FileInspector workspaceId="ws-1" path="a.md" onButtonError={report} />);
-    await waitFor(() => expect(report, "An open shared file reports its refusal").toHaveBeenCalledWith(
-      "Could not read the file.", received, expect.any(Function),
-    ));
   });
 
   // The user's real attempt: click the header's edit control, then type into
