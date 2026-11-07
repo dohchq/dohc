@@ -476,6 +476,7 @@ export function LinkedChatsPanel(props: {
         </div>
         <ChatMessageList
           testIdPrefix="linked-chat"
+          surface="panel"
           messages={messages}
           loading={messagesLoading}
           emptyLabel={`No messages yet${filePath ? ` about ${basenameOf(filePath)}` : ""}.`}

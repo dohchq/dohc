@@ -481,6 +481,13 @@ const GROUP_WINDOW_MS = 5 * 60_000;
 
 export type ChatDensity = "stream" | "thread" | "narrow";
 
+// A day's line across the pane, with the day's name in the middle. The pinned
+// copy at the top of a scrolled list uses the same classes, so the two match.
+const DAY_DIVIDER = "mb-1.5 mt-2.5 flex items-center gap-3 text-[12px] font-medium text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line";
+// The divider's top margin. A divider becomes the pinned copy once it rises
+// past this line, where the copy sits, so the swap moves nothing.
+const DAY_DIVIDER_TOP = 10;
+
 // A row is a face column and the text, at the spacing each place gives it.
 // The stream stops text at 720px; a thread's panel is narrower than that.
 // A narrow row has no room beside its name, so its hover bar rises above it.
@@ -506,10 +513,10 @@ export function continuesRun(previous: ChatMessageRecord | undefined, message: C
     message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
 }
 
-// The day pinned over the list for its topmost visible row, or null. A row
-// that starts its day carries that day's divider; any other row's divider is
-// further up, out of view. The label shows only while the divider is out of
-// view or crossing the top edge, so it never covers a divider for its own day.
+// The day pinned at the top of the list for its topmost visible row, or null.
+// A row that starts its day carries that day's divider; any other row's
+// divider is further up, out of view. The day is pinned only once its divider
+// has risen to the pinned copy's place, so the two never show at once.
 export function pinnedChatDay(
   topRow: { day: string; startsDay: boolean; dividerFullyVisible: boolean } | null,
 ): string | null {
@@ -569,6 +576,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   anchor?: "end" | "start";
   // A stream at full width, a thread in its side panel, or a narrow pane.
   density?: ChatDensity;
+  // The pane's background, which the pinned day covers messages with.
+  surface?: "bg" | "panel";
 }) {
   const density = props.density ?? "stream";
   const anchor = props.anchor ?? "end";
@@ -599,11 +608,11 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     },
     getScrollableNode: () => list.current?.getScrollableNode() ?? null,
   }), [indexes]);
-  // The day of the topmost visible message, pinned over the list while its
-  // day's divider is out of view. Legend reports the visible set, and an
-  // IntersectionObserver on the mounted day dividers reports each divider that
-  // crosses the scroller's top edge. Nothing reads layout while scrolling, and
-  // state changes only with the label.
+  // The day of the topmost visible message, pinned at the top of the list
+  // once its day's divider has risen there. Legend reports the visible set,
+  // and an IntersectionObserver on the mounted day dividers reports each
+  // divider that crosses the pinned copy's line. Nothing reads layout while
+  // scrolling, and state changes only with the day.
   const [topDay, setTopDay] = useState<string | null>(null);
   const messagesRef = useRef(props.messages);
   messagesRef.current = props.messages;
@@ -660,7 +669,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
       let changed = false;
       for (const entry of entries) {
         const id = (entry.target as HTMLElement).dataset.dayDivider!;
-        // Crossing or above the top edge.
+        // Crossing or above the pinned copy's line.
         const clipped = entry.rootBounds !== null && entry.boundingClientRect.top < entry.rootBounds.top;
         if (clipped === clippedDividers.current.has(id)) continue;
         changed = true;
@@ -668,7 +677,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         else clippedDividers.current.delete(id);
       }
       if (changed) updateTopDay();
-    }, { root: scroller, threshold: [0, 1] });
+    }, { root: scroller, rootMargin: `-${DAY_DIVIDER_TOP}px 0px 0px 0px`, threshold: [0, 1] });
     dividerObserver.current = observer;
     for (const divider of dividers.current.values()) observer.observe(divider);
     return () => {
@@ -681,6 +690,11 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     };
   }, [listShown, updateTopDay]);
   useEffect(updateTopDay, [props.messages, updateTopDay]);
+  const [scrollbarWidth, setScrollbarWidth] = useState(0);
+  useLayoutEffect(() => {
+    const scroller = topDay ? list.current?.getScrollableNode() : null;
+    if (scroller) setScrollbarWidth(scroller.offsetWidth - scroller.clientWidth);
+  }, [topDay]);
 
   const messageKey = useCallback((node: Node | null) => {
     const element = node instanceof Element ? node : node?.parentElement;
@@ -766,7 +780,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             data-testid={`${props.testIdPrefix}-day`}
             data-day-divider={message.id}
             ref={observeDivider}
-            className={`${sizes.divider} mb-1.5 mt-2.5 flex items-center gap-3 text-[12px] font-medium text-subtle before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line`}
+            className={`${sizes.divider} ${DAY_DIVIDER}`}
           >
             {formatChatDay(message.createdAtMs)}
           </span>
@@ -897,13 +911,14 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   }
   return <div className="relative flex min-h-0 flex-1 flex-col">
     {topDay ? (
-      <span
+      <div
         aria-hidden
         data-testid={`${props.testIdPrefix}-sticky-day`}
-        className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-full border border-line bg-bg px-2 py-0.5 text-[11px] text-subtle"
+        className={`pointer-events-none absolute left-0 top-0 z-10 ${props.surface === "panel" ? "bg-panel" : "bg-bg"}`}
+        style={{ right: scrollbarWidth }}
       >
-        {topDay}
-      </span>
+        <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+      </div>
     ) : null}
     <LegendList
     ref={list}
