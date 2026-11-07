@@ -40,20 +40,21 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 const sourceAdapter = (files: Map<string, string>) => sourceCaptureAdapter(files);
-async function fixture(agentRun?: () => LocalDatasetAgent | null, holder: CollectionsHolderCheck = unguardedCollections) {
+async function fixture(agentRun?: () => LocalDatasetAgent | null, holder: CollectionsHolderCheck = unguardedCollections, { customRead = true, schema = "" } = {}) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-dataset-app-")); roots.push(workspaceRoot);
   // Workers and exports live in .dohc/local, which an engine open prepares.
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   if (holder.required()) await recordNewCollectionsHolder(workspaceRoot, "w", holder.here());
   const host = await createLocalDatasetHost({ holder, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture, ...(agentRun ? { agentRun } : {}) }); hosts.push(host);
   const generated = generateDatasetSources(definition);
-  const files = new Map(Object.entries(generated.files)); files.set("data/dataset.json", JSON.stringify(definition));
-  files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
+  const files = new Map(Object.entries(generated.files));
+  if (customRead) files.set(definition.operationsPath,files.get(definition.operationsPath)+`\nglobalThis.operations.fileRead=(ctx,input)=>{
     if(input.echo)return {echo:input.fileId};
     if(input.extra)return {fileId:input.fileId,extra:true};
     if(input.guess)return {fileId:input.fileId};
     return {fileId:ctx.db.query('SELECT receipt FROM responses WHERE receipt=?',[input.fileId])[0]?.receipt||null};
   };`);
+  files.set(definition.schemaPath, files.get(definition.schemaPath) + schema);
   const adapter = sourceAdapter(files);
   const prepared = await host.prepare({ descriptorPath: "data/dataset.json", adapter });
   const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
@@ -123,6 +124,18 @@ describe("local approved dataset apps", () => {
     expect({ ...shown, operations: shown.operations.map(({ display: _, ...operation }) => operation) }).toEqual(stored);
     expect(await f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).toMatchObject({ replayed: false });
     expect(await f.host.apps.activate(f.app, new AbortController().signal)).toEqual(f.published);
+  });
+
+  it("says what each operation does only when dohc generated the Collection's schema and its operation code", async () => {
+    const shown = async (sources: Parameters<typeof fixture>[2]) => {
+      const [row] = (await fixture(undefined, undefined, sources)).host.apps.list("app");
+      if (!row || !("datasetCapability" in row)) throw new Error("Expected Dataset app.");
+      return (row.datasetCapability as AppDatasetCapability).operations.map(operation => operation.display);
+    };
+    expect(await shown({ customRead: false })).toEqual([{ kind: "create", label: "Submit", fields: ["Name", "Receipt"] }]);
+    // Beside generated operation code, a trigger that deletes every other record on each submit.
+    const wipe = "\nCREATE TRIGGER wipe AFTER INSERT ON responses BEGIN DELETE FROM responses WHERE id <> NEW.id; END;\n";
+    expect(await shown({ customRead: false, schema: wipe })).toEqual([{ kind: "action", label: "Submit", fields: [] }]);
   });
 
   it("persists approval provenance with the captured candidate without changing app authority", async () => {

@@ -10,7 +10,8 @@ import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { DatasetSchemaChangeError, generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import { invalidateDatasetAddresses, resolveDatasetAddress } from "./datasetAddress";
 import { CollectionChangeProposal, describeCollectionChangeRow } from "./collectionChange";
-import { generateDatasetSources } from "./datasetGenerator";
+import { generateDatasetSchema, generateDatasetSources } from "./datasetGenerator";
+import { hasGeneratedDatasetSources } from "./datasetFieldMigration";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { createDatasetHandler } from "../ipc/datasetIpc";
 import { datasetDefinitionFromDrafts } from "../renderer/collections/datasetDefinitionFromDrafts";
@@ -193,6 +194,25 @@ it("keeps stable field/table IDs across consecutive add and label changes", asyn
   const result = (await f.host.query(call(renamedTable.revision, id(5)))).result as { rows: Array<{ values: Record<string, unknown> }> };
   expect(result.rows[0]!.values[id(4)]).toBe("Ada");
   expect(result.rows[0]!.values[noteId]).toBeNull();
+});
+
+it("counts a Collection as generated only when dohc generated both its schema and its operation code", async () => {
+  const f = await fixture();
+  const first = f.host.approvedArtifacts(id(1));
+  expect(hasGeneratedDatasetSources(first.revision, first.schemaSql)).toBe(true);
+  // A field dohc adds changes the schema's text but keeps it generated.
+  await approve(f, await f.prepare({ kind: "addField", tableId: id(2), field: { name: "Email", type: "text", required: false, unique: false } }));
+  const added = f.host.approvedArtifacts(id(1));
+  expect(added.schemaSql).not.toBe(generateDatasetSchema(added.revision.definition));
+  expect(hasGeneratedDatasetSources(added.revision, added.schemaSql)).toBe(true);
+  // Beside generated operation code, a trigger that deletes every other record on each insert.
+  const wipe = `${added.schemaSql}\nCREATE TRIGGER wipe AFTER INSERT ON people BEGIN DELETE FROM people WHERE id <> NEW.id; END;\n`;
+  const triggered = describeDatasetRevision({ definition: added.revision.definition, revision: 3, schemaSql: wipe, operationSource: added.operationSource });
+  expect(hasGeneratedDatasetSources(triggered, wipe)).toBe(false);
+  // The schema checked must be the one the revision names.
+  expect(hasGeneratedDatasetSources(triggered, added.schemaSql)).toBe(false);
+  const edited = describeDatasetRevision({ definition: added.revision.definition, revision: 3, schemaSql: added.schemaSql, operationSource: `${added.operationSource}\n// custom` });
+  expect(hasGeneratedDatasetSources(edited, added.schemaSql)).toBe(false);
 });
 
 it("adds a unique field as an index and rejects duplicate values through existing operations", async () => {

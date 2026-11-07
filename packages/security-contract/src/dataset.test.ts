@@ -134,10 +134,8 @@ describe("dataset publication binding", () => {
 
   it("shows what each operation does beside the capability, and keeps it out of what an approval verifies", () => {
     const approved = revision();
-    approved.operationsSha256 = hash(generateDatasetOperations(approved.definition));
-    approved.revisionSha256 = hash(datasetRevisionDigestContent(approved));
     const capability = resolveAppDatasetCapability(binding(approved), approved);
-    const shown = displayAppDatasetCapability(capability, approved);
+    const shown = displayAppDatasetCapability(capability, approved, true);
     expect(shown.operations.map(operation => operation.display)).toEqual([
       { kind: "create", label: "Submit", fields: ["Name"] },
       { kind: "read", label: "View responses", fields: ["Record ID", "Name"] },
@@ -148,15 +146,15 @@ describe("dataset publication binding", () => {
     expect(capability.operations.some(operation => "display" in operation)).toBe(false);
     expect(verifyAppDatasetCapability(capability, approved)).toEqual(capability);
     expect(() => verifyAppDatasetCapability(shown, approved)).toThrow();
-    expect(() => displayAppDatasetCapability(capability, { ...approved, revision: 2 })).toThrow();
+    expect(() => displayAppDatasetCapability(capability, { ...approved, revision: 2 }, true)).toThrow();
     // A generated form's narrower create shows only the fields it writes.
     const narrowed = resolveAppDatasetCapability({ ...binding(approved), createFields: [{ operationId: id(5), fieldIds: [] }] }, approved);
-    expect(displayAppDatasetCapability(narrowed, approved).operations[0]!.display).toEqual({ kind: "create", label: "Submit", fields: [] });
+    expect(displayAppDatasetCapability(narrowed, approved, true).operations[0]!.display).toEqual({ kind: "create", label: "Submit", fields: [] });
   });
 
-  it("shows custom operation code by each operation's label, because it may do more than it declares", () => {
+  it("shows custom code by each operation's label, because it may do more than it declares", () => {
     const approved = revision();
-    const shown = displayAppDatasetCapability(resolveAppDatasetCapability(binding(approved), approved), approved);
+    const shown = displayAppDatasetCapability(resolveAppDatasetCapability(binding(approved), approved), approved, false);
     expect(shown.operations.map(operation => operation.display)).toEqual([
       { kind: "action", label: "Submit", fields: [] },
       { kind: "action", label: "View responses", fields: [] },
@@ -177,7 +175,7 @@ describe("dataset publication binding", () => {
     ];
     const capability = parseAppDatasetCapability({ ...binding(approved), name: approved.definition.name,
       operations: approved.definition.operations.map(({ operationId, name, access, readOnly }) => ({ operationId, name, access, readOnly })) });
-    const shown = displayAppDatasetCapability(capability, approved, () => true);
+    const shown = displayAppDatasetCapability(capability, approved, true);
     // A delete and an action still say what they do.
     expect(shown.operations.map(operation => operation.display)).toEqual([
       ...Array.from({ length: 20 }, (_, n) => ({ kind: "read", label: `Read ${n}`, fields: [] })),

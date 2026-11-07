@@ -49,12 +49,12 @@ export function resolveAppDatasetCapability(value: unknown, approvedRevision: Da
 
 /**
  * Adds what each operation does, from the revision the capability names, for Review app to show.
- * Only generated operation code does what its kind and fields declare. Custom code shows as an action, by its label.
+ * `generated` is the host's check of the revision's saved sources: dohc generated both its schema and its operation code.
+ * Only then does each operation do what its kind and fields declare. Custom code shows as an action, by its label.
  * Keep the result out of candidates and digests. verifyAppDatasetCapability refuses it.
  */
-export function displayAppDatasetCapability(capability: AppDatasetCapability, approved: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
+export function displayAppDatasetCapability(capability: AppDatasetCapability, approved: DatasetRevision, generated: boolean): AppDatasetCapability {
   if (capability.datasetId !== approved.datasetId || capability.revision !== approved.revision || capability.revisionSha256 !== approved.revisionSha256) fail();
-  const generated = hasGeneratedDatasetRevision(approved, lookup);
   const shown = { ...capability, operations: capability.operations.map(operation => {
     const declared = approved.definition.operations.find(candidate => candidate.operationId === operation.operationId);
     const table = approved.definition.tables.find(candidate => candidate.tableId === declared?.tableId);

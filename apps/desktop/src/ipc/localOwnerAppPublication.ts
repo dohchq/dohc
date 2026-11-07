@@ -9,6 +9,7 @@ import { displayAppDatasetCapability } from "@dohc/security-contract/dataset-aut
 import { prepareLocalAppPublication, readLocalAppSource } from "../workspaces/ownerAppPublication";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "../workspaces/closedAppCompiler";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
+import { hasGeneratedDatasetSources } from "../workspaces/datasetFieldMigration";
 
 export function createLocalOwnerAppPublicationHandler<Workspace extends { workspaceId: string }, Operation extends { workspace: Workspace; signal: AbortSignal; session?: { generation: number }; scope?: string; assertCurrent(): void }>(deps: {
   datasetForWorkspace(workspace: Workspace, signal: AbortSignal): Promise<Pick<LocalDatasetHost, "approvedArtifacts" | "apps">>;
@@ -76,14 +77,14 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
     preparing.add(callerKey);
     try {
       const capture = await deps.flushCapture(operation.workspace); current();
-      let revision: DatasetRevision | undefined;
+      let dataset: { revision: DatasetRevision; schemaSql: string } | undefined;
       const prepared = await deps.withAdapter(operation.workspace, adapter => prepareLocalAppPublication(input, {
         adapter, signal: operation.signal, assertCurrent: current, compile: deps.compile, deferredWrites: capture.deferredWrites,
         resolveDatasetRevision: async binding => {
           const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
           const approved = local.approvedArtifacts(binding.datasetId);
           if (!approved.active) throw new Error("This Collection is unavailable on this device.");
-          revision = approved.revision;
+          dataset = approved;
           return approved.revision;
         },
       }));
@@ -96,7 +97,8 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       pending.set(approvalId, { prepared, workspaceId: input.workspaceId, callerKey, scope: operation.scope ?? callerKey, signal: operation.signal, digest, clear });
       operation.signal.addEventListener("abort", clear, { once: true });
       // The digest binds the candidate. Review app also gets what each operation does, from the revision the candidate names.
-      const shown = candidate.capabilities.map(capability => capability.kind === "dataset" && revision ? displayAppDatasetCapability(capability, revision) : capability);
+      const shown = candidate.capabilities.map(capability => capability.kind === "dataset" && dataset
+        ? displayAppDatasetCapability(capability, dataset.revision, hasGeneratedDatasetSources(dataset.revision, dataset.schemaSql)) : capability);
       return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest: digest, appRoot: candidate.appRoot,
         versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path),
         capabilities: shown, externalNetwork: true, local: true });

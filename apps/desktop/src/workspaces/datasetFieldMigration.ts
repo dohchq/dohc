@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, DatabaseSync } from "node:sqlite";
-import { datasetColumnFields, type DatasetColumnField, type DatasetDefinition } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetColumnField, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { hasGeneratedDatasetRevision } from "@dohc/security-contract/dataset-authorization";
 import { generateDatasetSchema } from "./datasetGenerator";
 
 const quote = (name: string) => `"${name}"`;
@@ -50,6 +51,15 @@ function generatedSchema(actual: string, definition: DatasetDefinition): boolean
   // Exact source proves predicates, while structural inspection accepts only dohc's known ALTER ADD layout.
   if (actual === generateDatasetSchema(definition)) return true;
   try { return inspect(actual) === inspect(generateDatasetSchema(definition)); } catch { return false; }
+}
+
+/**
+ * dohc generated the revision's schema and operation code, so each operation does what its kind and fields declare.
+ * `schemaSql` is the saved schema the revision names. Edited generated code counts as custom.
+ */
+export function hasGeneratedDatasetSources(revision: DatasetRevision, schemaSql: string): boolean {
+  return hasGeneratedDatasetRevision(revision) && createHash("sha256").update(schemaSql).digest("hex") === revision.schemaSha256 &&
+    generatedSchema(schemaSql, revision.definition);
 }
 
 export function generateFieldMigration(input: { previous: DatasetDefinition; next: DatasetDefinition; schemaSql: string; tableId: string; field: DatasetColumnField }) {

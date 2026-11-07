@@ -7,6 +7,7 @@ import { resolveCompatibleDatasetRevision, type DatasetAccess, type DatasetAutho
 import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
+import { hasGeneratedDatasetSources } from "./datasetFieldMigration";
 import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import type { LocalAppStore, LocalAppRow, LocalAppPrepared, LocalAppStorage } from "./localAppStore";
 import type { LocalAppAction } from "./localAppLaunch";
@@ -26,7 +27,7 @@ export function createLocalDatasetApps(options: {
   agentRun(): LocalDatasetAgent | null;
   /** The person on this computer, whom a local app's commits are made for. */
   localPersonId(): string;
-  approved(datasetId: string): { revision: DatasetRevision; active: boolean };
+  approved(datasetId: string): { revision: DatasetRevision; schemaSql: string; active: boolean };
   bind(datasetId: string, appId: string, binding: AppDatasetBinding | null, commit: () => void): void;
   invoke(context: LocalDatasetAppContext, input: InvokeDatasetInput): Promise<DatasetInvocationResult>;
   upload(context: LocalDatasetAppContext, input: LocalDatasetUpload): Promise<unknown>;
@@ -47,8 +48,10 @@ export function createLocalDatasetApps(options: {
   /** The approval as Review app shows it: what each operation does in the revision it names, when this device still has that revision. */
   function shown(value: LocalAppRow, declared: AppDatasetCapability): AppDatasetCapability {
     try {
-      const key = { workspaceId: options.workspaceId, datasetId: value.resourceId };
-      return displayAppDatasetCapability(declared, resolveCompatibleDatasetRevision(db, key, declared, options.approved(value.resourceId).revision));
+      const key = { workspaceId: options.workspaceId, datasetId: value.resourceId }, approved = options.approved(value.resourceId);
+      // A compatible earlier revision names the same schema and operation code as the approved one.
+      const revision = resolveCompatibleDatasetRevision(db, key, declared, approved.revision);
+      return displayAppDatasetCapability(declared, revision, hasGeneratedDatasetSources(revision, approved.schemaSql));
     } catch { return declared; }
   }
   function resolveAuthority(context: LocalDatasetAppContext, request: { workspaceId: string; datasetId?: string; access: DatasetAccess }): DatasetAuthority {
