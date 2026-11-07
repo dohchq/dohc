@@ -169,12 +169,14 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // the row of its kind it replaces, so an open toast stays open, and files
   // it quietly when there is none.
   // "repeat" keeps an unchanged message's toast, and toasts a new message.
+  // "reader" works like "repeat" and also keeps an unchanged message's
+  // details, for a reader that can't see the refusal's cause.
   // "quiet" updates the row it replaces where it stands, with its id, time
   // and toast, so it never takes the toast from a newer row; with no row to
   // replace it files one without a toast.
   // A row that tests and other surfaces name passes a fixed `id`.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string }, seen: boolean | "keep" | "repeat" | "quiet" = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string }, seen: boolean | "keep" | "repeat" | "reader" | "quiet" = false) => {
       if (currentWorkspace.current !== workspaceId) return;
       nextId.current += 1;
       const id = error.id ?? `shell-error-${nextId.current}`;
@@ -193,14 +195,15 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           const updated: ShellError = { ...error, message, id: replaced.id, atMs: replaced.atMs, seen: replaced.seen };
           return current.flatMap((existing) => existing === replaced ? [updated] : matches(existing) ? [] : [existing]);
         }
-        const repeated = seen === "repeat" && replaced?.message === message ? replaced : undefined;
+        const repeat = seen === "repeat" || seen === "reader";
+        const repeated = repeat && replaced?.message === message ? replaced : undefined;
         const next: ShellError = {
           ...error,
-          ...(repeated && !error.details ? { details: repeated.details } : {}),
+          ...(seen === "reader" && repeated ? { details: repeated.details } : {}),
           message,
           id: repeated?.id ?? id,
           atMs: repeated?.atMs ?? atMs,
-          seen: seen === "repeat" ? (repeated?.seen ?? false) : seen === "keep" || seen === "quiet" ? (replaced?.seen ?? true) : seen,
+          seen: repeat ? (repeated?.seen ?? false) : seen === "keep" || seen === "quiet" ? (replaced?.seen ?? true) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -345,7 +348,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       noDismiss: true,
       kind: "share-collision-record",
       identity: "share-collision-record",
-    }, "repeat");
+    }, "reader");
     return true;
   }, [push, retrySharedView]);
 
@@ -425,10 +428,9 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       identity?: string;
     }) => {
       if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message)) return;
-      const shown = readError(failure.message);
-      const sharedFileRefusal = refusalCode(failure.cause) === "share-collision-record" ? readError(failure.cause)
-        : refusalCode(failure.message) === "share-collision-record" ? shown : null;
-      const cause = sharedFileRefusal ? null : failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
+      const refusal = [failure.cause, failure.message].find(error => refusalCode(error) === "share-collision-record");
+      const shown = readError(refusal ?? failure.message);
+      const cause = refusal !== undefined ? null : failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
       const title = failure.title ?? (isLiveEditingRefusal(failure.cause) ? readError(failure.cause).title : undefined);
       const action = failure.action ??
         (isPrivacyDenied(failure.message) || isPrivacyDenied(failure.cause) ? privacySettingsAction : undefined);
@@ -439,7 +441,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       push({
         ...(title ? { title } : {}),
         ...(failure.tone ? { tone: failure.tone } : {}),
-        message: sharedFileRefusal?.words ?? shown.words ?? UNKNOWN_ERROR_WORDS,
+        message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(failure.command ? { command: failure.command } : {}),
         ...(failure.paths?.length ? { paths: failure.paths } : {}),
