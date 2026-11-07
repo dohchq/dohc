@@ -93,6 +93,7 @@ const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--dohc
 const ACTIVE_GROUP_LINE =
   "border-t-2 border-accent forced-colors:border-[Highlight] [[data-split]_[data-editor-group-id][data-active]_&]:block";
 const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
+const INACTIVE_GROUP_GLYPH = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-subtle";
 
 // An edge the strip can still scroll past fades over this width. A revealed
 // tab stops clear of the fade, its joins included, where the strip has room
@@ -233,10 +234,10 @@ const Tab = memo(function Tab(props: {
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink"
         />
       ) : null}
-      {/* The drawing's 8px from glyph to name; the glyph is muted on the
-          active tab and subtle on the rest. */}
+      {/* The drawing's 8px from glyph to name; only the focused group's
+          active glyph is muted. The other glyphs are subtle. */}
       <span className="flex items-center gap-2">
-        <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? "text-muted" : "text-subtle"} />
+        <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? `text-muted ${INACTIVE_GROUP_GLYPH}` : "text-subtle"} />
         <span className="max-w-44 truncate">{name}</span>
       </span>
       <button

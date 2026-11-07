@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useFocusSurface } from "../ui/focusReturn";
@@ -66,6 +66,41 @@ function renderLayout(onResizeGroups = vi.fn()) {
 }
 
 describe("EditorGroupLayout", () => {
+  it("recedes only the unfocused group's active name and glyph as keyboard focus moves", () => {
+    const view = render(<Workbench groups={[
+      { id: "left", tabs: ["left.md", "left-other.md"] },
+      { id: "right", tabs: ["right.md", "right-other.md"] },
+    ]} active="left" />);
+    const left = screen.getByRole("tab", { name: "left.md" });
+    const right = screen.getByRole("tab", { name: "right.md" });
+    const leftGlyph = left.querySelector("svg:not(.lucide-x)");
+    const rightGlyph = right.querySelector("svg:not(.lucide-x)");
+    const nameTone = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
+    const glyphTone = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-subtle";
+    const receded = (selector: string, tone: string) => Array.from(view.container.querySelectorAll(
+      `[data-split] [data-editor-group-id]:not([data-active]) ${selector}[class~="${tone}"]`,
+    ));
+    const assertTones = (focused: HTMLElement, other: HTMLElement, otherGlyph: Element | null) => {
+      expect(focused.classList.contains("text-ink")).toBe(true);
+      expect(receded('[role="tab"][aria-selected="true"]', nameTone)).toEqual([other]);
+      expect(receded("svg", glyphTone)).toEqual([otherGlyph]);
+      for (const tab of [focused, other]) {
+        expect(tab.getAttribute("aria-selected")).toBe("true");
+        expect(tab.classList.contains("bg-bg")).toBe(true);
+        expect(tab.querySelector('button[aria-label^="Close"]')?.classList.contains("opacity-0")).toBe(false);
+      }
+    };
+    assertTones(left, right, rightGlyph);
+    act(() => right.focus());
+    expect(document.activeElement).toBe(right);
+    assertTones(right, left, leftGlyph);
+    act(() => left.focus());
+    expect(document.activeElement).toBe(left);
+    assertTones(left, right, rightGlyph);
+    expect(screen.getByRole("tab", { name: "left.md" })).toBe(left);
+    expect(screen.getByRole("tab", { name: "right.md" })).toBe(right);
+  });
+
   it("labels each group and focuses it from pointer, focus, and context-menu entry", () => {
     const { onFocusGroup } = renderLayout();
     const right = screen.getByRole("region", { name: "Editor group 2" });
