@@ -232,6 +232,18 @@ it.each([false, true])("returns a rename before its pass, reads updating without
   f.retirement.abort();
 });
 
+it("undoes a connected agent's named rename when Undo supplies no name", async () => {
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
+  const f = await fixture(rewrite); await f.write("old.txt");
+  const moved = await (await prepareMoveWorkspacePathAs(f.operation, {fromPath: "old.txt", toPath: "new.txt"}, {...agent, agentName: "Mover agent"}, f.options))();
+  expect(moved).toMatchObject({ok: true, undo: {available: true}});
+  expect(JSON.parse(await readFile(f.recordPath(), "utf8"))).toMatchObject({linkRewrite: {author: {agentName: "Mover agent"}}});
+  await vi.waitFor(() => expect(rewrite).toHaveBeenCalledOnce());
+  expect(await f.undo(undefined, true)).toMatchObject({ok: true, tracked: {state: "restored", momentCount: 1}, remaining: []});
+  expect(await readFile(join(f.rootPath, "old.txt"), "utf8")).toBe("old.txt");
+  f.retirement.abort();
+});
+
 it("keeps the History adapter receiver when IPC schedules its rewrite", async () => {
   const seen = deferred<unknown>();
   const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async function (this: unknown) {
