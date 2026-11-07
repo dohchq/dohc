@@ -76,6 +76,37 @@ it("says History paused with Try again, restarts capture from the row, and keeps
   expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
 });
 
+// An open report keeps its text while other notices arrive: its Time is when
+// the notice was raised, not when the list last drew.
+it("keeps an open Details report's text when another notice arrives later", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(Date.parse("2026-11-07T09:00:00Z"));
+    const bridge = makeBridge(Promise.resolve(null));
+    let status: SyncStatusResult = { ...SYNC_STATUS, historyCaptureFailed: true, engineStoreRefused: null };
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = await within(notices).findByTestId("notice-history-capture-failed");
+    await user.click(within(row).getByRole("button", { name: "Details" }));
+    const report = () => row.querySelector("pre")?.textContent;
+    const before = report();
+    expect(before).toContain("Time: 2026-11-07T09:00:");
+
+    vi.setSystemTime(Date.parse("2026-11-07T10:00:00Z"));
+    status = { ...status, ownerLiveStopFailures: [{ objectId: "object-a", path: "a.md", detail: "corrupt" }] };
+    act(() => bridge.emitWorkspaceActivity());
+    await within(notices).findByText('dohc could not stop live editing for "a.md".');
+    expect(within(row).getByRole("button", { name: "Hide details" })).toBeTruthy();
+    expect(report()).toBe(before);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 describe("History paused words", () => {
   function pausedBridge() {
     const bridge = makeBridge(Promise.resolve(null));
