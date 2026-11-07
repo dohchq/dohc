@@ -956,6 +956,10 @@ export function DesktopWorkspaceShell(props: {
       sequence: dmNavigationRequest.current.sequence + 1,
     };
   }
+  const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
+  const retryRefusedSharedView = useCallback(() => {
+    if (!workspaceAdmission.superseded) void refreshShareViewRef.current();
+  }, [workspaceAdmission]);
   const {
     shellErrors,
     hideShellError,
@@ -1002,7 +1006,7 @@ export function DesktopWorkspaceShell(props: {
     clearIdentity,
     privacySettingsAction,
     keepCollectionsHere,
-  } = useShellError(workspaceId);
+  } = useShellError(workspaceId, retryRefusedSharedView);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
@@ -2306,7 +2310,6 @@ export function DesktopWorkspaceShell(props: {
         details,retry,action:save,target,identity});
     }
   },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped,reportPendingLiveStop,readLiveStopRefusalForRow,setShellRetryBusy]);
-  const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,

@@ -140,6 +140,9 @@ class CapturePartialFailureError extends Error {
       options,
     );
     this.name = "CapturePartialFailureError";
+    if (options.cause instanceof CollisionRecordRefusal) {
+      Object.assign(this, { code: options.cause.code });
+    }
   }
 }
 
@@ -1084,13 +1087,15 @@ function untrustedCollisionRecordRefusal(
 // could not set aside. The record still holds what kept the person's files
 // apart, so the refresh changes nothing.
 class CollisionRecordRefusal extends Error {
+  readonly code = "share-collision-record";
+
   constructor(records: ShareViewRecords, options: { cause: unknown }) {
     super(
       `dohc did not update these shared files because it could not read ${posix.join(records.shown, COLLISION_RECORD_FILE)}. ` +
         "It keeps a refresh from replacing your own files.",
       options,
     );
-    this.name = "CollisionRecordRefusal";
+    this.name = "Error";
   }
 }
 

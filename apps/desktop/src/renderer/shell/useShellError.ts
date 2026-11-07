@@ -3,7 +3,7 @@ import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
-import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
 import type { NoticeTarget } from "./noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
@@ -146,7 +146,7 @@ export type ReportShellFailure = (failure: {
 }) => void;
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
-export function useShellError(workspaceId: string) {
+export function useShellError(workspaceId: string, retrySharedView?: () => void) {
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
@@ -335,6 +335,20 @@ export function useShellError(workspaceId: string) {
     filedShareCapture.current = null;
   }, [workspaceId]);
 
+  const reportSharedViewRefusal = useCallback((error: unknown, retry: (() => void) | null) => {
+    if (refusalCode(error) !== "share-collision-record") return false;
+    const { words, cause } = readError(error);
+    push({
+      message: words ?? UNKNOWN_ERROR_WORDS,
+      ...(cause ? { details: [["Cause", cause]] } : {}),
+      retry: retrySharedView ?? retry,
+      noDismiss: true,
+      kind: "share-collision-record",
+      identity: "share-collision-record",
+    }, "repeat");
+    return true;
+  }, [push, retrySharedView]);
+
   const reportShellError = useCallback(
     (
       fallback: string,
@@ -345,6 +359,7 @@ export function useShellError(workspaceId: string) {
       // Changes the row of its identity where it stands, with no new toast.
       quiet = false,
     ) => {
+      if (reportSharedViewRefusal(error, retry)) return;
       const { cause, title, words, canRetry, details: explanation } = readError(error);
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
       const details: ReadonlyArray<ErrorDetailField> = partial ? [
@@ -369,7 +384,7 @@ export function useShellError(workspaceId: string) {
         ...(kind ? { kind } : {}),
       }, quiet || waitedForCollectionMove(error) ? "quiet" : false);
     },
-    [push, privacySettingsAction, keepCollectionsHere],
+    [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed. A part that keeps one row
@@ -408,6 +423,8 @@ export function useShellError(workspaceId: string) {
       kind?: ShellErrorKind;
       identity?: string;
     }) => {
+      if (reportSharedViewRefusal(failure.cause, failure.retry ?? null) ||
+        reportSharedViewRefusal(failure.message, failure.retry ?? null)) return;
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
       const title = failure.title ?? (isLiveEditingRefusal(failure.cause) ? readError(failure.cause).title : undefined);
@@ -433,7 +450,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);
     },
-    [push, privacySettingsAction],
+    [push, privacySettingsAction, reportSharedViewRefusal],
   );
   // Content search lives in the shell so its results survive panel switches.
   // Invocation failures use the shell's persistent error and retry contract;

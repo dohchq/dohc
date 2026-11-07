@@ -15,6 +15,8 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "./workspaceActivityCoalesce
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
+import { ipcWireError } from "../ipc/errorWords";
+import { sharedViewRefusal, sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, holdHistory, shellBootstrapProps, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 // One share's durable skip record, as the registry holds it.
@@ -1817,6 +1819,44 @@ describe("ui-state merge-on-load", () => {
         { exact: false },
       ),
     ).toBeTruthy();
+  });
+
+  it("shows one plain refusal when a shared file is open before refresh finishes", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
+    const received = new Error(`Error invoking remote method 'desktop:read-workspace-text': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    bridge.readWorkspaceText.mockRejectedValue(received);
+    const refused: RefreshSharedViewResult = {
+      ok: false, changedPaths: 0, errorKind: "collision-record", errorMessage: sharedViewRefusalWords,
+    };
+    const opening = deferred<RefreshSharedViewResult>();
+    const refresh = vi.fn<() => Promise<RefreshSharedViewResult>>()
+      .mockReturnValueOnce(opening.promise).mockResolvedValue(refused);
+    bridge.refreshSharedView = refresh;
+    renderShell(bridge, { ...WORKSPACE, shareView: {
+      shareId: "share-1", granterEmail: "granter@dohc.test", access: "view",
+    } });
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")?.textContent,
+      "An open shared file shows the plain refusal before refresh finishes").toContain(sharedViewRefusalWords));
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    expect(within(toast).getByRole("button", { name: "Dismiss workspace error" })).toBeTruthy();
+    await act(async () => { opening.resolve(refused); });
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(notices.querySelectorAll("[data-notice-row]")).toHaveLength(1);
+    const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: /Copy/ })).toBeTruthy();
+    expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+    expect(within(row).queryByRole("button", { name: "Details" })).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    fireEvent.click(screen.getByTestId("shared-view-refresh"));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect((await screen.findByTestId("notice-center")).querySelectorAll("[data-notice-row]")).toHaveLength(1);
   });
 
   it("keeps a refresh that can't read the share collision record in Notices until a refresh completes", async () => {
