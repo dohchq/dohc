@@ -28,6 +28,8 @@ export type MenuItem = {
   icon?: ReactNode;
   /** A second line under the label, such as why a disabled row cannot run. It stays at full strength. */
   description?: string;
+  /** The chord that runs the row's action anywhere: `label` after the label, `keys` as aria-keyshortcuts. */
+  shortcut?: { label: string; keys: string | undefined };
   title?: string;
   testId?: string;
   data?: Readonly<Record<`data-${string}`, string>>;
@@ -490,6 +492,7 @@ export function Menu(props: {
                 aria-current={entry.current || undefined}
                 aria-disabled={entry.disabled || undefined}
                 aria-describedby={describedBy}
+                aria-keyshortcuts={entry.shortcut?.keys}
                 title={entry.title}
                 data-testid={entry.testId}
                 {...entry.data}
@@ -521,6 +524,7 @@ export function Menu(props: {
                 ) : (
                   <span className={`${MENU_LABEL} ${dim}`}>{entry.label}</span>
                 )}
+                {entry.shortcut ? <span aria-hidden className={`${MENU_SHORTCUT} ${dim}`}>{entry.shortcut.label}</span> : null}
               </button>
             );
           })}

@@ -12,7 +12,7 @@ import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
-import { useTabRowActionsSlot } from "./workbench/tabRowActions";
+import { NARROW_GROUP_HIDDEN, useTabRowActionsSlot } from "./workbench/tabRowActions";
 import { useShownAfter } from "./ui/useShownAfter";
 import { PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
@@ -26,7 +26,8 @@ import { TOPMATTER_READ_ONLY_FLAG } from "./pageTopmatter";
 // shrink. `status` (a save state that needs the person, a slow open's
 // "Opening…") sits left of them and gives way first, before the tab names:
 // its words can change width without moving a control, and in a narrow pane
-// a state mark shows only its mark. A status with nothing visible, such as a calm save
+// a state mark shows only its mark. A narrow group moves Share into its tab
+// list (NARROW_GROUP_HIDDEN). A status with nothing visible, such as a calm save
 // state or a quick open kept for screen readers, draws no box, so loading,
 // ready and failed views take the same width. Outside an editor group, they
 // draw in a row of their own.
@@ -72,7 +73,7 @@ export function ViewActions(props: {
           aria-label="Share file"
           title="Share file"
           onClick={props.onShare}
-          className="shrink-0"
+          className={`shrink-0 ${NARROW_GROUP_HIDDEN}`}
         >
           <Share2 size={14} aria-hidden />
         </IconButton>

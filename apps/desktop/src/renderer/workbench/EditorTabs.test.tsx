@@ -6,6 +6,8 @@ import { useRef, useState } from "react";
 import { useFocusSurface } from "../ui/focusReturn";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cornerRadius, EditorTabs } from "./EditorTabs";
+import { NARROW_GROUP_HIDDEN } from "./tabRowActions";
+import { shortcutText } from "../../shortcuts/shortcutRegistry";
 import {
   CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
@@ -31,6 +33,8 @@ beforeEach(() => {
 afterEach(cleanup);
 
 const noop = () => {};
+// The split's chord, as its tab list row shows it after the name.
+const SPLIT_KEYS = shortcutText("new-editor-group-right", undefined);
 const tabs = [{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }];
 
 function renderTabs(activeTab: string) {
@@ -1231,7 +1235,7 @@ describe("EditorTabs overlay scrollbar", () => {
     const menu = screen.getByRole("menu", { name: "Tabs in editor group 2" });
     expect(
       Array.from(menu.children, (row) => row.getAttribute("role") === "separator" ? "---" : row.textContent),
-    ).toEqual(["a.md", "b.md", "c.md", "---", "Close group"]);
+    ).toEqual(["a.md", "b.md", "c.md", "---", `New editor group right${SPLIT_KEYS}`, "Close group"]);
     const close = screen.getByRole("menuitem", { name: "Close group" });
     expect(close.getAttribute("aria-current")).toBeNull();
     fireEvent.click(close);
@@ -1295,10 +1299,83 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
     if (groupTabs.length === 0) return;
     fireEvent.click(screen.getByTestId("tabs-overflow"));
-    const menu = screen.getByTestId("tabs-overflow-menu");
     expect(screen.queryByRole("menuitem", { name: "Close group" })).toBeNull();
-    expect(menu.querySelector('[role="separator"]')).toBeNull();
-    expect(screen.getAllByRole("menuitem").map((row) => row.textContent)).toEqual(["a.md", "b.md", "c.md"]);
+    expect(screen.getAllByRole("menuitem").map((row) => row.textContent))
+      .toEqual(["a.md", "b.md", "c.md", `New editor group right${SPLIT_KEYS}`]);
+  });
+
+  // A narrow group hides Share file and New editor group right with a
+  // container query, which jsdom can't evaluate, so this checks the class and
+  // the rows that stand in for the buttons.
+  it("offers Share file and New editor group right in the tab list, where a narrow group moves them", async () => {
+    const user = userEvent.setup();
+    const onShare = vi.fn();
+    const onCreateGroupRight = vi.fn();
+    const group = (activeTab: string) => (
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[...tabs, { path: siteTabPath("apps/trip") }]}
+        activeTab={activeTab}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={onCreateGroupRight}
+        onShare={onShare}
+      />
+    );
+    const { rerender } = render(group("b.md"));
+    expect(screen.getByTestId("create-editor-group-right").classList).toContain(NARROW_GROUP_HIDDEN);
+
+    // The keyboard reaches both rows as it reaches a tab's.
+    screen.getByTestId("tabs-overflow").focus();
+    await user.keyboard("{Enter}");
+    const share = screen.getByRole("menuitem", { name: "Share file" });
+    const split = screen.getByRole("menuitem", { name: "New editor group right" });
+    expect(share.querySelector("svg")?.getAttribute("class")).toContain("lucide-share-2");
+    expect(split.querySelector("svg")?.getAttribute("class")).toContain("lucide-columns-2");
+    expect(split.getAttribute("aria-keyshortcuts")).toBe("Control+\\");
+    expect(split.textContent).toBe(`New editor group right${SPLIT_KEYS}`);
+    await user.keyboard("{End}");
+    expect(document.activeElement).toBe(share);
+    await user.keyboard("{ArrowUp}");
+    expect(document.activeElement).toBe(split);
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(onShare).toHaveBeenCalledWith("b.md");
+
+    await user.click(screen.getByTestId("tabs-overflow"));
+    await user.click(screen.getByRole("menuitem", { name: "New editor group right" }));
+    expect(onCreateGroupRight).toHaveBeenCalledWith("left");
+
+    // A tab that opens only once can't open in a new group, from the row
+    // either.
+    rerender(group(siteTabPath("apps/trip")));
+    await user.click(screen.getByTestId("tabs-overflow"));
+    expect(screen.getByRole("menuitem", { name: "New editor group right" }).getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("keeps an empty group's New editor group right at every width", () => {
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[]}
+        activeTab={null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+    expect(screen.getByTestId("create-editor-group-right").classList).not.toContain(NARROW_GROUP_HIDDEN);
   });
 
   // Forced colors remove fills, so the mark is a border, which they keep, in

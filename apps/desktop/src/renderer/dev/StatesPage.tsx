@@ -237,8 +237,8 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         </div>
       ) : (
         // Tall enough to hold the tab list, which the capture opens, with
-        // Close group and its shadow.
-        <div className="h-38 bg-bg" />
+        // the group's actions and its shadow.
+        <div className="h-46 bg-bg" />
       )}
     </>
   );
@@ -318,6 +318,7 @@ function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode
             onMove={noop}
             onMoveToGroup={noop}
             onCreateGroupRight={noop}
+            onShare={noop}
           />
         )}
       >

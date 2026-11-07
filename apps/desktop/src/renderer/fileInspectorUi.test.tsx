@@ -6,7 +6,7 @@ import { DELETED_FILE_DRAFT_NOTICE, DocumentControls, OPENING_TITLE, OPENING_WOR
 import { captureOrphanedDraft, loadLiveDraftRecovery, resetOrphanedDrafts } from "./orphanedDrafts";
 import { PENDING_SHARE_WORDS_DELAY_MS, StateMark, type SaveStateKey } from "./ui/StateMark";
 import { EditorTabs } from "./workbench/EditorTabs";
-import { EditorGroupFrame } from "./workbench/tabRowActions";
+import { EditorGroupFrame, NARROW_GROUP_HIDDEN } from "./workbench/tabRowActions";
 
 afterEach(cleanup);
 
@@ -108,6 +108,9 @@ describe("ViewActions", () => {
     expect(precedes(tablist, share)).toBe(true);
     expect(precedes(share, toggle)).toBe(true);
     expect(precedes(toggle, within(row).getByTestId("create-editor-group-right"))).toBe(true);
+    // A narrow group moves Share into its tab list. Outside a group's row the
+    // query matches no container, so Share stays.
+    expect(share.classList).toContain(NARROW_GROUP_HIDDEN);
   });
 
   // Run arrives once main answers that the file is an app's entry. It stands
