@@ -3,6 +3,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -88,6 +89,9 @@ type Section = {
   // What the section shows before or after its rows.
   body?: ReactNode;
   after?: ReactNode;
+  // The muted line a section with nothing in it shows under its header. It
+  // is no stop in the keyboard list; the header's toggle reads it.
+  empty?: string;
 };
 
 type NavItem = { sectionId: HomeSectionId; row?: HomeRowModel; more?: true };
@@ -136,6 +140,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const appByRoot = useMemo(() => new Map(appList.map((app) => [app.root, app])), [appList]);
   const expanded = useMemo(() => new Set(explorer.expandedFolders), [explorer.expandedFolders]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<HomeSectionId>>(new Set());
+  const idBase = useId();
 
   const noFolders = useMemo(() => new Set<string>(), []);
   const kinds = useMemo(
@@ -183,7 +188,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     !!explorer.onRestoreCollection ||
     !!refusal ||
     !!explorer.collectionsElsewhere;
-  const appsShown = apps?.state.status === "failed" || appList.length > 0;
+  // Pages, Collections and Apps always show in a workspace of your own, each
+  // saying when it has nothing. A share view shows only the kinds it holds.
+  const appsStatus = apps?.state.status;
+  const appsShown = appsStatus === "failed" || appList.length > 0 || (!!apps && !explorer.shareView);
   const collectionActions: MenuItem[] = [];
   if (!refusal && explorer.onIncludeArchivedCollections) {
     const archived = explorer.includeArchivedCollections ?? false;
@@ -199,17 +207,24 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     collectionActions.push({ id: "restore", label: "Restore from recovery file…", testId: "collections-restore", onSelect: explorer.onRestoreCollection });
   }
 
+  // A read on its way holds one row's height and says nothing, so the
+  // sections under it stay put and no section claims to be empty too soon.
+  const holdRow = <div aria-hidden className="h-7" />;
+  const collectionsUnknown = refusal ? undefined : explorer.collectionsUnknown;
   const sections: Section[] = [];
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
   if (recent.length > 0) sections.push({ id: "recent", label: "Recent", rows: recent });
-  sections.push({
-    id: "pages",
-    label: "Pages",
-    count: kinds.pages.length,
-    countLabel: (count) => plural(count, "page", "pages"),
-    rows: pages,
-    add: { label: "New page", onClick: () => explorer.onNewPage("") },
-  });
+  if (pages.length > 0 || !explorer.shareView) {
+    sections.push({
+      id: "pages",
+      label: "Pages",
+      count: kinds.pages.length,
+      countLabel: (count) => plural(count, "page", "pages"),
+      rows: pages,
+      add: { label: "New page", onClick: () => explorer.onNewPage("") },
+      ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
+    });
+  }
   if (showCollections) {
     sections.push({
       id: "collections",
@@ -224,10 +239,15 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ...(collectionActions.length > 0 ? { actions: collectionActions } : {}),
       body: refusal ? (
         <CollectionsRefusalRow refusal={refusal} onKeep={explorer.onKeepCollections} onRetry={explorer.onRetryCollections} />
-      ) : undefined,
+      ) : collectionsUnknown === "failed" && explorer.onRetryCollections ? (
+        <RetryRow testId="collections-failed" onRetry={explorer.onRetryCollections} />
+      ) : collectionsUnknown ? holdRow : undefined,
       after: !refusal && explorer.collectionsElsewhere ? (
         <CollectionsElsewhereRow elsewhere={explorer.collectionsElsewhere} onKeep={explorer.onKeepCollections} />
       ) : undefined,
+      ...(!refusal && !collectionsUnknown && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
+        ? { empty: "No Collections yet." }
+        : {}),
     });
   }
   if (appsShown) {
@@ -238,6 +258,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       countLabel: (count) => plural(count, "app", "apps"),
       rows: appRows,
       ...(apps?.state.status === "failed" ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> } : {}),
+      ...(appsStatus === "loading" ? { body: holdRow } : {}),
+      ...(appsStatus === "ready" && appList.length === 0
+        ? { empty: "No apps yet. Any folder with a web app in it shows up here." }
+        : {}),
     });
   }
   if (others.length > 0) {
@@ -469,9 +493,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const appsSettled = apps ? apps.state.status !== "loading" : true;
   const firstAppKey = appRows[0]?.key ?? null;
   useEffect(() => {
-    if (!appsReveal) return;
+    if (!appsReveal || !appsSettled) return;
     if (!appsShown) {
-      if (appsSettled) onAppsRevealed?.();
+      onAppsRevealed?.();
       return;
     }
     if (collapsed.has("apps")) {
@@ -546,6 +570,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
         const open = !collapsed.has(section.id);
         const sectionKey = `section:${section.id}`;
         const testId = SECTION_TEST_IDS[section.id];
+        const emptyId = open && section.empty ? `${idBase}${section.id}-empty` : undefined;
         return (
           <section
             key={section.id}
@@ -560,6 +585,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                 data-home-key={sectionKey}
                 data-testid={`${testId}-toggle`}
                 aria-expanded={open}
+                aria-describedby={emptyId}
                 tabIndex={tabbableKey === sectionKey ? 0 : -1}
                 onFocus={() => setFocusedKey(sectionKey)}
                 onClick={() => {
@@ -599,6 +625,11 @@ export function ExplorerHome(props: ExplorerHomeProps) {
             {open ? (
               <>
                 {section.body ? <div className="px-1">{section.body}</div> : null}
+                {emptyId ? (
+                  <p id={emptyId} data-testid={`${testId}-empty`} className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                    {section.empty}
+                  </p>
+                ) : null}
                 {section.rows.length > 0 || section.more ? (
                   <ul
                     ref={section.id === "pages" ? pagesListRef : undefined}

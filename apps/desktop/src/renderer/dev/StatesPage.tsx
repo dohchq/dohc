@@ -2665,16 +2665,24 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* The Explorer's Home, at the sidebar's narrowest. */}
-      <Section part="explorer-home" title="Explorer Home">
+      <Section part="explorer-home" title="Explorer Home" menusAtRest>
         <Specimen label="pinned, recent, pages in folders, Collections, apps, other files; a page open; a row hovered">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover"
             data-force-target='[data-section="pages"]:nth-of-type(1)'>
             <Explorer {...HOME_SPECIMEN} />
           </div>
         </Specimen>
-        <Specimen label="a new workspace: Pages and its +">
+        <Specimen label="a new workspace: Pages, Collections and Apps each say they have nothing">
           <div className="w-60 rounded-lg border border-line bg-panel">
-            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={undefined} dataCollections={[]} />
+            <Explorer {...HOME_SPECIMEN} files={[]} folders={[]} pinned={[]} recentFiles={[]} apps={HOME_NO_APPS}
+              appFolders={new Set()} dataCollections={[]} onIncludeArchivedCollections={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a share view holding one app: only Apps shows">
+          <div className="w-60 rounded-lg border border-line bg-panel">
+            <Explorer {...HOME_SPECIMEN} files={[{ path: "trip-planner/index.html", kind: "file" }]} folders={["trip-planner"]} pinned={[]}
+              recentFiles={[]} apps={HOME_SHARED_APP} appFolders={new Set(["trip-planner"])} dataCollections={[]}
+              shareView={{ granterEmail: "sam@example.com" }} />
           </div>
         </Specimen>
         <Specimen label="loading: blank for 150 ms, then skeleton rows">
@@ -3944,6 +3952,11 @@ const HOME_APPS: ExplorerApps = {
   reveal: false,
   onRevealed: noop,
 };
+
+const HOME_NO_APPS: ExplorerApps = { ...HOME_APPS, state: { status: "ready", workspaceId: "states", apps: [] }, pinnedApps: [] };
+
+// A share that holds one app and nothing else.
+const HOME_SHARED_APP: ExplorerApps = { ...HOME_NO_APPS, state: { status: "ready", workspaceId: "states", apps: [SHELF_APP] } };
 
 const HOME_FILES = [
   "Trip plan.md", "Packing list.md", "Budget.md",
