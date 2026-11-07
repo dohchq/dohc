@@ -8,7 +8,7 @@ import type { ErrorDetailField } from "./copyDetails";
 import { SHELL_ERROR_MAX_CHARS } from "./useShellError";
 
 // A path from a drop can run to 32,767 characters. A line shows its end, where
-// the file's name is; Copy keeps it whole.
+// the file's name is; Copy details keeps it whole.
 const SHOWN_PATH_MAX_CHARS = 80;
 const COPIED_LINE_MAX_CHARS = IMPORT_SKIPPED_PATH_MAX_CHARS + 120;
 

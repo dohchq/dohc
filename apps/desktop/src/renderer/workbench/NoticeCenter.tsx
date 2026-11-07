@@ -163,8 +163,9 @@ const isFailure = (notice: NoticeRow): boolean =>
 // purpose, so it shows as a warning, not a failure.
 const isHeld = (notice: NoticeRow): boolean => notice.kind === "markdown-write-held";
 
-// What Copy puts on the clipboard for a failed run's notice. The notice store
-// already bounds the body, so Copy keeps all of the text the person sees.
+// What Copy details puts on the clipboard for a failed run's notice. The
+// notice store already bounds the body, so the report keeps all of the text
+// the person sees.
 const failureDetails = (notice: NoticeRow): string =>
   errorDetails([
     ["Notice", notice.title],

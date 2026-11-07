@@ -1302,7 +1302,7 @@ export function DesktopWorkspaceShell(props: {
         openLiveDocuments(failedFor);
       };
       if (waiting) {
-        // Copy keeps what the error said. A plain relay error has words and no cause.
+        // Copy details keeps what the error said. A plain relay error has words and no cause.
         const {cause, words} = readError(error);
         const said = cause ?? words;
         reportShellFailure({title: waiting.title, message, retry: again, details: said ? [["Cause", said] as const] : [],

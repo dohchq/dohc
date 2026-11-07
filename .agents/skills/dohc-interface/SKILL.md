@@ -267,7 +267,7 @@ The after also drops the sentence about unsaved changes, because saving first is
 - **Details** is for text that reports something. A control that copies the person's own work, or something made to paste elsewhere, such as set-aside edits or an invitation, needs no Details. Its tooltip and accessible name say what it copies: `Copy edits`, `Copy invitation`.
 - **Details** opens the copy text under the message, selectable, scrolling past 240px. A Copy icon at its top right copies exactly that text.
 - While open, the action reads **Hide details** and holds the toast. It also lifts the clamp, so a message never offers both **Details** and **Show more**.
-- **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's Copy.
+- **Details** is a button with `aria-expanded` and `aria-controls`. Focus stays on it, and Tab next reaches the block's **Copy details**.
 - The block opens without animating its height. Only the chevron turns.
 - A full-height state uses the same **Details**, in place of **Technical details**.
 - A crash notice keeps **Send report** when the build has a report server. It comes before **Details**, on the toast and the row. Both show the same report text.

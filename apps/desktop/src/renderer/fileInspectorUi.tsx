@@ -518,7 +518,7 @@ export function OrphanedDraftNotices(props: {
   );
 }
 
-// One set-aside edit above the page, with its Copy and Dismiss.
+// One set-aside edit above the page, with its Copy edits and Dismiss.
 export function SetAsideEditRow(props: {
   message: string;
   getText: ComponentProps<typeof CopyButton>["getText"];
