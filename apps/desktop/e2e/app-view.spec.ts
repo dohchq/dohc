@@ -411,7 +411,6 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await sidebarEnd.focus();
     for (const control of [
       leftGroup.getByTestId(appTab),
-      leftGroup.getByRole("button", { name: "Close editor group", exact: true }),
       allTabs,
       page.getByTestId("app-view-reload"),
       page.getByTestId("site-preview-show-source"),
@@ -462,7 +461,8 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     // Closing the note's group, which held focus, puts focus in the app.
     await leftGroup.getByTestId(editorTabTestId("notes.md")).click({ position: { x: 16, y: 16 } });
     await expect(leftGroup).toHaveAttribute("data-active");
-    await leftGroup.getByRole("button", { name: "Close editor group", exact: true }).click();
+    await allTabs.click();
+    await allTabsMenu.getByRole("menuitem", { name: "Close group", exact: true }).click();
     await expect(page.getByRole("region", { name: /^Editor group \d+$/ })).toHaveCount(1);
     await expect(webview).toBeFocused();
   } finally {
