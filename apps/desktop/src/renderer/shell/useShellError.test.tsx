@@ -80,13 +80,16 @@ describe("useShellError", () => {
       expect(result.current.shellErrors, "One refusal has one Notices row").toHaveLength(1);
       return result.current.shellErrors[0]!;
     };
+    let reader: ReturnType<typeof row> | undefined;
     if (order === "reader first") {
       act(read);
-      expect(row().details, "A reader alone gives no Cause").toBeUndefined();
+      reader = row();
+      expect(reader.details, "A reader alone gives no Cause").toBeUndefined();
     }
     act(() => refresh(cause));
     const first = row();
     expect(first.details, "A refresh adds its filesystem cause").toEqual(cause);
+    if (reader) expect(first, "A refresh keeps the reader's row").toMatchObject({ id: reader.id, atMs: reader.atMs, seen: reader.seen });
     act(read);
     expect(row(), "A later reader keeps the refresh's Cause").toMatchObject({ id: first.id, message: sharedViewRefusalWords, details: cause });
     expect(row().title).toBeUndefined();

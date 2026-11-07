@@ -876,6 +876,7 @@ describe("ended Edit Collection shares", () => {
       expect(lines.filter(line => line.startsWith("Cause:")), "Copy keeps only the latest refresh's filesystem cause").toEqual(cause ? [`Cause: ${cause}`] : []);
     };
     const copyToast = async () => {
+      await navigator.clipboard.writeText("");
       await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy error details" }));
       return navigator.clipboard.readText();
     };
@@ -904,7 +905,11 @@ describe("ended Edit Collection shares", () => {
       act(() => focusAfterMinimum());
       await waitFor(() => expect(bridge.refreshSharedView.mock.calls.length, "Focus starts a background refresh").toBeGreaterThan(before));
       expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
-      await waitFor(async () => expect(await copyToast(), "A background refusal with no filesystem cause drops the Cause").not.toContain("Cause:"));
+      await waitFor(async () => {
+        const copy = await copyToast();
+        expect(copy, "The toast copies the refusal").toContain(`Error: ${sharedViewRefusalWords}`);
+        expect(copy, "A background refusal with no filesystem cause drops the Cause").not.toContain("Cause:");
+      });
       await copyBoth();
     } finally {
       view.unmount();

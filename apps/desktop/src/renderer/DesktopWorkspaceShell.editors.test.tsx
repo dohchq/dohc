@@ -1859,6 +1859,7 @@ describe("ui-state merge-on-load", () => {
       const toast = screen.getByTestId("workspace-shell-error");
       expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
       expect(within(toast).getByRole("button", { name: "Dismiss workspace error" })).toBeTruthy();
+      await navigator.clipboard.writeText("");
       await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
       const toastCopy = await navigator.clipboard.readText();
       checkRefusalCopy(toastCopy, cause);
@@ -1912,6 +1913,7 @@ describe("ui-state merge-on-load", () => {
     });
     fireEvent.contextMenu(file);
     const toast = await screen.findByTestId("workspace-shell-error");
+    await navigator.clipboard.writeText("");
     await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
     checkRefusalCopy(await navigator.clipboard.readText());
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -1970,6 +1972,7 @@ describe("ui-state merge-on-load", () => {
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(words);
     expect(toast.textContent).not.toContain("Couldn't refresh the shared view.");
+    await navigator.clipboard.writeText("");
     await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
     checkRefusalCopy(await navigator.clipboard.readText(), refused.errorCause);
     // The record still keeps the person's own files apart, so its row has no ×.
@@ -1977,6 +1980,7 @@ describe("ui-state merge-on-load", () => {
     const notices = await screen.findByTestId("notice-center");
     const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
+    await navigator.clipboard.writeText("");
     await user.click(within(row).getByRole("button", { name: /Copy/ }));
     checkRefusalCopy(await navigator.clipboard.readText(), refused.errorCause);
 
