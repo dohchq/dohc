@@ -20,8 +20,10 @@ import { Menu, type MenuItem } from "../ui/Menu";
 import {
   MENU_ACTIVE_OPTION,
   MENU_DETAIL,
+  MENU_EDGE_PX,
   MENU_ENTER,
   MENU_FRAME,
+  MENU_GAP_PX,
   MENU_ICON,
   MENU_LABEL,
   MENU_ROW,
@@ -253,36 +255,62 @@ export function MentionComposer(props: {
   const showMenu = fileStage !== null || ((active !== null || catalogQuery !== null) && menuLength > 0);
 
   const menuRef = useRef<HTMLUListElement | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const stackRef = useRef<HTMLDivElement | null>(null);
   const [menuPosition, setMenuPosition] = useState<{
     left: number;
-    top: number;
+    top?: number;
+    bottom?: number;
     maxHeight: number;
     placement: "above" | "below";
-  }>({ left: 0, top: 0, maxHeight: 192, placement: "below" });
+  }>({ left: 0, bottom: 0, maxHeight: 192, placement: "above" });
+  // The menu floats off the whole composer, above it unless only below has
+  // room, so it never covers the text, the toolbar, or a bar stacked on top.
+  // Measured on open, when the composer or window resizes, and when the
+  // list's rows change, not per key.
+  const placeMenu = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     if (!showMenu) return;
     const menu = menuRef.current;
+    const form = formRef.current;
     menu?.showPopover?.();
+    if (!menu || !form) return;
+    const stack = stackRef.current ?? form;
     const position = () => {
-      const anchor = textareaRef.current?.getBoundingClientRect();
-      if (!anchor || !menu) return;
-      const below = window.innerHeight - anchor.bottom - 12;
-      const above = anchor.top - 12;
+      const frame = form.getBoundingClientRect();
+      // The topmost bar, the poll, or the box itself: its border, not the
+      // stack's empty margin above it.
+      const top = (stackRef.current?.firstElementChild ?? form).getBoundingClientRect().top;
+      const above = top - MENU_GAP_PX - MENU_EDGE_PX;
+      const below = window.innerHeight - frame.bottom - MENU_GAP_PX - MENU_EDGE_PX;
       const height = Math.min(192, menu.scrollHeight + 2);
-      const down = below >= height || below >= above;
+      const down = height > above && below > above;
+      const width = Math.min(256, window.innerWidth - 16);
+      const left = Math.max(MENU_EDGE_PX, Math.min(frame.left, window.innerWidth - MENU_EDGE_PX - width));
       const maxHeight = Math.max(0, Math.min(192, down ? below : above));
-      setMenuPosition({
-        left: Math.max(8, Math.min(anchor.left, window.innerWidth - Math.min(256, window.innerWidth - 16) - 8)),
-        top: down ? anchor.bottom + 6 : Math.max(8, anchor.top - Math.min(height, maxHeight) - 6),
-        maxHeight,
-        placement: down ? "below" : "above",
-      });
+      setMenuPosition(down
+        ? { left, top: frame.bottom + MENU_GAP_PX, maxHeight, placement: "below" }
+        : { left, bottom: window.innerHeight - top + MENU_GAP_PX, maxHeight, placement: "above" });
     };
+    const scrolled = (event: Event) => { if (event.target !== menu) position(); };
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
+    resized?.observe(stack);
     position();
+    placeMenu.current = position;
     window.addEventListener("resize", position);
-    document.addEventListener("scroll", position, true);
-    return () => { window.removeEventListener("resize", position); document.removeEventListener("scroll", position, true); };
-  }, [showMenu, menuLength, fileStage, props.value]);
+    document.addEventListener("scroll", scrolled, true);
+    return () => {
+      placeMenu.current = null;
+      resized?.disconnect();
+      window.removeEventListener("resize", position);
+      document.removeEventListener("scroll", scrolled, true);
+    };
+  }, [showMenu]);
+  // A filtered or loaded list has a new height, so it may fit the other side.
+  const fileLoading = fileStage?.loading ?? false;
+  useLayoutEffect(() => {
+    placeMenu.current?.();
+  }, [menuLength, fileLoading]);
 
   useLayoutEffect(() => {
     if (!highlightFileOnOpen.current || pendingCaret.current !== null || !active) return;
@@ -541,7 +569,6 @@ export function MentionComposer(props: {
   };
 
   const isPost = props.surface === "post";
-  const formRef = useRef<HTMLFormElement | null>(null);
   useToastsAbove(formRef, props.pinned === true);
   const locked = props.sending || props.disabled === true;
   const empty = !props.allowEmptySend && props.value.trim().length === 0;
@@ -984,12 +1011,12 @@ export function MentionComposer(props: {
   // The bars, the poll, the box and the agent offer are one stack, so the
   // offer floats above the topmost bar and never covers its ×.
   return (
-    <div className="@container/composer relative shrink-0">
+    <div ref={stackRef} className="@container/composer relative shrink-0">
       {props.above}
       {pollBlock}
       {form}
       {props.agentOffer ? (
-        <AgentOffer offer={props.agentOffer} surface="stream" />
+        <AgentOffer offer={props.agentOffer} surface="stream" hidden={showMenu} />
       ) : null}
     </div>
   );

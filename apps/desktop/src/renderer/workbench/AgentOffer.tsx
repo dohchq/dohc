@@ -78,6 +78,8 @@ export function useAgentOffer(input: {
 export const AgentOffer = memo(function AgentOffer(props: {
   offer: AgentAddressedOffer;
   surface: "post" | "stream";
+  // Kept mounted and hidden while the @ menu sits where it floats.
+  hidden?: boolean;
 }) {
   const { offer } = props;
   const { words } = STATES[offer.state];
@@ -85,6 +87,7 @@ export const AgentOffer = memo(function AgentOffer(props: {
   return (
     <div
       role="status"
+      hidden={props.hidden}
       data-testid="composer-agent-offer"
       data-state={offer.state}
       className={`dohc-pop-in flex min-w-0 items-center gap-1.5 text-[11px] tabular-nums text-muted ${

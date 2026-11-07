@@ -29,16 +29,21 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     const view = page.locator("main");
     const composer = view.getByTestId("chats-composer");
+    // A has-locator is matched inside the form, so it can't start at main.
+    const frame = view.locator("form", { has: page.getByTestId("chats-composer") });
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["light", "dark"]) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
       await composer.fill("@");
       const menu = view.getByTestId("chats-mention-menu");
       await expect(menu).toBeVisible();
+      await waitForVisibleAnimations(page);
       const openBox = await composer.boundingBox();
       const menuBox = await menu.boundingBox();
-      expect(menuBox!.y).toBeGreaterThanOrEqual(openBox!.y + openBox!.height);
-      await waitForVisibleAnimations(page);
+      const frameBox = await frame.boundingBox();
+      // 4px over the frame, the gap every floating menu keeps.
+      expect(frameBox!.y - (menuBox!.y + menuBox!.height)).toBeCloseTo(4, 1);
+      expect(Math.abs(menuBox!.x - frameBox!.x)).toBeLessThanOrEqual(1);
       await page.screenshot({ path: testInfo.outputPath(`mentions-${theme}.png`) });
       await composer.press("Escape");
       const closedBox = await composer.boundingBox();
@@ -69,18 +74,20 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🧑🏽‍🚀");
     await astronaut.click();
     await expect(astronautPill).toHaveCount(0);
-    // The menu opens above only when the composer has no room for it below.
+    // The menu opens above even when the composer has no room for it below.
     // A short thread leaves its composer high, so the window ends just
-    // under the composer, with less room than one row of the menu.
+    // under the composer's frame, with less room than one row of the menu.
     await page.setViewportSize({ width: 1280, height: 480 });
-    const placed = await composer.boundingBox();
+    const placed = await frame.boundingBox();
     await page.setViewportSize({ width: 1280, height: Math.ceil(placed!.y + placed!.height + 30) });
     await composer.fill("@");
     const upperMenu = view.getByTestId("chats-mention-menu");
     await expect(upperMenu).toBeVisible();
+    await waitForVisibleAnimations(page);
     const lowComposerBox = await composer.boundingBox();
+    const lowFrameBox = await frame.boundingBox();
     const upperMenuBox = await upperMenu.boundingBox();
-    expect(upperMenuBox!.y + upperMenuBox!.height).toBeLessThanOrEqual(lowComposerBox!.y);
+    expect(lowFrameBox!.y - (upperMenuBox!.y + upperMenuBox!.height)).toBeCloseTo(4, 1);
     await composer.press("Escape");
     expect((await composer.boundingBox())!.y).toBe(lowComposerBox!.y);
     await composer.fill("");
