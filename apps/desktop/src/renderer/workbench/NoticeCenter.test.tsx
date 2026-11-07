@@ -952,7 +952,6 @@ describe("notice center", () => {
       id,
       ...(tone ? { tone } : {}),
       message: text,
-      details: text,
       atMs: 1_000,
       canRetry: false,
       seen: false,
