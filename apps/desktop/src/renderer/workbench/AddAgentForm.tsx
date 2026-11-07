@@ -5,7 +5,7 @@ import {
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
 import { DEFAULT_AGENT_ID, firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
-import { launchCommand, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
+import { launchCommand, launchCommandHint, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "../settings/AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
 import { bridge } from "../bridge";
@@ -40,9 +40,13 @@ export function AddAgentForm(props: {
   const agent = firstAgent(settings);
   const savedProfile = agent?.launch ? launchProfile(agent.launch) : undefined;
   const savedCommand = agent?.launch && "command" in agent.launch ? agent.launch.command : "";
+  const savedProfileCommand = savedProfile ? launchCommand(savedProfile) : "";
   const [agentName, setAgentName] = useState(agent?.name ?? "");
   const [profile, setProfile] = useState(savedProfile);
-  const [advanced, setAdvanced] = useState(savedCommand.length > 0);
+  // The tool the command field started from. Typing keeps it only while the
+  // command starts that same program.
+  const [startProfile, setStartProfile] = useState(savedProfile);
+  const [advanced, setAdvanced] = useState(savedCommand.length > 0 || (savedProfile?.arguments?.length ?? 0) > 0);
   const requests = useRequestSequence([props.workspaceId]);
   const [command, setCommand] = useState(savedCommand);
   const [error, setError] = useState<string | null>(null);
@@ -53,9 +57,10 @@ export function AddAgentForm(props: {
     setAgentName(agent?.name ?? "");
     setCommand(savedCommand);
     setProfile(savedProfile);
-  }, [agent?.name, savedCommand, savedProfile?.tool, savedProfile?.executable]);
+    setStartProfile(savedProfile);
+  }, [agent?.name, savedCommand, savedProfile?.tool, savedProfileCommand]);
 
-  const launch = useMemo(() => launchFrom(profile, command), [profile, command]);
+  const launch = useMemo(() => launchFrom(profile, command, startProfile), [profile, command, startProfile]);
   const trimmedCommand = launch ? launchCommand(launch) : "";
   const preview = agentName.trim() || "Your agent";
 
@@ -161,8 +166,8 @@ export function AddAgentForm(props: {
           </p>
         </div>
 
-        <AgentToolPicker workspaceId={props.workspaceId} profile={profile} disabled={busy}
-          onError={props.onError} onChange={(value) => { setProfile(value); setCheck({ status: "idle" }); }} />
+        <AgentToolPicker workspaceId={props.workspaceId} profile={launch ? launchProfile(launch) : undefined} disabled={busy}
+          onError={props.onError} onChange={(value) => { setProfile(value); setStartProfile(value); setCheck({ status: "idle" }); }} />
         <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
           <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
           {profile && command.trim() ? <SecondaryButton size="compact" disabled={busy} onClick={() => { setProfile(undefined); setCheck({ status: "idle" }); }}>Use saved command</SecondaryButton> : null}
@@ -184,7 +189,7 @@ export function AddAgentForm(props: {
             className={`${INPUT_CLASS} font-mono text-[12px]`}
           />
           <p className={HINT_CLASS}>
-            Editing this command turns off the tool profile. The conversation arrives through stdin.
+            {launchCommandHint(launch)}
           </p>
         </div>
 
