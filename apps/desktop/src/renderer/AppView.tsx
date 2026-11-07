@@ -259,16 +259,25 @@ export function useAppView(options: {
   }, [enabled, theme, workspaceId]);
 
   // Switching to the tab puts focus in the app. Focus that only makes the app's group the focused one, such as Tab
-  // onto the group's tabs or a click on its toolbar, stays where it went.
-  const was = useRef({ visible: options.visible, focused: options.focused });
+  // onto the group's tabs or a click on its toolbar, stays where it went. Focus that went nowhere when the other group
+  // closed, to the page or to this group's own area, goes to the app.
+  const wasVisible = useRef(options.visible);
   useEffect(() => {
-    const before = was.current;
-    was.current = { visible: options.visible, focused: options.focused };
+    const switched = !wasVisible.current;
+    wasVisible.current = options.visible;
     // Focus that moved elsewhere before the app finished opening stays there.
     if (!options.focused) { wantsFocus.current = false; return; }
-    if (before.visible || before.focused) return;
+    const active = document.activeElement;
+    const nowhere = !active || active === document.body || active.matches('[data-focus-surface="editor"][data-active]');
+    if (!switched && !nowhere) return;
     wantsFocus.current = true;
-    tryFocus();
+    if (switched) { tryFocus(); return; }
+    // A press on the group's blank area makes it the focused one before the browser focuses that area, and focus
+    // stays where the person pressed.
+    const press = () => { wantsFocus.current = false; };
+    document.addEventListener("mousedown", press, { capture: true, once: true });
+    const later = setTimeout(() => { document.removeEventListener("mousedown", press, true); tryFocus(); });
+    return () => { clearTimeout(later); document.removeEventListener("mousedown", press, true); };
   }, [options.visible, options.focused, tryFocus]);
   // A click on the app's tab, or Enter or Space on it, puts focus in the app, also when the tab was already shown.
   const pressSeen = useRef(options.focusRequest);
