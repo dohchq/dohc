@@ -1,5 +1,5 @@
 import { AtSign, FileText, Hash, ListChecks, Plus, type LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
@@ -36,6 +36,14 @@ import {
 } from "../ui/Menu";
 import { isComposingKey, isOptionReturn, isSendKey } from "../ui/keys";
 import { useToastsAbove } from "./toastClearance";
+
+// What a control outside the composer can ask of it. Neither sends.
+export interface MentionComposerHandle {
+  focus(): void;
+  // Adds @handle for a candidate to the end of the draft, as if picked from
+  // the @ menu, and puts the caret after it.
+  mention(candidateId: string): void;
+}
 
 export interface FileMentionCandidate {
   path: string;
@@ -171,6 +179,7 @@ export function MentionComposer(props: {
   // poll's choices passes onPollChange.
   poll?: ComposerPollDraft | null;
   onPollChange?: (poll: ComposerPollDraft | null) => void;
+  handle?: Ref<MentionComposerHandle>;
 }) {
   const [focused, setFocused] = useState(false);
   const pollDraft = props.onPollChange ? props.poll ?? null : null;
@@ -213,6 +222,28 @@ export function MentionComposer(props: {
   // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
+  useImperativeHandle(props.handle, () => ({
+    focus: () => textareaRef.current?.focus(),
+    mention: (candidateId) => {
+      const candidate = props.candidates.find((value) => value.id === candidateId);
+      const pick = rosterPick.current;
+      if (!candidate || pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
+        textareaRef.current?.focus();
+        return;
+      }
+      // A mention glued to a word is not a mention; give it its own word.
+      const draft = props.value.length > 0 && !/\s$/u.test(props.value) ? `${props.value} ` : props.value;
+      const from = draft.length;
+      const value = `${draft}@${candidate.handle} `;
+      pendingCaret.current = value.length;
+      const next = !props.onRosterPick ? null : candidate.kind === "agent"
+        ? { candidate, from, to: from + 1 + candidate.handle.length }
+        : rosterPick.current;
+      rosterPick.current = next;
+      props.onChange(value);
+      props.onRosterPick?.(next);
+    },
+  }), [props.candidates, props.value, props.onChange, props.onRosterPick]);
   const highlightFileOnOpen = useRef(false);
   const pollRef = useRef<HTMLFieldSetElement | null>(null);
   const focusPollOnOpen = useRef(false);

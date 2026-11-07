@@ -53,7 +53,8 @@ export function ThreadedChat(props: {
   reactionControls?: ChatReactionControls;
   // More under a message, such as its poll. `answer` opens the message's
   // thread with the reply box focused, and makes that reply its answer.
-  renderMessageFooter?: (message: ChatMessageRecord, answer: () => void) => ReactNode;
+  // `place` says whether the message is in the stream or the thread panel.
+  renderMessageFooter?: (message: ChatMessageRecord, answer: () => void, place: "stream" | "thread") => ReactNode;
   // The run behind each agent reply, by message, for its Run details.
   runs?: Readonly<Record<string, ChatRunRecord>>;
   // An agent at work, and the message it answers.
@@ -232,7 +233,7 @@ export function ThreadedChat(props: {
   ) : null, [detailsId, runs]);
   const renderThreadFooter = useCallback((message: ChatMessageRecord) => (
     <>
-      {renderMessageFooter?.(message, () => answer(message.id))}
+      {renderMessageFooter?.(message, () => answer(message.id), "thread")}
       {runDetails(message)}
     </>
   ), [answer, renderMessageFooter, runDetails]);
@@ -241,7 +242,7 @@ export function ThreadedChat(props: {
     const replies = threads.replies.get(message.id);
     return (
       <>
-        {renderMessageFooter?.(message, () => answer(message.id))}
+        {renderMessageFooter?.(message, () => answer(message.id), "stream")}
         {runDetails(message)}
         {replies ? <ThreadSummary testIdPrefix={prefix} replies={replies} mentionCandidates={mentionCandidates} onOpen={() => openThread(message.id)} /> : null}
         {working && workingRootId === message.id && openRootId !== message.id ? <WorkingLine testIdPrefix={prefix} working={working} /> : null}

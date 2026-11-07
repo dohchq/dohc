@@ -428,12 +428,14 @@ test("a runner that exits silently says why under the message and posts a notice
     const toasts = page.getByTestId("notice-toasts");
     await expect(toasts).toContainText("Nova didn't reply");
     // The same words sit under the message that asked. Running it again
-    // would repeat what it did, so the line offers no Try again and says to
-    // ask the agent again instead. In its own chat a message asks it.
+    // would repeat what it did, so the line offers no Try again. In its own
+    // chat a message asks it, so its button readies the box. The thread
+    // panel, away from that box, says it in words.
     const words = "Nova didn't reply. Its run ended with an error.";
     const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
-    await expect(line.getByRole("status")).toHaveText([words, nextStep]);
+    await expect(line.getByRole("status")).toHaveText([words]);
+    await expect(line.getByRole("button", { name: "Message Nova" })).toBeVisible();
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
     await waitForVisibleAnimations(page);
     if (process.env.UI_AUDIT_SHOT_DIR) {
