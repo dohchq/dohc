@@ -63,7 +63,8 @@ it("shows one kept-copy list failure with its cause, retries, and clears it on r
   const toast = await screen.findByTestId("workspace-shell-error");
   expect(within(toast).getByText(title)).toBeTruthy();
   expect(within(toast).getByText(message)).toBeTruthy();
-  await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+  await user.click(within(toast).getByRole("button", { name: "Details" }));
+  await user.click(within(toast).getByRole("button", { name: "Copy details" }));
   expect(await navigator.clipboard.readText()).toContain(readError.replaceAll("\n", " "));
   await user.click(screen.getByTestId("notice-center-toggle"));
   const rows = () => within(screen.getByTestId("notice-center")).getAllByText(title);

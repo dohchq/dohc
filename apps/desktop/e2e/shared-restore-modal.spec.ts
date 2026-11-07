@@ -250,15 +250,8 @@ test.describe("shared restore review with a notice toast", () => {
     await page.keyboard.press("F6");
     const toasts = page.getByTestId("notice-toasts");
     const retry = toasts.getByRole("button", { name: "Try again" });
-    // F6 lands on the toast's first control. A cut-off title puts Show more
-    // first, so the whole message can be read before acting, and Try again
-    // is the next Tab.
-    const first = toasts.getByRole("button").first();
-    await expect(first).toBeFocused();
-    if (await toasts.getByRole("button", { name: "Show more" }).count()) {
-      await expect(first).toHaveAccessibleName("Show more");
-      await page.keyboard.press("Tab");
-    }
+    // F6 lands on the toast's first worded action, even when a cut-off title
+    // puts Show more before it.
     await expect(retry).toBeFocused();
     await page.screenshot({ path: test.info().outputPath("toast-keyboard-focus-dark.png") });
     // Tab cycles the toast's own controls; it does not reach the page behind.
@@ -275,7 +268,7 @@ test.describe("shared restore review with a notice toast", () => {
     await expect(restore).toBeFocused();
     await expect(dialog).toBeVisible();
     await page.keyboard.press("F6");
-    await expect(first).toBeFocused();
+    await expect(retry).toBeFocused();
     await page.keyboard.press("F6");
     await expect(restore).toBeFocused();
     // Closing the focused toast from the keyboard leaves the trap whole: the

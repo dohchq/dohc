@@ -247,7 +247,8 @@ describe("workspace switch admission", () => {
         expect(toast.textContent).toContain(SAVED_TABS_WAITED);
         expect(within(toast).queryByRole("button", { name: "Restore tabs" })).toBeNull();
         expect(notices()).toBe("Notices, 1 unread");
-        await user.click(within(toast).getByRole("button", { name: "Copy notice details" }));
+        await user.click(within(toast).getByRole("button", { name: "Details" }));
+        await user.click(within(toast).getByRole("button", { name: "Copy details" }));
         expect((await navigator.clipboard.readText()).split("\n").slice(0, 2))
           .toEqual([`Notice: ${SAVED_TABS_WAITED}`, `Title: ${SAVED_TABS_TITLE}`]);
 
@@ -311,7 +312,7 @@ describe("workspace switch admission", () => {
 
         const row = (await within(center).findByText(SAVED_TABS_RESTORE_AFTER_WAIT)).closest("li")!;
         expect(within(row).queryByRole("button", { name: "Dismiss notice" }), "only Restore tabs ends the row").toBeNull();
-        expect(within(row).getByRole("button", { name: "Copy notice details" })).toBeTruthy();
+        expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
         await user.click(within(center).getByRole("button", { name: "Mark all read" }));
         expect(notices()).toBe("Notices");
         expect(within(center).getByText(SAVED_TABS_RESTORE_AFTER_WAIT)).toBeTruthy();
@@ -371,7 +372,8 @@ describe("workspace switch admission", () => {
         expect(screen.queryByTestId("tab-b.md")).toBeNull();
         window.dispatchEvent(new Event("beforeunload"));
         expect(bridge.setWorkspaceUiState, "saving waits for Restore tabs").not.toHaveBeenCalled();
-        await user.click(within(row).getByRole("button", { name: "Copy notice details" }));
+        await user.click(within(row).getByRole("button", { name: "Details" }));
+        await user.click(within(row).getByRole("button", { name: "Copy details" }));
         expect((await navigator.clipboard.readText()).split("\n")[0], "the action first, so the toast's limit cuts only the reason")
           .toBe("Notice: Restore tabs brings them back. Until you pick it, tab changes aren't saved. Your saved tabs didn't load within 4 minutes.");
 

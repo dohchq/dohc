@@ -779,7 +779,7 @@ export function ProductDemo() {
               onRebuildEngineStore={() => undefined}
               workspaceErrors={shellErrors.map((error) => ({
                 ...error,
-                details: error.message,
+                copy: { report: error.message },
                 canRetry: false,
               }))}
               onHideWorkspaceError={hideShellError}

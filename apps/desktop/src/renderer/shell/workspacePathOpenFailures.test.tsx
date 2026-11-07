@@ -87,7 +87,8 @@ function failure(cause: string, change: Partial<WorkspacePathOpenFailure> = {}):
 async function copied(toast: HTMLElement): Promise<string> {
   const user = userEvent.setup();
   const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
-  await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+  await user.click(within(toast).getByRole("button", { name: "Details" }));
+  await user.click(within(toast).getByRole("button", { name: "Copy details" }));
   return String(writeText.mock.lastCall?.[0]);
 }
 
@@ -176,7 +177,7 @@ describe("folders a launch could not open", () => {
       .getByText("dohc could not open Trips. Another program is using this file or folder.")
       .closest("li")!;
     expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
   });
 
   it("shows a failure main held before this window listened, such as one reported while it loaded", async () => {
