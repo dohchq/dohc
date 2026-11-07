@@ -693,9 +693,9 @@ where
     if let Some(error) = read_error {
         return Err(error);
     }
-    // The writer stopped after the client closed its input, so this shutdown's
-    // retirement cut the frame short. The client was done sending and is not
-    // waiting on that frame.
+    // The writer stopped after the client closed its input. This shutdown's
+    // retirement cuts any frame still being written, and the client is done
+    // sending, so that abort is not a failure.
     if after_input_closed
         && writer_result
             .as_ref()
