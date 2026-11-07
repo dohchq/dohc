@@ -620,14 +620,15 @@ describe("ChatLane", () => {
     expect(onOpenAgentSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("readies a mention of the agent to ask again in a group, and never sends", async () => {
+  it("readies a mention of another agent to ask again, and never sends", async () => {
     const failedRun = {
       runId: "run-1", triggerMessageId: "message-1", words: "Atlas didn't reply. Its run ended with an error.", retryable: false,
       nextStep: { kind: "message", agentId: "atlas", name: "Atlas", handle: "Atlas" },
     } as const;
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...idle, failedRun });
     const atlas: MentionCandidate = { id: "agent:atlas", kind: "agent", handle: "Atlas", label: "Atlas", description: "your agent" };
-    render(lane("channel-1", "workspace-a", "channel", undefined, [atlas]));
+    // Atlas's run failed in Nova's chat, so a mention asks Atlas.
+    render(lane("agent-dm", "workspace-a", "agent", "nova", [atlas]));
     const failed = await screen.findByTestId("chats-lane-run-failed");
     expect(within(failed).getAllByRole("status").map((node) => node.textContent)).toEqual([failedRun.words]);
     const composer = screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement;
@@ -638,10 +639,22 @@ describe("ChatLane", () => {
     expect(composer.value).toBe("Try the coast @Atlas ");
     expect(document.activeElement).toBe(composer);
     expect(composer.selectionStart).toBe(composer.value.length);
-    // A second press keeps the one mention.
+    // A second press keeps the one mention and puts the caret back at the end.
+    composer.setSelectionRange(3, 3);
+    fireEvent.select(composer);
     fireEvent.click(within(failed).getByRole("button", { name: "Mention @Atlas" }));
     expect(composer.value).toBe("Try the coast @Atlas ");
+    expect(composer.selectionStart).toBe(composer.value.length);
     expect(bridgeMock.sendChatMessage.mock.calls.length).toBe(sends);
+
+    // While a message sends, the box is locked, so nothing can change its draft.
+    const pending = deferred<{ message: ReturnType<typeof message> }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(pending.promise);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(composer.disabled).toBe(true));
+    expect(within(screen.getByTestId("chats-lane-run-failed")).queryByRole("button", { name: "Mention @Atlas" })).toBeNull();
+    await act(async () => pending.resolve({ message: message({ id: "sent", body: "Try the coast @Atlas" }) }));
+    await waitFor(() => expect(composer.disabled).toBe(false));
   });
 
   it("stops the agent's run from its DM", async () => {

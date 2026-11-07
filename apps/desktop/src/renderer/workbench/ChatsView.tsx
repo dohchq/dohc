@@ -4498,7 +4498,7 @@ export function ChatsView(props: {
               retryBusy={dispatchActionBusy}
               onRetryFailedRun={threadLocked ? undefined : retryFailedRun}
               onOpenAgentSettings={props.onSetupAgent}
-              onAskAgain={threadLocked ? undefined : askAgainInComment}
+              onAskAgain={threadLocked || sending ? undefined : askAgainInComment}
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}

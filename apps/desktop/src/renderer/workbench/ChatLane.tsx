@@ -586,7 +586,7 @@ export function ChatLane(props: {
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
         {...(props.onOpenAgentSettings ? { onOpenAgentSettings: props.onOpenAgentSettings } : {})}
         {...(chatAgentId ? { chatAgentId } : {})}
-        {...(!props.locked && place === "stream" ? { onAskAgain: askAgain } : {})}
+        {...(!props.locked && !sending && place === "stream" ? { onAskAgain: askAgain } : {})}
       /> : null}
     </>;
   }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun, askAgain]);

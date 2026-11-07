@@ -227,8 +227,16 @@ export function MentionComposer(props: {
     mention: (candidateId) => {
       const candidate = props.candidates.find((value) => value.id === candidateId);
       const pick = rosterPick.current;
-      if (!candidate || pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
-        textareaRef.current?.focus();
+      const node = textareaRef.current;
+      if (!candidate) {
+        node?.focus();
+        return;
+      }
+      // Already mentioned: the caret goes back to the end, as on the first press.
+      if (pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
+        node?.focus();
+        node?.setSelectionRange(props.value.length, props.value.length);
+        setCaret(props.value.length);
         return;
       }
       // A mention glued to a word is not a mention; give it its own word.
