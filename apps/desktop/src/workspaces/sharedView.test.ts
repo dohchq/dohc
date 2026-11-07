@@ -9231,14 +9231,15 @@ describe("share-refresh records in .dohc/local", () => {
       try {
         await writeFile(view.collisionRecord, "not json", "utf8");
         const logRequests = view.relay.logRequests;
-        failRenameFromPathOnce = { path: view.collisionRecord, error: Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }) };
+        // EIO, because Windows retries a busy rename, so one EBUSY would succeed there.
+        failRenameFromPathOnce = { path: view.collisionRecord, error: Object.assign(new Error("EIO: i/o error, rename"), { code: "EIO" }) };
 
         await expect(view.refresh(undefined, access)).resolves.toEqual({
           ok: false,
           changedPaths: 0,
           errorKind: "collision-record",
           errorMessage: UNREADABLE_RECORD_WORDS,
-          errorCause: "EBUSY: resource busy or locked",
+          errorCause: "EIO: i/o error, rename",
         });
         expect(failRenameFromPathOnce).toBeNull();
         expect(view.relay.logRequests).toBe(logRequests);
