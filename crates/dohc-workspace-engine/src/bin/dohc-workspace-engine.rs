@@ -360,6 +360,7 @@ where
     let mut negotiated_max_frame_bytes = WireLimits::default().max_frame_bytes;
     let mut keep_running = true;
     let mut read_error: Option<io::Error> = None;
+    let mut input_closed = false;
     let active_requests = Arc::new(Mutex::new(HashSet::new()));
     let mut request_tasks = JoinSet::new();
     while keep_running {
@@ -408,6 +409,7 @@ where
             }
         };
         if read == 0 {
+            input_closed = !*writer_gone_rx.borrow();
             break;
         }
         decoder.push(&read_buf[..read]);
@@ -686,6 +688,16 @@ where
     close_result?;
     if let Some(error) = read_error {
         return Err(error);
+    }
+    // The client closed its input while the writer still ran, so this
+    // shutdown retired the connection. A frame that retirement cut short was
+    // going to a client that had already left.
+    if input_closed
+        && writer_result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionAborted)
+    {
+        return Ok(());
     }
     writer_result
 }
@@ -4127,6 +4139,136 @@ mod tests {
                 result: serde_json::Value::Null,
             }))
         }
+    }
+
+    /// Answers each request with an acknowledgement that its connection's
+    /// retirement ends, as a live application's is.
+    struct ConnectionAckService {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl ProtocolEngineService for ConnectionAckService {
+        type Input = LiveApplicationInput;
+        async fn call(
+            &self,
+            ctx: RequestContext,
+            request: WireRequest,
+        ) -> Result<ServiceResponse, WireError> {
+            let connection = ctx.connection.expect("the transport passes its connection");
+            Ok(ServiceResponse {
+                response: WireResponse {
+                    id: request.id,
+                    result: serde_json::json!({"status": "applied"}),
+                },
+                blob_egress: None,
+                output_guard: Some(Arc::new(TestOutputGuard {
+                    cancel: CancelSignal::new(),
+                    retired: connection.cancel_signal(),
+                    deadline: None,
+                    dropped: self.dropped.clone(),
+                    read_connection: None,
+                })),
+            })
+        }
+    }
+
+    /// Passes writes through and lets the first flush finish, the HelloAck's.
+    /// Every later flush stays pending, so the acknowledgement after it has
+    /// all its bytes out and is still flushing when the client leaves.
+    struct HoldFlushesAfterFirst<W> {
+        output: W,
+        flushed: bool,
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for HoldFlushesAfterFirst<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.output).poll_write(cx, bytes)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            if self.flushed {
+                return Poll::Pending;
+            }
+            let result = Pin::new(&mut self.output).poll_flush(cx);
+            self.flushed = result.is_ready();
+            result
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.output).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_closing_its_input_during_a_flush_ends_the_daemon_cleanly() {
+        let mut input_bytes = encode_envelope(&Envelope::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            auth_token: TEST_AUTH_TOKEN.to_owned(),
+            capabilities: Vec::new(),
+            last_session_generation: None,
+            max_frame_bytes: None,
+        }));
+        input_bytes.extend_from_slice(&encode_envelope(&Envelope::Request(WireRequest {
+            id: 91,
+            method: "test.apply".to_owned(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: serde_json::Value::Null,
+        })));
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (server_input, server_output) = tokio::io::split(server);
+        let (mut client_input, mut client_output) = tokio::io::split(client);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let service = Arc::new(ConnectionAckService {
+            dropped: dropped.clone(),
+        });
+        let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+        let run = tokio::spawn(run_transport(
+            TEST_AUTH_TOKEN.to_owned(),
+            server_input,
+            HoldFlushesAfterFirst {
+                output: server_output,
+                flushed: false,
+            },
+            supervisor,
+            no_events(),
+            || Ok(()),
+        ));
+        client_output.write_all(&input_bytes).await.unwrap();
+        // Once the acknowledgement's last byte has arrived, its flush is all
+        // that is left, and that flush never finishes.
+        let limits = WireLimits::default();
+        let mut decoder = FrameDecoder::new(limits.clone());
+        let mut read = [0; 4096];
+        let mut answered = Vec::new();
+        while answered.is_empty() {
+            let count = client_input.read(&mut read).await.unwrap();
+            assert_ne!(count, 0, "the daemon closed before its acknowledgement");
+            decoder.push(&read[..count]);
+            while let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() {
+                if let Envelope::Response(response) = decode_control(&payload, &limits).unwrap() {
+                    answered.push(response.id);
+                }
+            }
+        }
+        assert_eq!(answered, [91]);
+        client_output.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the daemon ends once its client leaves")
+            .unwrap()
+            .expect("a client closing its input is a clean exit");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the acknowledgement's guard is released"
+        );
     }
 
     struct BlobService;
