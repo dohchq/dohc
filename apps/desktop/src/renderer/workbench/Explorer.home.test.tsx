@@ -159,16 +159,16 @@ describe("Explorer Files", () => {
   it("shows nothing below the Files header before the first listing", () => {
     render(<Explorer {...explorerProps({ mode: "files", listed: false, files: [], folders: [] })} />);
 
-    expect(screen.queryByText("No files")).toBeNull();
+    expect(screen.queryByText("No files yet.")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
     expect(screen.queryByRole("tree")).toBeNull();
   });
 
-  it("shows No files after an empty listing", () => {
+  it('shows "No files yet." after an empty listing', () => {
     render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [], editorGroups: [] })} />);
 
     // An empty-state line says something, so it reads in muted, not subtle.
-    for (const line of [within(section("Files")).getByText("No files"), screen.getByText("No open editors")]) {
+    for (const line of [within(section("Files")).getByText("No files yet."), screen.getByText("No files open.")]) {
       expect(line.className).toContain("text-muted");
       expect(line.className).not.toContain("text-subtle");
     }
@@ -180,18 +180,18 @@ describe("Explorer Files", () => {
     render(<Explorer {...explorerProps({ mode: "files", files: [file("notes.md")], folders: [] })} />);
 
     expect(within(screen.getByRole("tree")).getByRole("treeitem", { name: "notes.md" })).toBeTruthy();
-    expect(screen.queryByText("No files")).toBeNull();
+    expect(screen.queryByText("No files yet.")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
   });
 
-  it("swaps No files for the new folder row in an empty workspace", async () => {
+  it('swaps "No files yet." for the new folder row in an empty workspace', async () => {
     const user = userEvent.setup();
     render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [] })} />);
 
     await user.click(within(section("Files")).getByRole("button", { name: "New folder" }));
 
     expect((await screen.findByTestId("tree-edit-input")).getAttribute("aria-label")).toBe("New folder name");
-    expect(screen.queryByText("No files")).toBeNull();
+    expect(screen.queryByText("No files yet.")).toBeNull();
   });
 });
 

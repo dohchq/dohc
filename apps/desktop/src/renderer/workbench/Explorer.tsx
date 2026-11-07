@@ -2069,9 +2069,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             <>
               {empty ? (
                 props.listed ? (
-                  <div className="px-3 py-1.5 text-[11px] text-muted">
-                    No files
-                  </div>
+                  <p className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                    No files yet.
+                  </p>
                 ) : null
               ) : (
                 <ul
