@@ -33,6 +33,9 @@ export function AgentBadge(props: {
   // The agent's token where its avatar shows, so the sparkle takes the avatar's hue.
   // Its `self` says the message is your person's, which a name alone never proves.
   presentation?: ActorPresentation;
+  // Whether the agent gave the name shown. Left out, "Agent" is dohc's word
+  // for an agent that gave none, since a chat post stores the two alike.
+  named?: boolean;
   // What shows in place of the sparkle, such as the agent's face, which
   // then says whose agent it is on hover or focus.
   children?: ReactNode;
@@ -60,6 +63,9 @@ export function AgentBadge(props: {
     ? `${AGENT_TOOLS.find((tool) => tool.id === launch.tool)?.name ?? "Its tool"} on this computer`
     : "Your runner command";
   const reported = reportedAgentLine(author.authorReported);
+  // A plug card says "(as reported)" once: on the reported line when it has
+  // one, else on a name the agent gave.
+  const nameAsReported = Boolean(plug) && !reported && (props.named ?? author.authorDisplayName !== "Agent");
   const trigger = useRef<HTMLSpanElement>(null);
   const tooltip = useRef<HTMLSpanElement>(null);
   const [place, setPlace] = useState<ReturnType<typeof resolveFloatingMenuPosition> | null>(null);
@@ -141,8 +147,7 @@ export function AgentBadge(props: {
         >
           <span className="font-medium">
             {author.authorDisplayName}
-            {/* A connected agent's card says "(as reported)" once: on the reported line when it has one. */}
-            {plug === "unknown" || (connected && !reported) ? <span className="text-muted"> {AS_REPORTED}</span> : null}
+            {nameAsReported ? <span className="text-muted"> {AS_REPORTED}</span> : null}
           </span>
           {author.linkAgent || plug === "unknown" ? null : (
             <span className="text-muted">
