@@ -121,6 +121,19 @@ describe("agent badge", () => {
     expect(screen.getByRole("tooltip").textContent).not.toContain("(as reported)");
   });
 
+  it("says \"(as reported)\" once on a connected agent's card: on its reported line, else on its name", () => {
+    const connected = { group: "agent-connected", hue: null, self: true, connected: true } as const;
+    const card = (authorReported?: { product: string; version: string; model: string }) => {
+      render(<AgentBadge testIdPrefix="chats-post" author={{ authorDisplayName: "Scout", ...(authorReported ? { authorReported } : {}) }} presentation={connected} />);
+      fireEvent.focus(screen.getByTestId("chats-post-agent-badge"));
+      const text = screen.getByRole("tooltip").textContent;
+      cleanup();
+      return text;
+    };
+    expect(card({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" })).toBe("ScoutConnected agentClaude Code 2.1 · Claude Opus 5.5 (as reported)");
+    expect(card()).toBe("Scout (as reported)Connected agent");
+  });
+
   it("marks a share's agent post with the plug, and a card that claims no kind", () => {
     // A share serves no run id, so its agent posts could be a run's or a connected agent's.
     const share = { group: "agent-share", hue: null, self: false, connected: "unknown" } as const;

@@ -141,7 +141,8 @@ export function AgentBadge(props: {
         >
           <span className="font-medium">
             {author.authorDisplayName}
-            {plug ? <span className="text-muted"> {AS_REPORTED}</span> : null}
+            {/* A connected agent's card says "(as reported)" once: on the reported line when it has one. */}
+            {plug === "unknown" || (connected && !reported) ? <span className="text-muted"> {AS_REPORTED}</span> : null}
           </span>
           {author.linkAgent || plug === "unknown" ? null : (
             <span className="text-muted">
