@@ -3,8 +3,8 @@
 
 use dohc_engine_domain::{
     AGENT_REPLY_EXCERPT_CHARS, ChatActorKind, ChatChannelKind, ChatDecisionState, ChatThreadLane,
-    LinkedChatStore, NoFaults, ResolveDecision, SendMessage, StartChannelThread, StreamAgentRequest,
-    StreamAgentRequestState, StreamPage, StreamPosition,
+    LinkedChatStore, NoFaults, ResolveDecision, SendMessage, StartChannelThread,
+    StreamAgentRequest, StreamAgentRequestState, StreamPage, StreamPosition,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
