@@ -725,7 +725,9 @@ describe("engine markdown source view", () => {
       expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false");
     } else {
       await waitFor(() => expect(screen.queryByTestId("markdown-source-toggle")).toBeNull());
-      expect((screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
+      const reason = screen.getByTestId("markdown-save-state").getAttribute("title")!;
+      expect(screen.getByRole("button", { name: "Edit", description: reason }).getAttribute("title")).toBe(reason);
     }
     const delivered = bridgeMock.applyEngineYDocUpdate.mock.calls.length;
     await user.type(screen.getByTestId("page-title"), " Typed after access stopped.");
@@ -1057,7 +1059,7 @@ describe("engine markdown source view", () => {
     // The content still renders — read-only, not replaced.
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(
-      (screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled,
+      screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled") || screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled") === "true",
       "drop engineMayHoldDocument from the readOnly computation -> the edit toggle is enabled over a session the engine may still bind.",
     ).toBe(true);
     expect(opens).toBe(1);

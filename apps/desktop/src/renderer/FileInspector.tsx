@@ -754,7 +754,7 @@ export const FileInspector = memo(function FileInspector(
   const closedDocumentControls = (opening: boolean) =>
     kind === "markdown" ? (
       <DocumentControls
-        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : undefined }}
+        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : "dohc could not open this file." }}
         menu={{
           workspaceId: props.workspaceId,
           reportError: props.onButtonError,

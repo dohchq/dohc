@@ -8,6 +8,7 @@ import {
   DocumentControls,
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
+  LOSSY_NOTE_TITLE,
   OpeningState,
   ViewActions,
   OrphanedDraftNotices,
@@ -18,6 +19,7 @@ import {
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
   REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  SAVE_STATE,
   StateMark,
 } from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
@@ -770,6 +772,7 @@ export function MarkdownView(props: {
         ? ("recovery" as const)
         : engine.readOnlyCause === "access-ended" ? "read-only"
           : engine.readOnlyCause ? "read-only-unavailable" : "saved";
+  const chipTitle = chipState === "read-only" ? "Your access to this document ended." : undefined;
   // The file changed outside dohc. Reopening closes this session first, and
   // main lets the disk version stand. Reload can wait for capture to record it.
   // A document with nothing unsaved reopens by itself, never over edits main
@@ -998,6 +1001,12 @@ export function MarkdownView(props: {
     engine.engineMayHoldDocument ||
     props.lossyNote === "lossy" ||
     (props.truncated && !engine.available);
+  const reason = props.lossyNote === "lossy" ? LOSSY_NOTE_TITLE
+    : chipTitle ?? (typeof chipState === "string" && SAVE_STATE[chipState].title
+      ? SAVE_STATE[chipState].title
+      : props.forceReadOnly ? SAVE_STATE["read-only"].title
+      : props.truncated ? SAVE_STATE["too-large"].title
+      : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
   // the flip. See writeDraftNow and the unmount flush.
@@ -2291,7 +2300,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
+              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={chipTitle} />
             ) : null}
           </>
         }
@@ -2301,7 +2310,7 @@ export function MarkdownView(props: {
               label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE : undefined,
+              title: opening ? OPENING_TITLE : readOnly ? reason : undefined,
               onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {

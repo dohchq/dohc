@@ -7,6 +7,18 @@ import { KindGlyph } from "./KindGlyph";
 afterEach(cleanup);
 
 describe("KindGlyph", () => {
+  it("distinguishes audio from PDF and binary files", () => {
+    const { container } = render(<>
+      <KindGlyph kind={FILE_KIND_RECORDS.audio} size={15} />
+      <KindGlyph kind={FILE_KIND_RECORDS.pdf} size={15} />
+      <KindGlyph kind={FILE_KIND_RECORDS.binary} size={15} />
+    </>);
+    const glyphs = container.querySelectorAll("svg");
+    expect(glyphs[0]?.classList.contains("lucide-file-headphone")).toBe(true);
+    expect(glyphs[1]?.classList.contains("lucide-file")).toBe(true);
+    expect(glyphs[2]?.classList.contains("lucide-file")).toBe(true);
+  });
+
   it("draws every kind's registry glyph without naming it", () => {
     for (const kind of Object.values(FILE_KIND_RECORDS)) {
       const { container, unmount } = render(<KindGlyph kind={kind} size={15} />);

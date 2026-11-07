@@ -35,7 +35,7 @@ import { DocumentMenu } from "../DocumentMenu";
 import { PageIdentity } from "../PageIdentity";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { TextViewActions } from "../TextEditorView";
-import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
+import { DocumentControls, LossyNoteNoticeView, LOSSY_NOTE_TITLE, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
 import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -77,6 +77,7 @@ import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddres
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
+import { EmptyEditorGroup } from "../workbench/EmptyEditorGroup";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { CollectionsElsewhereRow, CollectionsRefusalRow, Explorer, TreeRow, type ExplorerProps, type VisibleRow } from "../workbench/Explorer";
@@ -211,9 +212,20 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         onCreateGroupRight={noop}
         onCloseGroup={noop}
       />
-      {/* Tall enough to hold the tab list, which the capture opens, and its
-          shadow. */}
-      <div className="h-28 bg-bg" />
+      {props.tabs.length === 0 ? (
+        <div className="flex h-[640px] flex-col bg-bg">
+          <EmptyEditorGroup
+            platform="win32"
+            create={{ markdown: noop, collection: noop, drawing: noop }}
+            recent={["plan.md", "notes.md"]}
+            files={[{ path: "plan.md" }, { path: "notes.md" }]}
+            onOpen={noop}
+          />
+        </div>
+      ) : (
+        // Room for the tab list and its shadow when the capture opens it.
+        <div className="h-28 bg-bg" />
+      )}
     </>
   );
 }
@@ -239,7 +251,7 @@ function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
 
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode; body?: ReactNode }) {
   const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
@@ -263,7 +275,7 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: s
         )}
       >
         {props.children}
-        <div className="h-4 rounded-b-lg bg-bg" />
+        {props.body ?? <div className="h-4 rounded-b-lg bg-bg" />}
       </EditorGroupFrame>
     </div>
   );
@@ -2023,14 +2035,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The capture opens each part's tab list. */}
+      {/* The first part opens its tab list. The empty active group is
+          captured with menus closed: opening the other group's tab list
+          focuses that group, and in a split specimen focus makes a group
+          active (#3391). */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
         </Specimen>
       </Section>
 
-      <Section part="editor-groups-empty" title="Editor groups, empty active group">
+      <Section part="editor-groups-empty" title="Editor groups, empty active group" menusAtRest>
         <Specimen label="split: an empty active group, then one with tabs">
           <EditorGroupsSpecimen activeHasTabs={false} />
         </Specimen>
@@ -2228,12 +2243,18 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
         <Specimen label="failed" className="w-full">
-          <TabRowActionsSpecimen width="w-full">
+          <TabRowActionsSpecimen width="w-full" body={
+            <div className="flex h-56 flex-col rounded-b-lg bg-bg">
+              <EmptyState icon={AlertTriangle} tone="danger" title="dohc could not read this file.">
+                <SecondaryButton data-testid="file-read-retry" onClick={noop}>Try again</SecondaryButton>
+              </EmptyState>
+            </div>
+          }>
             <ViewActions
               onShare={noop}
               actions={
                 <DocumentControls
-                  toggle={{ label: "Edit", disabled: true }}
+                  toggle={{ label: "Edit", disabled: true, title: "dohc could not open this file." }}
                   menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
                 />
               }
@@ -2932,6 +2953,20 @@ function Pane(props: { theme: "light" | "dark" }) {
           the tab row, as a document does: a calm save state says so only to
           screen readers. */}
       <Section part="file-view-actions" title="File view actions" menusAtRest>
+        {([false, true] as const).map((held) => (
+          <Specimen key={String(held)} label={held ? "held change" : "read-only note"} className="w-full">
+            <TabRowActionsSpecimen width="w-full" body={
+              <LossyNoteNoticeView held={held}>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Open externally</button>
+                <button type="button" onClick={noop} className="whitespace-nowrap text-muted hover:text-ink">Edit anyway</button>
+              </LossyNoteNoticeView>
+            }>
+              <ViewActions onShare={noop} actions={
+                <DocumentControls toggle={{ label: "Edit", disabled: true, title: LOSSY_NOTE_TITLE }} menu={null} />
+              } />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
         {FILE_VIEW_CSV_STATES.map((specimen) => (
           <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
             <TabRowActionsSpecimen width="w-full" path="data/funnel.csv">

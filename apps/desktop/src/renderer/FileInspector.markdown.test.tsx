@@ -143,6 +143,29 @@ describe("FileInspector renders markdown through the shared component map", () =
     }
   });
 
+  it.each(["truncated with engine available", "access ended on a writable share"] as const)(
+    "gives enabled Edit no reason title: %s", async (cause) => {
+      const previous = { available: engineDocState.available, readOnlyCause: engineDocState.readOnlyCause };
+      engineDocState.available = cause === "truncated with engine available";
+      engineDocState.readOnlyCause = cause === "access ended on a writable share" ? "access-ended" : null;
+      bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+        text: TABLE_DOCUMENT,
+        truncated: cause === "truncated with engine available",
+      });
+      try {
+        render(<FileInspector workspaceId="ws-1" path="a.md" />);
+        const toggle = await screen.findByTestId("markdown-edit-toggle");
+        await waitFor(() => {
+          expect(toggle.hasAttribute("disabled")).toBe(false);
+          expect(toggle.getAttribute("aria-disabled")).not.toBe("true");
+        });
+        expect(toggle.getAttribute("title")).toBeNull();
+      } finally {
+        Object.assign(engineDocState, previous);
+      }
+    },
+  );
+
   it("shows a table as a table, inside the wrapper that keeps the page from scrolling sideways", async () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
