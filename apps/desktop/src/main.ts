@@ -184,6 +184,7 @@ import {
   crashReportOperations,
   collectionCopiesLeftOperations,
   workspaceTrustOperations,
+  oldWindowOperations,
   reportingOperations,
   usageRecordOperations,
   noticeOperations,
@@ -222,6 +223,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { windowShowsWorkspace } from "./window/workspaceWindowReuse";
+import { createOldWindows } from "./window/oldWindows";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
   createRendererWorkspaceOperationRunner,
@@ -579,6 +581,7 @@ import { createTelemetry, privacyInEffect, usageEventFor } from "./telemetry/tel
 import { diagnosticsText, saveDiagnostics } from "./telemetry/diagnostics";
 import {
   createShareHandoffIntentSlot,
+  focusShareHandoffWindow,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
 import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemption";
@@ -5689,6 +5692,8 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
         const closingApps = appViews?.closeOwner(session.sender.id) ?? Promise.resolve();
         shareDirectWriteDelivery.retireSender(session.sender);
         const retiring = rendererWorkspaceRetirement.retireSender(session);
+        // The sender no longer shows its workspace.
+        oldWindows.notify();
         return { ...retiring,
           requiredForAdmission: Promise.all([retiring.requiredForAdmission, closingApps]).then(() => {}),
         };
@@ -6083,6 +6088,14 @@ const workspaceFileOpens = createWorkspaceFileOpens<WebContents, WorkspaceSummar
   send: (contents, workspace, file) => {
     if (!contents.isDestroyed()) contents.send(CHANNELS.workspaceActivated, { ...workspace, file });
   },
+});
+
+const oldWindows = createOldWindows<WebContents, BrowserWindow>({
+  windows: () => desktopWindows.workspaceWindows.allLive(),
+  sessionOf: (contents) => rendererWorkspaceSessions.current(contents),
+  authorities: workspaceAuthorities,
+  isQuitting: () => appLifecycle.isQuitting(),
+  focus: focusShareHandoffWindow,
 });
 
 // Opens a file or folder the OS or a launch handed dohc: its workspace, and
@@ -7400,6 +7413,11 @@ function registerIpcHandlers(): void {
     executeAppPreview,
   });
 
+  registerOperations(operationBoundary, oldWindowOperations, {
+    readOldWindowState: (_input, { event }) => oldWindows.read(event.sender),
+    goToWorkspaceWindow: (_input, { event }) => oldWindows.goTo(event.sender),
+  });
+
   registerOperations(operationBoundary, workspaceTrustOperations, workspaceTrustHandlers<IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     trust: workspaceTrust,
     identify: folderIdentity,
@@ -7432,7 +7450,10 @@ function registerIpcHandlers(): void {
       desktopWindows.setPreferredWorkspaceId(workspaceId, sender);
     },
     markWorkspaceOpened,
-    workspaceShown: (workspaceId, sender) => workspaceFileOpens.shown(sender, workspaceId),
+    workspaceShown: (workspaceId, sender) => {
+      workspaceFileOpens.shown(sender, workspaceId);
+      oldWindows.notify();
+    },
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: async (operation) => {
       // A root macOS refuses would open with every file and engine call failing.

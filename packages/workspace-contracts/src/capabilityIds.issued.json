@@ -266,5 +266,7 @@
   "app.view",
   "app.local.check",
   "capture.history.retry",
-  "dataset.change.ask"
+  "dataset.change.ask",
+  "window.old.read",
+  "window.old.go"
 ]

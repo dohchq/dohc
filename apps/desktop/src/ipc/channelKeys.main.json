@@ -149,6 +149,7 @@
   "mountShare",
   "moveWorkspacePath",
   "noticesChanged",
+  "oldWindowStateChanged",
   "openExternalUrl",
   "openFileExternally",
   "openSharedView",
