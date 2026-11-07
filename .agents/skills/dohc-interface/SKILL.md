@@ -430,8 +430,10 @@ Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-x
 Dialog: build it on `Overlay`. Cancel, the X, and Escape close it.
 While closing would discard hand-written work, as with open merge conflicts, only the dialog's own buttons close it.
 A press outside a dialog does nothing, so a stray click cannot discard what a person typed.
-Only pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
-Pass `closeOnBackdrop` to `Overlay` for a picker only.
+Pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
+Settings closes on a press outside too, because each field saves when the person leaves it. A field that can't save yet sets `data-unsaved` and says why beside it. The press then keeps Settings open and focuses that field.
+A press closes one surface, as Escape does. A press that closes a menu leaves its dialog open, and a press that starts inside the panel never closes it.
+Pass `closeOnBackdrop` to `Overlay` only for these.
 
 Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
 

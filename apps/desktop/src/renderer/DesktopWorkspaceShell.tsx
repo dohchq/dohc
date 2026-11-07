@@ -7486,7 +7486,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         // A finished pop keeps no transform, so an agent row's fixed ⋯ menu
         // places itself against the window. `!` outranks the unlayered class.
-        <Overlay onClose={closeSettings} panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
+        <Overlay onClose={closeSettings} closeOnBackdrop panelProps={{ className: "dohc-pop-in [animation-fill-mode:backwards]!" }}>
           <LazyDesktopSettings
             workspaceIsReady={workspaceIsReady}
             workspaceOpenFailed={!!workspaceOpenFailure}

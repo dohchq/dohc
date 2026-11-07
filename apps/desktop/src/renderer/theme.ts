@@ -85,6 +85,11 @@ function applyLook(look: LookSettings): void {
   // every zoom step, and on every settings save.
 }
 
+/** The count of looks applied so far, so a late answer can tell a newer look replaced the one it would undo. */
+export function currentLookRevision(): number {
+  return lookRevision;
+}
+
 /** Applies what the settings say about the window's look. */
 export function applyLookSettings(settings: DesktopUserSettings): void {
   lookRevision += 1;
