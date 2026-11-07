@@ -918,7 +918,7 @@ export function MentionComposer(props: {
                     ? "field-sizing-content px-0 py-0"
                     : "min-h-16 px-0 py-0"
               }`
-            : "field-sizing-content block max-h-60 min-h-[34px] w-full resize-none bg-transparent px-3 pb-0.5 pt-2.5 text-[14px] leading-[22px] text-ink outline-none placeholder:text-subtle focus:shadow-none! disabled:opacity-60"
+            : "field-sizing-content block max-h-60 min-h-[34px] w-full resize-none bg-transparent px-3 pb-0.5 pt-2.5 text-[14px] leading-[22px] text-ink outline-none placeholder:text-subtle focus:shadow-none!"
         }
       />
       {isPost && expanded ? pollBlock : null}
