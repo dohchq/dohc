@@ -2957,6 +2957,9 @@ describe("Details", () => {
     expect(within(screen.getByTestId(id)).getByRole("button", { name: "Hide details" })).toBeTruthy();
     rerender(noticeElement({ syncStatus: declinedStatus(declined({ path: "notes/renamed.md", headBlobSha256: "b".repeat(64) })) }));
     expect(within(screen.getByTestId(id)).getByRole("button", { name: "Details" }).getAttribute("aria-expanded")).toBe("false");
+    // The first version coming back is a repeat too.
+    rerender(noticeElement({ syncStatus: declinedStatus(declined({ path: "notes/renamed.md" })) }));
+    expect(within(screen.getByTestId(id)).getByRole("button", { name: "Details" }).getAttribute("aria-expanded")).toBe("false");
   });
 
   it("puts Details after Send report on a crash notice's toast and row", async () => {

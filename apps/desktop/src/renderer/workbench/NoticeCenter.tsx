@@ -325,6 +325,9 @@ function useDetails(props: {
 }): CopyControls {
   const id = useId();
   const [openFor, setOpenFor] = useState<{ revision: NoticeRevision | undefined } | null>(null);
+  // A new revision forgets the open one, so an earlier revision that comes
+  // back opens closed too.
+  if (openFor !== null && openFor.revision !== props.revision) setOpenFor(null);
   const open = openFor !== null && openFor.revision === props.revision;
   const { copy, testId } = props;
   if (!copy) return NO_COPY;
