@@ -330,6 +330,8 @@ describe("CloudSyncSettings", () => {
     expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
     expect(syncSwitch().getAttribute("aria-busy")).toBeNull();
     expect(screen.queryByTestId("switch-busy")).toBeNull();
+    // The spinner's place stays, so the switch does not move when it goes.
+    expect(syncSwitch().previousElementSibling?.className).toContain("size-3");
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
     expect(screen.queryByTestId("cloud-sync-needs-server")).toBeNull();

@@ -302,18 +302,22 @@ export function SwitchControl(props: {
   describedBy?: string | undefined;
   checked: boolean;
   disabled?: boolean;
-  // The change it asked for is still running.
+  // The change it asked for is still running. A caller that can be busy
+  // passes false while idle, so the spinner's place is kept.
   busy?: boolean;
   onChange: (checked: boolean) => void;
   ref?: Ref<HTMLButtonElement>;
 }) {
-  // While busy, a spinner sits left of the switch. A row's controls hold its
-  // right edge, so the switch does not move when the spinner shows. Under
-  // reduced motion the global rule stops the spin, so it shows a still ring.
+  // While busy, a spinner sits left of the switch. A switch that can be busy
+  // keeps the spinner's place while idle, so the switch does not move when it
+  // shows, even in a row whose controls wrap to the left edge. Under reduced
+  // motion the global rule stops the spin, so it shows a still ring.
   return (
     <>
       {props.busy ? (
         <LoaderCircle data-testid="switch-busy" size={12} aria-hidden className="shrink-0 animate-spin text-subtle" />
+      ) : props.busy === false ? (
+        <span aria-hidden className="size-3 shrink-0" />
       ) : null}
       <button
         ref={props.ref}
