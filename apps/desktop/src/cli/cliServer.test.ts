@@ -3069,6 +3069,18 @@ describe("CLI socket server", () => {
     const reactions = await store.listReactions({ workspaceId: WORKSPACE_ID, threadId });
     expect(reactions.map((reaction) => reaction.author.kind)).toEqual(["agent"]);
 
+    // A name the caller gives doesn't move the run's messages off its agent.
+    const named = await invoke("post", {
+      cwd: workspaceRoot, actor: "agent", agent: "Client", group: "general", title: "Named",
+      attachments: [], needsDecision: false, body: "Posted under another name.",
+    });
+    await invoke("reply", {
+      cwd: workspaceRoot, actor: "agent", agent: "Client", thread: named.threadId, body: "Replied under another name.",
+      attachments: [], needsDecision: false,
+    });
+    const credited = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${named.threadId.slice("th_".length)}` });
+    expect(credited.map((message) => [message.authorAgentId, message.author.displayName])).toEqual([["codex", "Nova"], ["codex", "Nova"]]);
+
     // Once the run lets go of the slot, the person's posts are theirs.
     dispatchedRun = null;
     const own = await post({ actor: "human", title: "Mine", body: "My own post." });
