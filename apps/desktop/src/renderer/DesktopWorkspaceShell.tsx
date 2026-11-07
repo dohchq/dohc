@@ -424,6 +424,20 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
+// The Notices row of a shared view whose refresh can't read its collision record.
+const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
+
+// What a refresh that set a shared view's collision record aside tells the
+// person, whether the refresh then completed or failed.
+function collisionRecordSetAsideMessage(takesLocalWrites: boolean | undefined): string {
+  return (
+    "dohc could not read this share's record of your files with the same path as a shared file. " +
+    (takesLocalWrites
+      ? "A refresh can count them as your edits, so check Send changes before you send."
+      : "A refresh can replace them with the shared version, and dohc keeps no copy of yours.")
+  );
+}
+
 // The commands that still run under the opening cover.
 const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings-appearance", "settings-agents"]);
 
@@ -942,6 +956,10 @@ export function DesktopWorkspaceShell(props: {
       sequence: dmNavigationRequest.current.sequence + 1,
     };
   }
+  const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
+  const retryRefusedSharedView = useCallback(() => {
+    void refreshShareViewRef.current();
+  }, []);
   const {
     shellErrors,
     hideShellError,
@@ -988,7 +1006,7 @@ export function DesktopWorkspaceShell(props: {
     clearIdentity,
     privacySettingsAction,
     keepCollectionsHere,
-  } = useShellError(workspaceId);
+  } = useShellError(workspaceId, props.workspace.shareView ? retryRefusedSharedView : undefined);
   const stopAndRestore = useStopAndRestore(workspaceId, {ready: workspaceIsReady && !props.workspace.shareView,
     onError: (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)});
   useScheduleHostNotice({ workspaceId, ready: workspaceIsReady, show: showScheduleHostNotice, report: reportShellFailure });
@@ -2292,7 +2310,6 @@ export function DesktopWorkspaceShell(props: {
         details,retry,action:save,target,identity});
     }
   },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments,liveDocumentStopped,reportPendingLiveStop,readLiveStopRefusalForRow,setShellRetryBusy]);
-  const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
     workspaceId,
@@ -5065,6 +5082,24 @@ export function DesktopWorkspaceShell(props: {
           probeFailure = outcome.probed === true;
           if (outcome.changedPaths > 0) await bestEffortRepaint();
           if (!isCurrent()) return "stale";
+          if (outcome.collisionRecordQuarantined) {
+            reportShellFailure({ message: collisionRecordSetAsideMessage(outcome.takesLocalWrites) });
+          }
+          if (outcome.errorKind === "collision-record") {
+            // The record keeps the person's own files apart while dohc can't
+            // read it, so its row has no ×. The next refresh that completes
+            // ends it. A background refusal toasts only when the row is new.
+            reportShellFailure({
+              message: outcome.errorMessage,
+              ...(outcome.errorCause ? { details: [["Cause", outcome.errorCause] as const] } : {}),
+              retry: retryRefusedSharedView,
+              noDismiss: true,
+              kind: "share-collision-record",
+              identity: SHARE_COLLISION_RECORD_ROW,
+              repeat: background,
+            });
+            return "stale";
+          }
           if (background) throw Object.assign(new Error(outcome.errorMessage), { errorKind: outcome.errorKind });
           reportShellError(
             "Couldn't refresh the shared view.",
@@ -5073,11 +5108,9 @@ export function DesktopWorkspaceShell(props: {
           return "stale";
         }
         if (outcome.probed) return "current";
+        clearIdentity(SHARE_COLLISION_RECORD_ROW);
         if (outcome.collisionRecordQuarantined) {
-          reportShellFailure({
-            message:
-              "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
-          });
+          reportShellFailure({ message: collisionRecordSetAsideMessage(outcome.takesLocalWrites) });
         }
         if (outcome.status === "ended") {
           shareViewEndedRef.current = true;

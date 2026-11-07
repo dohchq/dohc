@@ -37,6 +37,8 @@ import {
   readSharedViewProjectionDebt,
   type CaptureSharedViewLocalDivergenceOutcome,
   type RefreshSharedViewOutcome,
+  setAsideCollisionRecord,
+  standaloneShareViewFailureOutcome,
   type StandaloneShareViewRefreshOutcome,
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
@@ -945,6 +947,7 @@ export function createShareViewFiles(
         excludedPaths: [],
         unjournalablePaths: recovered.unjournalablePaths,
         collisionRecordQuarantined: recovered.collisionRecordQuarantined,
+        ...(recovered.collisionRecordQuarantined ? { takesLocalWrites: recovered.takesLocalWrites ?? false } : {}),
         refusedOps: 0,
         refusedDetail: null,
       };
@@ -953,65 +956,75 @@ export function createShareViewFiles(
         : outcome;
     };
 
-    let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
-    if (target.ended) {
-      outcome = localOutcome("ended");
-    } else {
-      const relay = await dependencies.resolveRelay(target);
-      if (relay === null) {
-        outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
+    try {
+      let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
+      if (target.ended) {
+        outcome = localOutcome("ended");
       } else {
-        const pull: Parameters<
-          ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
-        >[0]["pull"] = async (input) =>
-          dependencies.pull(target, relay, {
-            grantedSelector: input.grantedSelector,
-            recordRefusals: input.recordRefusals,
-            recordCollisions: input.recordCollisions,
-            recordChangedPaths: input.recordChangedPaths,
-          });
-        const recordRefusals = async (refusals: ShareViewRefusal[]) =>
-          dependencies.recordRefusals(target, refusals);
+        const relay = await dependencies.resolveRelay(target);
+        if (relay === null) {
+          outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
+        } else {
+          const pull: Parameters<
+            ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
+          >[0]["pull"] = async (input) =>
+            dependencies.pull(target, relay, {
+              grantedSelector: input.grantedSelector,
+              recordRefusals: input.recordRefusals,
+              recordCollisions: input.recordCollisions,
+              recordChangedPaths: input.recordChangedPaths,
+            });
+          const recordRefusals = async (refusals: ShareViewRefusal[]) =>
+            dependencies.recordRefusals(target, refusals);
 
-        outcome =
-          target.kind === "standalone"
-            ? await lifecycle.reconcileStandalone({
-                rootDir: target.rootPath,
-                workspaceId: target.storeWorkspaceId,
-                relay,
-                shareId: target.shareId,
-                pull,
-                store,
-                pinnedSelector: target.grantedSelector,
-                recordRefusals,
-                captured: recovered,
-                preservedPaths: target.unsavedPaths,
-                onCursorCommitted,
-              })
-            : await lifecycle.refreshCaptured({
-                rootDir: target.rootPath,
-                workspaceId: target.storeWorkspaceId,
-                relay,
-                shareId: target.shareId,
-                pull,
-                store,
-                pinnedSelector: target.grantedSelector,
-                recordRefusals,
-                captured: recovered,
-                preservedPaths: target.unsavedPaths,
-                onCursorCommitted,
-              });
+          outcome =
+            target.kind === "standalone"
+              ? await lifecycle.reconcileStandalone({
+                  rootDir: target.rootPath,
+                  workspaceId: target.storeWorkspaceId,
+                  relay,
+                  shareId: target.shareId,
+                  pull,
+                  store,
+                  pinnedSelector: target.grantedSelector,
+                  recordRefusals,
+                  captured: recovered,
+                  preservedPaths: target.unsavedPaths,
+                  onCursorCommitted,
+                })
+              : await lifecycle.refreshCaptured({
+                  rootDir: target.rootPath,
+                  workspaceId: target.storeWorkspaceId,
+                  relay,
+                  shareId: target.shareId,
+                  pull,
+                  store,
+                  pinnedSelector: target.grantedSelector,
+                  recordRefusals,
+                  captured: recovered,
+                  preservedPaths: target.unsavedPaths,
+                  onCursorCommitted,
+                });
+        }
       }
+      if (
+        "ok" in outcome
+          ? outcome.ok && outcome.status === "ended"
+          : outcome.status === "ended"
+      ) {
+        await dependencies.markEnded(target);
+        await dependencies.retireTarget(target);
+      }
+      return { kind: "refresh", outcome };
+    } catch (error) {
+      // The capture set the record aside, so a refresh that then fails
+      // says so too.
+      if (target.kind !== "standalone" || !recovered.collisionRecordQuarantined) throw error;
+      return {
+        kind: "refresh",
+        outcome: { ...standaloneShareViewFailureOutcome(error, localChanges), ...setAsideCollisionRecord(recovered) },
+      };
     }
-    if (
-      "ok" in outcome
-        ? outcome.ok && outcome.status === "ended"
-        : outcome.status === "ended"
-    ) {
-      await dependencies.markEnded(target);
-      await dependencies.retireTarget(target);
-    }
-    return { kind: "refresh", outcome };
   }
 
   async function recordRecoveredPaths(target: ActiveShareViewFilesTarget, captured: CaptureSharedViewLocalDivergenceOutcome): Promise<void> {

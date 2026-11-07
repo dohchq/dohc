@@ -11,6 +11,8 @@ import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 import { CollectionMoveUnfinishedError, ipcWireError } from "../../ipc/errorWords";
+import { sharedViewRefusal, sharedViewRefusalWords } from "../../testing/sharedViewRefusal.fixture";
+import { createOwnedProjectionRepairer } from "../../workspaces/ownedProjectionRepair";
 
 afterEach(() => { cleanup(); localStorage.clear(); });
 
@@ -19,6 +21,110 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it.each(["refresh first", "search first"])("shows one plain refusal from workspace search: %s", async order => {
+    const error = new Error(`Error invoking remote method 'desktop:search-workspace': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    const refresh = () => result.current.reportShellFailure({
+      message: sharedViewRefusalWords, retry, noDismiss: true,
+      kind: "share-collision-record", identity: "share-collision-record",
+    });
+    const read = () => result.current.reportSearchError(error, vi.fn());
+    act(() => { if (order === "refresh first") { refresh(); read(); } else { read(); refresh(); } });
+    expect(result.current.shellErrors, "One refusal has one Notices row").toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({
+      identity: "share-collision-record", kind: "share-collision-record", noDismiss: true,
+      message: sharedViewRefusalWords, seen: false, retry,
+    });
+    const first = result.current.shellErrors[0]!;
+    act(() => result.current.hideShellError(first.id));
+    act(read);
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ id: first.id, message: sharedViewRefusalWords, seen: true });
+    act(() => result.current.retryShellError(first.id));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(result.current.shellErrors).toHaveLength(1);
+    act(() => result.current.clearIdentity("share-collision-record"));
+    expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it.each(["cause", "message"] as const)("shows one plain Apps listing refusal through its %s", async field => {
+    const error = new Error(`Error invoking remote method 'desktop:list-sites': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    const report = () => result.current.reportShellFailure(field === "cause"
+      ? { message: "Could not load apps.", cause: error, identity: "apps-list", title: "Could not load" }
+      : { message: error.message, identity: "apps-list" });
+    act(report);
+    expect(result.current.shellErrors[0]?.identity, "A refused read uses the shared-view row").toBe("share-collision-record");
+    expect(result.current.shellErrors[0]).toMatchObject({ message: sharedViewRefusalWords, noDismiss: true, retry });
+    expect(result.current.shellErrors[0]?.title).toBeUndefined();
+    act(report);
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]?.message).toBe(sharedViewRefusalWords);
+  });
+
+  it.each(["reader first", "refresh first"])("copies only a refresh's filesystem cause on the shared-view row: %s", order => {
+    const wrapped = new Error(`Error invoking remote method 'desktop:list-sites': CapturePartialFailureError [share-collision-record]: ${sharedViewRefusalWords}`);
+    const cause = [["Cause", "EBUSY: resource busy or locked"]] as const;
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    const refresh = (details?: typeof cause) => result.current.reportShellFailure({
+      message: sharedViewRefusalWords, ...(details ? { details } : {}), retry, noDismiss: true,
+      kind: "share-collision-record", identity: "share-collision-record", repeat: true,
+    });
+    const read = () => result.current.reportShellFailure({
+      message: "Could not load apps.", cause: wrapped, identity: "apps-list", title: "Could not load",
+    });
+    const row = () => {
+      expect(result.current.shellErrors, "One refusal has one Notices row").toHaveLength(1);
+      return result.current.shellErrors[0]!;
+    };
+    let reader: ReturnType<typeof row> | undefined;
+    if (order === "reader first") {
+      act(read);
+      reader = row();
+      expect(reader.details, "A reader alone gives no Cause").toBeUndefined();
+    }
+    act(() => refresh(cause));
+    const first = row();
+    expect(first.details, "A refresh adds its filesystem cause").toEqual(cause);
+    if (reader) expect(first, "A refresh keeps the reader's row").toMatchObject({ id: reader.id, atMs: reader.atMs, seen: reader.seen });
+    act(read);
+    expect(row(), "A later reader keeps the refresh's Cause").toMatchObject({ id: first.id, message: sharedViewRefusalWords, details: cause });
+    expect(row().title).toBeUndefined();
+    act(() => refresh());
+    expect(row().details, "A refresh with no filesystem cause has no Cause").toBeUndefined();
+  });
+
+  it("shows a mounted share's search refusal on the general row in an ordinary workspace", async () => {
+    const error = new Error(`Error invoking remote method 'desktop:search-workspace': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportSearchError(error, retry));
+    expect(result.current.shellErrors).toHaveLength(1);
+    const row = result.current.shellErrors[0]!;
+    expect(row, "The general row keeps the caller's retry and kind").toMatchObject({ message: sharedViewRefusalWords, retry, kind: "workspace-search" });
+    expect(row.details, "The general row copies no wire text").toBeUndefined();
+    expect(row.noDismiss, "An ordinary workspace can dismiss the refusal").toBeUndefined();
+  });
+
+  it("shows a projection repair refusal on the shared-view row", async () => {
+    const refusal = await sharedViewRefusal();
+    const rootPath = "/refused-projection";
+    const repair = createOwnedProjectionRepairer({
+      projectionStatus: vi.fn(async () => ({ state: "current" as const })),
+      reconcile: vi.fn(async () => { throw refusal; }),
+    });
+    const received = await repair({ rootPath, target: { kind: "standalone", workspaceId: "ws-a" } })
+      .catch(error => new Error(`Error invoking remote method 'desktop:list-sites': ${String(ipcWireError(error))}`));
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    act(() => result.current.reportShellError("Could not load apps.", received));
+    expect(result.current.shellErrors[0]?.identity, "A projection repair uses the shared-view row").toBe("share-collision-record");
+    expect(result.current.shellErrors[0]).toMatchObject({ message: sharedViewRefusalWords, noDismiss: true, retry });
+  });
+
   it("drops a late History refusal from the previous workspace", () => {
     const { result, rerender } = renderHook(({ workspaceId }) => useShellError(workspaceId), {
       initialProps: { workspaceId: "before" },
@@ -416,6 +522,18 @@ describe("useShellError", () => {
     act(() => result.current.retryShellError(id));
     expect(retry).toHaveBeenCalledTimes(1);
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("keeps a share's collision-record row through its retry", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({
+      message: "dohc did not update these shared files.", retry, noDismiss: true,
+      kind: "share-collision-record", identity: "share-collision-record",
+    }));
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(result.current.shellErrors.map((error) => error.message)).toEqual(["dohc did not update these shared files."]);
   });
 
   // A retry answers false when it could not run, such as during an account
