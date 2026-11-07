@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
-import * as sharedView from "../workspaces/sharedView";
 import { RelayConflictError, SharedFileReadOnlyError, ShareUnavailableError, type ShareProposalOp } from "@dohc/workspace-contracts/relay";
 import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { shareProposalOperations } from "./shareOperations";
@@ -107,10 +106,7 @@ async function harness() {
     afterHandler: (work: () => void) => { afterHandler = work; } };
 }
 
-afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-});
+afterEach(() => vi.unstubAllGlobals());
 
 describe("registered share proposal handlers", () => {
   it.each(Object.values(shareProposalOperations))("rejects an untrusted sender on $channel before parsing or work", async row => {
@@ -458,14 +454,8 @@ describe("registered share proposal handlers", () => {
   it("refuses unsafe reconciliation and reports a raced withdrawal honestly", async () => {
     const h = await harness(); h.recipient();
     const refusal = new Error("record unreadable");
-    vi.spyOn(sharedView, "isCollisionRecordRefusal").mockImplementation(error => error === refusal);
     h.reconcile.mockRejectedValue(refusal);
-    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(
-      "dohc could not read this share's record of your files with the same path as a shared file. Refresh, then send your changes again.",
-    );
-    const unrelated = new Error("store unavailable");
-    h.reconcile.mockRejectedValue(unrelated);
-    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toBe(unrelated);
+    await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toBe(refusal);
     h.reconcile.mockResolvedValue({ kind: "settle", capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [{ path: "docs/file", reason: "unreadable" }] });
     await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(); expect(h.submit).not.toHaveBeenCalled();
     h.withdraw.mockResolvedValue({ proposalId: "proposal", state: "accepted" });

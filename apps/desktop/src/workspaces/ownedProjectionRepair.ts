@@ -1,5 +1,4 @@
 import { unjournalablePathMessages } from "./shareViewRecords";
-import { isCollisionRecordRefusal } from "./sharedView";
 import type {
   ShareViewFiles,
   ShareViewFilesTarget,
@@ -28,14 +27,7 @@ export function createOwnedProjectionRepairer(files: ProjectionOwner) {
       async (markWorkspaceChanged, lease) => {
         let changedNothing = false;
         try {
-          const outcome = await files.reconcile(lease, input.target, "repair").catch((error: unknown) => {
-            if (isCollisionRecordRefusal(error)) {
-              throw new Error(
-                "dohc could not read this share's record of your files with the same path as a shared file. Refresh the share, then try again.",
-              );
-            }
-            throw error;
-          });
+          const outcome = await files.reconcile(lease, input.target, "repair");
           assertOwnedProjectionRepair(outcome);
           const repairedStatus = await files.projectionStatus(input.target);
           changedNothing = repairChangedNothing(outcome, repairedStatus);

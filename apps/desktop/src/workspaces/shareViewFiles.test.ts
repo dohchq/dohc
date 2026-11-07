@@ -334,7 +334,7 @@ const unusedReconcilePorts: Pick<
 };
 
 describe("ShareViewFiles", () => {
-  it("gives a refresh instruction when a change finds an unreadable saved list", async () => {
+  it("refuses a change with the shared-view refusal when it can't read the saved list", async () => {
     const rootPath = await workspaceRoot();
     const path = "docs/a.md";
     const text = "shared file\n";
@@ -348,9 +348,7 @@ describe("ShareViewFiles", () => {
     const change = { kind: "save" as const, path, text: "changed\n", expectedContentHash: createHash("sha256").update(text).digest("hex") };
     const save = () => withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested, change));
 
-    await expect(save()).rejects.toThrow(
-      "dohc could not read this share's record of your files with the same path as a shared file. Refresh, then try the change again.",
-    );
+    await expect(save()).rejects.toMatchObject({ code: "share-collision-record" });
     expect(await readFile(record, "utf8")).toBe("not json");
     expect(store.writeTextFile).not.toHaveBeenCalled();
     const refusal = new Error("store unavailable");

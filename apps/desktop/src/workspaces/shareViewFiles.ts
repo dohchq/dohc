@@ -34,7 +34,6 @@ import {
 } from "./workspaceFiles";
 import {
   createShareViewLifecycle,
-  isCollisionRecordRefusal,
   readSharedViewProjectionDebt,
   type CaptureSharedViewLocalDivergenceOutcome,
   type CaptureSharedViewRefreshOutcome,
@@ -740,13 +739,6 @@ export function createShareViewFiles(
         paths: divergenceScopes,
         preservedPaths: target.unsavedPaths,
         workspaceLease: lease,
-      }).catch((error: unknown) => {
-        if (isCollisionRecordRefusal(error)) {
-          throw new Error(
-            "dohc could not read this share's record of your files with the same path as a shared file. Refresh, then try the change again.",
-          );
-        }
-        throw error;
       });
       await recordRecoveredPaths(target, captured);
       assertShareChangesJournalable(captured.unjournalablePaths);

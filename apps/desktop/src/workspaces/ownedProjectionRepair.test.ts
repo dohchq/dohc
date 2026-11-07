@@ -1,7 +1,6 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as sharedView from "./sharedView";
+import { describe, expect, it, vi } from "vitest";
 import { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
 import type {
   ShareViewFiles,
@@ -28,10 +27,6 @@ const validRepair: ShareViewReconcileOutcome = {
 };
 
 const damagedRecord = new Error("record unreadable");
-beforeEach(() => {
-  vi.spyOn(sharedView, "isCollisionRecordRefusal").mockImplementation(error => error === damagedRecord);
-});
-afterEach(() => vi.restoreAllMocks());
 
 function owner(input?: {
   statuses?: ShareViewProjectionStatus[];
@@ -138,7 +133,7 @@ describe("createOwnedProjectionRepairer", () => {
     {
       name: "a damaged collision record",
       repair: damagedRecord,
-      refusal: /could not read this share's record of your files with the same path as a shared file/i,
+      refusal: /record unreadable/,
     },
     {
       name: "an unjournalable path",
@@ -160,11 +155,9 @@ describe("createOwnedProjectionRepairer", () => {
     ).rejects.toThrow(refusal);
   });
 
-  it("gives a refresh instruction when repair finds an unreadable saved list", async () => {
+  it("passes a refusal from repair through unchanged", async () => {
     const harness = owner({ repair: damagedRecord });
-    await expect(ensureCurrent(harness.files, "dohc-damaged-repair")).rejects.toThrow(
-      "dohc could not read this share's record of your files with the same path as a shared file. Refresh the share, then try again.",
-    );
+    await expect(ensureCurrent(harness.files, "dohc-damaged-repair")).rejects.toBe(damagedRecord);
     expect(harness.projectionStatus).toHaveBeenCalledOnce();
     const refusal = new Error("store unavailable");
     harness.reconcile.mockRejectedValue(refusal);
@@ -227,7 +220,7 @@ describe("createOwnedProjectionRepairer", () => {
     {
       name: "refuses a write queued behind a repair that found a damaged record",
       repair: damagedRecord,
-      refusal: /could not read this share's record of your files with the same path as a shared file/i,
+      refusal: /record unreadable/,
     },
     {
       name: "refuses a write queued behind a repair that found an unjournalable path",
