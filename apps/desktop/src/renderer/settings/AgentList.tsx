@@ -517,16 +517,14 @@ export function AgentList(props: {
     setChecking(null);
   }, [onClearError, onError, requests, workspaceId]);
 
-  // A new agent takes the first free id and name. One dohc starts is on and
-  // is checked at once; one you run opens on its name.
-  const add = async (fields: Pick<AgentSettings, "name" | "launch" | "enabled">, idBase: string) => {
+  // A new agent takes the first free id and name, is on, and is checked at once.
+  const add = async (fields: Required<Pick<AgentSettings, "name" | "launch" | "enabled">>, idBase: string) => {
     const id = newAgentId([...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)], idBase);
     const agent: AgentSettings = { ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue), ...fields };
-    if (!agent.launch) setRenaming(id);
     setAdding(true);
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
     setAdding(false);
-    if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
+    if (saved && !paused && checkNote === null) void check({ id, ...agent });
   };
 
   const neighbours = (id: string) => {
@@ -684,7 +682,7 @@ export function AgentList(props: {
             onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
           />
         ))}
-        <div data-testid="agent-add" className="grid grid-cols-3 gap-2 py-4 max-[640px]:grid-cols-1">
+        <div data-testid="agent-add" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
           {(["claude", "codex"] as const).map((tool) => {
             const name = AGENT_TOOLS.find((entry) => entry.id === tool)!.name;
             const found = toolTileState(tool, tools);
@@ -711,12 +709,6 @@ export function AgentList(props: {
               />
             );
           })}
-          <AddTile
-            title="Add one you run"
-            disabled={adding}
-            state={<span className={`${TILE_LINE} text-muted`}>Through MCP</span>}
-            onAdd={() => void add({ name: newAgentName(settings.agents, "Agent"), enabled: false }, "agent")}
-          />
         </div>
       </div>
       <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">

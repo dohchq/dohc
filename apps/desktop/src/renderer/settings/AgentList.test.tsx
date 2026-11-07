@@ -252,7 +252,7 @@ it("says what each tool needs before it can be added", async () => {
   expect(tile("Add Claude Code").disabled).toBe(true);
   expect(within(tile("Add Codex")).getByText("Not found")).toBeTruthy();
   expect(tile("Add Codex").disabled).toBe(true);
-  expect(within(tile("Add one you run")).getByText("Through MCP")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^Add one you run/ })).toBeNull();
   expect(screen.getByText("Runs on this computer. Turn an agent on for one computer per workspace.")).toBeTruthy();
 });
 
@@ -285,16 +285,6 @@ it("gives the first agent you add the default id", async () => {
   await within(tile("Add Codex")).findByText("Ready");
   await userEvent.click(tile("Add Codex"));
   expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default"]);
-});
-
-it("adds an agent you run, off, and opens it on its name", async () => {
-  const { onSave, rerender } = renderList();
-  await userEvent.click(tile("Add one you run"));
-  const saved = onSave.mock.calls[0]![0];
-  expect(saved.agents.agent).toEqual({ name: "Agent", hue: expect.any(String), changesFiles: true, enabled: false, timeoutMinutes: 30 });
-  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
-  rerender({ settings: saved });
-  expect(screen.getByRole("textbox", { name: "Name of Agent" })).toBeTruthy();
 });
 
 it("says on each tile that dohc couldn't look for tools, and looks again from the toast", async () => {
