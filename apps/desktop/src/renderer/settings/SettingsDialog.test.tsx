@@ -1056,7 +1056,7 @@ describe("SettingsDialog", () => {
       source: "default",
     });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
-    expect((await screen.findByRole("switch", { name: "Turn on Nova" })).getAttribute("aria-checked")).toBe("true");
+    expect((await screen.findByRole("switch", { name: "Nova" })).getAttribute("aria-checked")).toBe("true");
   });
 
   it("keeps an agent entry dohc could not use in its row while a save runs", async () => {
@@ -1071,7 +1071,7 @@ describe("SettingsDialog", () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     const problem = await screen.findByTestId("agent-problem");
     expect(problem.textContent).toBe("hue must be one of: olive.");
-    await user.click(screen.getByRole("switch", { name: "Turn on Nova" }));
+    await user.click(screen.getByRole("switch", { name: "Nova" }));
     expect(screen.getByTestId("agent-problem")).toBe(problem);
     await act(async () => saved.resolve({ settings: settingsWithAgent({ name: "Nova", enabled: false }), source: "stored" }));
   });
@@ -1339,7 +1339,7 @@ describe("SettingsDialog", () => {
     expect(onError).toHaveBeenCalledWith("Nova didn't reply to the check.", undefined, expect.any(Function), [
       ["Cause", "Runner did not report within 120 seconds."],
     ], "agent-check:ws-1:default");
-    expect(screen.getByRole("switch", { name: "Turn on Nova" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("switch", { name: "Nova" }).getAttribute("aria-checked")).toBe("false");
     expect(bridge.setUserSettings).not.toHaveBeenCalled();
   });
 
