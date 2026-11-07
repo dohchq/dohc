@@ -179,12 +179,16 @@ export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking 
 }
 
 // Under the message an agent didn't answer: why, in its notice's words, and
-// Try again while its request can run once more.
+// Try again while its request can run once more. A next step takes its own
+// line, behind a hidden copy of the icon so it starts under the words.
 export function FailedRunLine(props: {
   testIdPrefix: string;
   failed: ChatDispatchFailedRun;
   busy: boolean;
   onRetry?: () => void;
+  onOpenAgentSettings?: () => void;
+  // The agent whose own chat this is, where any message asks it.
+  chatAgentId?: string;
   className?: string;
   children?: ReactNode;
 }) {
@@ -210,8 +214,52 @@ export function FailedRunLine(props: {
         </SecondaryButton>
       ) : null}
       {props.children}
+      {props.failed.nextStep ? (
+        <span data-testid={`${props.testIdPrefix}-run-next-step`} className="flex basis-full gap-x-2">
+          <TriangleAlert size={14} aria-hidden className="invisible shrink-0" />
+          <span role="status" className="min-w-0 wrap-anywhere">
+            <FailedRunNextStep
+              step={props.failed.nextStep}
+              testIdPrefix={props.testIdPrefix}
+              onOpenAgentSettings={props.onOpenAgentSettings}
+              chatAgentId={props.chatAgentId}
+            />
+          </span>
+        </span>
+      ) : null}
     </div>
   );
+}
+
+// What to do instead of Try again: message the agent, in its own chat or by
+// its @handle elsewhere, or, when a message won't wake it, a step in
+// Settings, which opens the Agents page.
+function FailedRunNextStep(props: {
+  step: NonNullable<ChatDispatchFailedRun["nextStep"]>;
+  testIdPrefix: string;
+  onOpenAgentSettings?: () => void;
+  chatAgentId?: string;
+}) {
+  const { step } = props;
+  if (step.kind === "message") {
+    return <>{step.agentId === props.chatAgentId ? `Message ${step.name} to ask again.`
+      : step.handle ? `Mention @${step.handle} to ask again.`
+      : `Message ${step.name} in its own chat to ask again.`}</>;
+  }
+  const action = step.kind === "add-agent" ? "Add an agent"
+    : step.kind === "turn-on" ? `Turn ${step.name} on`
+    : `Set up ${step.name}`;
+  const settings = props.onOpenAgentSettings ? (
+    <button
+      type="button"
+      data-testid={`${props.testIdPrefix}-run-open-settings`}
+      onClick={props.onOpenAgentSettings}
+      className="rounded-sm text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
+    >
+      Settings
+    </button>
+  ) : "Settings";
+  return <>{action} in {settings} to ask again.</>;
 }
 
 // Where a failed run's line goes: under its last post, by when it was

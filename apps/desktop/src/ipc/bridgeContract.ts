@@ -5906,6 +5906,28 @@ export const ChatDispatchFailedRun = z.object({
   triggerMessageId: OPAQUE_ID,
   // "Nova didn't reply. Its run ended with an error."
   words: z.string().min(1).max(1_000),
+  // For a run that ended without its reply, what the person can do instead,
+  // on its own line. Its notice leaves it out.
+  nextStep: z.discriminatedUnion("kind", [
+    // An agent that is set up and on, asked again in a message. The chat
+    // words it: "Message Nova to ask again." in the agent's own chat, where
+    // any message asks it; elsewhere "Mention @Nova to ask again.", with the
+    // handle the composer inserts, or "Message 🦊 in its own chat to ask
+    // again." for a name with no handle.
+    z.object({
+      kind: z.literal("message"),
+      agentId: AgentId,
+      name: z.string().min(1).max(1_000),
+      handle: z.string().min(1).max(200).optional(),
+    }).strict(),
+    // For an agent the @ menu can't offer, a step in Settings: "Add an agent
+    // in Settings to ask again." when it's gone, "Turn Nova on in Settings
+    // to ask again." when it's off, and "Set up Nova in Settings to ask
+    // again." when it isn't set up.
+    z.object({ kind: z.literal("add-agent") }).strict(),
+    z.object({ kind: z.literal("turn-on"), name: z.string().min(1).max(1_000) }).strict(),
+    z.object({ kind: z.literal("set-up"), name: z.string().min(1).max(1_000) }).strict(),
+  ]).optional(),
   // Whether Try again can run its request once more.
   retryable: z.boolean(),
 }).strict();

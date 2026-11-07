@@ -427,10 +427,13 @@ test("a runner that exits silently says why under the message and posts a notice
     // The failure's toast sits above the message box, so Send stays in reach.
     const toasts = page.getByTestId("notice-toasts");
     await expect(toasts).toContainText("Nova didn't reply");
-    // The same words sit under the message that asked. Nothing can run it
-    // again today, so the line offers no Try again.
+    // The same words sit under the message that asked. Running it again
+    // would repeat what it did, so the line offers no Try again and says to
+    // ask the agent again instead. In its own chat a message asks it.
+    const words = "Nova didn't reply. Its run ended with an error.";
+    const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
-    await expect(line).toHaveText("Nova didn't reply. Its run ended with an error.");
+    await expect(line.getByRole("status")).toHaveText([words, nextStep]);
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
     await waitForVisibleAnimations(page);
     if (process.env.UI_AUDIT_SHOT_DIR) {
@@ -454,6 +457,7 @@ test("a runner that exits silently says why under the message and posts a notice
     const center = page.getByTestId("notice-center");
     await expect(center.getByText("Nova didn't reply", { exact: true })).toBeVisible();
     await expect(center.getByText("Its run ended with an error.", { exact: true })).toBeVisible();
+    await expect(center).not.toContainText(nextStep);
     const messages = page.getByTestId("chats-lane-message");
     await expect(messages).toHaveCount(1);
     await expect(messages.getByTestId("chats-lane-message-author")).toHaveAttribute("data-author-kind", "human");
@@ -464,7 +468,8 @@ test("a runner that exits silently says why under the message and posts a notice
     await messages.hover();
     await page.getByTestId("chats-lane-reply-in-thread").click();
     const panel = page.getByTestId("chats-lane-thread-panel");
-    await expect(panel.getByTestId("chats-lane-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
+    const panelLine = panel.getByTestId("chats-lane-run-failed");
+    await expect(panelLine.getByRole("status")).toHaveText([words, nextStep]);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
@@ -473,11 +478,12 @@ test("a runner that exits silently says why under the message and posts a notice
       }
     }
 
-    // A post in a group says the same under its opening message.
+    // A post in a group says it under its opening message, by the @handle.
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
-    await expect(page.getByTestId("chats-run-failed")).toHaveText("Nova didn't reply. Its run ended with an error.");
+    const postLine = page.getByTestId("chats-run-failed");
+    await expect(postLine.getByRole("status")).toHaveText([words, "Mention @Nova to ask again."]);
     await expect(page.getByTestId("chats-run-try-again")).toHaveCount(0);
     if (process.env.UI_AUDIT_SHOT_DIR) {
       for (const theme of ["light", "dark"]) {

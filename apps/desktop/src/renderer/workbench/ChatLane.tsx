@@ -67,6 +67,8 @@ export function ChatLane(props: {
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
   onNotice?: (message: string) => void;
   onThreadRead?: () => void;
+  // Opens Settings at Agents, from a failed run whose agent is gone.
+  onOpenAgentSettings?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
   // What a picked agent's offer says. Only an agent DM's lane reads its
@@ -129,6 +131,7 @@ export function ChatLane(props: {
   const flashTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
   const agentDm = props.channel.kind === "agent";
+  const chatAgentId = agentDm ? props.channel.agentId : undefined;
   const agentOffer = useAgentOffer({
     workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
   });
@@ -574,9 +577,11 @@ export function ChatLane(props: {
         busy={retrying}
         className="mt-1"
         {...(failedRun.retryable && !props.locked ? { onRetry: () => void retryRun() } : {})}
+        {...(props.onOpenAgentSettings ? { onOpenAgentSettings: props.onOpenAgentSettings } : {})}
+        {...(chatAgentId ? { chatAgentId } : {})}
       /> : null}
     </>;
-  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
+  }, [decisionsByMessage, messages, workspaceId, props.locked, props.onOpenPath, props.onOpenAgentSettings, chatAgentId, onError, props.onNotice, replyPlace, replyToChange, sending, chooseOption, failedRun, failedEnd, retrying, retryRun]);
   const place = agentDm ? props.agentName ?? "Your agent" : `# ${props.channel.name}`;
 
   return (

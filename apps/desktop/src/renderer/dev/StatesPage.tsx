@@ -9,6 +9,7 @@ import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatDispatchFailedRun,
   ChatFileMentionRecord,
   ChatMessageRecord,
   ChatRunRecord,
@@ -867,6 +868,11 @@ const CHAT_THREAD_MESSAGES = [
   chatMessage("comment-2", "Can we cut the last paragraph?", 2, "opening"),
 ];
 const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
+// The same thread in Claude Code's own chat.
+const CHAT_AGENT_THREAD_NAV = {
+  ...CHAT_THREAD_NAV,
+  channel: { ...CHAT_CHANNEL, id: "claude-code", name: "Claude Code", slug: "claude-code", kind: "agent", agentId: "claude-code" },
+} as const;
 const NO_BOOKMARKS = new Set<string>();
 
 // A thread at the drawing's column, its second comment hovered. Its
@@ -914,21 +920,25 @@ const STOPPED_RUN: ChatRunRecord = {
   runId: "4f2a9c1e0b", threadId: "post-plain", triggerMessageId: "opening", command: "claude",
   startedAtMs: CHAT_AT, endedAtMs: CHAT_AT + 90_000, exitCode: 143,
 };
-function ChatFailedRunSpecimen(props: { words: string; posted: boolean; retryable: boolean; busy?: boolean }) {
+function ChatFailedRunSpecimen(props: { words: string; nextStep?: ChatDispatchFailedRun["nextStep"]; posted: boolean; retryable: boolean; busy?: boolean; ownChat?: boolean }) {
   return (
     <div className="w-[560px]">
       <ThreadMessages
         workspaceId="states"
-        nav={CHAT_THREAD_NAV}
-        channelLabel={`#${CHAT_CHANNEL.name}`}
+        nav={props.ownChat ? CHAT_AGENT_THREAD_NAV : CHAT_THREAD_NAV}
+        channelLabel={props.ownChat ? "Claude Code" : `#${CHAT_CHANNEL.name}`}
         messages={props.posted ? [STOPPED_REQUEST, STOPPED_REPLY] : [STOPPED_REQUEST]}
         messagesLoading={false}
         threadLocked={false}
         flashMessageId={null}
         runRecords={props.posted ? { [STOPPED_REPLY.id]: STOPPED_RUN } : {}}
-        failedRun={{ runId: STOPPED_RUN.runId, triggerMessageId: "opening", words: props.words, retryable: props.retryable }}
+        failedRun={{
+          runId: STOPPED_RUN.runId, triggerMessageId: "opening", words: props.words,
+          ...(props.nextStep ? { nextStep: props.nextStep } : {}), retryable: props.retryable,
+        }}
         retryBusy={props.busy ?? false}
         onRetryFailedRun={noop}
+        onOpenAgentSettings={noop}
         reactionsByMessage={new Map()}
         decisionsByMessage={new Map()}
         attachmentsByMessage={new Map()}
@@ -2636,7 +2646,45 @@ function Pane(props: { theme: "light" | "dark" }) {
           <ChatThreadSpecimen />
         </Specimen>
         <Specimen label="failed before the agent posted">
-          <ChatFailedRunSpecimen words="Claude Code didn't reply. Its run ended with an error." posted={false} retryable={false} />
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
+            posted={false}
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed after the agent posted">
+          <ChatFailedRunSpecimen
+            words="Claude Code stopped before finishing. Its run ended with an error."
+            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
+            posted
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed, in the agent's own chat">
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
+            posted={false}
+            retryable={false}
+            ownChat
+          />
+        </Specimen>
+        <Specimen label="failed, its agent turned off since">
+          <ChatFailedRunSpecimen
+            words="Claude Code didn't reply. Its run ended with an error."
+            nextStep={{ kind: "turn-on", name: "Claude Code" }}
+            posted={false}
+            retryable={false}
+          />
+        </Specimen>
+        <Specimen label="failed, its agent gone from Settings">
+          <ChatFailedRunSpecimen
+            words="Your agent didn't reply. Its run ended with an error."
+            nextStep={{ kind: "add-agent" }}
+            posted={false}
+            retryable={false}
+          />
         </Specimen>
         <Specimen label="stopped when dohc quit, before the agent posted">
           <ChatFailedRunSpecimen words="Claude Code didn't reply. dohc quit during its run." posted={false} retryable />
