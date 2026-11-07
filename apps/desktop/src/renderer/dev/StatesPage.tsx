@@ -2834,12 +2834,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <ChatThreadSpecimen />
         </Specimen>
         <Specimen label="failed before the agent posted">
-          <ChatFailedRunSpecimen
-            words="Claude Code didn't reply. Its run ended with an error."
-            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
-            posted={false}
-            retryable={false}
-          />
+          <ChatFailedRunSpecimen words="Claude Code didn't reply. Its run ended with an error." posted={false} retryable />
         </Specimen>
         <Specimen label="failed after the agent posted">
           <ChatFailedRunSpecimen
@@ -2849,28 +2844,28 @@ function Pane(props: { theme: "light" | "dark" }) {
             retryable={false}
           />
         </Specimen>
-        <Specimen label="failed, in the agent's own chat">
+        <Specimen label="failed after the agent posted, in the agent's own chat">
           <ChatFailedRunSpecimen
-            words="Claude Code didn't reply. Its run ended with an error."
+            words="Claude Code stopped before finishing. Its run ended with an error."
             nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
-            posted={false}
+            posted
             retryable={false}
             ownChat
           />
         </Specimen>
-        <Specimen label="failed, its agent turned off since">
+        <Specimen label="failed after the agent posted, its agent turned off since">
           <ChatFailedRunSpecimen
-            words="Claude Code didn't reply. Its run ended with an error."
+            words="Claude Code stopped before finishing. Its run ended with an error."
             nextStep={{ kind: "turn-on", name: "Claude Code" }}
-            posted={false}
+            posted
             retryable={false}
           />
         </Specimen>
-        <Specimen label="failed, its agent gone from Settings">
+        <Specimen label="failed after the agent posted, its agent gone from Settings">
           <ChatFailedRunSpecimen
-            words="Your agent didn't reply. Its run ended with an error."
+            words="Your agent stopped before finishing. Its run ended with an error."
             nextStep={{ kind: "add-agent" }}
-            posted={false}
+            posted
             retryable={false}
           />
         </Specimen>
@@ -2884,7 +2879,12 @@ function Pane(props: { theme: "light" | "dark" }) {
           <ChatFailedRunSpecimen words="Claude Code didn't reply. dohc quit during its run." posted={false} retryable busy />
         </Specimen>
         <Specimen label="stopped again after its second attempt">
-          <ChatFailedRunSpecimen words="Claude Code stopped before finishing. dohc quit during its run." posted retryable={false} />
+          <ChatFailedRunSpecimen
+            words="Claude Code stopped before finishing. dohc quit during its run."
+            nextStep={{ kind: "message", agentId: "claude-code", name: "Claude Code", handle: "ClaudeCode" }}
+            posted
+            retryable={false}
+          />
         </Specimen>
       </Section>
 

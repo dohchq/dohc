@@ -1,4 +1,4 @@
-import type { ChatDispatchFailedRun, ChatDispatchNotice, RunnerSelfTestResult } from "../ipc/bridgeContract";
+import { nextStepWords, type ChatDispatchFailedRun, type ChatDispatchNextStep, type ChatDispatchNotice, type RunnerSelfTestResult } from "../ipc/bridgeContract";
 import { AGENTS_RESTRICTED_MESSAGE, CLAUDE_MIN_VERSION, launchCommand, launchProfile, supportsAgentProfile, type AgentLaunchProfile } from "./agentToolCatalog";
 import { NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import { cutText } from "@dohc/automation-executor/automation-chat";
@@ -136,8 +136,6 @@ function runFailureReason(run: AgentRunRecord, outcome: FailedOutcome, nodeAvail
     }
   }
 }
-
-const ASKS_AGAIN: ReadonlySet<FailedOutcome> = new Set(["failed", "no-reply", "timed-out"]);
 
 function needsNodeJs(outcome: FailedOutcome, nodeAvailable?: ReplyRuntimeAvailability): boolean {
   return (outcome === "failed" || outcome === "no-reply") && nodeAvailable?.source === "path" && !nodeAvailable.available;
@@ -877,15 +875,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!options.runNotices) return;
     const { workspaceId } = workspace;
     const agent = (await options.readDispatchAgents()).find(({ id }) => id === run.agentId);
-    const words = isFailedOutcome(outcome)
+    const words: { lead: string; reason: string; nextStep?: ChatDispatchNextStep } = isFailedOutcome(outcome)
       ? await failureWords(workspace, run, outcome, agent)
       : { lead: endedRunTitle(outcome, agent?.name), reason: "" };
+    // The toast and Notices row end with the step under the message, worded
+    // for the chat it shows in. Only a very long agent name reaches the cut.
+    let body = words.reason;
+    if (words.nextStep) {
+      try {
+        const { channel } = await options.chatStoreFor(workspace).getThread({ workspaceId, threadId: run.threadId });
+        const step = nextStepWords(words.nextStep, channel?.kind === "agent" ? channel.agentId : undefined);
+        body = cutText(`${words.reason} ${step}`, NOTICE_BODY_MAX_CHARS);
+      } catch (error) {
+        reportError(error);
+      }
+    }
     await options.runNotices.post({
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
       title: runNoticeTitle(words.lead, await threadTitle(workspace, run.threadId)),
-      body: words.reason,
+      body,
       target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
     });
   }
@@ -900,53 +910,40 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     outcome: FailedOutcome,
     agent: Agent | undefined,
     attemptCount?: number,
-  ): Promise<{ lead: string; reason: string; nextStep?: ChatDispatchFailedRun["nextStep"] }> {
+  ): Promise<{ lead: string; reason: string; nextStep?: ChatDispatchNextStep }> {
     const posted = outcome !== "no-reply" && outcome !== "not-started" && await runPosted(workspace, run.runId);
     const nodeAvailable = !posted && (outcome === "failed" || outcome === "no-reply")
       ? await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath))
       : undefined;
-    // Running these again would repeat what they did, so the person asks
-    // the agent again instead, in a message the chat words, with the @handle
-    // the composer inserts. A message won't wake an agent that's gone, off
-    // or not set up, so its step is in Settings, in the order its DM checks
-    // them, by the full name its DM and Settings show. A run that couldn't
-    // start or needs Node.js has its own next step.
-    const handle = agent ? handleForName(agent.name) : "";
-    const nextStep: ChatDispatchFailedRun["nextStep"] = !ASKS_AGAIN.has(outcome) || needsNodeJs(outcome, nodeAvailable) ? undefined
-      : !agent ? { kind: "add-agent" }
-      : !agent.launch ? { kind: "set-up", name: agent.name }
-      : !agent.enabled ? { kind: "turn-on", name: agent.name }
-      : { kind: "message", agentId: agent.id, name: agent.name, ...(handle ? { handle } : {}) };
     const words = {
       lead: `${noticeAgentName(agent?.name)} ${posted ? "stopped before finishing" : "didn't reply"}`,
       reason: runFailureReason(run, outcome, nodeAvailable),
-      ...(nextStep ? { nextStep } : {}),
     };
-    if (agent === undefined) return words;
-    let attempts = attemptCount;
-    try {
-      attempts ??= (await options.listFailedRunRecoveries?.(workspace, run.threadId))
-        ?.find((each) => each.run.runId === run.runId)?.attemptCount;
-    } catch (error) {
-      reportError(error);
-      return words;
-    }
-    if (!canRepeatFailedRun(outcome, posted) || (attempts !== undefined && attempts >= 2)) {
+    // A run that couldn't start or needs Node.js has its own next step.
+    if (outcome === "not-started" || needsNodeJs(outcome, nodeAvailable)) return words;
+    // Try again stays until the request has had two attempts, unless
+    // running it again would repeat what it posted.
+    if (canRepeatFailedRun(outcome, posted)) {
+      let attempts = attemptCount;
       try {
-        const { channel } = await options.chatStoreFor(workspace).getThread({
-          workspaceId: workspace.workspaceId, threadId: run.threadId,
-        });
-        const name = noticeAgentName(agent.name);
-        const next = channel?.kind === "agent" && channel.agentId === run.agentId
-          ? `Ask ${name} again in a new message.`
-          : `Mention ${name} in a new message to ask again.`;
-        const reason = cutText(words.reason, NOTICE_BODY_MAX_CHARS - next.length - 2);
-        words.reason = `${reason}${/[.!?…]$/u.test(reason) ? " " : ". "}${next}`;
+        attempts ??= (await options.listFailedRunRecoveries?.(workspace, run.threadId))
+          ?.find((each) => each.run.runId === run.runId)?.attemptCount;
       } catch (error) {
         reportError(error);
+        return words;
       }
+      if (attempts === undefined || attempts < 2) return words;
     }
-    return words;
+    // Otherwise the person asks the agent again, in a message the chat
+    // words, with the @handle the composer inserts. A message won't wake an
+    // agent that's gone, off or not set up, so its step is in Settings, in
+    // the order its DM checks them, by the full name its DM and Settings show.
+    const handle = agent ? handleForName(agent.name) : "";
+    const nextStep: ChatDispatchNextStep = !agent ? { kind: "add-agent" }
+      : !agent.launch ? { kind: "set-up", name: agent.name }
+      : !agent.enabled ? { kind: "turn-on", name: agent.name }
+      : { kind: "message", agentId: agent.id, name: agent.name, ...(handle ? { handle } : {}) };
+    return { ...words, nextStep };
   }
 
   // The thread's title, read from its own channel's threads. An empty title
