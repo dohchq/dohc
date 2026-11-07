@@ -199,6 +199,7 @@
     "desktop:open-user-settings-file",
     "desktop:open-workspace",
     "desktop:open-workspace-manager",
+    "desktop:open-workspace-policy-file",
     "desktop:open-workspace-settings-file",
     "desktop:open-workspace-window",
     "desktop:order-agents",

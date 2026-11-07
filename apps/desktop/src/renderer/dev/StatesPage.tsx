@@ -682,10 +682,12 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
 // One History timeline across two days: a file change, a version starting,
 // a labelled record change by an automation, a rules change an agent
 // approved that main could not date, the workspace starting, and an
-// unlabelled record change with no date or place. Only a rules change can
-// carry its approving agent. Local times, as above.
+// unlabelled record change with no date or place. Both undated changes
+// list last, under Date unknown. Only a rules change can carry its
+// approving agent. Local times, as above.
 const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
 const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
+const TIMELINE_SIGNUPS = "00000000-0000-4000-8000-0000000000b3";
 const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
   id: "moment-timeline-plan", versionId: "main", path: "trip/plan.md", recordedAtMs: new Date(2026, 6, 8, 10, 12).getTime(),
   operation: "write", origin: "local-file", momentOrder: 9, summary: "Added the ferry times",
@@ -694,10 +696,10 @@ function timelineVersion(id: string, kind: "main" | "named", name: string, creat
   return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
 }
 function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
-  by?: { automation?: string; rulesApprovedBy?: string }): TimelineEntry {
+  by?: { automation?: string; rulesApprovedBy?: string; operation?: string }): TimelineEntry {
   const rules = by?.rulesApprovedBy;
   return { kind: "collection", datasetId, name, sortAtMs, change: {
-    revision, operation: rules ? "Fields and rules" : "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    revision, operation: rules ? "Fields and rules" : by?.operation ?? "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
     changesetBytes: rules ? 0 : 120, attachmentCount: 0,
     ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
     ...(rules ? {
@@ -707,13 +709,18 @@ function timelineChange(datasetId: string, name: string, revision: number, recor
   } };
 }
 const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
+const TIMELINE_RULES = timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" });
+const TIMELINE_UNDATED = timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null);
+// A long Collection name beside a long title: the title has room to give.
+const TIMELINE_SIGNUPS_CHANGE = timelineChange(TIMELINE_SIGNUPS, "Registrations 2026", 7, new Date(2026, 6, 8, 9, 12).getTime(),
+  new Date(2026, 6, 8, 9, 12).getTime(), { operation: "confirm" });
 const TIMELINE_MIXED: TimelineEntry[] = [
   TIMELINE_FILE,
   timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
   TIMELINE_DATED,
-  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" }),
+  TIMELINE_RULES,
   timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
-  timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
+  TIMELINE_UNDATED,
 ];
 // One afternoon in History, one line per change: Nova's three edits to one
 // file fold into one row, a person's edit shows their face, and the machine's
@@ -741,6 +748,7 @@ const TIMELINE_STORY: TimelineEntry[] = [
 const TIMELINE_COLLECTIONS = new Map([
   [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), openHistory: noop }],
   [TIMELINE_GUESTS, { name: "Guests" }],
+  [TIMELINE_SIGNUPS, { name: "Registrations 2026", operationLabels: new Map([["confirm", "Set status to Confirmed"]]), openHistory: noop }],
 ]);
 
 // The About tab on the drawing's document: who wrote what, who has it.
@@ -1211,16 +1219,24 @@ function AccessSpecimen(props: { view: AccessView; reason?: AccessReason }) {
   );
 }
 
-// The Sharing view's lists, as the drawing fills them.
+// The Sharing view's lists, as the drawing fills them: a long name cut in
+// its middle, one person, several at two levels, a link, two rows with one
+// name, and an ended share.
 const SHARING_CHECKED_AT = new Date(2026, 6, 8, 9, 40).getTime();
 const SHARING_GRANTED: AccessAnswer = {
   ...ABOUT_ACCESS,
   ref: null,
   rows: [
     aboutGrant({ shareId: "share-plan", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
-      selector: { paths: ["notes/product-plan.md"], versionId: null } }),
+      selector: { paths: ["notes/product-plan-2027-roadmap.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["trip/notes.md"], versionId: null } }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      selector: { paths: ["trip/notes.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-trip", grantId: "grant-trip-tea", recipientUserId: "tea", recipientEmail: "tea@example.com",
+      selector: { paths: ["trip/notes.md"], versionId: null }, access: "view" }),
     aboutGrant({ shareId: "share-research", grantId: "grant-link", via: "link", recipientUserId: null, recipientEmail: null,
-      selector: { paths: ["research/competitors.md"], versionId: null }, access: "view" }),
+      selector: { paths: ["research/notes.md"], versionId: null }, access: "view" }),
     aboutGrant({ shareId: "share-old", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
       subjectName: "budget.csv", selector: null, access: null, status: "revoked" }),
   ],
@@ -1260,6 +1276,22 @@ const SHARING_REMOVED: AccessAnswer = {
     aboutGrant({ shareId: "in-budget", grantId: "in-3", via: "received", sharerName: null, granterEmail: null, recipientUserId: "me",
       recipientEmail: null, selector: null, access: null, status: "removed", removalMessage: "Sam removed your access." }),
   ],
+};
+// A link, and a person who can do more than it lets anyone do.
+const SHARING_LINK_ABOVE: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [
+    aboutGrant({ shareId: "share-brief", grantId: "grant-brief-link", via: "link", recipientUserId: null, recipientEmail: null,
+      selector: { paths: ["plans/launch-brief.md"], versionId: null }, access: "view" }),
+    aboutGrant({ shareId: "share-brief", grantId: "grant-brief-sam", recipientUserId: "sam", recipientEmail: "sam@hollis.studio",
+      selector: { paths: ["plans/launch-brief.md"], versionId: null } }),
+  ],
+};
+// A share dohc cannot read: it stays listed, and can still be ended.
+const SHARING_DAMAGED: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [aboutGrant({ shareId: "share-bad", grantId: "grant-bad", recipientUserId: "kim", recipientEmail: "kim@example.com",
+    subjectName: "budget.csv", selector: null, access: null, status: "damaged" })],
 };
 const SHARING_WAITING = new Map([["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }]]);
 const SHARING_ACTIONS: SharingActions = {
@@ -2140,12 +2172,12 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
-            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onRetry={noop} />
+            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onOpenFile={noop} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="diff: file no longer tracked">
           <div className="flex h-64 w-96 flex-col rounded-lg border border-line bg-bg">
-            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onRetry={noop} />
+            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onOpenFile={noop} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="restore refused">
@@ -2175,6 +2207,12 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
               collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Collections at the sidebar's default width: who made a change cuts before the Collection's name">
+          <div data-testid={`states-history-collections-narrow-${theme}`} className="flex h-[260px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_DATED, TIMELINE_RULES, TIMELINE_SIGNUPS_CHANGE, TIMELINE_UNDATED]} hasMore={false} loadingMore={false} onLoadMore={noop}
+              onOpenMoment={noop} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="partial: a Collection did not load">
@@ -2540,6 +2578,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
         </Specimen>
+        <Specimen label="a link, and a person who can do more">
+          <SharingSpecimen granted={ready(SHARING_LINK_ABOVE)} received={ready({ ...SHARING_RECEIVED, rows: [] })} mounts={[]} />
+        </Specimen>
         <Specimen label="may be out of date">
           <SharingSpecimen granted={ready({ ...SHARING_GRANTED, freshness: "stale" })}
             received={ready({ ...SHARING_RECEIVED, freshness: "stale" })} />
@@ -2563,7 +2604,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             confirmShareId="share-plan" />
         </Specimen>
         <Specimen label="keyboard focus on a row's actions">
-          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
             <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-granted-menu"]'>
               <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
@@ -2571,12 +2612,15 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="keyboard focus on a row's code copy">
-          <div data-force-state="focus-within" data-force-target='[data-testid="sharing-granted-actions"]'>
+          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
             <div data-force-state="focus focus-visible" data-force-target='[data-testid="sharing-copy-code"]'>
               <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
                 received={ready({ ...SHARING_RECEIVED, rows: [] })} />
             </div>
           </div>
+        </Specimen>
+        <Specimen label="a share dohc cannot read">
+          <SharingSpecimen granted={ready(SHARING_DAMAGED)} received={ready({ ...SHARING_RECEIVED, rows: [] })} mounts={[]} />
         </Specimen>
         <Specimen label="removed shares still on this computer, and skipped changes">
           <SharingSpecimen granted={ready({ ...SHARING_GRANTED, rows: [] })} received={ready(SHARING_REMOVED)}
