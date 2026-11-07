@@ -105,8 +105,10 @@ it("returns messages with an opaque cursor that resumes from where the relay sto
 });
 
 it("returns the messages that fit its result, with a cursor that resumes after the last one", async () => {
-  const body = "x".repeat(400 * 1024);
-  const f = fixture({wait: ({input}) => Response.json({ok: true, group: {channelWireId: "wire-team", name: "Team"}, mention: "@Helper",
+  // The answer fits share-web's 1 MiB read of it. The result repeats the Group with each message, so only two fit there.
+  const body = "x".repeat(300 * 1024);
+  const name = "n".repeat(50_000);
+  const f = fixture({wait: ({input}) => Response.json({ok: true, group: {channelWireId: "wire-team", name}, mention: "@Helper",
     messages: input.cursor === undefined ? [41, 42, 43].map(relaySeq => message(relaySeq, {body})) : [],
     cursor: input.cursor === undefined ? 43 : 60})});
   const client = await f.connect();
