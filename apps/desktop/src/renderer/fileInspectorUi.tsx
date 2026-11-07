@@ -461,7 +461,7 @@ export function OpenExternallyButton(props: { workspaceId: string; path: string;
 export const REPLACED_HISTORY_DRAFT_NOTICE =
   "This document changed while you were editing. Your earlier edits are set aside here.";
 // So does the notice for a save refused because the file is gone.
-export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your text to keep it.";
+export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your edits to keep them.";
 
 export function OrphanedDraftNotices(props: {
   workspaceId: string;
@@ -490,7 +490,7 @@ export function OrphanedDraftNotices(props: {
                 // Until storage keeps the draft, a copy is still the way to keep it.
                 : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
                   ? REPLACED_HISTORY_DRAFT_NOTICE
-                  : "This document reopened before your last edit saved. Copy your text to keep it.")}
+                  : "This document reopened before your last edit saved. Copy your edits to keep them.")}
           </span>
           <div className="flex items-center gap-2">
             {/* Same rule as the recovery list's Copy: a draft the projection
