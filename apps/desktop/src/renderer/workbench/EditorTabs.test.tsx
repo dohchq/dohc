@@ -473,12 +473,13 @@ describe("EditorTabs strip scrolling", () => {
 
   // The strip's buttons rest at the muted tone of the other tab-row controls.
   it("tones the strip's buttons muted at rest", () => {
-    render(
+    // An empty group's strip holds the group close.
+    const group = (groupId: string, groupNumber: number, groupTabs: typeof tabs) => (
       <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={tabs}
-        activeTab="a.md"
+        groupId={groupId}
+        groupNumber={groupNumber}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
         activeTabDirty={false}
         recoveryPaths={new Set<string>()}
         onActivate={noop}
@@ -488,13 +489,15 @@ describe("EditorTabs strip scrolling", () => {
         onMoveToGroup={noop}
         onCreateGroupRight={noop}
         onCloseGroup={noop}
-      />,
+      />
     );
+    render(<>{group("left", 1, tabs)}{group("right", 2, [])}</>);
     const buttons = [
       screen.getByTestId("tabs-overflow"),
-      screen.getByTestId("create-editor-group-right"),
+      ...screen.getAllByTestId("create-editor-group-right"),
       screen.getByRole("button", { name: "Close editor group" }),
     ];
+    expect(buttons).toHaveLength(4);
     for (const button of buttons) {
       const classes = button.className.split(" ");
       expect(classes).toContain("text-muted");
