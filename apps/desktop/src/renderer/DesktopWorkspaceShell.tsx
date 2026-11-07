@@ -649,6 +649,9 @@ export function DesktopWorkspaceShell(props: {
   // The account deletion review, owned above the shell.
   accountDeletion: AccountDeletion;
   openOnReady?: OpenOnSwitch;
+  // Forget left this window showing this workspace, so it can no longer
+  // edit it. OpenElsewhere: another window shows it now.
+  oldWindow?: { readonly openElsewhere: boolean } | null;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const {
@@ -769,7 +772,7 @@ export function DesktopWorkspaceShell(props: {
   // slow update check must not act for a workspace this window has left.
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
-  const storeUpdateRequiredRef = useRef(false);
+  const workspaceStoppedRef = useRef(false);
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const {
     callbacksForEditor,
@@ -3873,6 +3876,18 @@ export function DesktopWorkspaceShell(props: {
     [flushStableDrafts, hasDrafts, reportShellError],
   );
 
+  const closeThisWindow = useCallback(() => {
+    void bridge().closeThisWindow().catch((error) =>
+      reportShellError("dohc could not close this window.", error));
+  }, [reportShellError]);
+  const goToWorkspaceWindow = useCallback(() => {
+    const go = () => {
+      void bridge().goToWorkspaceWindow({}).catch((error) =>
+        reportShellError("dohc could not go to that window.", error, go));
+    };
+    go();
+  }, [reportShellError]);
+
   const closeActiveTab = useCallback(() => {
     const current = wbRef.current;
     const group = activeGroup(current);
@@ -3883,10 +3898,9 @@ export function DesktopWorkspaceShell(props: {
       mutateWb((state) => closeEditorGroup(state, group.id));
     } else if (group.tabs.length === 0 && bridge().platform === "darwin") {
       // With nothing left to close, macOS closes the window.
-      void bridge().closeThisWindow().catch((error) =>
-        reportShellError("Could not close this window.", error));
+      closeThisWindow();
     }
-  }, [closeTabsAfterFlush, mutateWb, reportShellError]);
+  }, [closeTabsAfterFlush, mutateWb, closeThisWindow]);
 
   // ⌃Tab and its alternates cycle through the focused group's tabs.
   const showAdjacentTab = useCallback(
@@ -4854,7 +4868,7 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       // A stopped workspace answers no workspace shortcut.
-      if (storeUpdateRequiredRef.current) return;
+      if (workspaceStoppedRef.current) return;
       const platform = bridge().platform;
       // Typing matches no chord, so a keystroke never pays for the page-wide
       // modal query, which grows with a long note's elements.
@@ -4907,6 +4921,10 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
       countInput();
+      // A stopped workspace answers only the menu commands that need no
+      // workspace, as a window without the workspace shell does. On macOS a
+      // shortcut the keydown listener leaves alone arrives here.
+      if (workspaceStoppedRef.current && command !== "check-updates" && command !== "install-update" && command !== "toggle-theme") return;
       // App-menu commands originate outside the modal; only keydown is guarded.
       if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
       else if (command === "command-palette") setPaletteOpen(true);
@@ -5701,10 +5719,12 @@ export function DesktopWorkspaceShell(props: {
     engineStoreRefusalRecovery(syncStatus.engineStoreRefused) === "update"
       ? syncStatus.engineStoreRefused
       : null;
-  const storeUpdateRequired = storeUpdateRefusal !== null;
-  // A stopped store or a failed open shows in place of the opening cover.
-  openingCoverShown.current = !workbenchRestored && !storeUpdateRequired && (workspaceIsReady || !workspaceOpenFailure);
-  storeUpdateRequiredRef.current = storeUpdateRequired;
+  const oldWindow = props.oldWindow ?? null;
+  // The workspace also stops in a window Forget left showing it.
+  const workspaceStopped = storeUpdateRefusal !== null || oldWindow !== null;
+  // A stopped workspace or a failed open shows in place of the opening cover.
+  openingCoverShown.current = !workbenchRestored && !workspaceStopped && (workspaceIsReady || !workspaceOpenFailure);
+  workspaceStoppedRef.current = workspaceStopped;
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
       ["Problem", storeUpdateRefusal && engineStoreRefusalSentence(storeUpdateRefusal)],
@@ -5723,7 +5743,7 @@ export function DesktopWorkspaceShell(props: {
   // Dialogs float above the stop state and could still write to the
   // stopped workspace. A stop closes them; a running workspace is unchanged.
   useEffect(() => {
-    if (!storeUpdateRequired) return;
+    if (!workspaceStopped) return;
     setNewFileOpen(false);
     setNewCollectionFolder(null);
     setRecoveryWorkspaceId(null);
@@ -5732,7 +5752,7 @@ export function DesktopWorkspaceShell(props: {
     setShareTarget(null);
     setOpenShare(null);
     setLiveDocumentsWorkspaceId(null);
-  }, [storeUpdateRequired]);
+  }, [workspaceStopped]);
   // The live-delivery retry is main's own command, not a repaint: nothing
   // here decides that delivery recovered. Main reports that by pushing a new
   // status, so an accepted command needs no follow-up read. A refusal becomes
@@ -6028,7 +6048,7 @@ export function DesktopWorkspaceShell(props: {
             versions={workspaceVersions}
             // Out of the workbench, so it waits for the workspace the way
             // the inert workbench does.
-            disabled={!workspaceIsReady || storeUpdateRequired}
+            disabled={!workspaceIsReady || workspaceStopped}
             onOpenCompare={openVersionCompareTab}
             onOpenAllVersions={openVersionsTab}
             {...(shareVersion ? { onShareVersion: shareVersion } : {})}
@@ -6233,7 +6253,7 @@ export function DesktopWorkspaceShell(props: {
           }
           onSelectView={(view) => mutateWb((state) => setView(state, view))}
           onOpenSettings={() => openSettings()}
-          viewsDisabled={!workbenchRestored || storeUpdateRequired}
+          viewsDisabled={!workbenchRestored || workspaceStopped}
           notices={
             <NoticeCenter
               workspaceId={workspaceId}
@@ -6281,7 +6301,7 @@ export function DesktopWorkspaceShell(props: {
         />
         <div
           data-testid="workspace-workbench"
-          inert={!workbenchRestored || storeUpdateRequired ? true : undefined}
+          inert={!workbenchRestored || workspaceStopped ? true : undefined}
           className="flex min-w-0 flex-1"
         >
 
@@ -6548,7 +6568,7 @@ export function DesktopWorkspaceShell(props: {
                 <VersionsPage
                   workspaceId={workspaceId}
                   versions={workspaceVersions}
-                  disabled={!workspaceIsReady || storeUpdateRequired}
+                  disabled={!workspaceIsReady || workspaceStopped}
                   historyKey={versionsHistoryKey}
                   versionKey={versionEpoch}
                   onOpenCompare={openVersionCompareTab}
@@ -6986,6 +7006,26 @@ export function DesktopWorkspaceShell(props: {
               </dl>
             </section>
           ) : null}
+          </div>
+        </div>
+      ) : oldWindow !== null ? (
+        <div
+          data-testid="workspace-old-window"
+          role="alert"
+          className="absolute left-12 right-0 bottom-0 top-10 z-10 grid grid-rows-[1fr_auto_1fr] justify-items-center overflow-y-auto bg-bg px-6 text-center"
+        >
+          <div className="row-start-2 flex flex-col items-center gap-5">
+            <h2 className="m-0 max-w-md select-text cursor-text text-xl font-semibold leading-tight tracking-tight text-ink">
+              {oldWindow.openElsewhere
+                ? "This workspace is open in another window."
+                : "This window can't edit this workspace anymore."}
+            </h2>
+            {/* Each button takes focus as its state appears. */}
+            {oldWindow.openElsewhere ? (
+              <PrimaryButton key="go" autoFocus onClick={goToWorkspaceWindow}>Go to that window</PrimaryButton>
+            ) : (
+              <PrimaryButton key="close" autoFocus onClick={closeThisWindow}>Close this window</PrimaryButton>
+            )}
           </div>
         </div>
       ) : !workspaceIsReady && workspaceOpenFailure ? (

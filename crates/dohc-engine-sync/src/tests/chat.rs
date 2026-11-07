@@ -2054,6 +2054,9 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
         push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![
                 group_message("peer", 3, "m-1", "thread-imported", "human", "/task One"),
                 group_message("peer", 4, "m-2", "thread-imported", "human", "/task Two"),
@@ -2061,6 +2064,7 @@ fn a_relay_pass_keeps_committed_claims_when_a_later_envelope_fails() {
             next_cursor: 2,
             has_more: false,
         })),
+        ..Default::default()
     });
     let pull = |engine: &mut EngineStore| {
         client.pull_chat_workspace(

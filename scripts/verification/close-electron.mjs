@@ -6,6 +6,25 @@ import { join } from "node:path";
 const FORCED_CLEANUP_TIMEOUT_MS = 10_000;
 export const PROCESS_EXIT_ALLOWANCE_MS = 1_000;
 
+// Every process under pid, found by parent pid while pid still runs.
+async function descendantPids(pid) {
+  const listing = await new Promise((resolve, reject) => {
+    execFile("ps", ["-A", "-o", "pid=,ppid="], { timeout: FORCED_CLEANUP_TIMEOUT_MS }, (error, stdout) => {
+      if (error) reject(error); else resolve(stdout);
+    });
+  });
+  const rows = listing.trim().split("\n").filter(Boolean).map((line) => line.trim().split(/\s+/u).map(Number));
+  const found = new Set([pid]);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [member, parent] of rows) {
+      if (!found.has(member) && found.has(parent)) { found.add(member); changed = true; }
+    }
+  }
+  found.delete(pid);
+  return [...found];
+}
+
 function isRunning(child) {
   return child.exitCode === null && child.signalCode === null;
 }
@@ -41,10 +60,22 @@ async function terminateOwnedProcess(child) {
         });
     });
   } else {
-    // Graceful close already had its bounded attempt. Kill the group while its recorded leader
-    // is live; a second grace period could outlive the leader and lose ownership.
-    try { process.kill(-child.pid, "SIGKILL"); }
-    catch (error) { if (error.code !== "ESRCH") throw error; }
+    // Graceful close already had its bounded attempt. A descendant can lead its own group, as the
+    // engine does on Linux, so every descendant is listed while the leader is live and killed by pid.
+    const descendants = await descendantPids(child.pid).catch((error) => {
+      console.error("Electron forced cleanup could not list descendants; killing its group only:", error);
+      return [];
+    });
+    // Kill the group only while its recorded leader is live; once it exits, its pid can lead
+    // another group. A second grace period could outlive the leader and lose ownership.
+    if (isRunning(child)) {
+      try { process.kill(-child.pid, "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+    for (const pid of descendants) {
+      try { process.kill(pid, "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") console.error(`Electron forced cleanup could not kill descendant ${pid}:`, error); }
+    }
   }
   if (!(await waitForExit(child, FORCED_CLEANUP_TIMEOUT_MS))) {
     throw new Error(`Electron process ${child.pid} did not exit after forced cleanup.`);

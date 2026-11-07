@@ -186,6 +186,7 @@ import {
   crashReportOperations,
   collectionCopiesLeftOperations,
   workspaceTrustOperations,
+  oldWindowOperations,
   reportingOperations,
   usageRecordOperations,
   noticeOperations,
@@ -224,6 +225,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { windowShowsWorkspace } from "./window/workspaceWindowReuse";
+import { createOldWindows } from "./window/oldWindows";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import {
   createRendererWorkspaceOperationRunner,
@@ -581,6 +583,7 @@ import { createTelemetry, privacyInEffect, usageEventFor } from "./telemetry/tel
 import { diagnosticsText, saveDiagnostics } from "./telemetry/diagnostics";
 import {
   createShareHandoffIntentSlot,
+  focusShareHandoffWindow,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
 import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemption";
@@ -875,10 +878,16 @@ function notifyCollectionAutomationsChanged(workspaceId: string): void {
   notifyWorkspaceWindows(workspaceId, CHANNELS.collectionAutomationsChanged);
 }
 
-function notifyWorkspaceWindows(workspaceId: string, channel: string): void {
+// A change to a Collection's fields or rules applied: the windows on that
+// workspace read that Collection again where they show it.
+function notifyCollectionRulesChanged(workspaceId: string, datasetId: string): void {
+  notifyWorkspaceWindows(workspaceId, CHANNELS.collectionRulesChanged, { datasetId });
+}
+
+function notifyWorkspaceWindows(workspaceId: string, channel: string, details: Record<string, string> = {}): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId !== workspaceId) continue;
-    win.webContents.send(channel, { workspaceId });
+    win.webContents.send(channel, { ...details, workspaceId });
   }
 }
 
@@ -5691,6 +5700,8 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
         const closingApps = appViews?.closeOwner(session.sender.id) ?? Promise.resolve();
         shareDirectWriteDelivery.retireSender(session.sender);
         const retiring = rendererWorkspaceRetirement.retireSender(session);
+        // The sender no longer shows its workspace.
+        oldWindows.notify();
         return { ...retiring,
           requiredForAdmission: Promise.all([retiring.requiredForAdmission, closingApps]).then(() => {}),
         };
@@ -6085,6 +6096,14 @@ const workspaceFileOpens = createWorkspaceFileOpens<WebContents, WorkspaceSummar
   send: (contents, workspace, file) => {
     if (!contents.isDestroyed()) contents.send(CHANNELS.workspaceActivated, { ...workspace, file });
   },
+});
+
+const oldWindows = createOldWindows<WebContents, BrowserWindow>({
+  windows: () => desktopWindows.workspaceWindows.allLive(),
+  sessionOf: (contents) => rendererWorkspaceSessions.current(contents),
+  authorities: workspaceAuthorities,
+  isQuitting: () => appLifecycle.isQuitting(),
+  focus: focusShareHandoffWindow,
 });
 
 // Opens a file or folder the OS or a launch handed dohc: its workspace, and
@@ -6772,6 +6791,7 @@ function registerIpcHandlers(): void {
   const datasetDependencies = {
     hostForWorkspace: datasetForWorkspace,
     moveToServer,
+    collectionRulesChanged: notifyCollectionRulesChanged,
     collectionPlace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], datasetId: string, signal: AbortSignal): Promise<DatasetPlace> => {
       const authority = await collectionsAuthorityFor(workspace, signal);
       if (authority.kind === "server") return { kind: "server", host: new URL(authority.server.credentials.relayUrl ?? authority.server.credentials.serverUrl).host };
@@ -7404,6 +7424,11 @@ function registerIpcHandlers(): void {
     executeAppPreview,
   });
 
+  registerOperations(operationBoundary, oldWindowOperations, {
+    readOldWindowState: (_input, { event }) => oldWindows.read(event.sender),
+    goToWorkspaceWindow: (_input, { event }) => oldWindows.goTo(event.sender),
+  });
+
   registerOperations(operationBoundary, workspaceTrustOperations, workspaceTrustHandlers<IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     trust: workspaceTrust,
     identify: folderIdentity,
@@ -7436,7 +7461,10 @@ function registerIpcHandlers(): void {
       desktopWindows.setPreferredWorkspaceId(workspaceId, sender);
     },
     markWorkspaceOpened,
-    workspaceShown: (workspaceId, sender) => workspaceFileOpens.shown(sender, workspaceId),
+    workspaceShown: (workspaceId, sender) => {
+      workspaceFileOpens.shown(sender, workspaceId);
+      oldWindows.notify();
+    },
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: async (operation) => {
       // A root macOS refuses would open with every file and engine call failing.

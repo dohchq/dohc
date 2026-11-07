@@ -148,6 +148,8 @@ export const CAPABILITIES = {
   "workspace.trust.read": capability("Read whether this computer trusts the admitted workspace to run its apps' code.", {ipc: ["readWorkspaceTrust"]}),
   "workspace.trust.request": capability("Show main's dialog that asks the person to trust the admitted workspace.", {ipc: ["requestWorkspaceTrust"]}),
   "workspace.trust.restrict": capability("Put the admitted workspace in Restricted Mode and stop its app commands.", {ipc: ["restrictWorkspace"]}),
+  "window.old.read": capability("Read whether this window was left showing a workspace it can no longer edit, and whether another window shows it.", {ipc: ["readOldWindowState"]}),
+  "window.old.go": capability("Bring the other window that shows this window's workspace to the front.", {ipc: ["goToWorkspaceWindow"]}),
   "diagnostics.read": capability("Read diagnostics about this computer's dohc.", {ipc: ["readDiagnostics"]}),
   "diagnostics.save": capability("Save diagnostics to a file the person picks.", {ipc: ["saveDiagnostics"]}),
   "reports.notice.read": capability("Read which reports the notice must name.", {ipc: ["readReportsNotice"]}),

@@ -413,6 +413,9 @@ export const WorkspaceIdPayload = z.object({
 });
 export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
 
+export const CollectionRulesChangedEvent = z.strictObject({ workspaceId: WORKSPACE_ID, datasetId: z.uuid() });
+export type CollectionRulesChangedEvent = z.infer<typeof CollectionRulesChangedEvent>;
+
 export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
   recoveryCopies: z.boolean().optional(),
 });
@@ -6514,6 +6517,33 @@ export const workspaceTrustOperations = {
   },
 } as const satisfies OperationTable;
 
+// A window left showing a workspace after Forget can no longer edit it.
+// OpenElsewhere: another window shows that workspace now. Null for a window
+// that shows its workspace as it is open now. Both rows read only the sending
+// window's own session; the renderer names no workspace or window.
+export const OldWindowState = z.strictObject({ workspaceId: WORKSPACE_ID, openElsewhere: z.boolean() }).nullable();
+export type OldWindowState = z.infer<typeof OldWindowState>;
+// A window's old window state may have changed: read it again.
+export const OldWindowStateChangedEvent = z.undefined();
+export const oldWindowOperations = {
+  readOldWindowState: {
+    capabilityId: "window.old.read",
+    scope: "workspace",
+    channel: "desktop:read-old-window-state",
+    payload: z.strictObject({}), result: OldWindowState, guard: "trusted-sender",
+    handlerCheck: { check: "rendererWorkspaceSessions.current(event.sender)", reason: "The handler reads only the sending window's own session." },
+  },
+  // Brings the other window that shows the sending window's workspace to the
+  // front. Opens no window, and does nothing when no other window shows it.
+  goToWorkspaceWindow: {
+    capabilityId: "window.old.go",
+    scope: "workspace",
+    channel: "desktop:go-to-workspace-window",
+    payload: z.strictObject({}), guard: "trusted-sender",
+    handlerCheck: { check: "rendererWorkspaceSessions.current(event.sender)", reason: "The handler finds the window from the sending window's own session." },
+  },
+} as const satisfies OperationTable;
+
 // Reports and diagnostics. Only main sends usage and error reports, and
 // only when this build names a report service and the person's switches in
 // Privacy allow it. Diagnostics stay on this computer unless the person
@@ -7429,6 +7459,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof collectionCopiesLeftOperations>,
     OperationBridge<typeof workspaceTrustOperations>,
+    OperationBridge<typeof oldWindowOperations>,
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
@@ -7686,6 +7717,9 @@ export interface DohcDesktopBridge
   onCollectionAutomationsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
+  // A change to a Collection's fields or rules applied, from any window or
+  // the CLI: a page that shows that Collection reads it again.
+  onCollectionRulesChanged(listener: (event: CollectionRulesChangedEvent) => void): () => void;
   // A press this window made settled, or waits. Each event names its
   // workspace; a window on another workspace drops it.
   onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;
@@ -7716,6 +7750,8 @@ export interface DohcDesktopBridge
   onWorkspaceActivated(listener: (workspace: WorkspaceSummary, file?: string) => void): () => void;
   // A folder failure is waiting: take it with takeWorkspacePathOpenFailures.
   onWorkspacePathOpenFailed(listener: () => void): () => void;
+  // This window's old window state may have changed: read it with readOldWindowState.
+  onOldWindowStateChanged(listener: () => void): () => void;
   // Auto-update state pushes from main, validated against UpdateStateEvent in
   // the preload before they reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;

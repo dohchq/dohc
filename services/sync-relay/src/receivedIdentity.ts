@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { fileSideOf, pathVisibleThroughShare, type AnyShareSelector, type ChatShareThreadResolver } from "./shareFilter";
 
 export type ReceivedRecipient = readonly ["user" | "link", string];
-export function createReceivedIdentity(key?: string | Uint8Array) {
+export function createReceivedIdentity(key?: string | Uint8Array, observed?: (recipient: ReceivedRecipient, workspaceId: string, objectId: string, token: string) => void) {
   const digest = (domain: string, recipient: ReceivedRecipient, workspaceId: string, objectId?: string) =>
     key ? createHmac("sha256", key).update(JSON.stringify([domain, recipient, workspaceId, ...(objectId === undefined ? [] : [objectId])])).digest("hex") : undefined;
   return {
@@ -13,7 +13,9 @@ export function createReceivedIdentity(key?: string | Uint8Array) {
     object(recipient: ReceivedRecipient, workspaceId: string, objectId: unknown) {
       if (typeof objectId !== "string" || !objectId) return undefined;
       const value = digest("dohc/received-object/v1", recipient, workspaceId, objectId);
-      return value ? `share-object:v1:${value}` : undefined;
+      const token = value ? `share-object:v1:${value}` : undefined;
+      if (token) observed?.(recipient, workspaceId, objectId, token);
+      return token;
     },
   };
 }

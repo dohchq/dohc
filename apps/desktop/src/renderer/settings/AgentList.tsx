@@ -451,8 +451,10 @@ export function AgentList(props: {
   const asking = props.trust?.asking ?? false;
   // Set while main's dialog answers the card's Trust workspace. When it
   // answers, focus that was on the band goes to the first thing trust turned
-  // on, or back to Trust workspace when the person stayed in Restricted Mode.
+  // on, or to the Agents heading when it turned on nothing. It goes back to
+  // Trust workspace when the person stayed in Restricted Mode.
   const card = useRef<HTMLDivElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const trustPressed = useRef(false);
   useEffect(() => {
     if (!trustPressed.current || asking) return;
@@ -460,9 +462,9 @@ export function AgentList(props: {
     const band = card.current?.querySelector(`[data-testid="restricted-agents-state"]`);
     const active = document.activeElement;
     if (active !== null && active !== document.body && !band?.contains(active)) return;
-    card.current?.querySelector<HTMLElement>(restricted
-      ? `[data-testid="restricted-agents-state"] button`
-      : `[data-testid="agent-check"]:not(:disabled), [data-testid="agent-add"] button:not(:disabled)`)?.focus();
+    (restricted
+      ? card.current?.querySelector<HTMLElement>(`[data-testid="restricted-agents-state"] button`)
+      : card.current?.querySelector<HTMLElement>(`[data-testid="agent-check"]:not(:disabled), [data-testid="agent-add"] button:not(:disabled)`) ?? heading.current)?.focus();
   }, [asking, restricted]);
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn, restricted);
   // Why Check can't start now. Try again on a toast can come at such a time.
@@ -517,16 +519,14 @@ export function AgentList(props: {
     setChecking(null);
   }, [onClearError, onError, requests, workspaceId]);
 
-  // A new agent takes the first free id and name. One dohc starts is on and
-  // is checked at once; one you run opens on its name.
-  const add = async (fields: Pick<AgentSettings, "name" | "launch" | "enabled">, idBase: string) => {
+  // A new agent takes the first free id and name, is on, and is checked at once.
+  const add = async (fields: Required<Pick<AgentSettings, "name" | "launch" | "enabled">>, idBase: string) => {
     const id = newAgentId([...Object.keys(settings.agents), ...(props.agentProblems ?? []).map((problem) => problem.id)], idBase);
     const agent: AgentSettings = { ...newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue), ...fields };
-    if (!agent.launch) setRenaming(id);
     setAdding(true);
     const saved = await onSave({ ...settings, agents: { ...settings.agents, [id]: agent } });
     setAdding(false);
-    if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
+    if (saved && !paused && checkNote === null) void check({ id, ...agent });
   };
 
   const neighbours = (id: string) => {
@@ -621,7 +621,7 @@ export function AgentList(props: {
     <section data-testid="agent-list" aria-labelledby="agents-title">
       {/* The title sits where every Settings page title sits; the buttons beside it reach 4 px higher. */}
       <div className="-mt-1 mb-5 flex min-h-8 items-center gap-2">
-        <h3 id="agents-title" className="m-0 mr-auto text-base font-semibold text-ink">Agents</h3>
+        <h3 ref={heading} tabIndex={-1} id="agents-title" className="m-0 mr-auto text-base font-semibold text-ink">Agents</h3>
         <CopyButton
           key={workspaceId}
           label="Copy MCP config"
@@ -684,7 +684,7 @@ export function AgentList(props: {
             onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
           />
         ))}
-        <div data-testid="agent-add" className="grid grid-cols-3 gap-2 py-4 max-[640px]:grid-cols-1">
+        <div data-testid="agent-add" className="grid grid-cols-2 gap-2 py-4 max-[640px]:grid-cols-1">
           {(["claude", "codex"] as const).map((tool) => {
             const name = AGENT_TOOLS.find((entry) => entry.id === tool)!.name;
             const found = toolTileState(tool, tools);
@@ -711,12 +711,6 @@ export function AgentList(props: {
               />
             );
           })}
-          <AddTile
-            title="Add one you run"
-            disabled={adding}
-            state={<span className={`${TILE_LINE} text-muted`}>Through MCP</span>}
-            onAdd={() => void add({ name: newAgentName(settings.agents, "Agent"), enabled: false }, "agent")}
-          />
         </div>
       </div>
       <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">

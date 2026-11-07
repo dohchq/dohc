@@ -267,6 +267,8 @@
   "app.local.check",
   "capture.history.retry",
   "dataset.change.ask",
+  "window.old.read",
+  "window.old.go",
   "file.reveal",
   "explorer.menu.read"
 ]

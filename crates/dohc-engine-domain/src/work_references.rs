@@ -79,11 +79,12 @@ pub enum TransactionalRecordId {
 }
 
 /// The stable identity a reference names.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum WorkTarget {
     /// `channelId` is null for a file's conversation.
@@ -164,6 +165,223 @@ pub enum WorkReferenceResolution {
         created_at_ms: i64,
         registration: WorkReferenceRegistration,
     },
+}
+
+pub const WORK_REFERENCE_BATCH: usize = 128;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkReferenceMapping {
+    pub reference: String,
+    pub target: WorkTarget,
+    pub created_at_ms: i64,
+}
+
+pub fn pending_work_references(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<WorkReferenceMapping>, DomainError> {
+    store.read_with(|conn| {
+        let mut statement = conn.prepare_cached(
+            "SELECT r.reference FROM work_reference_outbox o JOIN work_references r ON r.reference=o.reference \
+             WHERE r.workspace_id=?1 ORDER BY o.enqueued_at_ms,o.reference LIMIT ?2",
+        ).map_err(DomainError::sql_corrupt)?;
+        let references = statement.query_map(params![workspace_id, WORK_REFERENCE_BATCH as i64], |row| row.get::<_, String>(0))
+            .map_err(DomainError::sql_corrupt)?;
+        let mut mappings = Vec::new();
+        for reference in references {
+            if let WorkReferenceResolution::Found {reference, target, created_at_ms, ..} =
+                resolve_in(conn, workspace_id, &reference.map_err(DomainError::sql_corrupt)?)? {
+                mappings.push(WorkReferenceMapping {reference, target, created_at_ms});
+            }
+        }
+        Ok(mappings)
+    })
+}
+
+pub fn acknowledge_work_references(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    references: &[String],
+) -> Result<(), DomainError> {
+    if references.len() > WORK_REFERENCE_BATCH {
+        return Err(DomainError::InvalidInput {
+            reason: "too many work references",
+        });
+    }
+    store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        for reference in references {
+            tx.execute(
+                "DELETE FROM work_reference_outbox WHERE reference=?1 AND reference IN \
+                (SELECT reference FROM work_references WHERE workspace_id=?2)",
+                params![reference, workspace_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+        }
+        Ok::<_, DomainError>(())
+    })?;
+    Ok(())
+}
+
+pub fn defer_work_reference_registrations(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    references: &[String],
+) -> Result<(), DomainError> {
+    if references.len() > WORK_REFERENCE_BATCH {
+        return Err(DomainError::InvalidInput {
+            reason: "too many work references",
+        });
+    }
+    store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        let mut tail: i64 = tx.query_row("SELECT coalesce(max(o.enqueued_at_ms),0) FROM work_reference_outbox o \
+            JOIN work_references r ON r.reference=o.reference WHERE r.workspace_id=?1",[workspace_id],|row|row.get(0))
+            .map_err(DomainError::sql_corrupt)?;
+        for reference in references {
+            tail = tail.checked_add(1).ok_or(DomainError::StateCorrupt {reason: "work reference retry order overflow"})?;
+            tx.execute("UPDATE work_reference_outbox SET enqueued_at_ms=?1 WHERE reference=?2 AND reference IN \
+                (SELECT reference FROM work_references WHERE workspace_id=?3)",params![tail,reference,workspace_id])
+                .map_err(DomainError::sql_persist)?;
+        }
+        Ok::<_,DomainError>(())
+    })?;
+    Ok(())
+}
+
+pub fn learn_work_references(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    mappings: &[WorkReferenceMapping],
+) -> Result<(), DomainError> {
+    if mappings.len() > WORK_REFERENCE_BATCH {
+        return Err(DomainError::InvalidInput {
+            reason: "too many work references",
+        });
+    }
+    store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        for mapping in mappings {
+            if !is_work_reference(&mapping.reference) { return Err(DomainError::InvalidInput {reason: "invalid work reference"}); }
+            if let WorkReferenceResolution::Found {target, ..} = resolve_in(tx, workspace_id, &mapping.reference)? {
+                if target != mapping.target { return Err(DomainError::InvalidInput {reason: "work references are immutable"}); }
+                continue;
+            }
+            tx.execute("INSERT INTO learned_work_references(reference,workspace_id,target_json,created_at_ms) VALUES (?1,?2,?3,?4)",
+                params![mapping.reference, workspace_id, serde_json::to_string(&mapping.target).map_err(|_| DomainError::StateCorrupt {reason: "invalid work reference target"})?, mapping.created_at_ms])
+                .map_err(DomainError::sql_persist)?;
+        }
+        Ok::<_, DomainError>(())
+    })?;
+    Ok(())
+}
+
+fn learned_row(
+    conn: &Connection,
+    workspace_id: &str,
+    reference: &str,
+) -> Result<Option<ReferenceRow>, DomainError> {
+    let row: Option<(String, i64)> = conn.query_row(
+        "SELECT target_json,created_at_ms FROM learned_work_references WHERE workspace_id=?1 AND reference=?2",
+        params![workspace_id, reference], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(DomainError::sql_corrupt)?;
+    let Some((json, created)) = row else {
+        return Ok(None);
+    };
+    let target: WorkTarget =
+        serde_json::from_str(&json).map_err(|_| DomainError::StateCorrupt {
+            reason: "invalid learned work reference",
+        })?;
+    let binding = match target {
+        WorkTarget::Message {
+            message_id,
+            thread_id,
+            channel_id,
+        } => Binding {
+            thread_id: Some(thread_id),
+            channel_id,
+            ..Binding::of("message", message_id)
+        },
+        WorkTarget::File {
+            version_id,
+            object_id,
+        } => Binding::versioned("file", version_id, object_id),
+        WorkTarget::App {
+            version_id,
+            object_id,
+        } => Binding::versioned("app", version_id, object_id),
+        WorkTarget::DocumentCollection {
+            version_id,
+            object_id,
+        } => Binding::versioned("documentCollection", version_id, object_id),
+        WorkTarget::DocumentRecord {
+            version_id,
+            record_id,
+        } => Binding::versioned("documentRecord", version_id, record_id),
+        WorkTarget::TransactionalCollection {
+            dataset_id,
+            table_id,
+        } => Binding {
+            dataset_id: Some(dataset_id),
+            ..Binding::of("transactionalCollection", table_id)
+        },
+        WorkTarget::TransactionalRecord {
+            dataset_id,
+            table_id,
+            record_id,
+        } => Binding {
+            dataset_id: Some(dataset_id),
+            table_id: Some(table_id),
+            ..Binding::of("transactionalRecord", transactional_record_key(&record_id)?)
+        },
+    };
+    Ok(Some((
+        binding.kind.to_owned(),
+        binding.target_id,
+        binding.version_id,
+        binding.dataset_id,
+        binding.table_id,
+        binding.thread_id,
+        binding.channel_id,
+        created,
+        false,
+    )))
+}
+
+pub fn work_reference_page_after(
+    store: &EngineStore,
+    workspace_id: &str,
+    scope_id: &str,
+) -> Result<Option<String>, DomainError> {
+    store.read_with(|conn| conn.query_row(
+        "SELECT after_reference FROM work_reference_sync_pages WHERE workspace_id=?1 AND scope_id=?2",
+        params![workspace_id, scope_id], |row| row.get::<_, Option<String>>(0),
+    ).optional().map(|row| row.flatten()).map_err(DomainError::sql_corrupt))
+}
+
+pub fn learn_work_reference_page(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    scope_id: &str,
+    mappings: &[WorkReferenceMapping],
+    next_after: Option<&str>,
+) -> Result<(), DomainError> {
+    if next_after.is_some_and(|reference| reference.len() > 2048) {
+        return Err(DomainError::InvalidInput {
+            reason: "invalid work reference cursor",
+        });
+    }
+    if !mappings.is_empty() {
+        learn_work_references(store, workspace_id, mappings)?;
+    }
+    if work_reference_page_after(store, workspace_id, scope_id)?.as_deref() == next_after {
+        return Ok(());
+    }
+    store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        tx.execute("INSERT INTO work_reference_sync_pages VALUES (?1,?2,?3) \
+            ON CONFLICT(workspace_id,scope_id) DO UPDATE SET after_reference=excluded.after_reference",
+            params![workspace_id, scope_id, next_after]).map_err(DomainError::sql_persist)?;
+        Ok::<_, DomainError>(())
+    })?;
+    Ok(())
 }
 
 /// Return this device's reference for `input`, making one when there is none.
@@ -499,6 +717,10 @@ fn resolve_in(
         })
         .optional()
         .map_err(DomainError::sql_corrupt)?;
+    let row = match row {
+        Some(row) => Some(row),
+        None => learned_row(conn, workspace_id, reference)?,
+    };
     let Some((
         kind,
         target_id,

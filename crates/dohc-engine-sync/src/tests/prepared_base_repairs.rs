@@ -37,6 +37,9 @@ fn seed(store: &mut EngineStore, objects: &[String], claim: &str) -> PagedRelay 
     let mut relay = PagedRelay::new([(
         0,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![ReplicationEnvelope {
                 workspace_id: "ws".into(),
                 origin_id: "remote".into(),
@@ -233,6 +236,9 @@ fn earliest_base_survives_later_copies(pending_dependencies: bool) {
     let mut relay = PagedRelay::new([(
         1_000,
         PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
             ops: vec![competing.clone(), duplicate.clone()],
             next_cursor: 1_002,
             has_more: false,

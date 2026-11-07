@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { compareAppCollectionPaths, exposesAppCollectionSubmittedFields } from "@dohc/security-contract/app-collection-checks";
+import { OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
@@ -102,6 +103,11 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
       collection: { kind: "collection-create", collectionPath: "responses", allowedFields: ["destination", "name"], requiredFields: ["destination"], readFields } }));
     return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { deferredWrites: [], adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
   };
+  // The same app with its Collection removed from app.publish.json.
+  const unconnectedApp = () => {
+    sources.set("trip/app.publish.json", JSON.stringify({ version: 1, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {} }));
+    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { deferredWrites: [], adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
+  };
   const prepared = await collectionApp();
   const published = await host.apps.activate(prepared, signal());
   const create = (fields: Record<string, unknown>, idempotencyKey = "response-1", target = host, revision = published.authorityRevision) =>
@@ -124,7 +130,7 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
     return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { deferredWrites: [], adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(),
       assertCurrent() {}, async resolveDatasetRevision(binding) { return target.approvedArtifacts(binding.datasetId).revision; } });
   };
-  return { host, engine, workspaceRoot, open, prepared, published, collectionApp, datasetApp, create, list, inspect };
+  return { host, engine, workspaceRoot, open, prepared, published, collectionApp, unconnectedApp, datasetApp, create, list, inspect };
 }
 
 describe("local document Collection apps", () => {
@@ -466,6 +472,70 @@ describe("local document Collection apps", () => {
       await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
       expect((await backend({ id: "list", op: "collection.list", limit: 10 })).status).toBe(404);
     } finally { lifetime.abort(); await launcher.close(); }
+  });
+
+  it("runs an app that reaches no workspace data on this device, refusing its every data request", async () => {
+    const f = await fixture(), lifetime = new AbortController();
+    const agent = { kind: "agent", label: "Builder", labelSource: "agent-declared" } as const;
+    const prepared = await f.unconnectedApp();
+    expect(prepared.candidate.capabilities).toEqual([]);
+    // A revision that drops its Collection replaces the Collection approval.
+    const app = await f.host.apps.activate(prepared, signal(), agent);
+    expect(app.authorityRevision).toBeGreaterThan(f.published.authorityRevision);
+    expect(() => f.host.apps.assertBrowserPublication(f.published.publicationId, f.published.authorityRevision)).toThrow(/approval changed/);
+    const listed = f.host.apps.list("trip");
+    expect(listed).toEqual(expect.arrayContaining([
+      { publicationId: app.publicationId, authorityRevision: app.authorityRevision, appRoot: "trip", sourceRevision: prepared.candidate.sourceRevision, approved: true, active: true },
+      expect.objectContaining({ publicationId: f.published.publicationId, approved: false, active: false }),
+    ]));
+    expect(OwnerAppPublicationResult.parse({ kind: "localListed", publications: listed })).toEqual({ kind: "localListed", publications: listed });
+    f.inspect(db => {
+      expect(db.prepare("SELECT revision,active_kind,active_publication_id FROM local_app_roots WHERE app_root='trip'").get()).toEqual({ revision: app.authorityRevision, active_kind: "unconnected", active_publication_id: app.publicationId });
+      const provenance = JSON.parse(String(db.prepare("SELECT provenance FROM local_app_approval_provenance WHERE publication_id=?").get(app.publicationId)!.provenance));
+      expect(provenance).toEqual({ agent, committedCandidateDigest: createHash("sha256").update(JSON.stringify(prepared.candidate)).digest("hex"), sourceRevision: prepared.candidate.sourceRevision, capabilities: [] });
+    });
+    for (const action of ["invoke", "upload", "attempt", "list", "create"] as const)
+      await expect(f.host.apps.request(app.publicationId, action, { authorityRevision: app.authorityRevision })).rejects.toThrow(/not approved for workspace data/);
+    await expect(f.host.apps.readBrowserFile(app.publicationId, { authorityRevision: app.authorityRevision, fileId: "a".repeat(16), operation: "read", input: {} })).rejects.toThrow(/cannot read/);
+    const launcher = await createLocalAppLaunchHost({ backend: f.host.apps, lifetime: lifetime.signal });
+    try {
+      const url = new URL(await launcher.launch(app.publicationId, signal())), origin = url.origin;
+      const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(origin + path, { method: "POST", headers: { origin, "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+      const session = await post("/session", { handoff: url.hash.slice(1) });
+      expect(session.status).toBe(200);
+      const { proof, html } = await session.json() as { proof: string; html: string };
+      expect(html).toContain("Trip");
+      const proven = (path: string, body: unknown) => post(path, body, { "x-dohc-app-proof": proof });
+      expect((await proven("/backend", { id: "list", op: "collection.list", limit: 10 })).status).toBe(404);
+      expect((await proven("/backend", { id: "create", op: "collection.create", idempotencyKey: "trip-1", fields: { destination: "Manila" } })).status).toBe(404);
+      expect((await proven("/backend", { id: "invoke", op: "backend.invoke", operation: "submit", idempotencyKey: "k", input: {} })).status).toBe(404);
+      expect(f.engine.state.writes).toEqual([]);
+      expect((await proven("/resume", {})).status).toBe(200);
+      // A revision that adds a Collection replaces it. Its session refuses to resume, or has already stopped.
+      const collection = await f.host.apps.activate(await f.collectionApp(), signal());
+      expect(await proven("/resume", {}).then(response => response.status === 200, () => false)).toBe(false);
+      expect(() => f.host.apps.assertBrowserPublication(app.publicationId, app.authorityRevision)).toThrow(/approval changed/);
+      expect(f.host.apps.list("trip")).toEqual(expect.arrayContaining([
+        expect.objectContaining({ publicationId: collection.publicationId, approved: true, active: true, collectionCapability: expect.objectContaining({ collectionPath: "trip/responses" }) }),
+        expect.objectContaining({ publicationId: app.publicationId, approved: false, active: false }),
+      ]));
+    } finally { lifetime.abort(); await launcher.close(); }
+    // Approving it again, then removing the approval, ends this device's authority for the app.
+    const again = await f.host.apps.activate(await f.unconnectedApp(), signal());
+    expect(again.publicationId).toBe(app.publicationId);
+    expect(await f.host.apps.withdraw(again.publicationId, again.authorityRevision)).toEqual({ kind: "withdrawn", publicationId: again.publicationId, authorityRevision: again.authorityRevision + 1 });
+    expect(() => f.host.apps.browserPublication(again.publicationId)).toThrow(/approval changed/);
+    await f.host.close();
+    f.inspect(db => {
+      expect(db.prepare("SELECT revision,active_kind,active_publication_id FROM local_app_roots WHERE app_root='trip'").get()).toEqual({ revision: again.authorityRevision + 1, active_kind: null, active_publication_id: null });
+      // Its bundle is charged with Collection apps, outside Dataset usage, and approving it again released the earlier copy.
+      const stored = Number(db.prepare("SELECT coalesce((SELECT sum(storage_bytes) FROM local_collection_apps),0)+coalesce((SELECT sum(storage_bytes) FROM local_unconnected_apps),0)+coalesce((SELECT sum(storage_bytes) FROM local_collection_creates),0) AS bytes").get()!.bytes);
+      expect(Number(db.prepare("SELECT bytes FROM local_collection_app_usage").get()!.bytes)).toBe(stored);
+      expect(db.prepare("SELECT count(*) AS n FROM local_unconnected_apps").get()!.n).toBe(1);
+    });
+    // The store opens again, and its budget still balances.
+    const reopened = await f.open();
+    expect(reopened.apps.list("trip")).toEqual(expect.arrayContaining([expect.objectContaining({ publicationId: app.publicationId, approved: false, active: false })]));
   });
 
   it("refuses to deliver a read that was queued when the approval ended", async () => {

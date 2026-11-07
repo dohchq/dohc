@@ -1290,8 +1290,9 @@ const COLLECTIONS_WAITING_NOTICE = {
 };
 
 // A failed merge while another merge dialog is open: Try again is disabled,
-// with its reason under it. The app can't show this row, since the open
-// dialog covers Notices.
+// with its reason under it. The cause's words were only "Try again in a
+// moment.", which goes while Try again waits, so the toast has no body. The
+// app can't show this row, since the open dialog covers Notices.
 const MERGE_BLOCKED_TOAST = {
   id: "merge-blocked",
   title: "dohc could not merge Draft into Main",
@@ -1306,7 +1307,7 @@ const MERGE_BLOCKED_NOTICE = {
   id: "merge-blocked",
   tone: "danger" as const,
   title: MERGE_BLOCKED_TOAST.title,
-  body: MERGE_BLOCKED_TOAST.message,
+  body: "",
   Icon: AlertTriangle,
   actions: [{ label: "Try again", onClick: noop, disabled: true, reason: MERGE_RETRY_AFTER_CLOSE }],
   copyText: MERGE_BLOCKED_TOAST.details,

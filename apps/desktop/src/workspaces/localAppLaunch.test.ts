@@ -173,12 +173,84 @@ it("cancels an in-flight operation when its renderer session ends", async () => 
   await expect(f.host.launch(publicationId, f.session.signal)).rejects.toThrow();
 });
 
-it("limits abandoned staging and stops all launch listeners with workspace lifetime", async () => {
+it("queues a launch beyond two staged ones and stops all launch listeners with workspace lifetime", async () => {
   const f = await fixture();
   await f.host.launch(publicationId, f.session.signal);
-  await expect(f.host.launch(publicationId, f.session.signal)).rejects.toThrow("Close another app");
-  f.lifetime.abort(); await f.host.close();
+  const waiting = f.host.launch(publicationId, f.session.signal).catch((error: unknown) => error);
+  f.lifetime.abort("closed"); await f.host.close();
+  expect(await waiting).toBe("closed");
   await expect(fetch(f.origin + "/bootstrap")).rejects.toThrow();
+});
+
+const handOff = async (url: string) => {
+  const { origin, hash } = new URL(url);
+  const response = await fetch(origin + "/session", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ handoff: hash.slice(1) }) });
+  expect(response.status).toBe(200);
+};
+const track = <T>(promise: Promise<T>) => {
+  const state = { settled: false, promise: promise.finally(() => { state.settled = true; }) };
+  return state;
+};
+
+it("opens a third launch when one of two staged launches loads its page", async () => {
+  const f = await fixture();
+  await f.host.launch(publicationId, f.session.signal);
+  const third = track(f.host.launch(publicationId, f.session.signal));
+  expect((await fetch(f.origin + "/bootstrap")).status).toBe(200);
+  expect(third.settled).toBe(false);
+  expect(f.backend.browserPublication).toHaveBeenCalledTimes(2);
+  await f.open();
+  await handOff(await third.promise);
+});
+
+it("opens waiting launches in the order they started", async () => {
+  const f = await fixture();
+  const second = await f.host.launch(publicationId, f.session.signal), order: string[] = [];
+  const earlier = f.host.launch(publicationId, f.session.signal).then(url => { order.push("earlier"); return url; });
+  const later = f.host.launch(publicationId, f.session.signal).then(url => { order.push("later"); return url; });
+  await f.open();
+  await Promise.race([earlier, later]);
+  expect(order).toEqual(["earlier"]);
+  await handOff(second);
+  await later;
+  expect(order).toEqual(["earlier", "later"]);
+});
+
+it("removes an aborted waiting launch without letting it block the next one", async () => {
+  const f = await fixture();
+  await f.host.launch(publicationId, f.session.signal);
+  const cancel = new AbortController();
+  const aborted = f.host.launch(publicationId, cancel.signal).catch((error: unknown) => error);
+  const next = track(f.host.launch(publicationId, f.session.signal));
+  cancel.abort("tab closed");
+  expect(await aborted).toBe("tab closed");
+  expect(next.settled).toBe(false);
+  expect(f.backend.browserPublication).toHaveBeenCalledTimes(2);
+  await f.open();
+  await handOff(await next.promise);
+});
+
+it("rejects waiting launches when the host closes", async () => {
+  const f = await fixture();
+  await f.host.launch(publicationId, f.session.signal);
+  const waiting = f.host.launch(publicationId, f.session.signal).catch((error: unknown) => error);
+  await f.host.close();
+  expect(await waiting).toEqual(Error("The local app session ended."));
+  await expect(f.host.launch(publicationId, f.session.signal)).rejects.toThrow("Close another app");
+});
+
+it("counts waiting launches against the session limit and refuses past it at once", async () => {
+  const f = await fixture();
+  await f.open();
+  for (let opened = 1; opened < 13; opened++) await handOff(await f.host.launch(publicationId, f.session.signal));
+  const staged = await f.host.launch(publicationId, f.session.signal);
+  await f.host.launch(publicationId, f.session.signal);
+  const waiting = track(f.host.launch(publicationId, f.session.signal));
+  await expect(f.host.launch(publicationId, f.session.signal)).rejects.toThrow("Close another app");
+  expect(waiting.settled).toBe(false);
+  await handOff(staged);
+  await handOff(await waiting.promise);
+  await expect(f.host.launch(publicationId, f.session.signal)).rejects.toThrow("Close another app");
 });
 
 it("releases an authenticated closed launch and never lets another origin close it", async () => {

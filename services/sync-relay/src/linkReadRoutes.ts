@@ -36,6 +36,7 @@ export function createLinkReadRoutes(
     | "getBlob"
     | "automationSwitchableFolder"
     | "currentFileObjectId"
+    | "indexReceivedWorkTargets"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -64,6 +65,7 @@ export function createLinkReadRoutes(
   replica?:ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
 ) {
   const identity = createReceivedIdentity(linkKey);
+
   // A Group link also reads, or with read-write access posts in, the Group's
   // channel. The share's answer and its files' answer both name it.
   const linkChannel = (grantId: string) => {
@@ -135,6 +137,11 @@ export function createLinkReadRoutes(
         fresh.effectiveSelector,
       );
       const requestedFolder = new URL(request.url).searchParams.get("collectionPath");
+      const observed: Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number][] = [];
+      const identity = createReceivedIdentity(linkKey, (recipient, workspaceId, objectId, objectToken) => {
+        const sourceHandle = identity.source(recipient, workspaceId);
+        if (sourceHandle) observed.push({recipient, workspaceId, objectId, objectToken, sourceHandle});
+      });
       const files = snapshot.files.map((file) => {
         const path = presentation.projectPath(file.path);
         if (path === null) throw notFound();
@@ -150,6 +157,7 @@ export function createLinkReadRoutes(
             && storage.automationSwitchableFolder(share.workspaceId, file.path.slice(0, -"/automations.yaml".length)) } : {}),
         };
       });
+      storage.indexReceivedWorkTargets(observed);
       return linkJsonResponse(fresh.shareId, fresh.grantId, {
         ok: true,
         effectiveSelector: presentation.selector,

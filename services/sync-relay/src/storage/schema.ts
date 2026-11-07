@@ -1,4 +1,5 @@
 import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
+import {initializeWorkReferenceSchema} from "./workReferenceSchema";
 import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
 import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
 import {initializeReplicaCurrentViewIncrementalSchema} from "./replicaCurrentViewIncrementalSchema";
@@ -1299,6 +1300,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationServerScheduleSchema(db);
     initializeAutomationServerUnsentRunSchema(db);
     initializeCurrentFileKeySchema(db);
+    initializeWorkReferenceSchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);
     initializeAutomationWorkspaceSchema(db);

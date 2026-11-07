@@ -1085,7 +1085,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
-    notes: ["Review the source and the Collection access it asks for, then approve."],
+    notes: ["Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link."],
   },
   launchLocal: {
     summary: "Get a local URL for an approved app.",

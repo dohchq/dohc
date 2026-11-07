@@ -60,11 +60,19 @@ describe("local app publication review", () => {
       kind === "caller" ? "other" : "caller", h.operation)).rejects.toThrow();
     expect(h.activate).not.toHaveBeenCalled(); h.controller.abort();
   });
-  it("refuses local preparation without a governed Collection", async () => {
-    const h = harness();
-    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: { ...candidate, capabilities: [] }, files: [] });
-    await expect(h.prepare()).rejects.toThrow(/Connect this app to a Collection/);
+  it("prepares and approves an app that reaches no workspace data, with no capabilities", async () => {
+    const h = harness(), unconnected = { ...candidate, capabilities: [] };
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: unconnected, files: [] });
+    const review = await h.prepare();
+    expect(review).toMatchObject({ kind: "prepared", appRoot: "app", capabilities: [], externalNetwork: true, local: true });
+    // It counts toward the same limit of 8 preparations awaiting approval.
+    const request = { action: "prepareLocal" as const, workspaceId: "w", appRoot: "app" };
+    for (const caller of ["b", "c", "d", "e", "f", "g", "h"]) await h.handler(request, caller, h.operation);
+    await expect(h.handler(request, "i", h.operation)).rejects.toThrow(/Too many apps await approval/);
     expect(h.activate).not.toHaveBeenCalled();
+    expect(await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation))
+      .toEqual({ kind: "published", publicationId: hash, authorityRevision: 1, local: true });
+    expect(h.activate).toHaveBeenCalledWith({ candidate: unconnected, files: [] }, h.controller.signal, null);
   });
   it("lists local apps without share identities and allows cancellation", async () => {
     const h = harness();
@@ -76,9 +84,9 @@ describe("local app publication review", () => {
   });
   it("reads an app's current source revision after flushing waiting edits, without preparing it", async () => {
     const h = harness();
-    vi.mocked(readLocalAppSource).mockResolvedValue({ sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: false });
+    vi.mocked(readLocalAppSource).mockResolvedValue({ sourceRevision: hash, sourcePaths: ["app/main.ts"] });
     expect(await h.handler({ action: "checkLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation))
-      .toEqual({ kind: "localChecked", appRoot: "app", sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: false });
+      .toEqual({ kind: "localChecked", appRoot: "app", sourceRevision: hash, sourcePaths: ["app/main.ts"] });
     expect(h.flushCapture).toHaveBeenCalledWith(h.operation.workspace);
     expect(readLocalAppSource).toHaveBeenCalledWith({ action: "checkLocal", workspaceId: "w", appRoot: "app" },
       expect.objectContaining({ signal: h.controller.signal, deferredWrites: ["app/draft.ts"] }));
@@ -93,7 +101,7 @@ describe("local app publication review", () => {
   });
   it("refuses a source revision read after its operation ended", async () => {
     const h = harness();
-    vi.mocked(readLocalAppSource).mockImplementation(async () => { h.controller.abort(); return { sourceRevision: hash, sourcePaths: ["app/main.ts"], declaresCollection: true }; });
+    vi.mocked(readLocalAppSource).mockImplementation(async () => { h.controller.abort(); return { sourceRevision: hash, sourcePaths: ["app/main.ts"] }; });
     await expect(h.handler({ action: "checkLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation)).rejects.toThrow();
   });
   it("launches only a loopback approved publication and refuses a late result", async () => {

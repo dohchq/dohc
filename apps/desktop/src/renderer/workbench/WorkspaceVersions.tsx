@@ -153,7 +153,7 @@ function mergeNotice(
     return {
       identity,
       tone: "warning",
-      title: `Merged ${source.name} into Main`,
+      title: `Merging ${source.name} into Main needs a decision`,
       message: [conflictCountCopy(answer.conflictCount, false), protectedLine].filter(Boolean).join(" "),
       ...paths,
       decideFrom: source.id,

@@ -1665,7 +1665,7 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active })[] }`.
 
 #### `dohc app checkLocal`
 
@@ -1676,13 +1676,13 @@ Compare sourceRevision with the one listLocal returns. They differ once the app'
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths, declaresCollection }`.
+Returns `{ kind: "localChecked", appRoot, sourceRevision, sourcePaths }`.
 
 #### `dohc app prepareLocal`
 
 Prepare an app to open on this computer.
 
-Review the source and the Collection access it asks for, then approve.
+Review the source and any Collection access it asks for, then approve. The app folder needs app.publish.json. A folder without one publishes only on a link.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.

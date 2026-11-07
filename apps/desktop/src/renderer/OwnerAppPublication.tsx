@@ -144,17 +144,19 @@ const sourceCheckFailed = "dohc could not check whether this app's source change
 type Reach = { text: string; added: boolean };
 type Access = { key: string; name: string; path?: string; reads: Reach[]; changes: Reach[]; adds: boolean };
 
-const approvedCapability = (row: LocalPublication): Capability => "datasetCapability" in row ? row.datasetCapability : row.collectionCapability;
+/** An approval of an app that reaches no workspace data has no capability. */
+const approvedCapabilities = (row: LocalPublication): Capability[] =>
+  "datasetCapability" in row ? [row.datasetCapability] : "collectionCapability" in row ? [row.collectionCapability] : [];
 
-/** `approved` is the capability the person approved earlier, or null on a first review, which marks nothing new. */
-function accessOf(capability: Capability, approved: Capability | null): Access {
+/** `approved` is what the person approved earlier, or null on a first review, which marks nothing new. */
+function accessOf(capability: Capability, approved: readonly Capability[] | null): Access {
   if (capability.kind === "dataset") {
-    const same = approved?.kind === "dataset" && approved.datasetId === capability.datasetId ? approved : null;
+    const same = approved?.find((value): value is AppDatasetCapability => value.kind === "dataset" && value.datasetId === capability.datasetId);
     const item = (operation: AppDatasetCapability["operations"][number]) => ({ text: operation.name, added: approved !== null && !same?.operationIds.includes(operation.operationId) });
     return { key: capability.datasetId, name: capability.name, adds: false,
       reads: capability.operations.filter(operation => operation.readOnly).map(item), changes: capability.operations.filter(operation => !operation.readOnly).map(item) };
   }
-  const same = approved && approved.kind !== "dataset" && approved.collectionPath === capability.collectionPath ? approved : null;
+  const same = approved?.find((value): value is AppCollectionCapability => value.kind !== "dataset" && value.collectionPath === capability.collectionPath);
   const item = (fields: readonly string[] | undefined) => (field: string) => ({ text: field, added: approved !== null && !fields?.includes(field) });
   return { key: capability.collectionPath, name: capability.collectionPath.split("/").pop() || capability.collectionPath, path: capability.collectionPath, adds: true,
     reads: capability.readFields.map(item(same?.readFields)), changes: capability.allowedFields.map(item(same?.allowedFields)) };
@@ -178,13 +180,17 @@ function AccessRows({ access }: { access: Access }) {
 }
 
 /** What the app can reach: the approved capabilities, or the candidate's with what the approval lacks marked New. */
-function AccessBox({ capabilities, approved, failed, onRetry }: { capabilities: readonly Capability[] | null; approved: Capability | null; failed: boolean; onRetry(): void }) {
+function AccessBox({ capabilities, approved, failed, onRetry }: { capabilities: readonly Capability[] | null; approved: readonly Capability[] | null; failed: boolean; onRetry(): void }) {
   const id = useId();
   return <section aria-labelledby={id}>
     <h3 id={id} className="m-0 mb-2 text-[13px] font-medium text-ink">What it can reach</h3>
     <div data-testid="app-access" className="rounded-lg border border-line bg-bg">
       {capabilities ? <>
-        <div className="flex flex-col gap-3 py-3">{capabilities.map(capability => { const access = accessOf(capability, approved); return <AccessRows key={access.key} access={access} />; })}</div>
+        <div className="flex flex-col gap-3 py-3">{capabilities.length ? capabilities.map(capability => { const access = accessOf(capability, approved); return <AccessRows key={access.key} access={access} />; }) :
+          <div className="grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2 px-3">
+            <Table2 size={14} aria-hidden className="text-muted" />
+            <span className="text-[13px] text-muted">No workspace data</span>
+          </div>}</div>
         <p className="m-0 flex items-start gap-2 border-t border-line px-3 py-2 text-[12px] text-muted"><Globe size={12} aria-hidden className="mt-0.5 shrink-0" />It can send what it receives to other websites.</p>
       </> : failed ? <RetryRow testId="app-access-retry" onRetry={onRetry} /> : <SkeletonRows rows={3} label="Loading what this app can reach…" className="p-3" />}
     </div>
@@ -352,9 +358,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
 
   // Signed out of the workspace's server: Share links offers Connect server instead of reading the list.
   // The links view keeps its own errors, so only the review on this device skips the list.
-  // An app that reaches no Collection has nothing to approve here, so it opens on its links, as a plain site does.
-  const linksOnly = localReview.status === "ready" && !localReview.approval && localReview.source?.declaresCollection === false;
-  const linksSignedOut = !!props.localApproval && !linksOnly && !!props.access && accessReasonForLane(props.access.context.facts, "granted") === "signed-out";
+  const linksSignedOut = !!props.localApproval && !!props.access && accessReasonForLane(props.access.context.facts, "granted") === "signed-out";
   useEffect(() => {
     let current = true;
     setPublicationsLoading(true); setPublicationsError(null); setLinksHidden(false);
@@ -434,7 +438,6 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const review = localReview.status === "ready" ? localReview : null;
   const approval = review?.approval ?? null;
   const changed = !!approval && !!review?.source && review.source.sourceRevision !== approval.sourceRevision;
-  const shownView = linksOnly ? "links" : view;
   const needsCandidate = !!review && (!approval || changed);
 
   // A first review or changed source shows the exact candidate, so approval binds what the person read.
@@ -468,7 +471,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     }
   };
   useEffect(() => {
-    if (shownView === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
+    if (view === "local" && needsCandidate && !localCandidate && candidateState === "idle" && !busy) void prepareLocalCandidate();
   });
   // A retry waits in this effect for any running action, so it never takes over an approval or a removal.
   const retryPreparation = () => setCandidateState(value => value === "failed" ? "idle" : value);
@@ -638,11 +641,11 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     heading.current?.focus();
   };
 
-  const localView = shownView === "local" && !prepared;
+  const localView = view === "local" && !prepared;
   // A candidate under review lists the files Approve changes binds; the source check's list is the fallback.
   const paths = localView ? (needsCandidate ? localCandidate?.sourcePaths : undefined) ?? review?.source?.sourcePaths : undefined;
   const shown = (path: string) => path.startsWith(`${props.appRoot}/`) ? path.slice(props.appRoot.length + 1) : path;
-  const boxCapabilities = !review ? null : !needsCandidate && approval ? [approvedCapability(approval)] : localCandidate?.capabilities ?? null;
+  const boxCapabilities = !review ? null : !needsCandidate && approval ? approvedCapabilities(approval) : localCandidate?.capabilities ?? null;
   const approving = busy === "approve" || candidateState === "loading";
   const canApprove = !!localCandidate && candidateState === "idle" && !busy && !responsesBusy;
   // Share links show once the server returns this app's publications. It stays hidden when the workspace is not synced,
@@ -689,8 +692,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
         {review?.rows.filter(row => !row.approved).map(row => "pendingCreates" in row ? row.pendingCreates > 0 ? <div key={row.publicationId} className="flex items-center gap-2 text-[12px] text-warning">
           <p className="m-0 flex-1">{unconfirmedResponses(row.pendingCreates)}</p>
           <SecondaryButton size="row" disabled={!!busy || responsesBusy} onClick={() => void withdraw(row, true)}>Try again</SecondaryButton>
-        </div> : null : <p key={row.publicationId} className="m-0 text-[12px] text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>)}
-        <AccessBox capabilities={boxCapabilities} approved={changed && approval ? approvedCapability(approval) : null} failed={localReview.status === "failed" || candidateState === "failed"}
+        </div> : null : "datasetCapability" in row ? <p key={row.publicationId} className="m-0 text-[12px] text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p> : null)}
+        <AccessBox capabilities={boxCapabilities} approved={changed && approval ? approvedCapabilities(approval) : null} failed={localReview.status === "failed" || candidateState === "failed"}
           onRetry={() => localReview.status === "failed" ? setLocalReload(value => value + 1) : retryPreparation()} />
         {showLinks ? <section aria-labelledby="app-links-title">
           <h3 id="app-links-title" className="m-0 mb-2 text-[13px] font-medium text-ink">Share links</h3>
@@ -810,7 +813,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} disabled={publicationsLoading || !!busy} onBusyChange={responseBusyChanged} />
         </div>)}
         <div><h3 className="m-0 text-[13px] font-medium text-ink">Publish on a share link</h3>
-          <p className="mb-0 mt-1 text-[12px] text-muted">{synced === false ? `Sync this workspace to publish on a share link.${linksOnly ? "" : " Opening on this device does not need sync."}` : `Publishing on a link needs a connection to your dohc host.${linksOnly ? "" : " Approval for this device does not."}`}</p></div>
+          <p className="mb-0 mt-1 text-[12px] text-muted">{synced === false ? "Sync this workspace to publish on a share link. Opening on this device does not need sync." : "Publishing on a link needs a connection to your dohc host. Approval for this device does not."}</p></div>
         {synced === false ? null : <>
           <label className="text-[13px] text-ink">Share link
             <select aria-label="Publication share link" disabled={loading || !!busy || responsesBusy} value={selected} onChange={event => setSelected(event.target.value)}
@@ -824,7 +827,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => { props.onClose(); props.onShareSource?.(); }}>Share app folder</SecondaryButton></div> : null}
         {synced === false ? null : <p className="m-0 text-[13px] text-muted">Prepare the app to review its source and data access before publishing.</p>}
         <footer className="flex justify-end gap-2">
-          {props.localApproval && !linksOnly ? <SecondaryButton disabled={committing} onClick={() => { setError(null); setNotice(null); setView("local"); }}>Back</SecondaryButton> :
+          {props.localApproval ? <SecondaryButton disabled={committing} onClick={() => { setError(null); setNotice(null); setView("local"); }}>Back</SecondaryButton> :
             <SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>}
           {synced === false ? null : <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" && !busyPublicationId ? "Preparing app…" : "Prepare app"}</PrimaryButton>}</footer>
       </>}

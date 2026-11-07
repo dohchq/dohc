@@ -269,6 +269,7 @@ export const CHANNELS = {
   findDatasetCollection: "desktop:find-dataset-collection",
   findAutomationCollection: "desktop:find-automation-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
+  collectionRulesChanged: "desktop:collection-rules-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.
   listAutomationButtons: "desktop:list-automation-buttons",
@@ -330,6 +331,7 @@ export const CHANNELS = {
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
   workspacePathOpenFailed: "desktop:workspace-path-open-failed",
+  oldWindowStateChanged: "desktop:old-window-state-changed",
   updateState: "desktop:update-state",
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",

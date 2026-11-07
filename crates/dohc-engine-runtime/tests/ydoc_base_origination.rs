@@ -4223,6 +4223,7 @@ impl dohc_engine_sync::RelayTransport for AcceptPushTransport {
         req: dohc_engine_sync::PushRequest,
     ) -> Result<dohc_engine_sync::PushResponse, dohc_engine_sync::RelayError> {
         Ok(dohc_engine_sync::PushResponse {
+            registered_references: Vec::new(),
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
             redundant_recoveries: Vec::new(),

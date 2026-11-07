@@ -110,24 +110,24 @@ export async function prepareOwnerAppPublication(input: OwnerPublicationSelectio
 
 const localAllowed = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
 
-/** Local approval captures the same immutable source without creating a share grant. */
+/**
+ * Local approval captures the same immutable source without creating a share grant. It needs app.publish.json:
+ * dohc shows a folder without one as a site, which offers no review to see or remove an approval.
+ */
 export async function prepareLocalAppPublication(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
-  return prepareAppSources(input, "main", localAllowed, dependencies);
+  return prepareAppSources(input, "main", localAllowed, dependencies, true);
 }
 
-/**
- * Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's.
- * declaresCollection is false for an app that reaches no Collection, which local preparation refuses.
- */
-export async function readLocalAppSource(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: SourceDependencies): Promise<{ sourceRevision: string; sourcePaths: string[]; declaresCollection: boolean }> {
-  const { declared, metadata } = await selectAppSources(input, "main", localAllowed, dependencies);
-  return { sourceRevision: metadata.sourceDigest, sourcePaths: metadata.files.map(file => file.path), declaresCollection: !!declared.dataset || !!declared.collection };
+/** Selects the files local preparation would capture, without compiling them. Its sourceRevision matches an unchanged approval's. */
+export async function readLocalAppSource(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">, dependencies: SourceDependencies): Promise<{ sourceRevision: string; sourcePaths: string[] }> {
+  const { metadata } = await selectAppSources(input, "main", localAllowed, dependencies);
+  return { sourceRevision: metadata.sourceDigest, sourcePaths: metadata.files.map(file => file.path) };
 }
 
 type SourceDependencies = Pick<AppPublicationPreparationDependencies, "adapter" | "signal" | "assertCurrent" | "deferredWrites">;
 
 async function selectAppSources(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
-  versionId: string, allowed: (path: string) => boolean, dependencies: SourceDependencies) {
+  versionId: string, allowed: (path: string) => boolean, dependencies: SourceDependencies, requireManifest = false) {
   const { adapter, signal, assertCurrent } = dependencies;
   if (!allowed(input.appRoot)) throw new Error("The app is outside this link's shared files.");
   const manifestPath = `${input.appRoot}/app.publish.json`;
@@ -137,6 +137,7 @@ async function selectAppSources(input: Pick<OwnerPublicationSelection, "workspac
   const folder = (await adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId, under: input.appRoot })).map(file => file.path);
   assertCurrent(); signal.throwIfAborted();
   const hasManifest = folder.includes(manifestPath);
+  if (requireManifest && !hasManifest) throw new Error(`Add app.publish.json to ${input.appRoot} before approving it on this device.`);
   const capture = async (paths: string[], maxInputBytes: number) => {
     assertCurrent(); signal.throwIfAborted();
     assertSourcePathsNotDeferred(dependencies.deferredWrites, paths);
@@ -175,9 +176,9 @@ async function selectAppSources(input: Pick<OwnerPublicationSelection, "workspac
 }
 
 async function prepareAppSources(input: Pick<OwnerPublicationSelection, "workspaceId" | "appRoot">,
-  versionId: string, allowed: (path: string) => boolean, dependencies: AppPublicationPreparationDependencies): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
+  versionId: string, allowed: (path: string) => boolean, dependencies: AppPublicationPreparationDependencies, requireManifest = false): Promise<{ candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] }> {
   const { adapter, signal, assertCurrent } = dependencies;
-  const { declared, schemaPath, metadata } = await selectAppSources(input, versionId, allowed, dependencies);
+  const { declared, schemaPath, metadata } = await selectAppSources(input, versionId, allowed, dependencies, requireManifest);
   const selected = { metadata, files: await adapter.hydrateCapturedSources(metadata, signal) };
   assertCurrent();
   const capabilities: AppPublicationCandidate["capabilities"] = [];

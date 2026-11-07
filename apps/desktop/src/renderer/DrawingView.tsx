@@ -19,6 +19,7 @@ import {
 } from "./collab/excalidrawPresence";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { binaryFileDataFromArtifact } from "./excalidrawAssets";
+import { pointExcalidrawAtAppFonts } from "./excalidrawFonts";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
   parseExcalidrawDocument,
@@ -36,7 +37,10 @@ import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
 
-const LazyExcalidrawCanvas = lazy(() => import("./ExcalidrawCanvas")) as
+const LazyExcalidrawCanvas = lazy(() => {
+  pointExcalidrawAtAppFonts();
+  return import("./ExcalidrawCanvas");
+}) as
   LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
 
 export function DrawingView({

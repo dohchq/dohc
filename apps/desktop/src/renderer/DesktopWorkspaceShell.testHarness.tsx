@@ -729,6 +729,7 @@ function makeBaseBridge(
       };
     }),
     closeThisWindow: vi.fn(async (): Promise<void> => undefined),
+    goToWorkspaceWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.
@@ -763,6 +764,7 @@ function makeBaseBridge(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
     onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
+    onCollectionRulesChanged: vi.fn(() => () => undefined),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
         report: null,
