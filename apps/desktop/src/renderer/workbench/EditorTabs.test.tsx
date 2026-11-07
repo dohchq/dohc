@@ -835,9 +835,10 @@ describe("EditorTabs pointer drag", () => {
     expect(onMove).toHaveBeenCalledWith("left", "a.md", 1);
   });
 
-  it("moves a tab to an empty group when released over its editor body", () => {
+  it("moves a tab to an empty group when released over its editor body, and reports the press there", () => {
     const onMove = vi.fn();
     const onMoveToGroup = vi.fn();
+    const onPress = vi.fn();
     render(
       <>
         <div data-editor-group-id="left">
@@ -853,6 +854,7 @@ describe("EditorTabs pointer drag", () => {
             onContextMenu={noop}
             onMove={onMove}
             onMoveToGroup={onMoveToGroup}
+            onPress={onPress}
             onCreateGroupRight={noop}
           />
         </div>
@@ -876,6 +878,8 @@ describe("EditorTabs pointer drag", () => {
     expect(onMove).not.toHaveBeenCalled();
     expect(onMoveToGroup).toHaveBeenCalledOnce();
     expect(onMoveToGroup).toHaveBeenCalledWith("left", "right", "a.md", 0);
+    // The tab now belongs to the group it was dropped on.
+    expect(onPress).toHaveBeenCalledExactlyOnceWith("right", "a.md");
   });
 
   it("reaches the last slot with a tab wider than the room left beside it", () => {

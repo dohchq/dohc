@@ -377,7 +377,7 @@ interface TabDragHost {
   settle: (tab: HTMLElement, visualLeft: number) => void;
   sync: () => void;
   // The press on this tab ended in a release, after a drag or without one.
-  press: (path: string) => void;
+  press: (groupId: string, path: string) => void;
 }
 
 // Pointer-drag reorder (no dnd dep). A press only becomes a drag after 4px
@@ -535,9 +535,9 @@ function createTabDrag(host: TabDragHost) {
       cancelAnimationFrame(s.frame);
       s.frame = 0;
     }
-    // After the browser has moved focus for the press. A drag that moved the tab ends with no click.
-    if (release) host.press(s.path);
     if (!s.active) {
+      // After the browser has moved focus for the press.
+      if (release) host.press(host.groupId(), s.path);
       // A press that never became a drag may still hold a frozen settle.
       s.tab.style.transform = "";
       return;
@@ -566,9 +566,12 @@ function createTabDrag(host: TabDragHost) {
       for (const other of s.slots) other.el.style.transition = "";
     });
     const target = release && editorGroupAtPoint(release.clientX, release.clientY);
-    if (commit && target && target.groupId !== host.groupId()) {
+    const into = commit && target && target.groupId !== host.groupId() ? target : null;
+    // A drag ends with no click. The press belongs to the group that holds the tab after the drop.
+    if (release) host.press(into?.groupId ?? host.groupId(), s.path);
+    if (into) {
       s.tab.style.transform = "";
-      host.moveToGroup(target.groupId, s.path, target.toIndex);
+      host.moveToGroup(into.groupId, s.path, into.toIndex);
       return;
     }
     const visualLeft = slot ? slot.left + s.dx : 0;
@@ -812,7 +815,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         });
       },
       sync: () => syncCorners.current(),
-      press: (path) => latest.current.onPress?.(latest.current.groupId, path),
+      press: (groupId, path) => latest.current.onPress?.(groupId, path),
     });
   }
   const drag = tabDrag.current;

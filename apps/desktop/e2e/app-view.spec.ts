@@ -452,6 +452,8 @@ test("@app-view an app keeps its page when its tab moves to another editor group
       const [view, group] = [await page.getByTestId("app-view-webview").boundingBox(), await rightGroup.boundingBox()];
       return !!view && !!group && view.x >= group.x - 1 && view.x + view.width <= group.x + group.width + 1;
     }).toBe(true);
+    // The drop releases a press on the app's tab, so focus is in the app.
+    await expect(webview).toBeFocused();
     expect(await guestIds(electronApp)).toEqual([guestId]);
     expect(await inFrame(electronApp, guestId, "window.pageLoad")).toBe(load);
     expect(await inFrame(electronApp, guestId, "document.getElementById('focus').value")).toBe(typed);
