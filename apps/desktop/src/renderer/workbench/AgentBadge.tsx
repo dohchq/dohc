@@ -1,7 +1,7 @@
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Sparkles } from "lucide-react";
 import type { ActorPresentation, ChatReportedAgentRecord } from "../../ipc/bridgeContract";
-import { ownAgentNamed, type DesktopUserSettings } from "../../settings/userSettings";
+import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import { useAgentInk } from "./ChatAvatar";
 import { AS_REPORTED, reportedAgentLine } from "./reportedAgent";
@@ -21,6 +21,8 @@ type AgentAuthor = {
   authorOwnerDisplayName?: string;
   authorUserId?: string;
   authorReported?: ChatReportedAgentRecord;
+  // Your agent's run records its id. A name an agent gives itself never makes it yours.
+  authorAgentId?: string;
 };
 
 export function AgentBadge(props: {
@@ -38,7 +40,9 @@ export function AgentBadge(props: {
   const [open, setOpen] = useState(false);
   const descriptionId = useId();
   const { author } = props;
-  const ownAgent = props.presentation?.self && settings ? ownAgentNamed(settings, author.authorDisplayName) : null;
+  const ownAgent = props.presentation?.self && settings && author.authorAgentId
+    ? listAgents(settings).find(({ id }) => id === author.authorAgentId) ?? null
+    : null;
   const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
   const reported = reportedAgentLine(author.authorReported);
   const trigger = useRef<HTMLSpanElement>(null);

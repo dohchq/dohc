@@ -99,6 +99,11 @@ export const chatReportedAgentSchema = z
     message: "A reported version needs its product.",
   });
 export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
+// A name the calling agent gives itself, recorded as the author of its edits
+// and messages. A slash is refused so no name can pass for an automation's id.
+export const documentAgentNameSchema = z
+  .string()
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
 const postArgsSchema = z
   .object({
     ...argsBase,
@@ -110,6 +115,7 @@ const postArgsSchema = z
     needsDecision: z.boolean(),
     options: z.array(z.string().min(1)).max(12).optional(),
     body: z.string().min(1),
+    agent: documentAgentNameSchema.optional(),
   })
   .strict();
 const replyArgsSchema = z
@@ -125,6 +131,7 @@ const replyArgsSchema = z
     resolve: z.string().min(1).optional(),
     choose: z.string().min(1).optional(),
     body: z.string().min(1),
+    agent: documentAgentNameSchema.optional(),
   })
   .strict();
 const reactArgsSchema = z
@@ -199,11 +206,6 @@ export const documentEditTextSchema = z
   .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
     message: "Document edit text is at most 256 KiB as UTF-8.",
   });
-// A name the calling agent gives itself, recorded as the author of its edits.
-// A slash is refused so no name can pass for an automation's id.
-export const documentAgentNameSchema = z
-  .string()
-  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
 const documentReadArgsSchema = z
   .object({ ...argsBase, path: documentPathArg })
   .strict();

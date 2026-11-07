@@ -222,6 +222,7 @@ function buildCliRequest(
           needsDecision: command.needsDecision,
           ...(command.options ? { options: command.options } : {}),
           body: stdinBody ?? command.body,
+          ...(command.agent ? { agent: command.agent } : {}),
         },
       };
     case "reply":
@@ -240,6 +241,7 @@ function buildCliRequest(
           ...(command.resolve ? { resolve: command.resolve } : {}),
           ...(command.choose ? { choose: command.choose } : {}),
           body: stdinBody ?? command.body,
+          ...(command.agent ? { agent: command.agent } : {}),
         },
       };
     case "react":

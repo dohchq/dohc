@@ -104,6 +104,7 @@ export function chatMessageForIpc(message: ChatMessage, collectionOf: Automation
     ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
     ...(message.authorUserId ? { authorUserId: message.authorUserId } : {}),
     ...(message.authorReported ? { authorReported: message.authorReported } : {}),
+    ...(message.authorAgentId ? { authorAgentId: message.authorAgentId } : {}),
     ...(message.parentMessageId
       ? { parentMessageId: message.parentMessageId }
       : {}),

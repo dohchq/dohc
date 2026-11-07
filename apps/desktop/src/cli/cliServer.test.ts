@@ -504,6 +504,7 @@ describe("CLI socket server", () => {
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
         agentIdsNamedIn: async () => [],
+        isOwnAgentId: async () => false,
         localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
@@ -1713,7 +1714,7 @@ describe("CLI socket server", () => {
     expect(opening.messages).toMatchObject([{
       threadId: startedThread.id,
       authorKind: "agent",
-      authorDisplayName: "Nova",
+      authorDisplayName: "Agent",
       authorOwnerDisplayName: "Sam",
       body: "Opening through the engine channel id",
     }]);
@@ -1784,7 +1785,7 @@ describe("CLI socket server", () => {
     }))).toEqual([
       {
         kind: "agent",
-        displayName: "Nova",
+        displayName: "Agent",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
@@ -3077,10 +3078,10 @@ describe("CLI socket server", () => {
     const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
     const threadId = `thread-${posted.threadId.slice("th_".length)}`;
     // The client announced "Codex" in its MCP handshake, and the MCP server
-    // names it on the file write. A reply names no agent.
+    // names it on the file write and the reply.
     async function writeAndReply() {
       await writeWorkspaceFile(ctx, { path: "plan.txt", content: "Day 2" }, "Codex");
-      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." });
+      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." }, "Codex");
       if (!reply.ok) throw new Error(reply.reason);
       const message = (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).find((row) => row.id === reply.messageId);
       const origin = writeFiles.mock.lastCall?.[1];
@@ -3088,6 +3089,7 @@ describe("CLI socket server", () => {
       return {
         file: deriveMomentActor(agentWriteAuthor(origin), { source: "own-store", workspaceId: WORKSPACE_ID, identity }, "Codex").key,
         reply: parseActorKey(message.authorActorKey),
+        name: message.author.displayName,
       };
     }
 
@@ -3097,7 +3099,10 @@ describe("CLI socket server", () => {
 
     // Outside a run, the client's writes keep the name it gave.
     dispatchedRun = null;
-    expect((await writeAndReply()).file).toMatchObject({ kind: "agent", claimedName: "Codex" });
+    const outside = await writeAndReply();
+    expect(outside.file).toMatchObject({ kind: "agent", claimedName: "Codex" });
+    expect(outside.reply).toEqual(outside.file);
+    expect(outside.name).toBe("Codex");
   });
 
   it("creates a Markdown document with provenance the door derives", async () => {
@@ -3207,9 +3212,10 @@ describe("CLI socket server", () => {
     const engineThread = listed.groups.flatMap(group => group.threads).find(candidate => cliThreadId(candidate.id) === thread);
     if (!engineThread) throw new Error("Posted thread is not listed");
     const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: engineThread.id });
+    // Outside a run, an agent that gives no name is the unnamed "Agent".
     expect(messages.map(message => [message.author.displayName, message.authorReported])).toEqual([
-      ["Nova", reported],
-      ["Nova", { product: "Claude Code" }],
+      ["Agent", reported],
+      ["Agent", { product: "Claude Code" }],
       ["Sam", undefined],
     ]);
 
@@ -3306,9 +3312,9 @@ describe("CLI socket server", () => {
     const chats = await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" });
     if (!chats.ok) throw new Error(chats.reason);
     expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
-    // An agent that gave no name carries the agent name from the person's settings.
+    // An agent that gave no name is "Agent".
     await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
-      .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Nova" } }]);
+      .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Agent" } }]);
 
     for (const [path, reason] of [
       ["untracked.md", "dohc does not track untracked.md yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file."],
@@ -4087,7 +4093,7 @@ describe("CLI socket server", () => {
       {
         id: replied.messageId,
         kind: "agent",
-        displayName: "Nova",
+        displayName: "Agent",
         body: "Agent response from the terminal",
         parentMessageId: opened.messageId,
         decisionState: undefined,
@@ -4117,7 +4123,7 @@ describe("CLI socket server", () => {
       },
       {
         kind: "agent",
-        displayName: "Nova",
+        displayName: "Agent",
         authorUserId: "verified-user-id",
         origin: "cli",
       },
