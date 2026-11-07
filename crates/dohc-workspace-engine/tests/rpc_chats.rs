@@ -4235,7 +4235,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.listAppQuitRecoveries",
+        "chats.dispatch.listFailedRunRecoveries",
         json!({}),
     )
     .await;
@@ -4244,7 +4244,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.listAppQuitRecoveries",
+        "chats.dispatch.listFailedRunRecoveries",
         json!({ "threadId": "thread" }),
     )
     .await;
@@ -4253,7 +4253,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &transport,
         &handle,
         &mut id,
-        "chats.dispatch.listAppQuitRecoveries",
+        "chats.dispatch.listFailedRunRecoveries",
         json!({ "threadId": "other-thread" }),
     )
     .await;

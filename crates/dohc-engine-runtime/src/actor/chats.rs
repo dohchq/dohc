@@ -1237,7 +1237,7 @@ impl ActorHandle {
         .await
     }
 
-    pub async fn chat_dispatch_list_app_quit_recoveries(
+    pub async fn chat_dispatch_list_failed_run_recoveries(
         &self,
         workspace_id: String,
         thread_id: Option<String>,
@@ -1246,7 +1246,7 @@ impl ActorHandle {
     ) -> Result<Vec<DispatchRecovery>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_app_quit_recoveries(&workspace_id, thread_id.as_deref(), after, limit)
+                .list_failed_run_recoveries(&workspace_id, thread_id.as_deref(), after, limit)
                 .map_err(RuntimeError::from)
         })
         .await

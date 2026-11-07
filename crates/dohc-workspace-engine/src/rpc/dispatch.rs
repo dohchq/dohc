@@ -1195,8 +1195,8 @@ impl EngineService {
                 self.chats_dispatch_requeue_failed_trigger(&ctx, request.workspace, request.params)
                     .await?
             }
-            "chats.dispatch.listAppQuitRecoveries" => {
-                self.chats_dispatch_list_app_quit_recoveries(
+            "chats.dispatch.listFailedRunRecoveries" => {
+                self.chats_dispatch_list_failed_run_recoveries(
                     &ctx,
                     request.workspace,
                     request.params,
@@ -1670,7 +1670,7 @@ mod tests {
             "chats.dispatch.latestRunForThread",
             "chats.dispatch.getThreadPauseState",
             "chats.dispatch.isThreadPaused",
-            "chats.dispatch.listAppQuitRecoveries",
+            "chats.dispatch.listFailedRunRecoveries",
             "chats.dispatch.listPending",
             "chats.dispatch.listRunMessages",
             "chats.dispatch.markFailureHandled",

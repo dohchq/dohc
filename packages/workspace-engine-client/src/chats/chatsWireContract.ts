@@ -73,7 +73,7 @@ export const CHATS_METHOD = {
   dispatchSetThreadPaused: "chats.dispatch.setThreadPaused",
   dispatchMarkFailureHandled: "chats.dispatch.markFailureHandled",
   dispatchRequeueFailedTrigger: "chats.dispatch.requeueFailedTrigger",
-  dispatchListAppQuitRecoveries: "chats.dispatch.listAppQuitRecoveries",
+  dispatchListFailedRunRecoveries: "chats.dispatch.listFailedRunRecoveries",
   dispatchComplete: "chats.dispatch.complete",
   dispatchFail: "chats.dispatch.fail",
 } as const;
@@ -381,7 +381,7 @@ export type ChatRunMessagesPage =
   ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListRunMessages];
 type ChatThreadRunsPage = typeof RunRecordsPageSchema.Type;
 export type ChatRecoveriesPage =
-  ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListAppQuitRecoveries];
+  ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListFailedRunRecoveries];
 export type ChatFeedPage =
   ChatsMethodResultMap[typeof CHATS_METHOD.feedListPersonal];
 
@@ -451,7 +451,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatDispatchSetPausedParams;
   [CHATS_METHOD.dispatchMarkFailureHandled]: ChatDispatchRunParams;
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: ChatDispatchRequeueParams;
-  [CHATS_METHOD.dispatchListAppQuitRecoveries]: ChatDispatchRecoveriesParams;
+  [CHATS_METHOD.dispatchListFailedRunRecoveries]: ChatDispatchRecoveriesParams;
   [CHATS_METHOD.dispatchComplete]: ChatDispatchCompleteParams;
   [CHATS_METHOD.dispatchFail]: ChatDispatchFailParams;
 };
@@ -993,7 +993,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchSetThreadPaused]: ChatThreadPauseSchema,
   [CHATS_METHOD.dispatchMarkFailureHandled]: ChatRunSchema,
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: Schema.Boolean,
-  [CHATS_METHOD.dispatchListAppQuitRecoveries]: pageSchema({
+  [CHATS_METHOD.dispatchListFailedRunRecoveries]: pageSchema({
     recoveries: Schema.mutable(
       Schema.Array(
         mutableStruct({ run: ChatRunSchema, attemptCount: NonnegativeInt }),
