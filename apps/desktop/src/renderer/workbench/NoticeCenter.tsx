@@ -60,6 +60,8 @@ export type Notice = {
   // Agent notices carry when they happened; system notices are stateful
   // ("cloud disconnected") and render no time.
   timeMs?: number;
+  // A notice with no time names its version, so a new one opens closed.
+  revision?: NoticeRevision;
   copy?: NoticeCopy;
   filePaths?: readonly string[];
   // A terminal command the body asks the person to run, shown with its copy.
@@ -76,6 +78,8 @@ export type Notice = {
 // What a message lets a person copy. A report says what happened, and its
 // text decides how it shows (useDetails). A named copy is the person's own
 // work to use elsewhere, so it keeps its own Copy and has no Details.
+export type NoticeRevision = string | number;
+
 export type NoticeCopy =
   | { report: string }
   | { label: "Copy file paths"; text: string };
@@ -313,19 +317,16 @@ function useDetails(props: {
   copy: NoticeCopy | undefined;
   // What the message shows, one part per line.
   shown: readonly (string | undefined)[];
-  // A repeat that replaces the message opens closed.
-  since?: number;
+  // Which notice this is, such as when it happened. Details stays open only
+  // for the revision it opened on, so a repeat that replaces it opens closed.
+  revision?: NoticeRevision;
   actionClass: string;
   testId: string;
   onOpenChange?: (open: boolean) => void;
 }): CopyControls {
   const id = useId();
-  const [open, setOpen] = useState(false);
-  const [openedSince, setOpenedSince] = useState(props.since);
-  if (openedSince !== props.since) {
-    setOpenedSince(props.since);
-    setOpen(false);
-  }
+  const [openFor, setOpenFor] = useState<{ revision: NoticeRevision | undefined } | null>(null);
+  const open = openFor !== null && openFor.revision === props.revision;
   const { copy, testId } = props;
   if (!copy) return NO_COPY;
   const copyIcon = (label: string, text: string) => (
@@ -336,7 +337,7 @@ function useDetails(props: {
   if (report === props.shown.filter(Boolean).join("\n")) return { ...NO_COPY, icon: copyIcon("Copy details", report) };
   const blockId = `${id}-details`;
   const toggle = () => {
-    setOpen(!open);
+    setOpenFor(open ? null : { revision: props.revision });
     props.onOpenChange?.(!open);
   };
   return {
@@ -392,7 +393,7 @@ function NoticeText(props: {
   // Told whenever Show more or Details opens or closes the whole text.
   onOpenChange?: (open: boolean) => void;
   copy?: NoticeCopy;
-  since?: number;
+  revision?: NoticeRevision;
   actionClass: string;
   testId: string;
   // The copy controls' test ids start with this. Default testId.
@@ -413,7 +414,7 @@ function NoticeText(props: {
   const copy = useDetails({
     copy: props.copy,
     shown: [props.title, props.body, ...paths, props.after],
-    since: props.since,
+    revision: props.revision,
     actionClass: props.actionClass,
     testId: props.copyTestId ?? props.testId,
     onOpenChange: (details) => onOpenChange?.(details || more),
@@ -886,7 +887,7 @@ export function WorkspaceErrorToast(props: {
         after={error.lastLine}
         onOpenChange={setOpen}
         copy={shownCopy(error)}
-        since={error.atMs}
+        revision={error.atMs}
         actionClass={TOAST_ACTION_CLASS}
         testId="workspace-shell-toast"
         copyTestId="workspace-shell-error"
@@ -995,7 +996,7 @@ export function LocalNoticeRow(props: {
         after={props.note === undefined ? notice.lastLine : undefined}
         onOpenRow={props.onOpen}
         copy={notice.copy}
-        since={notice.timeMs}
+        revision={notice.revision ?? notice.timeMs}
         actionClass={ROW_ACTION_CLASS}
         testId={`notice-${notice.id}`}
       >
@@ -1625,6 +1626,7 @@ export function NoticeCenter(props: {
         // Try again changes state, so the row goes only where Live documents goes.
         ...(liveDelivery.recovery === "live-documents" && onOpenLiveDocuments ? { target: { to: "live-documents" } as const } : {}),
         onRead: () => setDismissedLiveDeliveryKey(liveDeliveryKey),
+        ...(liveDeliveryKey ? { revision: liveDeliveryKey } : {}),
         copy: { report: liveDeliveryDetails },
         Icon: liveDelivery.Icon,
       });
@@ -1642,6 +1644,7 @@ export function NoticeCenter(props: {
           ? { actions: [{ label: "Live documents", onClick: onOpenLiveDocuments }], target: { to: "live-documents" } as const }
           : {}),
         onRead: () => setDismissedRefusalsKey(refusalsKey),
+        revision: refusalsKey,
         copy: { report: refusalsDetails },
         Icon: AlertTriangle,
       });
@@ -1734,6 +1737,7 @@ export function NoticeCenter(props: {
             new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
           ),
         onRead: () => closeDecline(declined),
+        revision: sharingDeclinedKey(props.workspaceId, declined),
         copy: { report: sharingDeclinedDetails(props.workspaceId, declined) },
         Icon: AlertTriangle,
       });
@@ -2467,7 +2471,7 @@ export function NoticeCenter(props: {
                             body={openNote === undefined ? notice.body : ""}
                             onOpenRow={openRowNotice}
                             copy={copies ? { report: failureDetails(notice) } : undefined}
-                            since={notice.createdAtMs}
+                            revision={notice.createdAtMs}
                             actionClass={ROW_ACTION_CLASS}
                             testId={`sent-notice-${notice.noticeId}`}
                           >

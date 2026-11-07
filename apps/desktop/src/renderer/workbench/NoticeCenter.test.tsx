@@ -3038,6 +3038,19 @@ describe("Details", () => {
     expect(within(screen.getByTestId("notice-e1")).getByRole("button", { name: "Details" }).getAttribute("aria-expanded")).toBe("false");
   });
 
+  // A status row has no time, so its version says it is a new one: a refusal
+  // after a new save keeps the row's id and opens closed.
+  it("opens a status row's repeat closed, though it has no time", async () => {
+    const id = "notice-sharing-declined-main:object-1";
+    const { rerender } = renderNotices({ syncStatus: declinedStatus(declined()) });
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(within(screen.getByTestId(id)).getByRole("button", { name: "Details" }));
+    rerender(noticeElement({ syncStatus: declinedStatus(declined({ path: "notes/renamed.md" })) }));
+    expect(within(screen.getByTestId(id)).getByRole("button", { name: "Hide details" })).toBeTruthy();
+    rerender(noticeElement({ syncStatus: declinedStatus(declined({ path: "notes/renamed.md", headBlobSha256: "b".repeat(64) })) }));
+    expect(within(screen.getByTestId(id)).getByRole("button", { name: "Details" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("puts Details after Send report on a crash notice's toast and row", async () => {
     renderNotices({
       crashReport: { revision: 1, title: "dohc quit unexpectedly", body: "", text: "Crash: renderer gone\nReason: oom", atMs: 1 },
