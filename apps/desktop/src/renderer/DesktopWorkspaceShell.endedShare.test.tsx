@@ -864,7 +864,7 @@ describe("ended Edit Collection shares", () => {
     await screen.findByTestId("workspace-shell-error");
     if (openFile !== "no file open") await screen.findByTestId("tab-docs/shared.md");
     await act(async () => undefined);
-    const checkCopy = (text: string) => {
+    const checkCopy = (text: string, cause?: string) => {
       const lines = text.split("\n");
       expect(lines[0], "Copy starts with the refusal").toBe(`Error: ${sharedViewRefusalWords}`);
       for (const line of lines) {
@@ -873,13 +873,16 @@ describe("ended Edit Collection shares", () => {
         expect(line, "Copied facts omit the capture class").not.toContain("CapturePartialFailureError");
       }
       for (const line of lines.slice(1)) expect(line, "Copied facts do not repeat the refusal").not.toContain(sharedViewRefusalWords);
-      expect(lines.filter(line => line.startsWith("Cause:")), "The background refusal keeps the filesystem cause").toEqual([`Cause: ${cause}`]);
+      expect(lines.filter(line => line.startsWith("Cause:")), "Copy keeps only the latest refresh's filesystem cause").toEqual(cause ? [`Cause: ${cause}`] : []);
     };
-    const copyBoth = async () => {
-      expect(screen.getAllByTestId("workspace-shell-error"), "The refusal has one toast").toHaveLength(1);
+    const copyToast = async () => {
       await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy error details" }));
-      const toastCopy = await navigator.clipboard.readText();
-      checkCopy(toastCopy);
+      return navigator.clipboard.readText();
+    };
+    const copyBoth = async (cause?: string) => {
+      expect(screen.getAllByTestId("workspace-shell-error"), "The refusal has one toast").toHaveLength(1);
+      const toastCopy = await copyToast();
+      checkCopy(toastCopy, cause);
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       const notices = await screen.findByTestId("notice-center");
       expect(notices.querySelectorAll("[data-notice-row]"), "The refusal has one Notices row").toHaveLength(1);
@@ -887,20 +890,21 @@ describe("ended Edit Collection shares", () => {
       expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
       expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
       expect(within(row).queryByRole("button", { name: "Details" })).toBeNull();
+      await navigator.clipboard.writeText("");
       await act(async () => { fireEvent.click(within(row).getByRole("button", { name: /Copy/ })); });
       const rowCopy = await navigator.clipboard.readText();
-      checkCopy(rowCopy);
+      checkCopy(rowCopy, cause);
       expect(rowCopy).toBe(toastCopy);
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
     };
-    await copyBoth();
+    await copyBoth(cause);
     const before = bridge.refreshSharedView.mock.calls.length;
     try {
       expect(screen.getAllByTestId("workspace-shell-error"), "The first toast is still open before the background refresh").toHaveLength(1);
       act(() => focusAfterMinimum());
       await waitFor(() => expect(bridge.refreshSharedView.mock.calls.length, "Focus starts a background refresh").toBeGreaterThan(before));
-      await act(async () => undefined);
       expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "background" });
+      await waitFor(async () => expect(await copyToast(), "A background refusal with no filesystem cause drops the Cause").not.toContain("Cause:"));
       await copyBoth();
     } finally {
       view.unmount();

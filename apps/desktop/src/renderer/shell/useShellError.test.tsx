@@ -64,6 +64,48 @@ describe("useShellError", () => {
     expect(result.current.shellErrors[0]?.message).toBe(sharedViewRefusalWords);
   });
 
+  it.each(["reader first", "refresh first"])("copies only a refresh's filesystem cause on the shared-view row: %s", order => {
+    const wrapped = new Error(`Error invoking remote method 'desktop:list-sites': CapturePartialFailureError [share-collision-record]: ${sharedViewRefusalWords}`);
+    const cause = [["Cause", "EBUSY: resource busy or locked"]] as const;
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a", retry));
+    const refresh = (details?: typeof cause) => result.current.reportShellFailure({
+      message: sharedViewRefusalWords, ...(details ? { details } : {}), retry, noDismiss: true,
+      kind: "share-collision-record", identity: "share-collision-record", repeat: true,
+    });
+    const read = () => result.current.reportShellFailure({
+      message: "Could not load apps.", cause: wrapped, identity: "apps-list", title: "Could not load",
+    });
+    const row = () => {
+      expect(result.current.shellErrors, "One refusal has one Notices row").toHaveLength(1);
+      return result.current.shellErrors[0]!;
+    };
+    if (order === "reader first") {
+      act(read);
+      expect(row().details, "A reader alone gives no Cause").toBeUndefined();
+    }
+    act(() => refresh(cause));
+    const first = row();
+    expect(first.details, "A refresh adds its filesystem cause").toEqual(cause);
+    act(read);
+    expect(row(), "A later reader keeps the refresh's Cause").toMatchObject({ id: first.id, message: sharedViewRefusalWords, details: cause });
+    expect(row().title).toBeUndefined();
+    act(() => refresh());
+    expect(row().details, "A refresh with no filesystem cause has no Cause").toBeUndefined();
+  });
+
+  it("shows a mounted share's search refusal on the general row in an ordinary workspace", async () => {
+    const error = new Error(`Error invoking remote method 'desktop:search-workspace': ${String(ipcWireError(await sharedViewRefusal()))}`);
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportSearchError(error, retry));
+    expect(result.current.shellErrors).toHaveLength(1);
+    const row = result.current.shellErrors[0]!;
+    expect(row, "The general row keeps the caller's retry and kind").toMatchObject({ message: sharedViewRefusalWords, retry, kind: "workspace-search" });
+    expect(row.details, "The general row copies no wire text").toBeUndefined();
+    expect(row.noDismiss, "An ordinary workspace can dismiss the refusal").toBeUndefined();
+  });
+
   it("shows a projection repair refusal on the shared-view row", async () => {
     const refusal = await sharedViewRefusal();
     const rootPath = "/refused-projection";

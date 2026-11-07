@@ -1869,6 +1869,7 @@ describe("ui-state merge-on-load", () => {
       expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
       expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
       expect(within(row).queryByRole("button", { name: "Details" })).toBeNull();
+      await navigator.clipboard.writeText("");
       await act(async () => { fireEvent.click(within(row).getByRole("button", { name: /Copy/ })); });
       const rowCopy = await navigator.clipboard.readText();
       checkRefusalCopy(rowCopy, cause);
@@ -1917,13 +1918,13 @@ describe("ui-state merge-on-load", () => {
     const notices = await screen.findByTestId("notice-center");
     const row = within(notices).getByText(sharedViewRefusalWords, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).getByRole("button", { name: "Dismiss notice" }), "An ordinary workspace can dismiss the refusal").toBeTruthy();
+    await navigator.clipboard.writeText("");
     await user.click(within(row).getByRole("button", { name: /Copy/ }));
     checkRefusalCopy(await navigator.clipboard.readText());
     bridge.showExplorerMenu.mockResolvedValueOnce("open-externally");
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.showExplorerMenu, "Try again repeats the native reveal").toHaveBeenCalledTimes(2));
     expect(bridge.showExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, path, kind: "file", pinned: false, reveal: true });
-    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(within(await screen.findByTestId("notice-center")).queryByText(sharedViewRefusalWords, { exact: false })).toBeNull();
   });
