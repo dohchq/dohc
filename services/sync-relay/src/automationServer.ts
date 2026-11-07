@@ -169,7 +169,7 @@ export interface AutomationServerOptions {
 
 /** One workspace this server runs, before its executor and press loop exist. */
 interface WorkspaceState {
-  /** Delivers every record's queued updates. False when one had updates it found no outbox for. */
+  /** Delivers every record's queued updates. False when updates still wait with no outbox, or set aside in a queue that can recover. */
   flushRecordDelivery?(): Promise<boolean>;
   refreshRecord?(path: string): Promise<void>;
   refreshAcceptedRecords?(): Promise<void>;
@@ -602,14 +602,26 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     };
     const configured = options.recordDelivery;
     if (configured) {
+      /** The record's binding now, or "unavailable" when none of the owner's shares grants it. */
+      const currentRecord = (path: string) => {
+        try {return storage.automationRecordBinding(workspaceId, ownerUserId, path);}
+        catch (error) {
+          if (error instanceof Error && error.message === "The shared file is unavailable. Restore access, then try again.") return "unavailable" as const;
+          throw error;
+        }
+      };
+      /** A set-aside queue recovers only from its record's current binding, in the same lineage and no older restore. */
+      const recoverable = (draft: LiveObjectBinding) => {
+        const current = currentRecord(draft.currentPath);
+        if (current === null || current === "unavailable") return false;
+        const {binding} = current;
+        return binding.workspaceId === draft.workspaceId && binding.mainVersionId === draft.mainVersionId && binding.objectId === draft.objectId
+          && binding.lineageClaimId === draft.lineageClaimId && binding.restoreFenceGeneration >= draft.restoreFenceGeneration;
+      };
       const delivery = automationRecordDelivery({replica, namespace: configured.namespace, ownerUserId,
         capture: async (binding, signal) => {
-          let current;
-          try {current = storage.automationRecordBinding(workspaceId, ownerUserId, binding.currentPath);}
-          catch (error) {
-            if (error instanceof Error && error.message === "The shared file is unavailable. Restore access, then try again.") throw new AutomationRecordBindingChanged("stale-binding");
-            throw error;
-          }
+          const current = currentRecord(binding.currentPath);
+          if (current === "unavailable") throw new AutomationRecordBindingChanged("stale-binding");
           if (!current || !isDeepStrictEqual(current.binding, binding)) throw new AutomationRecordBindingChanged(
             current && current.binding.restoreFenceGeneration !== binding.restoreFenceGeneration ? "restore-fenced" : "binding-changed", current?.binding);
           return configured.capture({...current, ownerUserId}, signal);
@@ -645,17 +657,21 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         let after = null, undelivered: string | null = null;
         const failures: unknown[] = [];
         do {
-          const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64, pendingOnly: true}, replica.signal);
-          // A quarantined draft is listed only while its owner's Try again is pending; the drainer sends only that head.
+          // Every draft, including quarantined ones. The drainer sends a quarantined queue's head only when its owner asked to try again.
+          const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64}, replica.signal);
           for (const draft of page.drafts) if (draft.pendingBytes > 0) {
-            try {if (!await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined))) undelivered ??= draft.binding.currentPath;}
+            try {
+              // Nothing here releases a queue that cannot recover, so it would hold every later run. Like a restore-fenced queue, it holds none.
+              if (draft.state === "quarantined" && !recoverable(draft.binding)) continue;
+              if (!await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined))) undelivered ??= draft.binding.currentPath;
+            }
             catch (error) {failures.push(error); options.onError(`deliver automation record "${draft.binding.currentPath}" in workspace "${workspaceId}"`, error);}
           }
           after = page.next;
         } while (after !== null);
         // Until it is delivered, no sync confirms that a run's changes were sent.
         if (undelivered !== null) options.onError(`deliver automation record "${undelivered}" in workspace "${workspaceId}"`,
-          new Error("The record has updates waiting but no outbox to deliver them from, so the server confirms no run's changes as sent."));
+          new Error("The record has updates the server has not sent, because no outbox holds them or the shared file set them aside. Until they are sent, the server confirms no run's changes as sent."));
         if (failures.length) throw failures[0];
         return undelivered === null;
       })().finally(() => {draining = undefined;});
