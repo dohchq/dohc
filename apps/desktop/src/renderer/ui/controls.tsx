@@ -211,11 +211,20 @@ export function FieldError(props: { id: string; children: ReactNode; className?:
 
 /** A list or section whose read failed. Its words are in the toast and its
  * Notices row, reported through the shell's error hook; here the mark says it
- * failed and Try again reads again. */
-export function RetryRow(props: { testId: string; onRetry: () => void }) {
+ * failed and Try again reads again. A caller that passes `children` also shows
+ * that sentence beside the mark. It wraps, and Try again follows it on the same
+ * line when both fit. */
+export function RetryRow(props: { testId: string; onRetry: () => void; children?: ReactNode }) {
   return (
-    <div data-testid={props.testId} className="flex items-center gap-2 px-2 py-1">
-      <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+    <div data-testid={props.testId} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1">
+      {props.children ? (
+        <p className="m-0 flex min-w-0 items-start gap-1.5 text-[12px] leading-4 text-muted">
+          <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+          <span>{props.children}</span>
+        </p>
+      ) : (
+        <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+      )}
       <SecondaryButton size="compact" onClick={props.onRetry}>
         Try again
       </SecondaryButton>
