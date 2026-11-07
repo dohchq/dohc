@@ -217,7 +217,7 @@ export function NewWorkspaceCard(props: {
               aria-label="Change location"
               {...locationTooltip.focusProps}
               onClick={() => void chooseFolder()}
-              className="-mr-2 shrink-0"
+              className={error ? "shrink-0 border border-line" : "-mr-2 shrink-0"}
             >
               Change
             </GhostButton>

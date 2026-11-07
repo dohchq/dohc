@@ -4143,19 +4143,6 @@ export function DesktopWorkspaceShell(props: {
         : { ...state, expandedFolders: [] },
     );
   }, [mutateWb]);
-  const createUntitledTextFile = useCallback(async () => {
-    try {
-      const result = await bridge().createWorkspaceFile({
-        workspaceId,
-        relativePath: uniqueUntitledPath(files, folders, "txt"),
-        initialText: "",
-      });
-      await refreshFiles();
-      openFile(result.path);
-    } catch (error) {
-      reportShellError("Could not create an untitled text file.", error);
-    }
-  }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
 
   // Human and agent creation share the same record identity and recovery path.
   const pendingRecordPaths = useRef(new Set<string>());
@@ -5605,7 +5592,6 @@ export function DesktopWorkspaceShell(props: {
         onActivateTab={activateEditorTab}
         onCloseTab={closeFileTab}
         onCloseAllTabs={closeAllTabs}
-        onNewUntitledTextFile={createUntitledTextFile}
         onCollapseFolders={collapseExplorerFolders}
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}

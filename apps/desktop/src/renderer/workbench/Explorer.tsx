@@ -125,7 +125,6 @@ export interface ExplorerProps {
   onActivateTab: (groupId: string, path: string) => void;
   onCloseTab: (groupId: string, path: string) => void;
   onCloseAllTabs: () => void;
-  onNewUntitledTextFile: () => void;
   onCollapseFolders: () => void;
   onSetFolderExpanded: (path: string, expanded: boolean) => void;
   onToggleFolder: (path: string) => void;
@@ -1848,12 +1847,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
               <SectionActionButton
-                label="New untitled text file"
-                onClick={props.onNewUntitledTextFile}
-              >
-                <FilePlus2 size={13} aria-hidden />
-              </SectionActionButton>
-              <SectionActionButton
                 label="Close all editors"
                 disabled={openEditorCount === 0}
                 onClick={props.onCloseAllTabs}
@@ -1971,7 +1964,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 ))}
               </ul>
             ) : (
-              <div className="px-3 py-1.5 text-[11px] text-subtle">
+              <div className="px-3 py-1.5 text-[11px] text-muted">
                 No open editors
               </div>
             )
@@ -2065,14 +2058,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           {filesExpanded ? (
             <>
               {empty ? (
-                <button
-                  type="button"
-                  onClick={() => props.onNewPage("")}
-                  className="mx-3 mt-2 flex items-center gap-1.5 rounded border border-dashed border-line px-2 py-1.5 text-xs text-muted hover:text-ink"
-                >
-                  <FilePlus2 size={13} aria-hidden />
-                  Create your first file
-                </button>
+                props.listed ? (
+                  <div className="px-3 py-1.5 text-[11px] text-muted">
+                    No files
+                  </div>
+                ) : null
               ) : (
                 <ul
                   ref={workspaceTreeRef}
