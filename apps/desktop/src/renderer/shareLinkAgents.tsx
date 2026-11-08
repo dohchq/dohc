@@ -197,9 +197,11 @@ export function LinkAgentsList(props: {
                   <span className="text-[12px] text-subtle">
                     {agent.reportedName === null ? "The agent reported no name" : "Name reported by the agent"}
                     {" · "}
-                    {agent.lastActionAtMs === null
-                      ? `Signed in ${shortTimestamp.format(agent.connectedAtMs)}`
-                      : `Last action ${shortTimestamp.format(agent.lastActionAtMs)}`}
+                    <span className="whitespace-nowrap">
+                      {agent.lastActionAtMs === null
+                        ? `Signed in ${shortTimestamp.format(agent.connectedAtMs)}`
+                        : `Last action ${shortTimestamp.format(agent.lastActionAtMs)}`}
+                    </span>
                   </span>
                   {failure ? (
                     <p
