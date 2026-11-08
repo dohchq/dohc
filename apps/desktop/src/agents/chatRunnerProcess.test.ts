@@ -3,8 +3,11 @@ import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createTestScratch } from "../workspaces/testTemp";
+import { compileOwner } from "../../scripts/stage-agent-probe.mjs";
+import { createSuiteTestScratchSync, createTestScratch } from "../workspaces/testTemp";
+import type { WindowsProbeOwner } from "./agentProbeProcess";
 import {
   createChatRunnerProcess,
   readRunnerNodeAvailable,
@@ -23,6 +26,19 @@ import { resolveSpawnCommand } from "../process/windowsSpawn";
 const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
   ? ["win32", "x64", "node.exe"] as const
   : ["darwin", "arm64", "node"] as const;
+
+// On Windows a real run starts under the owner dohc ships, so these runs use
+// one built from its source, as the app's build does.
+let windowsOwner: Promise<WindowsProbeOwner> | undefined;
+function windowsRunOwner(): Promise<WindowsProbeOwner> {
+  windowsOwner ??= (async () => {
+    const root = createSuiteTestScratchSync("dohc-chat-runner-owner-");
+    const executable = join(root, "agentProbeOwner.exe");
+    await compileOwner([fileURLToPath(new URL("./agentProbeOwner.cs", import.meta.url))], executable);
+    return { root, executable, relay: fileURLToPath(new URL("./agentProbeRelay.mjs", import.meta.url)), node: process.execPath };
+  })();
+  return windowsOwner;
+}
 
 async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch = "x64", overrides: Partial<ChatRunnerProcessOptions> = {}) {
   const root = await createTestScratch("dohc-chat-runner-");
@@ -453,11 +469,13 @@ describe("chat runner process", () => {
         'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" --version > "%dp0%\\node-version.txt"',
         "",
       ].join("\r\n"));
+      const owner = await windowsRunOwner();
       const runner = createChatRunnerProcess(
         {
           stateDir: () => join(shims, "state"),
           appRoot: () => shims,
           isPackaged: () => false,
+          agentOwner: () => owner,
         },
         () => undefined,
       );
@@ -484,9 +502,10 @@ describe("chat runner process", () => {
     // Stands in for npm's codex.cmd and records the arguments cmd.exe passes on.
     const codex = join(root, "codex.cmd");
     writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
+    const owner = await windowsRunOwner();
     const runner = createChatRunnerProcess(
       { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false, codexConfigFiles: () => ({ requirements: [], config: [], managedPreferences: [] }),
-        runCodexCheck: async () => JSON.stringify([{ name: "dohc", enabled: true }]) },
+        runCodexCheck: async () => JSON.stringify([{ name: "dohc", enabled: true }]), agentOwner: () => owner },
       () => undefined,
     );
     const start = (rootPath: string) => runner.spawnConfiguredRunner({
